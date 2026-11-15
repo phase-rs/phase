@@ -5431,6 +5431,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
             count: QuantityExpr::Fixed { .. },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            ..
         }
     );
 
@@ -11018,6 +11019,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         }
 

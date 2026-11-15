@@ -3743,6 +3743,107 @@ fn tapped_object_context_from_events(
     tapped.next().is_none().then_some(first)
 }
 
+/// CR 608.2c: does `effect` read a characteristic of the object an earlier instruction named?
+fn effect_reads_instruction_referent(effect: &Effect) -> bool {
+    let mut reads = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity.any_ref(&mut |qty| {
+            matches!(
+                qty,
+                QuantityRef::Power { scope }
+                | QuantityRef::Toughness { scope }
+                | QuantityRef::ObjectManaValue { scope }
+                    if matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+            )
+        });
+    });
+    reads
+}
+
+/// CR 608.2c: does `effect` deal its damage to the parent instruction's own target? Every
+/// printed face of that shape is a parse that dropped the recipient its text prints
+/// (Crush Underfoot: "It deals damage equal to its power to target creature."), so a
+/// referent would turn the announced object's damage on itself. Such an instruction
+/// keeps the reading it has without one.
+fn damages_parent_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            target: TargetFilter::ParentTarget,
+            ..
+        } | Effect::DamageAll {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
+}
+
+/// CR 601.2c: did `node` choose the object `id` as one of its own targets?
+fn chose_object(node: &ResolvedAbility, id: ObjectId) -> bool {
+    node.chosen_target_slots
+        .slots()
+        .iter()
+        .any(|&slot| node.targets.get(slot) == Some(&TargetRef::Object(id)))
+}
+
+/// CR 608.2c + CR 608.2h: an ability's next instruction refers back to the object its first
+/// instruction named, whether or not that instruction left an event naming it: a shield
+/// (Heal the Scars), a grant (Sheltering Word), counters (The Provider), a prevention shield
+/// (Boros Fury-Shield), a retarget (Imp's Mischief), a destroy or counter the target
+/// survived (Feed the Swarm, Essence Backlash), or a card put into a library (Lagonna-Band
+/// Storyteller). Only the root instruction announces, and only its next instruction reads:
+/// a later instruction's "that card" names a card some other instruction looked for, and may
+/// have found nothing (Judge Unworthy with an empty library). The root is the instruction
+/// that chose the object as its own target when the resolving stack object's root chose it
+/// too (CR 601.2c). Depth cannot say so: a "you may" root resumes after the choice at depth 1
+/// (Lagonna-Band Storyteller), and both records travel with it. Only a single object target
+/// is a referent, and never for an instruction that deals damage to the parent's own target
+/// (`damages_parent_target`). The object is snapshot live, after the layers settle (CR 613.1:
+/// The Provider's counters count).
+/// Stamps `snapshot` as the next instruction's effect-context object. Boxed and
+/// kept out of line so the clone stays off the recursive chain walker's frame.
+#[inline(never)]
+fn with_next_effect_context_object(
+    ability: &ResolvedAbility,
+    snapshot: &CostPaidObjectSnapshot,
+) -> Box<ResolvedAbility> {
+    let mut owned = Box::new(ability.clone());
+    if let Some(next) = owned.sub_ability.as_deref_mut() {
+        next.effect_context_object = Some(snapshot.clone());
+    }
+    owned
+}
+
+fn announced_object_context(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> Option<CostPaidObjectSnapshot> {
+    if !ability.sub_ability.as_deref().is_some_and(|sub| {
+        effect_reads_instruction_referent(&sub.effect) && !damages_parent_target(&sub.effect)
+    }) {
+        return None;
+    }
+    crate::game::layers::flush_layers(state);
+    let mut objects =
+        ability
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, target)| match target {
+                TargetRef::Object(id) => state.objects.get(id).map(|object| (slot, object)),
+                TargetRef::Player(_) => None,
+            });
+    let (slot, object) = objects.next()?;
+    let is_root = ability.chosen_target_slots.slots().contains(&slot)
+        && state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|root| chose_object(root, object.id));
+    (is_root && objects.next().is_none())
+        .then(|| CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent()))
+}
+
 fn sacrificed_object_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -16096,6 +16197,19 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
             state: TapStateChange::Tap,
             ..
         } => Some(ThisWayCause::Tapped),
+        // CR 701.17a: the library EDGE is part of what a `Mill` does, and the
+        // shared table below is only ever handed kind + destination. A
+        // bottom-edge instruction is the shared library→zone move, so it takes
+        // the destination zone's producer verb exactly as the `ChangeZone` arm
+        // does — never `Milled`. `mill::is_mill_move` is the single authority
+        // for that predicate, shared with the emitted `Milled` event.
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } if !crate::game::effects::mill::is_mill_move(*destination, position) => {
+            this_way_cause_for_zone(*destination)
+        }
         _ => this_way_cause_for_action(
             EffectKind::from(effect),
             declared_this_way_destination(effect),
@@ -17085,14 +17199,15 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     // in order), so the sibling publisher's `sort_unstable_by_key` + `dedup`
     // shape is deliberately NOT used here — it would reorder every existing
     // chain set. Retaining the earliest occurrence keeps the producer order each
-    // consumer already observes.
+    // consumer already observes. The membership check is one set per publish
+    // (`union_in_first_publish_order`), so a complete referent — a CopyToken
+    // owner's whole list at its completion — is published in time linear in its
+    // size.
     if let Some(chain_id) = state.chain_tracked_set_id {
-        let members = state.tracked_object_sets.entry(chain_id).or_default();
-        for id in affected_ids {
-            if !members.contains(&id) {
-                members.push(id);
-            }
-        }
+        union_in_first_publish_order(
+            state.tracked_object_sets.entry(chain_id).or_default(),
+            affected_ids,
+        );
     } else {
         let set_id = TrackedSetId(state.next_tracked_set_id);
         state.next_tracked_set_id += 1;
@@ -17100,14 +17215,22 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         // same object under two events); the invariant is the set's, not the
         // caller's, so it is enforced on this path too.
         let mut members: Vec<ObjectId> = Vec::with_capacity(affected_ids.len());
-        for id in affected_ids {
-            if !members.contains(&id) {
-                members.push(id);
-            }
-        }
+        union_in_first_publish_order(&mut members, affected_ids);
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// Append `affected` to `members`, skipping any id already there or earlier in
+/// `affected`, in first-publish order. One membership set per call, so a union
+/// is linear in the set plus the publish rather than a scan of the growing
+/// member list per id. An empty publish changes nothing and builds no set.
+fn union_in_first_publish_order(members: &mut Vec<ObjectId>, affected: Vec<ObjectId>) {
+    if affected.is_empty() {
+        return;
+    }
+    let mut listed: HashSet<ObjectId> = members.iter().copied().collect();
+    members.extend(affected.into_iter().filter(|id| listed.insert(*id)));
 }
 
 /// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
@@ -17261,6 +17384,11 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
     ResolvedEvents {
         ability: &'a ResolvedAbility,
         events: &'a [GameEvent],
+        /// CR 608.2c: the population the instruction selected before acting
+        /// ([`tap_untap::selection_before_resolution`]). A member whose state
+        /// the instruction left unchanged emits no event but is still among
+        /// its referents; empty when the referents are exactly the events.
+        selection: &'a [ObjectId],
     },
 }
 
@@ -17556,9 +17684,25 @@ pub(crate) fn publish_tracked_set_for_resolution(
         ) => publish_prospective_tracked_set(state, objects, participants, cause),
         (
             TrackedSetPublicationMode::Normal,
-            TrackedSetPublicationInput::ResolvedEvents { ability, events },
+            TrackedSetPublicationInput::ResolvedEvents {
+                ability,
+                events,
+                selection,
+            },
         ) if resolution_next_needs_tracked_set(state, producer) => {
-            let affected = affected_objects_with_causes(state, ability, &ability.effect, events);
+            let mut affected =
+                affected_objects_with_causes(state, ability, &ability.effect, events);
+            // CR 608.2c + CR 701.26a: "tap all creatures that blocked this
+            // creature this turn. They don't untap ..." (Joven's Ferrets) names
+            // an already-tapped blocker too. Such a member emits no event, so it
+            // joins from the selection; it was not "tapped this way", so its
+            // cause is read like any other member's.
+            for &id in selection {
+                if !affected.iter().any(|(member, _)| *member == id) {
+                    let cause = this_way_cause_for_resolved(state, &ability.effect, events, id);
+                    affected.push((id, cause));
+                }
+            }
             publish_tracked_set_with_causes(state, affected);
         }
         (
@@ -20148,6 +20292,7 @@ fn previous_effect_amount_from_events(
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
+    use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating};
     // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
     // authority for the scalar value a follow-up `PreviousEffectAmount` or
     // `EventContextAmount` consumer reads. That avoids re-deriving from an
@@ -20180,16 +20325,18 @@ fn previous_effect_amount_from_events(
     }
 
     let channel = amount_channel(&ability.effect)?;
+    // CR 107.1: every arm folds through the one saturating-sum authority, so an
+    // effect that removes, deals or changes more than `i32::MAX` in total
+    // publishes `i32::MAX` rather than wrapping (per-event amounts are already
+    // saturated `i32`; the events themselves keep their true counts).
     let amount: i32 = match channel.events {
-        AmountEvents::DamageDealt => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::DamageDealt { amount, .. } => {
-                    Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
-                }
+        AmountEvents::DamageDealt => {
+            let dealt = events.iter().filter_map(|event| match event {
+                GameEvent::DamageDealt { amount, .. } => Some(u32_to_i32_saturating(*amount)),
                 _ => None,
-            })
-            .sum(),
+            });
+            sum_saturating_i32(dealt)
+        }
         AmountEvents::FightExcessOnFoughtCreature => {
             // CR 120.10 + CR 701.14a: "add that much {R}" (The Last Agni Kai)
             // reads the excess dealt to the *fought* creature — the fight's
@@ -20201,7 +20348,7 @@ fn previous_effect_amount_from_events(
                 .ok()
                 .flatten()
                 .map(|(_subject, fought)| fought);
-            events
+            let excess = events
                 .iter()
                 .filter_map(|event| match (event, fought_creature) {
                     (
@@ -20211,36 +20358,32 @@ fn previous_effect_amount_from_events(
                             ..
                         },
                         Some(fought_creature),
-                    ) if *id == fought_creature => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
+                    ) if *id == fought_creature => Some(u32_to_i32_saturating(*excess)),
                     _ => None,
-                })
-                .sum()
+                });
+            sum_saturating_i32(excess)
         }
-        AmountEvents::LifeLost => events
-            .iter()
-            .filter_map(|event| match event {
+        AmountEvents::LifeLost => {
+            let lost = events.iter().filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
                 _ => None,
-            })
-            .sum(),
-        AmountEvents::LifeGained => events
-            .iter()
-            .filter_map(|event| match event {
+            });
+            sum_saturating_i32(lost)
+        }
+        AmountEvents::LifeGained => {
+            let gained = events.iter().filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
                 _ => None,
-            })
-            .sum(),
-        AmountEvents::CountersRemoved => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::CounterRemoved { count, .. } => {
-                    Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
-                }
+            });
+            sum_saturating_i32(gained)
+        }
+        AmountEvents::CountersRemoved => {
+            let removed = events.iter().filter_map(|event| match event {
+                GameEvent::CounterRemoved { count, .. } => Some(u32_to_i32_saturating(*count)),
                 _ => None,
-            })
-            .sum(),
+            });
+            sum_saturating_i32(removed)
+        }
     };
 
     // CR 608.2c (#6956): the predecessor tail was `(amount > 0).then_some(amount)`,
@@ -20336,27 +20479,23 @@ fn effect_instruction_completed(ability: &ResolvedAbility, events: &[GameEvent])
 /// and scoped to the fight target, mirroring the `Fight` arm of
 /// `previous_effect_amount_from_events`.
 ///
-/// Kept as a sibling of `previous_effect_amount_from_events` (which stays
-/// byte-unchanged) because the channel is a property of the *downstream*
-/// `PreviousEffectAmount` condition, not known at stamp time: both channels are
-/// stamped eagerly and `evaluate_condition` selects. Returns `None` when no
-/// excess was dealt.
+/// Kept as a sibling of `previous_effect_amount_from_events` because the
+/// channel is a property of the *downstream* `PreviousEffectAmount` condition,
+/// not known at stamp time: both channels are stamped eagerly and
+/// `evaluate_condition` selects. Returns `None` when no excess was dealt.
 fn previous_effect_excess_amount_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
+    use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating};
     let excess: i32 = match &ability.effect {
         Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    GameEvent::DamageDealt { excess, .. } => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
-                    _ => None,
-                })
-                .sum()
+            let excess = events.iter().filter_map(|event| match event {
+                GameEvent::DamageDealt { excess, .. } => Some(u32_to_i32_saturating(*excess)),
+                _ => None,
+            });
+            sum_saturating_i32(excess)
         }
         Effect::Fight { .. } => {
             // CR 120.10 + CR 701.14a: The Fight excess condition names the
@@ -20371,7 +20510,7 @@ fn previous_effect_excess_amount_from_events(
                 .ok()
                 .flatten()
                 .map(|(_subject, fought)| fought);
-            events
+            let excess = events
                 .iter()
                 .filter_map(|event| match (event, fought_creature) {
                     (
@@ -20381,12 +20520,10 @@ fn previous_effect_excess_amount_from_events(
                             ..
                         },
                         Some(fought_creature),
-                    ) if *id == fought_creature => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
-                    }
+                    ) if *id == fought_creature => Some(u32_to_i32_saturating(*excess)),
                     _ => None,
-                })
-                .sum()
+                });
+            sum_saturating_i32(excess)
         }
         _ => 0,
     };
@@ -20618,6 +20755,7 @@ fn publish_player_scope_clause_results(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability: scoped_template,
                 events: scoped_events,
+                selection: &[],
             },
         );
     }
@@ -25542,6 +25680,13 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: the population the instruction selects, read before it acts,
+    // for a following reference to it.
+    let selection_before = if resolution_next_needs_tracked_set(state, ability) {
+        tap_untap::selection_before_resolution(state, ability)
+    } else {
+        Vec::new()
+    };
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
     // begins that seat's instruction. Its entry becomes the seat in progress
     // before the node acts, so a pause inside it re-parks the sidecar (cloned
@@ -26348,8 +26493,19 @@ fn resolve_chain_body(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability,
                 events: &events[events_before..],
+                selection: &selection_before,
             },
         );
+        // CR 608.2c + CR 603.7a: a CopyToken owner parked at this producer's boundary completes
+        // the instruction later; bind it to the set just published so its remaining tokens join
+        // "those tokens".
+        let published = state.chain_tracked_set_id;
+        if let Some(owner) = state
+            .resolution_stack
+            .copy_token_at_child_boundary_mut(child_stack_start)
+        {
+            owner.referent_set = published;
+        }
     }
 
     // CR 608.2c + CR 608.2d: after a resolved producer has no legal candidate,
@@ -26445,18 +26601,31 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let effect_context_object =
-        parent_referent_context_from_events(state, effect_events).or_else(|| {
-            ability
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| {
-                    effect_refs_parent_target_metadata(&sub.effect)
-                        && !effect_requires_parent_target_object(&sub.effect)
-                })
-                .then(|| library_move_metadata_context_from_events(state, effect_events))
-                .flatten()
-        });
+    let event_context_object = parent_referent_context_from_events(state, effect_events);
+    // CR 608.2c + CR 609.3: an instruction that left no referent event still names
+    // the object its root instruction announced (`announced_object_context`), for
+    // the next instruction only. A later "that card" names what some other
+    // instruction looked for, and if it found nothing, it names nothing (Judge
+    // Unworthy with an empty library), so the object is stamped on the next
+    // instruction alone, below.
+    let announced_object = event_context_object
+        .is_none()
+        .then(|| announced_object_context(state, ability))
+        .flatten();
+    let effect_context_object = event_context_object.or_else(|| {
+        if announced_object.is_some() {
+            return None;
+        }
+        ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| {
+                effect_refs_parent_target_metadata(&sub.effect)
+                    && !effect_requires_parent_target_object(&sub.effect)
+            })
+            .then(|| library_move_metadata_context_from_events(state, effect_events))
+            .flatten()
+    });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -26563,6 +26732,14 @@ fn resolve_chain_body(
         &effect_context_owned
     } else {
         ability
+    };
+    let announced_owned;
+    let ability = match &announced_object {
+        Some(snapshot) if ability.sub_ability.is_some() => {
+            announced_owned = with_next_effect_context_object(ability, snapshot);
+            &*announced_owned
+        }
+        _ => ability,
     };
 
     // CR 608.2c: "the revealed cards" of a reveal-only until-loop name the cards
@@ -27423,7 +27600,8 @@ fn resolve_chain_body(
             ) || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                    .is_some())
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
@@ -35975,6 +36153,65 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: a chain set is the union of its publishes — each object once,
+    /// in first-publish order, across and within publishes — and each published
+    /// member's cause is stamped as before, the latest cause winning.
+    #[test]
+    fn publish_tracked_set_unions_once_in_first_publish_order_and_stamps_causes() {
+        let mut state = GameState::new_two_player(42);
+        state.chain_tracked_set_id = None;
+        let (a, b, c) = (ObjectId(1), ObjectId(2), ObjectId(3));
+        let tapped = Some(ThisWayCause::Tapped);
+        let members = |state: &GameState, set: TrackedSetId| {
+            state
+                .tracked_object_sets
+                .get(&set)
+                .cloned()
+                .expect("the chain set is published")
+        };
+        let causes = |state: &GameState, set: TrackedSetId| {
+            let mut causes: Vec<(ObjectId, ThisWayCause)> = state
+                .tracked_set_member_causes
+                .get(&set)
+                .map(|causes| causes.iter().map(|(id, cause)| (*id, *cause)).collect())
+                .unwrap_or_default();
+            causes.sort_by_key(|(id, _)| *id);
+            causes
+        };
+
+        // (1) A fresh set: an id repeated within one publish is listed once.
+        publish_tracked_set_with_causes(&mut state, vec![(a, tapped), (b, None), (a, tapped)]);
+        let set = state
+            .chain_tracked_set_id
+            .expect("the first publish opens a chain set");
+        assert_eq!(members(&state, set), vec![a, b]);
+        assert_eq!(causes(&state, set), vec![(a, ThisWayCause::Tapped)]);
+
+        // (2) The same chain: listed ids keep their place, a new one follows.
+        publish_tracked_set_with_causes(&mut state, vec![(c, tapped), (b, tapped), (a, None)]);
+        assert_eq!(state.chain_tracked_set_id, Some(set), "same chain set");
+        assert_eq!(members(&state, set), vec![a, b, c]);
+        assert_eq!(
+            causes(&state, set),
+            vec![
+                (a, ThisWayCause::Tapped),
+                (b, ThisWayCause::Tapped),
+                (c, ThisWayCause::Tapped)
+            ]
+        );
+
+        // (3) Two overlapping bulk publishes: X0..X63, then X32..X95.
+        let x = |range: std::ops::Range<u64>| -> Vec<ObjectId> {
+            range.map(|n| ObjectId(100 + n)).collect()
+        };
+        publish_tracked_set(&mut state, x(0..64));
+        publish_tracked_set(&mut state, x(32..96));
+        assert_eq!(state.chain_tracked_set_id, Some(set), "same chain set");
+        let want: Vec<ObjectId> = [a, b, c].into_iter().chain(x(0..96)).collect();
+        assert_eq!(members(&state, set), want);
+        assert_eq!(members(&state, set).len(), 99);
+    }
+
     /// CR 601.2c + CR 120.1: the prepended fight subject is the parent's
     /// target, so the damage child still declares only its own recipient.
     #[test]
@@ -37627,6 +37864,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             destination,
             target: TargetFilter::Any,
+            position: crate::types::ability::LibraryPosition::Top,
         };
         assert_eq!(
             this_way_cause_for_effect(&mill(Zone::Hand)),
@@ -37637,6 +37875,31 @@ mod tests {
         // by the function answering `None` for everything.
         assert_eq!(
             this_way_cause_for_effect(&mill(Zone::Graveyard)),
+            Some(ThisWayCause::Milled)
+        );
+    }
+
+    /// CR 701.17a + CR 401.2: a BOTTOM-edge move into a graveyard is not a mill
+    /// either. The table is handed only kind + destination, so the resolved
+    /// entry reads the library edge itself — a bottom card put into a graveyard
+    /// names no `Milled` cause (Grenzo, Dungeon Warden).
+    #[test]
+    fn this_way_cause_for_bottom_edge_mill_names_no_milled_cause() {
+        let mill = |position| Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: Zone::Graveyard,
+            target: TargetFilter::Any,
+            position,
+        };
+        assert_eq!(
+            this_way_cause_for_effect(&mill(crate::types::ability::LibraryPosition::Bottom)),
+            None,
+            "a bottom card put into a graveyard was not milled"
+        );
+        // The positive leg is the live control: the same destination read from
+        // the top edge still names the mill action.
+        assert_eq!(
+            this_way_cause_for_effect(&mill(crate::types::ability::LibraryPosition::Top)),
             Some(ThisWayCause::Milled)
         );
     }
@@ -41169,6 +41432,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             source_id,
@@ -47209,6 +47473,7 @@ mod tests {
             counter_type: Some(CounterType::Generic("oil".to_string())),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         };
         let parent = |optional: bool, performed: bool| {
             let mut ability =
@@ -47248,6 +47513,7 @@ mod tests {
             counter_type: Some(CounterType::Generic("study".to_string())),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         };
         let parent = |optional: bool, performed: bool| {
             let mut ability =
@@ -56958,6 +57224,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
@@ -62676,6 +62943,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::ParentTarget,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
             )
         };
@@ -66595,6 +66863,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
@@ -66622,6 +66891,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
@@ -66760,6 +67030,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
             source,
@@ -66869,6 +67140,7 @@ mod tests {
                     },
                 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
@@ -71707,5 +71979,191 @@ mod repeat_admission_tests {
             },
             other => panic!("expected an effect cost: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod saturating_amount_tests {
+    use super::{previous_effect_amount_from_events, previous_effect_excess_amount_from_events};
+    use crate::types::ability::{
+        Effect, EffectKind, EffectScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    };
+    use crate::types::counter::CounterType;
+    use crate::types::events::{GameEvent, LifeTotalReading};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    const SOURCE: ObjectId = ObjectId(100);
+    const FOUGHT: ObjectId = ObjectId(32);
+
+    fn ability(effect: Effect, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(effect, targets, SOURCE, PlayerId(0))
+    }
+
+    fn one() -> QuantityExpr {
+        QuantityExpr::Fixed { value: 1 }
+    }
+
+    fn remove_all_counters() -> ResolvedAbility {
+        ability(
+            Effect::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::Any,
+                scope: EffectScope::All,
+            },
+            vec![],
+        )
+    }
+
+    fn deal_damage() -> ResolvedAbility {
+        ability(
+            Effect::DealDamage {
+                amount: one(),
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+        )
+    }
+
+    /// A dual-target fight: the second object target is the fought creature.
+    fn fight() -> ResolvedAbility {
+        ability(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(ObjectId(31)), TargetRef::Object(FOUGHT)],
+        )
+    }
+
+    fn removed(count: u32) -> GameEvent {
+        GameEvent::CounterRemoved {
+            object_id: ObjectId(1),
+            counter_type: CounterType::Generic("charge".to_string()),
+            count,
+        }
+    }
+
+    fn damage(amount: u32, excess: u32) -> GameEvent {
+        GameEvent::DamageDealt {
+            source_id: SOURCE,
+            target: TargetRef::Object(FOUGHT),
+            amount,
+            is_combat: false,
+            excess,
+            source_incarnation: None,
+        }
+    }
+
+    fn life(amount: i32) -> GameEvent {
+        GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount,
+            new_total: LifeTotalReading::default(),
+        }
+    }
+
+    fn amount(ability: &ResolvedAbility, events: &[GameEvent]) -> Option<i32> {
+        previous_effect_amount_from_events(&GameState::new_two_player(7), ability, events)
+    }
+
+    fn excess(ability: &ResolvedAbility, events: &[GameEvent]) -> Option<i32> {
+        previous_effect_excess_amount_from_events(&GameState::new_two_player(7), ability, events)
+    }
+
+    /// CR 107.1: two permanents each losing 2^31 counters (two Astral
+    /// Cornucopias under Aether Snap) total more than `i32::MAX`; the counters
+    /// removed this way saturate instead of wrapping.
+    #[test]
+    fn counters_removed_total_saturates() {
+        let snap = remove_all_counters();
+        assert_eq!(
+            amount(&snap, &[removed(1 << 31), removed(1 << 31)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&snap, &[removed(1 << 31)]), Some(i32::MAX));
+        assert_eq!(amount(&snap, &[removed(5), removed(2)]), Some(7));
+        // The zero policy is unchanged: a completed removal of nothing is 0.
+        let completed = GameEvent::EffectResolved {
+            kind: EffectKind::from(&snap.effect),
+            source_id: SOURCE,
+            subject: None,
+        };
+        assert_eq!(amount(&snap, &[completed]), Some(0));
+    }
+
+    #[test]
+    fn damage_dealt_total_saturates() {
+        let bolt = deal_damage();
+        assert_eq!(
+            amount(&bolt, &[damage(u32::MAX, 0), damage(u32::MAX, 0)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&bolt, &[damage(3, 0), damage(4, 0)]), Some(7));
+    }
+
+    #[test]
+    fn fight_excess_total_saturates() {
+        let fight = fight();
+        assert_eq!(
+            amount(&fight, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&fight, &[damage(5, 2)]), Some(2));
+    }
+
+    #[test]
+    fn life_gained_total_saturates() {
+        let gain = ability(
+            Effect::GainLife {
+                amount: one(),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        assert_eq!(
+            amount(&gain, &[life(i32::MAX), life(i32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&gain, &[life(4)]), Some(4));
+        // A loss in the same window is not part of the gained total.
+        assert_eq!(amount(&gain, &[life(4), life(-3)]), Some(4));
+    }
+
+    /// Only `-i32::MAX` losses: the `i32::MIN` negation is outside this change.
+    #[test]
+    fn life_lost_total_saturates() {
+        let drain = ability(
+            Effect::LoseLife {
+                amount: one(),
+                target: None,
+            },
+            vec![],
+        );
+        assert_eq!(
+            amount(&drain, &[life(-i32::MAX), life(-i32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(amount(&drain, &[life(-3), life(2)]), Some(3));
+    }
+
+    #[test]
+    fn excess_totals_saturate() {
+        let bolt = deal_damage();
+        assert_eq!(
+            excess(&bolt, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(excess(&bolt, &[damage(4, 1), damage(4, 2)]), Some(3));
+        let fight = fight();
+        assert_eq!(
+            excess(&fight, &[damage(1, u32::MAX), damage(1, u32::MAX)]),
+            Some(i32::MAX)
+        );
+        assert_eq!(excess(&fight, &[damage(5, 2)]), Some(2));
     }
 }

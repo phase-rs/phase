@@ -15,8 +15,8 @@
 //! DistinctCounterKindsAmong` for-EACH-kind loop (Bribe Taker / Quarry Hauler).
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectError, EffectKind, PlayerFilter,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectError, EffectKind, EffectScope,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
@@ -164,6 +164,7 @@ fn remove_counter_branch(kind: CounterType, count: &QuantityExpr) -> AbilityDefi
                 counter_type: Some(kind),
                 count: count.clone(),
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
             },
         )
     }

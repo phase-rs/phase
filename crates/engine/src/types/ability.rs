@@ -978,6 +978,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }

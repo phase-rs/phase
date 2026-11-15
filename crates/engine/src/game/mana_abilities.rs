@@ -7398,6 +7398,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         )));
     }
@@ -7597,6 +7598,7 @@ mod tests {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
                         destination: Zone::Graveyard,
+                        position: crate::types::ability::LibraryPosition::Top,
                     })],
                     enter_with_counters: vec![],
                 },
@@ -7617,6 +7619,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         )));
     }
@@ -7726,6 +7729,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             })
         };
 
