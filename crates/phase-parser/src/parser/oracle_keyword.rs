@@ -2108,6 +2108,21 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     let (_, (name, rest)) = split_once_on(text, " ").ok()?;
     let rest = rest.trim();
 
+    // CR 702.1 + CR 702.6a: a keyword declaration is the ability's name plus its
+    // parameter. "<keyword> abilities …" ("equip abilities you activate cost {1}
+    // less") instead REFERS to abilities with that keyword, so it is never a
+    // declaration. Without this guard the generic path below reads the noun
+    // phrase as the parameter and fabricates a keyword (`Equip {0}`).
+    if terminated(
+        alt((tag::<_, _, OracleError<'_>>("abilities"), tag("ability"))),
+        not(alpha1),
+    )
+    .parse(rest)
+    .is_ok()
+    {
+        return None;
+    }
+
     // CR 702.32a: Fading N.
     // CR 702.63a: Vanishing N.
     // CR 702.112a: Renown N.
@@ -3704,6 +3719,29 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_granted_keyword_fragment("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.1 + CR 702.6a: "<keyword> abilities …" refers to abilities with that
+    /// keyword and is never a declaration. The generic name/parameter path read the
+    /// noun phrase as the parameter and fabricated `Equip {0}` (Nahiri, Storm of
+    /// Stone's "equip abilities you activate cost {1} less to activate").
+    #[test]
+    fn parse_granted_keyword_fragment_rejects_keyword_ability_noun_phrase() {
+        for text in [
+            "equip abilities you activate cost {1} less to activate",
+            "ninjutsu abilities you activate cost {1} less to activate",
+            "equip ability",
+        ] {
+            assert_eq!(parse_granted_keyword_fragment(text), None, "{text}");
+        }
+        assert_eq!(
+            parse_granted_keyword_fragment("equip {2}"),
+            Some(Keyword::Equip(ManaCost::Cost {
+                shards: vec![],
+                generic: 2
+            })),
+            "control: a real equip declaration still parses"
+        );
     }
 
     /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")

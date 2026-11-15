@@ -18,7 +18,6 @@ import {
   NativeEngineVersionMismatchError,
   WebSocketAdapter,
   acknowledgeFullTerminalDelivery,
-  bootstrapFullTerminalDelivery,
   readFullTerminalResult,
 } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
@@ -63,18 +62,18 @@ import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quic
 import {
   clearFullTerminalCleanupStrict,
   clearGameStrict,
+  clearNativeSoloSession,
+  clearOnlineSession,
   loadFullTerminalCleanupStrict,
   loadGameStrict,
+  markNativeSoloSessionTerminal,
+  type NativeSoloSessionIdentity,
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
+import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
-import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
-import {
-  commitFullTerminalDelivery,
-  loadFullTerminalDelivery,
-  replaceFullTerminalDelivery,
-  type FullTerminalDelivery,
-} from "../services/fullTerminalResult";
+import { loadWsSession, saveWsSession } from "../services/multiplayerSession";
+import { recoverFullTerminal } from "../services/fullTerminalRecovery";
 import { detectServerUrl } from "../services/serverDetection";
 import {
   canAttemptNativeEngine,
@@ -394,11 +393,17 @@ function sameStringArray(value: unknown, expected: readonly string[]): boolean {
 /** Validate the name-only publication before decorating a separate in-memory submission. */
 function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
   if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
-  const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
+  const matchesDeck = (deck: unknown, mainDeck: string[], companion: readonly string[] = []) =>
+    hasExactKeys(deck, ["main_deck", "sideboard", "commander"], ["companion"])
     && sameStringArray(deck.main_deck, mainDeck)
     && sameStringArray(deck.sideboard, [])
-    && sameStringArray(deck.commander, []);
-  if (!matchesDeck(value.player, run.playerDeck) || !matchesDeck(value.opponent, run.opponentDeck)
+    && sameStringArray(deck.commander, [])
+    // CR 702.139a: the designation is published (even when empty) for the seat
+    // that drafted it; it must be exactly the stored run's, and an absent key
+    // means no designation.
+    && sameStringArray(deck.companion ?? [], companion);
+  if (!matchesDeck(value.player, run.playerDeck, run.companion ? [run.companion] : [])
+    || !matchesDeck(value.opponent, run.opponentDeck)
     || !Array.isArray(value.ai_decks) || value.ai_decks.length !== 0) return false;
   const pool = run.booster_pack_pool;
   if (pool === undefined) return !Object.prototype.hasOwnProperty.call(value, "booster_pack_pool");
@@ -471,6 +476,9 @@ function nativeFallbackReason(error: unknown): string {
     ? "server_version_mismatch"
     : "native_engine_unavailable";
 }
+
+// Server address of the shell-owned native engine; its sockets come from a factory.
+const NATIVE_ENGINE_SERVER_URL = "native-engine";
 
 // The empty decklist a seat submits when it has no deck to send.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
@@ -1521,108 +1529,29 @@ export function GameProvider({
           return;
         }
         if (reconnectSession) {
-          const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
-          if (cancelled) return;
-          if (reconnectSession.terminalOnly && !terminalDelivery) {
-            onWsEventRef.current?.({
-              type: "terminalUnavailable",
-              message: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
-            });
-            return;
-          }
-
-          if (terminalDelivery) {
-            // A retained terminal capability is read only through the small raw
-            // socket helper. This branch intentionally returns before any
-            // playable adapter, controller, deck, or reconnect setup exists.
-            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
-            // Show the cached result summary immediately. A refreshed delivery
-            // must establish matching authority before reusing a private view.
-            onWsEventRef.current?.({
-              type: "terminalDelivery", delivery: { ...terminalDelivery, finalView: undefined },
-            });
-            try {
-              const refreshed = await readFullTerminalResult(
-                reconnectSession.serverUrl,
-                terminalDelivery.credential,
-              );
-              if (cancelled) return;
-              const retainsLocalFinalView = refreshed !== null
-                && refreshed.key.game_code === terminalDelivery.key.game_code
-                && refreshed.key.generation === terminalDelivery.key.generation
-                && refreshed.deliveryId === terminalDelivery.deliveryId
-                && refreshed.credential === terminalDelivery.credential
-                && refreshed.finalView === undefined
-                && terminalDelivery.finalView !== undefined;
-              const effectiveRefresh = retainsLocalFinalView
-                ? { ...refreshed, finalView: terminalDelivery.finalView }
-                : refreshed;
-              if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
-                throw new Error("Failed to retain terminal delivery");
-              }
-              const display = effectiveRefresh ?? terminalDelivery;
-              void acknowledgeFullTerminalDelivery(
-                reconnectSession.serverUrl,
-                display.deliveryId,
-                display.credential,
-              ).then((acknowledged) => {
-                if (acknowledged && !cancelled) clearWsSession(reconnectSession);
-              }).catch(() => {});
-              onWsEventRef.current?.({
-                type: "terminalDelivery",
-                delivery: display,
-              });
-            } catch (error) {
-              if (!cancelled) {
-                useMultiplayerStore.getState().setConnectionStatus("disconnected");
-                onWsEventRef.current?.({
-                  type: "terminalUnavailable",
-                  message: error instanceof Error ? error.message : "Terminal result is unavailable",
-                });
-              }
-            }
-            return;
-          }
-
-          let bootstrap: FullTerminalDelivery | null;
-          try {
-            bootstrap = await bootstrapFullTerminalDelivery(
-              reconnectSession.serverUrl,
-              reconnectSession.fullKey,
-              reconnectSession.playerToken,
-              crypto.randomUUID(),
-            );
-          } catch (error) {
-            if (!cancelled) {
-              useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              onWsEventRef.current?.({
-                type: "terminalUnavailable",
-                message: error instanceof Error ? error.message : "Terminal result is unavailable",
-              });
-            }
-            return;
-          }
-          if (cancelled) return;
-          if (bootstrap) {
-            if (!(await commitFullTerminalDelivery(bootstrap))) {
-              useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              onWsEventRef.current?.({
-                type: "terminalUnavailable",
-                message: "Failed to retain terminal delivery",
-              });
-              return;
-            }
-            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
-            void acknowledgeFullTerminalDelivery(
-              reconnectSession.serverUrl,
-              bootstrap.deliveryId,
-              bootstrap.credential,
-            ).then((acknowledged) => {
-              if (acknowledged && !cancelled) clearWsSession(reconnectSession);
-            }).catch(() => {});
-            onWsEventRef.current?.({ type: "terminalDelivery", delivery: bootstrap });
-            return;
-          }
+          // A legacy save predates the recorded player id. It is not seat 0: the
+          // only authority for this client's seat is the wire, so leave the seat
+          // unknown until `playerIdentity` delivers it (a terminal-only recovery
+          // never does).
+          useMultiplayerStore.getState().setActivePlayerId(reconnectSession.playerId ?? null);
+          const outcome = await recoverFullTerminal(
+            {
+              serverUrl: reconnectSession.serverUrl,
+              fullKey: reconnectSession.fullKey,
+              playerToken: reconnectSession.playerToken,
+              terminalOnly: reconnectSession.terminalOnly === true,
+            },
+            {
+              isCancelled: () => cancelled,
+              emit: (event) => onWsEventRef.current?.(event),
+              onFailure: () => useMultiplayerStore.getState().setConnectionStatus("disconnected"),
+              unreadableMessage: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
+              retainTerminalRoute: () =>
+                saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession),
+              releaseTerminalRoute: () => clearOnlineSession(gameId, reconnectSession),
+            },
+          );
+          if (outcome === "settled") return;
         }
         // Origin precedence: an explicit build override wins; then the
         // server a resumable session was recorded on (that server holds the
@@ -1653,7 +1582,25 @@ export function GameProvider({
           useMultiplayerStore.getState().displayName || "Player",
         );
 
-        let adapterSession: ReturnType<typeof loadWsSession> = null;
+        // The identity this online game's pointer holds. The adapter decides
+        // when the session becomes terminal-only and when it ends; this listener
+        // is owned by the adapter's persistent session lifecycle and survives
+        // unmount while terminal cleanup is pending.
+        let adapterSession: ReturnType<typeof loadWsSession> = reconnectSession ?? null;
+        wsAdapter.onEvent((event) => {
+          if (event.type === "sessionChanged") {
+            if (event.session) {
+              const previousSession = adapterSession;
+              adapterSession = event.session;
+              saveWsSession(event.session, event.session.terminalOnly
+                ? previousSession ?? event.session : undefined);
+            } else if (adapterSession) {
+              clearOnlineSession(gameId, adapterSession);
+              adapterSession = null;
+            }
+          }
+        });
+
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
@@ -1675,17 +1622,6 @@ export function GameProvider({
           }
           if (event.type === "latencyChanged") {
             useMultiplayerStore.getState().setLatency(event.latencyMs);
-          }
-          if (event.type === "sessionChanged") {
-            if (event.session) {
-              const previousSession = adapterSession;
-              adapterSession = event.session;
-              saveWsSession(event.session, event.session.terminalOnly
-                ? previousSession ?? event.session : undefined);
-            } else if (adapterSession) {
-              clearWsSession(adapterSession);
-              adapterSession = null;
-            }
           }
           if (event.type === "stateChanged") {
             // Ensure adapter is set before animating so state updates land correctly
@@ -1843,11 +1779,18 @@ export function GameProvider({
         }
         return run;
       };
+      // CR 100.2b + CR 702.139b: the draft match runs under the session's own
+      // minimum deck size, recorded on the run at launch.
+      const draftMatchFormatConfig = (run: DraftRunState | null) =>
+        formatConfig && run
+          ? draftSessionFormatConfig(formatConfig, run.min_deck_size)
+          : formatConfig;
       const startDraftDeck = async (raw: string) => {
         try {
           const deckList = JSON.parse(raw) as DeckListPayload;
+          let run: DraftRunState | null = null;
           if (soloDraft) {
-            const run = await loadExactDraftRun();
+            run = await loadExactDraftRun();
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
@@ -1857,7 +1800,7 @@ export function GameProvider({
             gameId,
             adapter,
             submission,
-            formatConfig,
+            draftMatchFormatConfig(run),
             playerCount,
             matchConfig,
             firstPlayer,
@@ -1890,13 +1833,20 @@ export function GameProvider({
           if (cancelled) return;
           const deckList = {
             booster_pack_pool: run.booster_pack_pool,
-            player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+            player: {
+              main_deck: run.playerDeck,
+              sideboard: [],
+              commander: [],
+              companion: run.companion ? [run.companion] : [],
+            },
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };
           const submission = await submitLocalHandoff(deckList);
           if (cancelled) return;
-          await initGame(gameId, adapter, submission, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          await initGame(
+            gameId, adapter, submission, draftMatchFormatConfig(run), playerCount, matchConfig, firstPlayer, "strict",
+          );
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
@@ -2250,10 +2200,38 @@ export function GameProvider({
           await ensureNativeEngine(nativeEngineKey);
           if (cancelled) return;
 
+          // The pointer is this game's only link to a result the server has
+          // retained, and a finished game's key no longer reconnects. Recover
+          // that result through the same terminal-only flow as online seats;
+          // only a seat the server reports as live resumes play.
+          if (nativeResume) {
+            useMultiplayerStore.getState().setActivePlayerId(nativeResume.playerId ?? 0);
+            const outcome = await recoverFullTerminal(
+              {
+                serverUrl: NATIVE_ENGINE_SERVER_URL,
+                fullKey: nativeResume.fullKey,
+                playerToken: nativeResume.playerToken,
+                terminalOnly: nativeResume.terminalOnly === true,
+                socketFactory: () => new NativeEngineSocket(),
+              },
+              {
+                isCancelled: () => cancelled,
+                emit: (event) => onWsEventRef.current?.(event),
+                unreadableMessage: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
+                retainTerminalRoute: () => markNativeSoloSessionTerminal(gameId, nativeResume),
+                releaseTerminalRoute: () => clearNativeSoloSession(gameId, nativeResume),
+              },
+            );
+            if (outcome === "settled") {
+              if (!cancelled) setEngineMode("native");
+              return;
+            }
+          }
+
           const expectedServerVersion =
             "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined;
           nativeAdapter = new WebSocketAdapter(
-            "native-engine",
+            NATIVE_ENGINE_SERVER_URL,
             "host",
             deckList?.player ?? emptySeatDeck(),
             undefined,
@@ -2284,6 +2262,25 @@ export function GameProvider({
                 },
           );
 
+          // The identity this game's pointer holds. The adapter decides when
+          // the session becomes terminal-only and when it ends; the pointer is
+          // the durable copy of that decision, so a result whose ACK never
+          // completed is recovered on the next open. This listener is owned by
+          // the adapter's persistent session lifecycle and survives unmount
+          // while terminal cleanup is pending.
+          let pointerSession: NativeSoloSessionIdentity | null = nativeResume ?? null;
+          nativeAdapter.onEvent((event: WsAdapterEvent) => {
+            if (event.type === "sessionChanged") {
+              if (event.session) {
+                pointerSession = event.session;
+                if (event.session.terminalOnly) markNativeSoloSessionTerminal(gameId, event.session);
+              } else if (pointerSession) {
+                clearNativeSoloSession(gameId, pointerSession);
+                pointerSession = null;
+              }
+            }
+          });
+
           const handleNativeEvent = (event: WsAdapterEvent) => {
             if (event.type === "stateDelivery") {
               useMultiplayerStore.getState().setStateWithheld(event.withheld);
@@ -2302,6 +2299,21 @@ export function GameProvider({
               useGameStore.setState({
                 waitingFor: { type: "GameOver", data: { winner: event.winner } },
               });
+              controller?.dispose();
+              controller = null;
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+            if (event.type === "terminalDelivery") {
+              useGameStore.setState({
+                waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+                ...(event.delivery.finalView ? { gameState: event.delivery.finalView } : {}),
+              });
+              controller?.dispose();
+              controller = null;
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
+            if (event.type === "terminalUnavailable") {
+              if (nativeSessionLive) onWsEventRef.current?.(event);
             }
             if (event.type === "requestRejected" || event.type === "operationFailed") {
               // Application failures leave transport and adapter ownership intact.
@@ -2366,9 +2378,11 @@ export function GameProvider({
           nativeSessionLive = true;
           // Persist the resume pointer only now that the session is live — an
           // earlier write would strand a Resume button if setup failed midway.
-          // Suspending (navigating away) keeps this pointer; only an explicit
-          // Concede (useConcedeHandler → clearGame) removes it. The player token
-          // lives only here — it is the reconnect credential.
+          // Suspending (navigating away) keeps this pointer. It is released
+          // only through the `sessionChanged` listener above, once the game has
+          // ended and its terminal result is acknowledged (a Concede ends the
+          // game the same way). The player token lives only here — it is the
+          // reconnect credential.
           const session = nativeAdapter.nativeSession;
           if (session) {
             saveActiveGame(

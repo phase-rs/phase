@@ -111,6 +111,7 @@ pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_boon;
+pub mod create_card_copy_by_name;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
@@ -2656,6 +2657,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             face_down_profile,
             with_entry_effect,
             library_placement,
+            library_reorder,
             library_shuffle,
             enter_attached_to,
             effect_kind,
@@ -2829,6 +2831,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     state.replace_active_change_zone_iteration(
                         crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
+                            // CR 701.20d + CR 616.1: carried across the further
+                            // pause; the terminal drain settles it once.
+                            library_reorder: library_reorder.clone(),
                             pending_return_result_producer,
                             paused_current: anticipated_pause.map(|mut boundary| {
                                 boundary.append_delivery_events(&events[delivery_start..]);
@@ -2889,6 +2894,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
+                            // CR 701.20d + CR 616.1: carried across the further
+                            // pause; the terminal drain settles it once.
+                            library_reorder: library_reorder.clone(),
                             pending_return_result_producer,
                             paused_current,
                             remaining: remaining[i + 1..].to_vec(),
@@ -2922,6 +2930,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     return;
                 }
             }
+        }
+        // CR 701.20d + CR 616.1: every member of this library placement is now
+        // in place, so the whole-library reorder it performed settles before the
+        // logical cleanup and before the completion/continuation run.
+        if let Some(library_reorder) = library_reorder {
+            library_reorder.finish(state);
         }
         crate::game::triggers::complete_logical_zone_trigger_collection_for(
             state,
@@ -5612,6 +5626,8 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         Effect::Encore => false,
         // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
         Effect::ChooseFromZone { .. } => false,
+        // CR 707.13: the copy is created to be cast, never onto the battlefield.
+        Effect::CreateCardCopyByName { .. } => false,
         // not a co-entry ContinuationStep: abandoning turns a scheme face
         // down (or returns it to the scheme deck), never onto the battlefield.
         Effect::AbandonScheme => false,
@@ -6478,6 +6494,7 @@ impl MovedObjectsSource {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6961,6 +6978,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7232,6 +7250,7 @@ fn node_with_entry_modifications(
         | Effect::CombineHost { .. }
         | Effect::CompletePlayerAction { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Connive { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::CopySpell { .. }
@@ -9801,6 +9820,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -10658,6 +10678,8 @@ fn effect_fields_read_filter_population(
             };
             recipient_reads || attacker_restriction.as_ref().is_some_and(has_filter)
         }
+        // CR 707.13: a name, not a filter.
+        Effect::CreateCardCopyByName { .. } => false,
         Effect::Conjure {
             cards,
             library_players,
@@ -11208,7 +11230,7 @@ fn choice_type_reads_filter_population(
         | ChoiceType::OddOrEven
         | ChoiceType::BasicLandType
         | ChoiceType::CardType { .. }
-        | ChoiceType::CardName
+        | ChoiceType::CardName { .. }
         | ChoiceType::NumberRange { .. }
         | ChoiceType::Labeled { .. }
         | ChoiceType::LandType
@@ -15030,6 +15052,9 @@ fn resolve_legacy_effect(
         }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
+        Effect::CreateCardCopyByName { .. } => {
+            create_card_copy_by_name::resolve(state, ability, events)
+        }
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
@@ -18713,6 +18738,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // eligible.
             if matches!(target, TargetFilter::ParentTarget)
                 && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+            // CR 608.2d: the same for "cast the copy / the card it created" when
+            // the creating instruction created nothing (Garth One-Eye after its
+            // name domain is exhausted, CR 609.3): the created referent is empty,
+            // so there is nothing the option could cast.
+            if matches!(target, TargetFilter::LastCreated)
+                && state.last_created_token_ids.is_empty()
             {
                 return true;
             }
@@ -23499,6 +23533,8 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // recycled self-or-others scheme's fresh answer must not inherit the label
     // an earlier resolution named.
     state.named_label_this_resolution = None;
+    // CR 201.4 + CR 608.2c: nor a prior resolution's chosen card name.
+    state.named_card_name_this_resolution = None;
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
@@ -29820,10 +29856,19 @@ pub(crate) fn evaluate_condition(
         // `cast_from_zone == None` → false (CR 707.10: a copy of a spell isn't
         // cast; CR 400.7: a new object has no cast provenance). Mirrors the
         // `StaticCondition::WasCast` evaluator at layers.rs.
-        AbilityCondition::WasCast { zone } => ability
-            .context
-            .cast_from_zone
-            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
+        // CR 601.2a + CR 707.13: a cast from outside the game (the source object
+        // is the resolving spell or its permanent) satisfies a bare "was cast" but
+        // no named origin zone.
+        AbilityCondition::WasCast { zone } => {
+            let from_outside_game = state
+                .objects
+                .get(&ability.source_id)
+                .is_some_and(|source| source.created_outside_game);
+            ability
+                .context
+                .cast_from_zone
+                .is_some_and(|cz| zone.is_none_or(|z| !from_outside_game && cz == z))
+        }
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).
@@ -43758,6 +43803,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![card],
             card_names: vec!["Three Mana Spell".to_string()],
+            occurrences: state.disclosed_occurrences(&[card]),
         }];
 
         let snapshot = revealed_object_context_from_events(&state, &events)
@@ -43777,6 +43823,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![a, b],
             card_names: vec!["A".into(), "B".into()],
+            occurrences: state.disclosed_occurrences(&[a, b]),
         }];
         assert!(revealed_object_context_from_events(&state, &events).is_none());
     }
@@ -43875,11 +43922,13 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![a],
                 card_names: vec!["A".into()],
+                occurrences: state.disclosed_occurrences(&[a]),
             },
             GameEvent::CardsRevealed {
                 player: PlayerId(0),
                 card_ids: vec![b],
                 card_names: vec!["B".into()],
+                occurrences: state.disclosed_occurrences(&[b]),
             },
         ];
         assert!(revealed_object_context_from_events(&state, &events).is_none());
@@ -43929,6 +43978,7 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![revealed],
                 card_names: vec!["Revealed".into()],
+                occurrences: state.disclosed_occurrences(&[revealed]),
             },
             GameEvent::PermanentSacrificed {
                 object_id: sacrificed,
@@ -48139,6 +48189,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![top, second],
             card_names: vec!["Top Card".to_string(), "Second Card".to_string()],
+            occurrences: state.disclosed_occurrences(&[top, second]),
         }];
         let effect = Effect::RevealTop {
             player: TargetFilter::Controller,
@@ -67686,6 +67737,7 @@ mod entry_observation_settlement_tests {
                 .latch_immediately_before(Vec::new(), Vec::new())
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
+                library_reorder: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),
@@ -70468,6 +70520,191 @@ mod parser_oracle_effect_tests {
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
         );
+    }
+}
+
+#[cfg(test)]
+mod library_reorder_iteration_carrier_tests {
+    use super::*;
+    use crate::game::zones::{create_object, LibraryReorderOperation};
+    use crate::types::ability::{ExileConcealment, LibraryPosition};
+    use crate::types::game_state::{ChangeZoneMemberEntry, PendingChangeZoneIteration};
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::EtbTapState;
+
+    /// CR 701.20d + CR 616.1: the ChangeZoneAll resume carrier owns the
+    /// whole-library reorder it paused on, so the drain that completes the
+    /// instruction settles reveal retirement exactly once, before its terminal
+    /// `EffectResolved` (cleanup and continuation).
+    #[test]
+    fn paused_library_reorder_settles_when_the_iteration_drains() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(93001),
+            PlayerId(0),
+            "Reorder A".to_string(),
+            Zone::Library,
+        );
+        let bottom = create_object(
+            &mut state,
+            CardId(93002),
+            PlayerId(0),
+            "Reorder B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).push_back(top);
+        state.library_of_mut(PlayerId(0)).push_back(bottom);
+        state.revealed_cards.insert(top);
+        state.revealed_cards.insert(bottom);
+        let top_incarnation = state.objects[&top].incarnation;
+        let bottom_incarnation = state.objects[&bottom].incarnation;
+
+        let reorder = LibraryReorderOperation::begin(&state, &[top, bottom]);
+        let reversed: im::Vector<ObjectId> = state
+            .library_of(PlayerId(0))
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        *state.library_of_mut(PlayerId(0)) = reversed;
+
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            pending_return_result_producer: None,
+            paused_current: None,
+            remaining: Vec::new(),
+            source_id: ObjectId(93001),
+            controller: PlayerId(0),
+            performed_by: PlayerId(0),
+            origin: None,
+            destination: Zone::Library,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            with_entry_effect: None,
+            library_placement: None,
+            library_shuffle: Default::default(),
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZoneAll,
+        });
+
+        let mut events = Vec::new();
+        drain_pending_change_zone_iteration(&mut state, &mut events);
+
+        assert!(
+            state.objects[&top].incarnation > top_incarnation
+                && state.objects[&bottom].incarnation > bottom_incarnation,
+            "CR 701.20d: the completed instruction retires every reordered revealed member"
+        );
+        assert!(
+            !state.revealed_cards.contains(&top) && !state.revealed_cards.contains(&bottom),
+            "no reordered member stays revealed"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+            "reach guard: the instruction reached its terminal resolution event"
+        );
+    }
+
+    /// CR 701.20d + CR 616.1: the resumed ChangeZoneAll tail delivers its
+    /// members one at a time. Library `[A, B]`, bottom order `[B, A]`: B's own
+    /// delivery leaves it in place and A's then shifts it. B is revealed only by
+    /// a stack-bound lease (CR 701.20a), which the per-card reorder spares
+    /// because it publishes no position, so only the drain's terminal
+    /// settlement retires it.
+    #[test]
+    fn drained_iteration_settles_a_member_only_the_arrangement_reordered() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(93011),
+            PlayerId(0),
+            "Pile A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(93012),
+            PlayerId(0),
+            "Pile B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).clear();
+        state.library_of_mut(PlayerId(0)).push_back(a);
+        state.library_of_mut(PlayerId(0)).push_back(b);
+        state.revealed_cards.insert(a);
+        state.grant_stack_bound_reveal(ObjectId(93019), &[b]);
+        let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
+
+        let reorder = LibraryReorderOperation::begin(&state, &[b, a]);
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[b, a]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            pending_return_result_producer: None,
+            paused_current: None,
+            remaining: [b, a]
+                .into_iter()
+                .map(|object_id| ChangeZoneMemberEntry {
+                    object_id,
+                    enter_with_counters: Vec::new(),
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                })
+                .collect(),
+            source_id: a,
+            controller: PlayerId(0),
+            performed_by: PlayerId(0),
+            origin: None,
+            destination: Zone::Library,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            with_entry_effect: None,
+            library_placement: Some(LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZoneAll,
+        });
+
+        let mut events = Vec::new();
+        drain_pending_change_zone_iteration(&mut state, &mut events);
+
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![b, a],
+            "reach guard: the chosen bottom order was delivered"
+        );
+        for ((id, label), before) in [(a, "A"), (b, "B")].into_iter().zip(incarnations) {
+            assert_eq!(
+                state.objects[&id].incarnation,
+                before + 1,
+                "{label} becomes exactly one new object"
+            );
+            assert!(
+                !state.revealed_cards.contains(&id) && !state.holds_stack_bound_reveal(id),
+                "{label} stops being revealed"
+            );
+        }
     }
 }
 
