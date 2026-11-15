@@ -2505,7 +2505,9 @@ fn choose_new_targets_offers_each_opponents_own_creatures_for_a_fanout() {
     runner.cast(redirect).target_objects(&[spell]).commit();
     drive_to_retarget_prompt(&mut runner);
     let WaitingFor::RetargetChoice {
-        legal_new_targets, ..
+        legal_new_targets,
+        current_targets,
+        ..
     } = &runner.state().waiting_for
     else {
         panic!(
@@ -2513,6 +2515,12 @@ fn choose_new_targets_offers_each_opponents_own_creatures_for_a_fanout() {
             runner.state().waiting_for
         );
     };
+    assert!(
+        !current_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(_))),
+        "the walk exposes only the object positions, got {current_targets:?}"
+    );
     assert!(
         legal_new_targets.contains(&TargetRef::Object(first))
             && legal_new_targets.contains(&TargetRef::Object(second)),
