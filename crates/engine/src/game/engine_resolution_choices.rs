@@ -241,7 +241,7 @@ fn legacy_mass_library_order_prompt_is_current(
 /// library arrangement, a player-scope sacrifice or a player-scope return)
 /// through its handler (`settle_owner_library_arrangement_after_departure`,
 /// `settle_player_scope_sacrifice_after_departure`,
-/// `settle_player_scope_bounce_after_departure`).
+/// `settle_player_scope_choice_after_departure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepartureSettlement {
     /// Nothing was settled: no choice was open, its prompt still stands or
@@ -378,15 +378,33 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
 }
 
 /// CR 800.4a + CR 101.4 + CR 608.2m: after a player leaves, continue an open
-/// player-scope return ("each player returns a permanent they control…") with
-/// the players and objects still in the game: republish the current chooser's
-/// prompt, or settle it through this handler so the collected returns are
-/// delivered as one batch. Reports whether it settled, so a departed
-/// controller's spell the settlement continued is not retired.
-pub(crate) fn settle_player_scope_bounce_after_departure(
+/// player-scope return ("each player returns a permanent they control…") or
+/// discard ("each opponent discards a card") with the players and objects still
+/// in the game: republish the current chooser's prompt, or settle it through
+/// this handler so the collected choices are delivered as one batch. Reports
+/// whether it settled, so a departed controller's spell the settlement
+/// continued is not retired.
+pub(crate) fn settle_player_scope_choice_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<DepartureSettlement, EngineError> {
+    match effects::scoped_discard::reconcile_player_scope_discard(state) {
+        effects::scoped_discard::PlayerScopeDiscardReconciliation::Unchanged
+        | effects::scoped_discard::PlayerScopeDiscardReconciliation::Retired => {}
+        effects::scoped_discard::PlayerScopeDiscardReconciliation::Settle => {
+            // CR 800.4a: the departed chooser's prompt admits only the empty
+            // answer; answering it continues the walk for the players left.
+            let waiting_for = state.waiting_for.clone();
+            let outcome = handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards: Vec::new() },
+                events,
+            )?;
+            adopt_departure_choice_outcome(state, events, outcome);
+            return Ok(DepartureSettlement::Settled);
+        }
+    }
     match effects::bounce::reconcile_player_scope_bounce(state) {
         effects::bounce::PlayerScopeBounceReconciliation::Unchanged
         | effects::bounce::PlayerScopeBounceReconciliation::Retired => {
@@ -6767,6 +6785,46 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 101.4 + CR 101.4a: when several players discard for one
+            // instruction, each chooses (the pick staying in hand, unrevealed)
+            // before any chosen card is discarded. CR 608.2c: only the carrier
+            // of this prompt's own instruction collects the answer.
+            if effects::scoped_discard::carrier_collects_discard(state, source_id) {
+                match effects::scoped_discard::advance_pending_player_scope_discard_choice(
+                    state, player, &chosen, events,
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::scoped_discard::PendingPlayerScopeDiscardOutcome::WaitingForNextChoice
+                    | effects::scoped_discard::PendingPlayerScopeDiscardOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::scoped_discard::PendingPlayerScopeDiscardOutcome::Completed {
+                        events_before,
+                        events_after,
+                    } => {
+                        // CR 117.3b: the resolution finished; the active player
+                        // receives priority once the continuation has drained.
+                        set_priority(state, state.active_player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before,
+                            events_after,
+                            false,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
+            }
+
             let chosen_refs = chosen
                 .iter()
                 .filter_map(|id| state.objects.get(id))
@@ -7337,7 +7395,7 @@ pub(super) fn handle_resolution_choice(
 
             if matches!(effect_kind, EffectKind::Bounce)
                 && state
-                    .pending_player_scope_bounce_choice
+                    .pending_player_scope_choice
                     .as_ref()
                     .is_some_and(|pending| pending.ability.source_id == source_id)
             {
@@ -7357,7 +7415,9 @@ pub(super) fn handle_resolution_choice(
                         events_before,
                         events_after,
                     } => {
-                        set_priority(state, player);
+                        // CR 117.3b: the resolution finished; the active player
+                        // receives priority once the continuation has drained.
+                        set_priority(state, state.active_player);
                         resume_with_error_propagation(state, events)?;
                         if let Some(outcome) = batch_or_drain_observer_triggers(
                             state,

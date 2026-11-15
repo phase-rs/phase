@@ -752,7 +752,7 @@ fn specific_discard_cards(state: &GameState, ability: &ResolvedAbility) -> Optio
 /// CR 701.9a: the cards a player-hand discard can move — the discarding
 /// player's hand, narrowed by the recipient-scoped card filter — or why there
 /// is no pool.
-enum PlayerHandDiscardPool {
+pub(super) enum PlayerHandDiscardPool {
     /// CR 608.2b: no discarding player resolves (an illegal declared player).
     NoPlayer,
     /// CR 701.9a + CR 609.3: an opponent's spell or ability can't force this
@@ -768,7 +768,7 @@ enum PlayerHandDiscardPool {
 
 /// The single authority on which hand cards a player-hand discard can move,
 /// shared by [`resolve`] and [`optional_discard_is_infeasible`].
-fn player_hand_discard_pool(
+pub(super) fn player_hand_discard_pool(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,

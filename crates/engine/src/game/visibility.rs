@@ -1561,6 +1561,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // ID of a card still in a hand (a hidden zone), and Library of Leng can
     // send it to another hidden zone. Server-only for every viewer.
     filtered.pending_single_discard = None;
+    // CR 101.4 + CR 101.4a: the picks earlier players have already made for a
+    // simultaneous instruction stay unrevealed until it is delivered, so no
+    // viewer — a later chooser above all — receives them. The projected
+    // prompt is the complete viewer-facing surface.
+    if let Some(choice) = filtered.pending_player_scope_choice.as_mut() {
+        choice.selections.clear();
+    }
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
     // have already chosen (CR 401.4: the order isn't revealed). The public
@@ -4170,7 +4177,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
-/// `pending_player_scope_bounce_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
 /// `replacement_continuations`, which every shield's `runtime_execute` names
 /// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
@@ -4522,7 +4529,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     if let Some(choice) = state.pending_player_scope_sacrifice_choice.as_mut() {
         redact_ability_payment(&mut choice.ability, hidden_ids);
     }
-    if let Some(choice) = state.pending_player_scope_bounce_choice.as_mut() {
+    if let Some(choice) = state.pending_player_scope_choice.as_mut() {
         redact_ability_payment(&mut choice.ability, hidden_ids);
     }
     if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
@@ -5295,7 +5302,7 @@ mod tests {
         LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
-        PendingManaAbility, PendingPlayerScopeBounceChoice, PendingSacrificeCostCompletion,
+        PendingManaAbility, PendingPlayerScopeChoice, PendingSacrificeCostCompletion,
         PendingScopedLibrarySearch, PendingSearchFoundBatch, PendingTriggerOrder,
         PreparedScopedLibrarySearchChoice, SpellCastRecord, StackEntry, TargetEffectDetail,
         TriggerOrderGroup,
@@ -7481,16 +7488,15 @@ mod tests {
                 }),
             ),
             (
-                "pending_player_scope_bounce_choice",
-                "/pending_player_scope_bounce_choice/".to_string(),
+                "pending_player_scope_choice",
+                "/pending_player_scope_choice/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
-                    state.pending_player_scope_bounce_choice =
-                        Some(PendingPlayerScopeBounceChoice {
-                            ability: effect(),
-                            remaining_players: Vec::new(),
-                            selections: Vec::new(),
-                        });
+                    state.pending_player_scope_choice = Some(PendingPlayerScopeChoice {
+                        ability: effect(),
+                        remaining_players: Vec::new(),
+                        selections: Vec::new(),
+                    });
                 }),
             ),
             (

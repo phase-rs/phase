@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, GameState, PendingPlayerScopeBounceChoice, StackEntryKind, WaitingFor,
+    CastingVariant, GameState, PendingPlayerScopeChoice, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -516,7 +516,7 @@ fn scoped_bounce_step(
 }
 
 /// CR 400.7: pin a chosen permanent to the object it is now, with its chooser.
-fn selection_for(
+pub(super) fn selection_for(
     state: &GameState,
     chooser: PlayerId,
     id: ObjectId,
@@ -637,7 +637,7 @@ fn collect_scoped_bounce_choices(
             ScopedBounceStep::Noop => {}
             ScopedBounceStep::Auto(id) => selections.extend(selection_for(state, seat, id)),
             ScopedBounceStep::Prompt { player, cards } => {
-                state.pending_player_scope_bounce_choice = Some(PendingPlayerScopeBounceChoice {
+                state.pending_player_scope_choice = Some(PendingPlayerScopeChoice {
                     ability: Box::new(template.clone()),
                     remaining_players: remaining,
                     selections,
@@ -692,7 +692,7 @@ pub(crate) fn advance_pending_player_scope_bounce_choice(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> PendingPlayerScopeBounceOutcome {
-    let Some(mut pending) = state.pending_player_scope_bounce_choice.take() else {
+    let Some(mut pending) = state.pending_player_scope_choice.take() else {
         return PendingPlayerScopeBounceOutcome::WaitingForNextChoice;
     };
     let answered: Vec<_> = chosen
@@ -734,10 +734,7 @@ pub(crate) enum PlayerScopeBounceReconciliation {
 /// in the game. A departed player makes no further choice and returns nothing;
 /// a pick that left the battlefield (with its departed owner, CR 800.4a) is a
 /// new object the instruction no longer finds (CR 400.7).
-fn prune_player_scope_bounce_carrier(
-    state: &GameState,
-    pending: &mut PendingPlayerScopeBounceChoice,
-) {
+fn prune_player_scope_bounce_carrier(state: &GameState, pending: &mut PendingPlayerScopeChoice) {
     pending
         .remaining_players
         .retain(|player| crate::game::players::is_alive(state, *player));
@@ -756,7 +753,7 @@ fn prune_player_scope_bounce_carrier(
 pub(crate) fn reconcile_player_scope_bounce(
     state: &mut GameState,
 ) -> PlayerScopeBounceReconciliation {
-    let Some(mut pending) = state.pending_player_scope_bounce_choice.take() else {
+    let Some(mut pending) = state.pending_player_scope_choice.take() else {
         return PlayerScopeBounceReconciliation::Unchanged;
     };
     let source_id = pending.ability.source_id;
@@ -780,12 +777,12 @@ pub(crate) fn reconcile_player_scope_bounce(
         if actor_departed {
             return PlayerScopeBounceReconciliation::Retired;
         }
-        state.pending_player_scope_bounce_choice = Some(pending);
+        state.pending_player_scope_choice = Some(pending);
         return PlayerScopeBounceReconciliation::Unchanged;
     };
 
     let template = (*pending.ability).clone();
-    state.pending_player_scope_bounce_choice = Some(pending);
+    state.pending_player_scope_choice = Some(pending);
     if !crate::game::players::is_alive(state, chooser) {
         // CR 800.4a: a player who has left the game makes no choice.
         set_scoped_bounce_waiting_for(state, &template, chooser, vec![]);

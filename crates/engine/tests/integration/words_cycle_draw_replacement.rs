@@ -21,6 +21,7 @@ use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const WORDS_OF_WAR: &str =
@@ -900,7 +901,7 @@ fn words_of_wind_later_chooser_concedes_after_earlier_picks() {
         assert!(!in_hand(&runner, id), "the departed seat returns nothing");
     }
     assert!(
-        runner.state().pending_player_scope_bounce_choice.is_none(),
+        runner.state().pending_player_scope_choice.is_none(),
         "the carrier is cleared once the instruction completes"
     );
     assert!(matches!(
@@ -924,11 +925,32 @@ fn words_of_wind_noncurrent_remaining_chooser_concedes() {
         seats: [p1, p2, p3],
     } = wind_table_at_p0_choice();
 
+    let p3_seat = engine::types::player::PlayerId(3);
+    let queued = |runner: &GameRunner| {
+        runner
+            .state()
+            .pending_player_scope_choice
+            .as_ref()
+            .expect("the return carrier is open while P0 chooses")
+            .remaining_players
+            .clone()
+    };
+    assert!(
+        queued(&runner).contains(&p3_seat),
+        "reach-guard: P3 waits in the parked chooser queue before conceding"
+    );
+
     runner
         .act(GameAction::Concede {
             player_id: engine::types::player::PlayerId(3),
         })
         .expect("P3 concedes while P0 is choosing");
+    // The carrier boundary, not the end state: with the prune reverted P3
+    // would stay queued (and merely find an empty pool later).
+    assert!(
+        !queued(&runner).contains(&p3_seat),
+        "the departed seat leaves the parked chooser queue at once"
+    );
     let (chooser, cards) = pending_return_choice(&runner);
     assert_eq!(chooser, P0, "P0's open prompt still stands");
     assert!(cards.contains(&drawer));
@@ -952,7 +974,7 @@ fn words_of_wind_noncurrent_remaining_chooser_concedes() {
         assert!(!in_hand(&runner, id), "the departed seat returns nothing");
     }
     assert!(
-        runner.state().pending_player_scope_bounce_choice.is_none(),
+        runner.state().pending_player_scope_choice.is_none(),
         "the carrier is cleared once the instruction completes"
     );
     assert!(matches!(
@@ -1152,4 +1174,238 @@ fn curfew_commander_replacement_pauses_the_batch_and_finishes() {
     assert!(on_battlefield(&runner, p0_b));
     assert_eq!(runner.state().objects[&curfew].zone, Zone::Graveyard);
     assert!(runner.state().stack.is_empty());
+}
+
+fn pending_discard_prompt(runner: &GameRunner) -> (PlayerId, Vec<ObjectId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::DiscardChoice { player, cards, .. } => (*player, cards.clone()),
+        other => panic!("expected a discard choice, got {other:?}"),
+    }
+}
+
+/// Three players: P0 controls Words of Waste and the drawing artifact; P1 and
+/// P2 each hold `hands` cards. The Waste draw replacement is armed and P0's
+/// draw is taken, so the first opponent's discard choice is open.
+fn waste_table(hands: [usize; 2]) -> (GameRunner, ObjectId, [Vec<ObjectId>; 2]) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let library_top = scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Waste", WORDS_OF_WASTE)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .id();
+    let mut hand_ids: [Vec<ObjectId>; 2] = [Vec::new(), Vec::new()];
+    for (slot, count) in hands.into_iter().enumerate() {
+        let player = PlayerId(slot as u8 + 1);
+        for index in 0..count {
+            hand_ids[slot].push(
+                scenario
+                    .add_creature_to_hand(player, &format!("P{} Hand {index}", slot + 1), 1, 1)
+                    .id(),
+            );
+        }
+    }
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    draw_one(&mut runner, drawer);
+    (runner, library_top, hand_ids)
+}
+
+fn in_graveyard(runner: &GameRunner, object: ObjectId) -> bool {
+    runner.state().objects[&object].zone == Zone::Graveyard
+}
+
+/// CR 101.4 + CR 101.4a + CR 701.9a: "each opponent discards a card" — both
+/// opponents choose before either card leaves a hand. While P2 is choosing,
+/// P1's pick is still in P1's hand (so P2 can't learn it), no viewer is sent
+/// the held pick, and after P2 answers both cards are discarded together and
+/// the draw stays replaced.
+///
+/// REVERT-FAILING: with the per-seat route, P1's pick is already in the
+/// graveyard when P2's prompt opens.
+#[test]
+fn words_of_waste_collects_both_opponents_choices_before_either_discards() {
+    let (mut runner, library_top, [p1, p2]) = waste_table([2, 2]);
+
+    let (chooser, cards) = pending_discard_prompt(&runner);
+    assert_eq!(
+        chooser, P1,
+        "the first opponent in turn order chooses first"
+    );
+    assert!(cards.iter().all(|card| p1.contains(card)));
+    let p1_pick = p1[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p1_pick],
+        })
+        .expect("P1's choice is accepted");
+
+    let (chooser, cards) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, PlayerId(2));
+    assert!(cards.iter().all(|card| p2.contains(card)));
+    assert!(
+        in_hand(&runner, p1_pick),
+        "P1's chosen card stays in hand until P2 has chosen"
+    );
+    assert!(!in_graveyard(&runner, p1_pick));
+    for viewer in [P0, P1, PlayerId(2)] {
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        assert!(
+            view.pending_player_scope_choice
+                .as_ref()
+                .is_some_and(|carrier| carrier.selections.is_empty()),
+            "viewer {viewer:?} must not be sent the held pick"
+        );
+    }
+
+    let p2_pick = p2[1];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p2_pick],
+        })
+        .expect("P2's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_graveyard(&runner, p1_pick) && in_graveyard(&runner, p2_pick));
+    assert!(in_hand(&runner, p1[1]) && in_hand(&runner, p2[0]));
+    assert!(!in_hand(&runner, library_top), "the draw is replaced");
+    assert!(runner.state().pending_player_scope_choice.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+}
+
+/// CR 101.4: a seat with nothing to choose (one card, so the discard is forced)
+/// is also held back: its card leaves the hand with the batch, not before the
+/// later chooser has chosen.
+#[test]
+fn words_of_waste_forced_discard_waits_for_the_later_chooser() {
+    let (mut runner, _, [p1, p2]) = waste_table([1, 2]);
+
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(
+        chooser,
+        PlayerId(2),
+        "P1's only card needs no choice, so P2 is the first prompt"
+    );
+    assert!(
+        in_hand(&runner, p1[0]),
+        "the forced discard has not happened while P2 chooses"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p2[0]] })
+        .expect("P2's choice is accepted");
+    resolve_stack(&mut runner);
+    assert!(in_graveyard(&runner, p1[0]) && in_graveyard(&runner, p2[0]));
+}
+
+/// CR 800.4a + CR 101.4: P2 concedes while choosing. P1's earlier pick is still
+/// discarded (it was chosen before the departure) and nothing is stranded.
+#[test]
+fn words_of_waste_chooser_concedes_and_the_earlier_pick_still_discards() {
+    let (mut runner, library_top, [p1, _]) = waste_table([2, 2]);
+    let p1_pick = p1[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p1_pick],
+        })
+        .expect("P1's choice is accepted");
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, PlayerId(2));
+
+    runner
+        .act(GameAction::Concede {
+            player_id: PlayerId(2),
+        })
+        .expect("P2 concedes during their discard choice");
+    resolve_stack(&mut runner);
+
+    assert!(in_graveyard(&runner, p1_pick), "P1's earlier pick discards");
+    assert!(!in_hand(&runner, library_top), "the draw stays replaced");
+    assert!(runner.state().pending_player_scope_choice.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 504.1 + CR 805.4b + CR 614.11a: Words of Wind replaces the active
+/// player's draw-step draw in Two-Headed Giant. Once every player's return
+/// choice is made, the active player has drawn nothing, the teammate still
+/// takes their own draw-step draw, the team draw-step queue is empty, and the
+/// active player receives priority in the draw step.
+///
+/// REVERT-FAILING: with the queue left parked at the active player, the
+/// teammate never draws before priority.
+#[test]
+fn words_of_wind_in_the_two_headed_giant_draw_step_still_draws_the_teammate() {
+    let mut scenario = GameScenario::new_with_format(
+        engine::types::format::FormatConfig::two_headed_giant(),
+        4,
+        7,
+    );
+    scenario.at_phase(Phase::Upkeep);
+    let p0_top = scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let p1_top = scenario.add_card_to_library_top(P1, "P1 Library Top");
+    for player in [PlayerId(2), PlayerId(3)] {
+        scenario.add_card_to_library_top(player, "Padding");
+    }
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Second Permanent", DRAW_A_CARD);
+    for player in [P1, PlayerId(2), PlayerId(3)] {
+        for index in 0..2 {
+            scenario.add_creature(player, &format!("P{} Creature {index}", player.0), 1, 1);
+        }
+    }
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    for _ in 0..16 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes toward the draw step");
+    }
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser, P0,
+        "reach-guard: Wind replaced P0's draw-step draw"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    assert_eq!(
+        runner.state().pending_team_draw_step.first(),
+        Some(&P0),
+        "reach-guard: the active player's draw is parked at the queue front"
+    );
+
+    answer_choices_with_first_legal(&mut runner);
+
+    assert!(
+        !in_hand(&runner, p0_top),
+        "the active player's draw is replaced"
+    );
+    assert!(in_hand(&runner, p1_top), "the teammate still draws");
+    assert!(
+        runner.state().pending_team_draw_step.is_empty(),
+        "the draw-step queue is drained before priority"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
 }
