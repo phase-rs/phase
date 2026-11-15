@@ -490,7 +490,7 @@ fn millennium_calendar_activation_doubles_only_own_time_counters() {
     );
     assert!(
         runner.state().objects[&own].tapped,
-        "the {T} cost must leave the Calendar tapped"
+        "the {{T}} cost must leave the Calendar tapped"
     );
     assert_eq!(
         time_counters(&runner, hostile_zero),

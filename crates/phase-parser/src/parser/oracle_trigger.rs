@@ -24705,13 +24705,13 @@ fn try_parse_untap_trigger(
 
     // Actor dispatch: only the controller-actor form is modeled. Any other
     // actor ("an opponent untaps …", "a player untaps …") stays red.
-    let (after_verb, ()) = tag::<_, _, OracleError<'_>>("you untap ")
+    let (after_verb, _) = tag::<_, _, OracleError<'_>>("you untap ")
         .parse(event)
         .ok()?;
 
     // CR 603.2c: the "one or more " quantifier marks the batched reading;
     // without it the head is not this trigger.
-    let (after_quantifier, ()) = tag::<_, _, OracleError<'_>>("one or more ")
+    let (after_quantifier, _) = tag::<_, _, OracleError<'_>>("one or more ")
         .parse(after_verb)
         .ok()?;
 
@@ -25049,7 +25049,9 @@ pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerConditi
             map(
                 pair(
                     map_opt(parse_turn_possessive_prefix, turn_window_condition),
-                    verify(parse_phase_name_set, |phases| *phases == [Phase::Untap]),
+                    verify(parse_phase_name_set, |phases: &Vec<Phase>| {
+                        *phases == [Phase::Untap]
+                    }),
                 ),
                 |(turn_window, phases)| {
                     append_trigger_condition(
