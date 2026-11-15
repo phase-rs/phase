@@ -128,7 +128,7 @@ fn p1_life(runner: &GameRunner) -> i32 {
     runner.state().players[1].life
 }
 
-/// CR 603.3b: casting an instant with the emblem in play triggers Ral's loyalty ability and the
+/// CR 603.3b: casting an instant while P0 has the emblem triggers Ral's cast trigger and the
 /// spell's storm together; P0 orders them.
 fn order_ral_and_storm_triggers(runner: &mut GameRunner, ral: ObjectId) {
     let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for else {
