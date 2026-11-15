@@ -570,6 +570,7 @@ fn set_scoped_bounce_waiting_for(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 400.7: a returned permanent is a new object; it enters no face-down profile.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
