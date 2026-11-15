@@ -879,7 +879,14 @@ fn finish_replacement_execute_epilogue(
     // arm above; drain the parked tail. The drain may re-park when the
     // next object surfaces its own prompt — in that case it sets
     // `state.waiting_for` for us to propagate.
-    if drain_parked_batch
+    // CR 800.4a + CR 616.1: a departure leaves a shared legacy batch's surviving tail on its
+    // owner for the action's ordinary drain; a staged population is settled by the departure
+    // itself (its leaver's decisions are retired and the rest are consulted again).
+    let leaves_shared_tail = !drain_parked_batch
+        && state
+            .active_batch_delivery()
+            .is_some_and(|pending| pending.staged.is_none());
+    if !leaves_shared_tail
         && matches!(waiting_for, WaitingFor::Priority { .. })
         && state.active_batch_delivery().is_some()
     {
@@ -1176,7 +1183,7 @@ fn finish_replacement_execute_epilogue(
 
         // CR 800.4a + CR 616.1: a departure leaves the surviving players' parked batch tail on
         // its shared owner; the action's ordinary drain resumes it.
-        if drain_parked_batch || state.active_batch_delivery().is_none() {
+        if !leaves_shared_tail {
             super::engine::resume_pending_continuation_if_priority(state, events)?;
         }
         waiting_for = state.waiting_for.clone();
