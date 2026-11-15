@@ -786,13 +786,14 @@ pub(crate) fn can_pay_ward_cost(
     // unmodeled event rewrite) — conservatively decline rather than assume it's
     // safe. The AI must never treat ending
     // its own game as an ordinary payable cost, for direct or compound Ward
-    // alike.
+    // alike. CR 810.8a + CR 101.2: a team that can't lose may cross the threshold.
     match total_poison_from_ward_cost(ctx, ward) {
         None => return false,
         Some(total_poison) if total_poison > 0 => {
             let ai = &ctx.state.players[ctx.ai_player.0 as usize];
             if players::poison_loss_measure(ctx.state, ai)
                 .is_some_and(|measure| super::poison::reaches_lethal(measure, total_poison))
+                && !engine::game::sba::player_has_cant_lose(ctx.state, ctx.ai_player)
             {
                 return false;
             }

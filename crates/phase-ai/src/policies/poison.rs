@@ -373,6 +373,7 @@ fn combat_contribution<'a>(
         })
         .collect();
     closest_delivered(
+        ctx.state,
         ctx.ai_player,
         clock_pools(ctx.state, ctx.ai_player, gains),
         |_| preview_unblocked_combat_damage(ctx.state, &at_players, gives_poison),
@@ -452,8 +453,10 @@ pub(crate) fn previewed_poison(
 /// (Solemnity) or a replacement (Vorinclex) can change every counter, so a lethal estimate is
 /// replaced by the pool's poison on the board `deliver` returns for its seat. `must_resolve`
 /// reads it even below lethal, for a count with no printed estimate. A delivery the engine
-/// could not read, or that does not end with the seat out and the AI in, is `Delivery::Unread`.
+/// could not read, or whose counters do not reach the threshold with the seat out and the AI in,
+/// is `Delivery::Unread`.
 fn confirm_lethal(
+    state: &GameState,
     ai_player: PlayerId,
     mut pool: PoisonPool,
     deliver: impl Fn(PlayerId) -> Option<GameState>,
@@ -471,9 +474,18 @@ fn confirm_lethal(
     // CR 704.3 + CR 104.4a: lethal is the seat out of the game and the AI still in it, since every
     // remaining player losing at once is a draw.
     if !players::is_alive(&after, pool.seat) {
-        if players::is_alive(&after, ai_player) {
-            pool.added = pool.added.max(headroom(pool.measure));
-        } else {
+        // Poison credit is only what the clone delivered.
+        let seats = engine::game::topology::shared_poison_members(state, pool.seat);
+        let poison = |board: &GameState| -> u32 {
+            board
+                .players
+                .iter()
+                .filter(|player| seats.contains(&player.id))
+                .map(|player| player.poison_counters)
+                .sum()
+        };
+        pool.added = poison(&after).saturating_sub(poison(state));
+        if !(players::is_alive(&after, ai_player) && reaches_lethal(pool.measure, pool.added)) {
             pool.delivery = Delivery::Unread;
         }
         return pool;
@@ -493,6 +505,7 @@ fn confirm_lethal(
 
 /// The confirmed pool with the fewest counters left to lethal.
 fn closest_delivered(
+    state: &GameState,
     ai_player: PlayerId,
     pools: Vec<PoisonPool>,
     deliver: impl Fn(PlayerId) -> Option<GameState>,
@@ -500,7 +513,7 @@ fn closest_delivered(
 ) -> Option<PoisonPool> {
     pools
         .into_iter()
-        .map(|pool| confirm_lethal(ai_player, pool, &deliver, must_resolve))
+        .map(|pool| confirm_lethal(state, ai_player, pool, &deliver, must_resolve))
         .filter(|pool| pool.added > 0)
         .min_by_key(PoisonPool::left)
 }
@@ -603,7 +616,8 @@ impl TacticalPolicy for PoisonClockPolicy {
                 let deliver = |seat| {
                     candidate_delivery(ctx.state, ctx.ai_player, &ctx.candidate.action, seat)
                 };
-                match closest_delivered(ctx.ai_player, pools, deliver, printed.is_none()) {
+                match closest_delivered(ctx.state, ctx.ai_player, pools, deliver, printed.is_none())
+                {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => {
                         PolicyVerdict::neutral(PolicyReason::new("poison_clock_no_poison_loss"))
@@ -619,7 +633,7 @@ impl TacticalPolicy for PoisonClockPolicy {
                 let deliver = |seat| {
                     candidate_delivery(ctx.state, ctx.ai_player, &ctx.candidate.action, seat)
                 };
-                match closest_delivered(ctx.ai_player, pools, deliver, false) {
+                match closest_delivered(ctx.state, ctx.ai_player, pools, deliver, false) {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => PolicyVerdict::neutral(PolicyReason::new(
                         "poison_clock_no_counters_to_proliferate",

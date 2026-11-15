@@ -1543,11 +1543,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 // player counters has an explicit, kind-specific
                 // valuation — no wildcard fallback, so a future
                 // supported counter kind forces a deliberate
-                // decision here. A lethal poison payment never
-                // reaches this scoring at all — `can_pay_ward_cost`
-                // above already rejects it (reframed as "can't
-                // rationally pay"), so the Poison arm only ever sees
-                // sub-lethal, ordinary-severity payments.
+                // decision here.
                 WardCost::GetPlayerCounters {
                     counter_kind: engine::types::player::PlayerCounterKind::Poison,
                     count,

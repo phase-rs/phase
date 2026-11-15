@@ -10156,6 +10156,117 @@ mod tests {
         );
     }
 
+    const LIGHTNING_BLAST: &str = "Lightning Blast deals 4 damage to any target.";
+
+    /// The AI at 3 poison in Two-Headed Giant casts Lightning Blast with The Serpent Society
+    /// opposing and its teammate at 7, controlling Platinum Angel when `angel`; returns the
+    /// runner at target selection, the gate's verdict on The Serpent Society, and its id.
+    fn blast_at_serpent_society(angel: bool) -> (GameRunner, bool, ObjectId) {
+        use engine::game::scenario_db::GameScenarioDbExt;
+        let db = crate::test_support::shared_integration_card_db();
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let mut scenario = GameScenario::new_with_format(format, 4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let serpent =
+            scenario.add_real_card(PlayerId(2), "The Serpent Society", Zone::Battlefield, db);
+        if angel {
+            scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+        }
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Blast", true, LIGHTNING_BLAST)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Red, 1));
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.players[0].poison_counters = 3;
+            state.players[1].poison_counters = 7;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let card_id = runner.state().objects[&blast].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: blast,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let serpent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(serpent)),
+        };
+        let issued = candidate_actions(state);
+        assert!(issued.iter().any(|c| c.action == serpent_action));
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let kept = gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        )
+        .iter()
+        .any(|g| g.candidate.action == serpent_action);
+        (runner, kept, serpent)
+    }
+
+    /// CR 702.21a + CR 704.6b + CR 810.8a: a teammate's Platinum Angel keeps the AI's team in the
+    /// game at fifteen shared poison, so the gate keeps The Serpent Society as a target, the AI
+    /// pays its Ward, and Lightning Blast resolves; without the Angel the payment stays rejected.
+    #[test]
+    fn a_team_that_cannot_lose_pays_a_poison_ward_past_its_threshold() {
+        let (_, kept_without_angel, _) = blast_at_serpent_society(false);
+        assert!(!kept_without_angel);
+
+        let (mut runner, kept, serpent) = blast_at_serpent_society(true);
+        assert!(kept);
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(serpent)),
+            })
+            .unwrap();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut paid = false;
+        while !runner.state().stack.is_empty() {
+            let state = runner.state();
+            let action = match &state.waiting_for {
+                WaitingFor::UnlessPayment { player, .. } if *player == P0 => {
+                    let action = crate::search::choose_action(state, P0, &config, &mut rng)
+                        .expect("the AI answers its Ward payment");
+                    paid |= action == GameAction::PayUnlessCost { pay: true };
+                    action
+                }
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                other => panic!("unexpected decision {other:?}"),
+            };
+            runner.act(action).expect("the game advances");
+        }
+        let state = runner.state();
+        assert!(paid);
+        assert_eq!(state.objects[&serpent].zone, Zone::Graveyard);
+        assert_eq!(engine::game::players::team_poison_total(state, P0), 15);
+        assert!(engine::game::players::is_alive(state, P0));
+        assert!(engine::game::players::is_alive(state, P1));
+    }
+
     /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in
     /// a `Compound` Ward can be jointly lethal — the aggregate across every
     /// sub-cost must be checked, not each sub-cost against the same

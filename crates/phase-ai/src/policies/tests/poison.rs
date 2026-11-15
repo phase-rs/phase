@@ -1578,6 +1578,73 @@ fn prevented_infect_attack_is_not_lethal() {
     assert_eq!(delta, 0.0);
 }
 
+/// Two Glistener Elves at opposing Two-Headed Giant heads on 6 and 7 poison beside Grizzly Bears,
+/// against a team at 2 shared life, under Solemnity when `solemn`: the verdict at declare
+/// attackers, then each head's poison and whether it remains after production combat.
+fn mixed_attack_at_two_life(solemn: bool) -> ((f64, PolicyReason), (u32, u32), [bool; 2]) {
+    let heads = [PlayerId(2), PlayerId(3)];
+    let poison = [(heads[0], 6), (heads[1], 7)];
+    let (mut runner, ids) = board(FormatConfig::two_headed_giant(), 4, &poison, |s| {
+        s.at_phase(Phase::PreCombatMain);
+        let ids = vec![
+            glistener_elf(s),
+            glistener_elf(s),
+            s.add_real_card(
+                AI,
+                "Grizzly Bears",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            ),
+        ];
+        if solemn {
+            solemnity(s);
+        }
+        ids
+    });
+    runner.state_mut().players[heads[0].0 as usize].life = 2;
+    runner.state_mut().players[heads[1].0 as usize].life = 0;
+    runner.advance_to_combat();
+    let attack = vec![
+        (ids[0], AttackTarget::Player(heads[0])),
+        (ids[1], AttackTarget::Player(heads[1])),
+        (ids[2], AttackTarget::Player(heads[0])),
+    ];
+    let verdict = verdict_on(runner.state(), &attack_candidate(attack.clone()));
+    runner.declare_attackers(&attack).unwrap();
+    runner.combat_damage();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
+        runner.declare_blockers(&[]).unwrap();
+        runner.combat_damage();
+    }
+    let state = runner.state();
+    (
+        verdict,
+        (poison_of(state, heads[0]), poison_of(state, heads[1])),
+        heads.map(|head| engine::game::players::is_alive(state, head)),
+    )
+}
+
+/// CR 101.2 + CR 120.3a + CR 810.9 + CR 810.8c: under Solemnity the Bears' life loss wins at 2 shared life
+/// while the infect damage gives no counters, so no poison is credited; without it the elves
+/// deliver two counters to fifteen (CR 704.6b) and the attack is poison lethal.
+#[test]
+fn a_life_loss_win_under_solemnity_credits_no_poison() {
+    let ((delta, reason), poison, alive) = mixed_attack_at_two_life(true);
+    assert_eq!(poison, (6, 7));
+    assert_eq!(alive, [false, false]);
+    assert_eq!(reason.kind, "poison_clock_na");
+    assert_eq!(delta, 0.0);
+
+    let ((_, reason), poison, alive) = mixed_attack_at_two_life(false);
+    assert_eq!(poison, (7, 8));
+    assert_eq!(alive, [false, false]);
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+    assert_eq!(reason.kind, "poison_clock_lethal");
+}
+
 /// CR 101.2: a single opponent under Solemnity is not one counter from losing.
 #[test]
 fn prevented_poison_on_a_single_opponent_is_not_lethal() {

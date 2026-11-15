@@ -621,10 +621,10 @@ fn ascend_status_in(
 /// mirrors the `player_has_cant_gain_life` / `player_has_cant_lose_life`
 /// teammate fold in `static_abilities.rs` (CR 810.9g/810.9h siblings).
 ///
-/// `pub(crate)` so the live loop-shortcut firewall
-/// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) can reuse the same
+/// Public so the live loop-shortcut firewall
+/// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) and the AI can reuse the same
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
-pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
+pub fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     cant_lose_active_for(state, player_id)
         || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
