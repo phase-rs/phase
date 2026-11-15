@@ -3193,3 +3193,149 @@ fn a_staged_population_applies_the_with_entry_rider_and_its_observers_see_it() {
         "Drogskol Cavalry ({cavalry:?}) saw both Spirits enter"
     );
 }
+
+const GLIMPSE_THE_UNTHINKABLE: &str = "Target player mills ten cards.";
+const DRYAD_MILITANT: &str =
+    "If an instant or sorcery card would be put into a graveyard from anywhere, exile it instead.";
+
+/// CR 400.2 + CR 401.2 + CR 616.1: P0 controls Rest in Peace and Dryad Militant
+/// and casts Glimpse the Unthinkable ("Target player mills ten cards.") at P1.
+/// Only P1's two instant/sorcery cards have competing replacements (Rest in
+/// Peace and Dryad Militant), so their owner is asked the order of those two
+/// decisions before anything is delivered. The prompt names exactly the hidden
+/// library cards that are instants or sorceries, so a viewer who may not see P1's
+/// library must not receive them, nor how many there are (the ten cards' faces
+/// are hidden until they leave the library). The chooser still gets real ids and
+/// can answer; a public battlefield population (Wrath of God) stays usable by
+/// every viewer.
+#[test]
+fn the_replacement_order_prompt_withholds_hidden_library_cards_from_other_viewers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    scenario.add_creature_from_oracle(P0, "Dryad Militant", 2, 1, DRYAD_MILITANT);
+    for i in 0..8 {
+        scenario.add_land_to_library_top(P1, &format!("Forest {i}"));
+    }
+    let spells: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_spell_to_library_top(P1, &format!("Hidden Spell {i}"), true)
+                .id()
+        })
+        .collect();
+    let glimpse = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Glimpse the Unthinkable",
+            false,
+            GLIMPSE_THE_UNTHINKABLE,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(glimpse).target_player(P1).commit();
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+    let WaitingFor::ReplacementDecisionOrder { player, objects } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "reach guard: the mill reaches the ordering prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "the milled cards' owner orders their decisions");
+    let mut held = objects.clone();
+    held.sort();
+    let mut expected = spells.clone();
+    expected.sort();
+    assert_eq!(
+        held, expected,
+        "reach guard: exactly the two spell cards hold decisions"
+    );
+
+    let ids_in = |waiting_for: &WaitingFor| match waiting_for {
+        WaitingFor::ReplacementDecisionOrder { objects, .. } => objects.clone(),
+        other => panic!("the prompt survives the projection: {other:?}"),
+    };
+    // The chooser keeps real ids and can answer.
+    let chooser_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(ids_in(&chooser_view.waiting_for).len(), 2);
+    // The opponent and an unseated spectator learn neither which hidden cards
+    // hold decisions nor how many.
+    let opponent_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    let spectator_view = engine::game::visibility::filter_state_for_unseated_viewer(runner.state());
+    for (who, view) in [("opponent", &opponent_view), ("spectator", &spectator_view)] {
+        assert!(
+            ids_in(&view.waiting_for).is_empty(),
+            "{who} receives hidden library ids: {:?}",
+            view.waiting_for
+        );
+    }
+    // The authorized player answers and both decisions complete.
+    select_decision(&mut runner, objects[0]);
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("the chooser answers");
+        }
+    }
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the mill completes: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// The public control: a battlefield population's ordering prompt names visible
+/// permanents, which every viewer may see.
+#[test]
+fn the_replacement_order_prompt_keeps_public_battlefield_members_for_every_viewer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let first_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let second_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, first_hyena, first);
+    attach(&mut runner, first_felidar, first);
+    attach(&mut runner, second_hyena, second);
+    attach(&mut runner, second_felidar, second);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    for view in [
+        engine::game::visibility::filter_state_for_viewer(runner.state(), P0),
+        engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+    ] {
+        let WaitingFor::ReplacementDecisionOrder { objects, .. } = view.waiting_for else {
+            panic!("the prompt survives the projection");
+        };
+        assert_eq!(objects, vec![first, second]);
+    }
+}

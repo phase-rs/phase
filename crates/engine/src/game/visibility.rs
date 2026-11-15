@@ -2933,6 +2933,30 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 400.2 + CR 401.2 + CR 616.1: a replacement-order prompt names exactly the
+    // members of a staged population that hold competing replacement decisions. For a
+    // population leaving a hidden zone (a mill, a discard) that set is a property of
+    // cards nobody may see, and so is its size, so a viewer who may not see the
+    // chooser's private zones receives only the members whose identity is visible to
+    // them. The chooser keeps the real ids to answer, and a public population (the
+    // battlefield) is unchanged.
+    if let WaitingFor::ReplacementDecisionOrder {
+        player,
+        ref objects,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::ReplacementDecisionOrder {
+                player,
+                objects: objects
+                    .iter()
+                    .copied()
+                    .filter(|id| interaction_object_identity_is_visible(&filtered, *id))
+                    .collect(),
+            };
+        }
+    }
+
     // CR 400.2 + CR 701.4a: A pending `BeholdChoice` carries the choosing player's
     // mixed-zone candidate set (battlefield-you-control ∪ HAND). The hand leg is a
     // hidden zone — exposing the raw candidate ids to an opponent would leak which
