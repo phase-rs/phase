@@ -4171,6 +4171,9 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
         .effect
         .target_filter()
         .is_some_and(filter_uses_event_target)
+        // CR 608.2c: the replaced event's player as the move's performer.
+        || crate::game::effects::zone_move_actor_filter(&ability.effect)
+            .is_some_and(filter_uses_event_target)
         || ability
             .sub_ability
             .as_deref()
@@ -5651,6 +5654,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::SelfRef,
@@ -5974,6 +5978,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,
@@ -6252,16 +6257,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8614,16 +8622,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8826,16 +8837,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8954,16 +8968,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -9422,16 +9439,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };

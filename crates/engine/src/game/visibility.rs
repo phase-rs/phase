@@ -1700,7 +1700,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.resolving_begin_game_abilities = false;
 
     // Un-card actions: enabled status and Gotcha offers are private to the entitled player.
-    // The gesture menu is derived from all active abilities in the game and is shared.
+    // The gesture menu and the touchable objects are derived only while some
+    // player is opted in, so they are as private as the opt-in itself: only an
+    // opted-in viewer receives them. An opted-out viewer or a spectator sees the
+    // same projection whatever the other seats chose.
+    let viewer_opted_in = viewer.is_some_and(|viewer_id| filtered.un_actions.is_enabled(viewer_id));
     if let Some(viewer_id) = viewer {
         filtered
             .un_actions
@@ -1713,6 +1717,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     } else {
         filtered.un_actions.enabled_players.clear();
         filtered.un_actions.gotcha_offers.clear();
+    }
+    if !viewer_opted_in {
+        filtered.un_actions.menu.clear();
+        filtered.un_actions.touchable.clear();
     }
     filtered.un_actions.pending_offers.clear();
 
@@ -3134,6 +3142,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         track_exiled_by_source,
         face_down_in_exile,
         ref face_down_profile,
+        ref with_entry_effect,
         ref enter_with_counters,
         ref conditional_enter_with_counters,
         count_param,
@@ -3143,6 +3152,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
+        performed_by,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
@@ -3170,6 +3180,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // Face-down entry characteristics are public effect parameters,
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
+                // The with-entry effect is the rider's public text, not private
+                // hand info — pass it through.
+                with_entry_effect: with_entry_effect.clone(),
                 enter_with_counters: enter_with_counters.clone(),
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
@@ -3181,6 +3194,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // The bounded-move duration is a public effect parameter, not
                 // private hand info — pass it through the redaction.
                 duration: duration.clone(),
+                // Who performs the move is public, like the duration.
+                performed_by,
             };
         }
     }
@@ -4064,6 +4079,9 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     // public face while hidden.
     obj.is_token = false;
     obj.is_horde_deck_token = false;
+    // `display_source = Token` is token-ness by another name — reset it with
+    // the flags above so a hidden card's art routing leaks nothing either.
+    obj.display_source = crate::game::game_object::DisplaySource::Card;
     obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
@@ -5011,6 +5029,7 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.combat_status = Default::default();
     record.block_pairs.clear();
     record.co_departed.clear();
+    record.co_entered.clear();
 }
 
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
@@ -5022,7 +5041,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
@@ -5107,7 +5126,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         redact_secret_agenda_choices(obj);
         obj.card_types = Default::default();
         obj.mana_cost = crate::types::mana::ManaCost::NoCost;
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.color.clear();
     }
 }
@@ -11593,6 +11612,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
@@ -11781,6 +11801,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,

@@ -501,6 +501,7 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // for the stronger version of the same reason: the seam cannot even name
         // the zone the card comes from.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -912,6 +913,7 @@ fn library_arrivals_are_inert(
                 // only needs to know that a library card can land on the
                 // battlefield and which filter picks it.
                 Effect::ChangeZone {
+                    actor: _,
                     origin: Some(Zone::Library),
                     destination: Zone::Battlefield,
                     target,

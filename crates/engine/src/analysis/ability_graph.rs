@@ -1319,6 +1319,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::GotchaSaid
+        | TriggerMode::Touched
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted
@@ -2975,6 +2976,7 @@ mod tests {
     }
     fn change_zone(origin: Option<Zone>, destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,

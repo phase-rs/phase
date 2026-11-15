@@ -16114,6 +16114,7 @@ fn cast_without_mana_cost_option_checks_commander_control() {
     abilities.push(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -20625,6 +20626,7 @@ fn cast_from_zone_exile_rider_exiles_graveyard_cast_on_resolution() {
     );
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -26306,6 +26308,7 @@ fn create_kicker_instead_target_spell(state: &mut GameState) -> (ObjectId, Objec
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -26326,6 +26329,7 @@ fn create_kicker_instead_target_spell(state: &mut GameState) -> (ObjectId, Objec
                 AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
@@ -27066,6 +27070,7 @@ fn modal_x_target_legality_chooses_x_before_targets() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -27233,6 +27238,7 @@ fn modal_x_target_selection_carries_per_mode_labels() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -27262,6 +27268,7 @@ fn modal_x_target_selection_carries_per_mode_labels() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
@@ -28505,6 +28512,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         let mode0 = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -28524,6 +28532,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         let mode1 = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
@@ -32440,6 +32449,7 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -32591,6 +32601,7 @@ fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -43880,6 +43891,7 @@ fn generous_ent_forestcycling_legal_when_creature_cast_is_unaffordable() {
         let mut put_in_hand_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
@@ -55591,6 +55603,7 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
     );
     grant.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -62857,6 +62870,7 @@ fn foretell_probe_admits_a_source_whose_own_cost_pauses() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     destination: Zone::Graveyard,
                     origin: None,
@@ -63163,5 +63177,37 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
     assert!(
         can_cast_object_now(&scenario.state, P0, even),
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
+}
+
+/// CR 601.2a (C27): a menu answer is bound to the grant's digest, so a grant
+/// whose enters-tapped rider changed (Edgar, Master Machinist) must digest
+/// differently and be refused as stale.
+#[test]
+fn grant_digest_covers_the_enters_tapped_rider() {
+    use crate::types::zones::EtbTapState;
+    let grant = |enter_tapped: EtbTapState| {
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            enter_tapped,
+            required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
+        })
+    };
+    assert_eq!(
+        grant_digest(&grant(EtbTapState::Tapped)),
+        grant_digest(&grant(EtbTapState::Tapped)),
+        "reach guard: the digest is stable"
+    );
+    assert_ne!(
+        grant_digest(&grant(EtbTapState::Tapped)),
+        grant_digest(&grant(EtbTapState::Unspecified))
     );
 }

@@ -7246,10 +7246,12 @@ pub enum FilterProp {
     Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
-    /// from `Another`, which excludes the *ability source*. Used for intervening-if
-    /// count predicates like Valakut, the Molten Pinnacle's "if you control at
-    /// least five other Mountains" — here "other" means "other than the newly-
-    /// entered Mountain," not "other than Valakut." Resolves against
+    /// from `Another`, whose live-object matcher excludes a bound recipient, else
+    /// the *ability source*; see [`FilterProp::Another`].
+    /// Used for intervening-if count predicates like Valakut, the Molten
+    /// Pinnacle's "if you control at least five other Mountains" — here "other"
+    /// means "other than the newly-entered Mountain," not "other than Valakut."
+    /// Resolves against
     /// `FilterContext::triggering_object`, populated at trigger-condition
     /// evaluation from the current `GameEvent`.
     ///
@@ -7472,7 +7474,8 @@ pub enum FilterProp {
     /// `DistinctFrom { reference: ParentTarget }` with
     /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
     /// every color-sharer EXCEPT the already-damaged target. Distinct from
-    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::Another`] (whose live-object matcher excludes a bound
+    /// recipient, else the ability *source*) and
     /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
     DistinctFrom {
         reference: Box<TargetFilter>,
@@ -8897,6 +8900,175 @@ pub enum TargetFilter {
     /// variant is only valid as an `UnlessPayModifier.payer`; it is never used
     /// as a target or affected filter.
     AllPlayers,
+}
+
+/// CR 115.1 + CR 601.2c: does this slot filter reference an object chosen in an
+/// EARLIER slot of the same ability, in a form a `.targets`-prefilled ability
+/// actually resolves? Exactly three encodings:
+///
+///   * `ObjectScope::Target` inside a quantity threshold (Puca's Mischief `Cmc`,
+///     Spawnbroker `PtComparison`) — resolved by `quantity::object_id_for_scope`.
+///   * `FilterProp::SharesQuality { reference: Some(ParentTarget) }` (Daring
+///     Thief) — resolved by the engine's `parent_target_shared_quality_values`.
+///   * a `ParentTargetController` controller ("another target creature that
+///     player controls", Mutiny) — resolved by the engine's
+///     `parent_target_controller_player` through its parent-target-controller
+///     lookup.
+///
+/// Each reads the first entry of `ability.targets`, and none consults
+/// `target_incarnations`.
+///
+/// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter::filter_inner_for_object` —
+/// the `TargetFilter::ParentTarget` and `ParentTargetSlot { index }` arms) and
+/// the positional read in that same function's `ParentTargetSlot { index }` arm
+/// (via `targeting::resolve_live_parent_slot_from_root`). That arm additionally
+/// requires `!ability.target_incarnations.is_empty()` and
+/// `target_pin_is_current`, and `target_incarnations` means "pinned at
+/// DELAYED-TRIGGER creation" (`set_target_incarnations_recursive`, CR 400.7 +
+/// CR 603.7c) — announcement-time targets are pinned in the separate
+/// `target_pins`. Forging a pin here would lie to
+/// `live_object_targets` and `pinned_object_targets_all_stale`. Measured: a
+/// clone with `.targets` prefilled and pins empty returns the SAME empty set
+/// the ability-free door already returns, so excluding this arm changes no
+/// behaviour and avoids rerouting 30 corpus slots. See deferral D1.
+pub fn target_filter_binds_prior_target(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|inner| match inner {
+        TargetFilter::Typed(typed) => {
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) || typed.properties.iter().any(filter_prop_binds_prior_target)
+        }
+        _ => false,
+    })
+}
+
+/// EXHAUSTIVE over `FilterProp` with NO wildcard.
+fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_contains_scope(value, ObjectScope::Target)
+        }
+        FilterProp::SharesQuality { reference, .. } => {
+            matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
+        }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
+        FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
+        // Every remaining prop enumerated explicitly (no `_ =>`) — see
+        // `filter_prop_contains_quantity_scope`'s doc for why props that box a
+        // nested `TargetFilter` (other than `SharesQuality`, handled above) need
+        // no arm here: the OUTER `filter_contains` traversal visits their nested
+        // filters independently.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        // CR 601.2c: carries no quantity threshold, and its declared-slot read is
+        // bound through `FilterContext::declared_slot_view`, not first-object binding.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
 }
 
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
@@ -11078,6 +11250,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::TargetOnly { target }
         | Effect::GainControl { target }
         | Effect::ChangeZone {
+            actor: _,
             origin: _,
             destination: _,
             target,
@@ -11346,14 +11519,17 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
 pub fn effect_refs_parent_target(effect: &Effect) -> bool {
-    effect_parent_ref_slot_count(effect) > 0
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|filter| filter_refs_parent_target(filter))
 }
 
 /// CR 608.2c: how many of the effect's target-filter slots (the ones
-/// [`effect_refs_parent_target`] scans) read its parent's target. The parser's
-/// cross-choice antecedent binder links a reader only when exactly one does.
+/// [`effect_refs_parent_target`] scans, without a zone move's performer) read
+/// its parent's target. The parser's cross-choice antecedent binder links a
+/// reader only when exactly one does.
 pub fn effect_parent_ref_slot_count(effect: &Effect) -> usize {
-    effect_parent_ref_slots(effect)
+    effect_target_parent_ref_slots(effect)
         .iter()
         .filter(|filter| filter_refs_parent_target(filter))
         .count()
@@ -11439,6 +11615,30 @@ pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
 /// an arm here, or its for-each parent-ref form won't rebind.
 pub fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
+    let mut slots = effect_target_parent_ref_slots(effect);
+    // CR 608.2c + CR 109.4: a zone move's named performer that is derived from
+    // the parent OBJECT ("its controller exiles it", "its owner shuffles it
+    // into their library") is a parent reference of its own, even when the
+    // moved population names no parent. Surfacing it here lets every
+    // member-driven loop rebind it per member, so each iteration's performer is
+    // that member's controller or owner rather than the first parent target's.
+    // A performer that names a player directly (`ParentTarget` on a player
+    // target, a declared or event player) is not object-derived and is left to
+    // the dependency readers that ask about it by name.
+    if let Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } = effect {
+        if let Some(
+            performer @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner),
+        ) = actor.player_filter()
+        {
+            slots.push(performer);
+        }
+    }
+    slots
+}
+
+/// The target-filter slots of [`effect_parent_ref_slots`], without a zone
+/// move's performer.
+fn effect_target_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
     let mut slots: Vec<&TargetFilter> = effect_target_filter(effect).into_iter().collect();
     match effect {
         Effect::CopyTokenOf {
@@ -20810,17 +21010,23 @@ impl LegacyPaymentCost {
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 
-/// CR 608.2c: who performs an instruction that acts on a player's library.
-/// The controller of the spell or ability follows its instructions, unless the
-/// instruction names its subject — and a subject acting on "their library" is
-/// the player whose library it is.
+/// CR 608.2c: who performs an instruction that acts on a player's library
+/// (`ExileTop`) or moves objects between zones (`ChangeZone`,
+/// `ChangeZoneAll`). The controller of the spell or ability follows its
+/// instructions, unless the instruction names its subject — and a subject
+/// acting on "their library" is the player whose library it is. Zone moves
+/// carry `Controller`, `Player`, or `LibraryPlayer` (a SearchFound searcher's
+/// exile of a card found in their own library); `declared_target` surfaces a
+/// player target only for `ExileTop`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
     Controller,
     /// "That player exiles the top card of their library" — the player whose
-    /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
+    /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary). On a zone
+    /// move it is the searcher exiling a card found in their own library
+    /// ("they exile each card they find", Opposition Agent).
     LibraryPlayer,
     /// CR 608.2c: the instruction's named subject is a player other than the
     /// library's owner — "Target opponent looks at the top card of your
@@ -20835,6 +21041,27 @@ impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 608.2c: the named subject's player filter, the one slot every
+    /// reader of an effect's player references visits for the performer. `None`
+    /// for the controller and the library owner, which carry no filter of
+    /// their own.
+    pub fn player_filter(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } => Some(player),
+            Self::Controller | Self::LibraryPlayer => None,
+        }
+    }
+
+    /// Mutable form of [`Self::player_filter`]: a reference rewrite (an anaphor
+    /// rebound to the replaced event's player, a scope rebind) reaches the
+    /// performer exactly as it reaches the instruction's other player slots.
+    pub fn player_filter_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } => Some(player),
+            Self::Controller | Self::LibraryPlayer => None,
+        }
     }
 
     /// CR 115.1: the subject's player filter when it names a target, so the
@@ -22771,6 +22998,15 @@ pub enum Effect {
         cant_regenerate: bool,
     },
     ChangeZone {
+        /// CR 608.2c: who performs this move — the player the parser bound
+        /// as the subject of the instruction's verb ("that player exiles …"),
+        /// the searcher for a SearchFound exile (`LibraryPlayer`), or the
+        /// controller when the instruction has no subject.
+        #[serde(
+            default,
+            skip_serializing_if = "LibraryInstructionActor::is_controller"
+        )]
+        actor: LibraryInstructionActor,
         #[serde(default)]
         origin: Option<Zone>,
         destination: Zone,
@@ -22837,6 +23073,14 @@ pub enum Effect {
         enters_modified_if: Option<TargetFilter>,
     },
     ChangeZoneAll {
+        /// CR 608.2c: who performs this move — the player the parser bound
+        /// as the subject of the instruction's verb ("that player exiles …"),
+        /// or the controller when the instruction has no subject.
+        #[serde(
+            default,
+            skip_serializing_if = "LibraryInstructionActor::is_controller"
+        )]
+        actor: LibraryInstructionActor,
         #[serde(default)]
         origin: Option<Zone>,
         destination: Zone,
@@ -48979,6 +49223,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
@@ -49436,6 +49681,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -51087,6 +51333,7 @@ mod static_condition_traversal_tests {
         };
         assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::None,
@@ -51106,6 +51353,7 @@ mod static_condition_traversal_tests {
         );
 
         let terminal = Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
             target: TargetFilter::Controller,

@@ -1089,6 +1089,10 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            // CR 608.2c + CR 701.23a: "they exile each card they find" — the
+            // subject agrees with the searcher, who searches their own library,
+            // so the library's player performs the exile.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             origin: None,
             destination: parsed.exile.destination,
             target: parsed.exile.target,
@@ -1278,6 +1282,7 @@ fn parse_self_enters_pay_cost_replacement(
     let decline = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,
@@ -7847,6 +7852,7 @@ fn parse_creature_die_exile_replacement(
         let mut exile_self = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -7994,6 +8000,7 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
     let exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
@@ -8245,6 +8252,7 @@ fn self_die_exile_anaphor_execute(
     let mut exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
@@ -8388,12 +8396,12 @@ fn graveyard_replacement_subject_filter(subject: &str) -> Option<TargetFilter> {
 /// CR 108.2b + CR 111.1: does this folded subject filter say anything the
 /// caller's own token axis does not?
 ///
-/// The bare card/token nouns ARE the token axis: "a card or token" is every
-/// object that can reach a graveyard (Rest in Peace) and "a card" is that minus
-/// tokens (Leyline of the Void), which `TokenScope` already encodes as a
-/// `NonToken` property. Re-expressing them as a type filter would narrow those
-/// two cards by whatever the `Card` type filter happens not to match, so this
-/// predicate declines them and leaves the axis to its owner.
+/// The caller handles bare card and token nouns through `TokenScope`. "A card"
+/// (Leyline of the Void) maps to `RepresentedByCard`, excluding tokens and spell
+/// copies. "A card or token" (Rest in Peace) currently maps to an unfiltered
+/// `Any` scope. That branch also admits spell copies, which are outside the
+/// printed subject and can reach a graveyard before ceasing to exist
+/// (CR 608.2n + CR 704.5e). This predicate only keeps additional constraints.
 fn filter_constrains_beyond_token_axis(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => {
@@ -8560,9 +8568,12 @@ fn parse_graveyard_redirect_replacement(
     // * `Unscoped` — "a card or token" (Rest in Peace) names both sides, so it
     //   constrains nothing, and any subject that says nothing about the axis
     //   (`~`, "that spell", "a permanent") lands here too.
-    // * `NonToken` — "a card" without an "or token" rider (Leyline of the Void)
-    //   is token-EXCLUDING, so a dying token reaches the graveyard and its
-    //   dies-triggers fire instead of being wrongly redirected.
+    // * `CardOnly` — "a card" without an "or token" rider (Leyline of the Void)
+    //   names only objects represented by a card (CR 108.2): it excludes tokens
+    //   (CR 108.2b), so a dying token reaches the graveyard and its dies-triggers
+    //   fire, and it excludes a cast copy of a card (CR 707.12, Mizzix's
+    //   Mastery), which goes to the graveyard and then ceases to exist
+    //   (CR 704.5e).
     // * `TokenOnly` — "a token" is card-EXCLUDING. Without this reading the
     //   subject was dropped on the floor: the bare token noun says nothing the
     //   OTHER two readings encode, so `filter_constrains_beyond_token_axis`
@@ -8572,7 +8583,7 @@ fn parse_graveyard_redirect_replacement(
     #[derive(Clone, Copy)]
     enum TokenScope {
         Unscoped,
-        NonToken,
+        CardOnly,
         TokenOnly,
     }
 
@@ -8618,7 +8629,7 @@ fn parse_graveyard_redirect_replacement(
             let names_token_terminal =
                 subject_ends_with(subject, " token") || subject_ends_with(subject, " tokens");
             let token_scope = if names_card && !names_token {
-                TokenScope::NonToken
+                TokenScope::CardOnly
             } else if names_token_terminal && !names_token && !names_card {
                 // CR 108.2b: card-EXCLUDING. Guarded by `!names_token` so the
                 // inclusive "a card or token" rider — which also ends in
@@ -8717,10 +8728,11 @@ fn parse_graveyard_redirect_replacement(
 
     // CR 400.3 + CR 108.3: "opponent's graveyard" means cards owned by an opponent
     // (cards go to owner's graveyard, so ownership is the stable discriminant).
-    // CR 108.2b + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
-    // so a dying token is NOT redirected (Leyline of the Void must let an
-    // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
-    // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
+    // CR 108.2 + CR 108.2b: a card-only subject ("a card") adds
+    // `RepresentedByCard`, so neither a dying token (Leyline of the Void must let
+    // an opponent's token reach the graveyard so dies-triggers fire — Blood Artist
+    // class) nor a resolved spell copy is redirected. Both axes are leaf
+    // `FilterProp`s on one `TypedFilter`.
     let mut props = Vec::new();
     match scope {
         // CR 400.3: "your graveyard" ⇒ You-owned cards only (Forbidden Crypt).
@@ -8736,7 +8748,7 @@ fn parse_graveyard_redirect_replacement(
     // merged filter, so every reading that constrains it must emit its property
     // here. `Unscoped` names both sides and emits nothing.
     match token_scope {
-        TokenScope::NonToken => props.push(FilterProp::NonToken),
+        TokenScope::CardOnly => props.push(FilterProp::RepresentedByCard),
         TokenScope::TokenOnly => props.push(FilterProp::Token),
         TokenScope::Unscoped => {}
     }
@@ -8787,6 +8799,7 @@ fn parse_graveyard_redirect_replacement(
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination,
             origin: None,
             target: TargetFilter::SelfRef,
@@ -15601,6 +15614,26 @@ fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefi
     // unrelated cards (Thada Adel, Acquisitor; Earwig Squad — both carry
     // `Shuffle { target: TriggeringPlayer }`). The `Shuffle.target` anaphor is
     // therefore rewritten LOCALLY below, scoped to this prevention follow-up.
+    // CR 615.5 + CR 108.3: a prevention follow-up has one damage recipient, so
+    // the owner-routed ChangeZone settles through that recipient's owner rather
+    // than the generic tracked-owner scope used for multi-owner moves.
+    if matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::PostReplacementDamageTarget | TargetFilter::ParentTarget,
+            owner_library: true,
+            ..
+        }
+    ) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if let Effect::Shuffle { target } = sub.effect.as_mut() {
+                if matches!(target, TargetFilter::ScopedPlayer) {
+                    *target = TargetFilter::PostReplacementDamageTargetOwner;
+                    sub.player_scope = None;
+                }
+            }
+        }
+    }
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| match f {
         TargetFilter::ParentTarget => *f = TargetFilter::PostReplacementDamageTarget,
         // CR 108.3 + CR 400.3: owner anaphor on a walker-visited effect
@@ -15734,10 +15767,11 @@ fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
 /// head is rewritten: a later link's "that card" refers to whatever an earlier
 /// link produced (Zur's Weirding reveals first).
 ///
-/// CR 608.2c: the generic effect parser drops the clause's subject, so the
-/// acting player is read here from the head's own text: "that player" / "they"
-/// is the drawing player (whose library it is); "you" or a bare imperative is
-/// the replacement's controller. An unrecognized subject is left unrewritten
+/// CR 608.2c: `ExileTop` names its performer relative to the library owner
+/// (`LibraryPlayer`) rather than through the `ChangeZone` actor the generic
+/// parser stamped, so the acting player is re-derived here from the head's own
+/// text: "that player" / "they" is the drawing player (whose library it is);
+/// "you" or a bare imperative is the replacement's controller. An unrecognized subject is left unrewritten
 /// (fail closed).
 fn rewrite_exile_would_be_drawn_card_to_exile_top(def: &mut AbilityDefinition, text: &str) {
     if !matches!(
@@ -25261,9 +25295,9 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // CR 108.2b + CR 111.1: "a card or token" names tokens explicitly — token-inclusive,
-        // so NO `NonToken` constraint and (with `Any` scope) no `valid_card` at all.
-        assert!(def.valid_card.is_none()); // matches all objects, tokens included
+        // The unfiltered `Any` scope includes tokens and currently also admits spell
+        // copies, which the printed "a card or token" subject excludes.
+        assert!(def.valid_card.is_none());
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -25283,21 +25317,22 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // valid_card should scope to opponent-owned cards AND exclude tokens:
-        // CR 108.2b + CR 111.1 — "a card" (no "or token") is token-excluding, so a
-        // dying token reaches the graveyard (dies-triggers fire — Blood Artist
-        // class) instead of being wrongly exiled.
+        // valid_card should scope to opponent-owned cards AND admit only objects
+        // represented by a card: CR 108.2 + CR 108.2b — "a card" (no "or token")
+        // excludes tokens, so a dying token reaches the graveyard (dies-triggers
+        // fire — Blood Artist class) instead of being wrongly exiled. It also
+        // excludes a cast copy of a card (CR 707.12).
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
                 assert!(
-                    properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 108.2b + CR 111.1)"
+                    properties.contains(&FilterProp::RepresentedByCard),
+                    "'a card' subject must admit only card-represented objects (CR 108.2)"
                 );
             }
-            other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
+            other => panic!("Expected Typed filter with Owned + RepresentedByCard, got {other:?}"),
         }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
@@ -25324,15 +25359,15 @@ mod tests {
         .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Opponent-owned, token-excluding (CR 108.2b + CR 111.1) — same subject scope as Leyline.
+        // Opponent-owned, card-represented only (CR 108.2 + CR 108.2b) — same subject scope as Leyline.
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
-                assert!(properties.contains(&FilterProp::NonToken));
+                assert!(properties.contains(&FilterProp::RepresentedByCard));
             }
-            other => panic!("Expected Typed(Owned Opponent + NonToken), got {other:?}"),
+            other => panic!("Expected Typed(Owned Opponent + RepresentedByCard), got {other:?}"),
         }
         // Exile redirect carries the void counter.
         match def.execute.as_deref().map(|a| &*a.effect) {
@@ -25381,10 +25416,10 @@ mod tests {
                 assert!(!properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
-                // "a card" is still token-excluding (CR 108.2b + CR 111.1).
-                assert!(properties.contains(&FilterProp::NonToken));
+                // "a card" still admits only card-represented objects (CR 108.2 + CR 108.2b).
+                assert!(properties.contains(&FilterProp::RepresentedByCard));
             }
-            other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
+            other => panic!("Expected Typed(Owned You + RepresentedByCard), got {other:?}"),
         }
     }
 
@@ -25410,10 +25445,10 @@ mod tests {
         }
     }
 
-    /// CR 108.2b + CR 111.1: a card-only subject targeting ANY graveyard ("a
-    /// card would be put into a graveyard") is token-EXCLUDING with no
-    /// controller scope — `valid_card` is `NonToken` alone. This is the live
-    /// Leyline-class bug fix: without the `NonToken` axis a dying token was
+    /// CR 108.2 + CR 108.2b: a card-only subject targeting ANY graveyard ("a
+    /// card would be put into a graveyard") admits only objects represented by a
+    /// card, with no controller scope — `valid_card` is `RepresentedByCard` alone.
+    /// This is the live Leyline-class bug fix: without this axis a dying token was
     /// wrongly redirected (exiled), suppressing dies-triggers.
     #[test]
     fn card_only_any_graveyard_excludes_tokens() {
@@ -25424,13 +25459,13 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Exact equality: the "a card" subject must exclude tokens (CR 108.2b + CR 111.1) and the
-        // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
-        // no `Owned { Opponent }` and no other property.
+        // Exact equality: the "a card" subject must admit only card-represented objects
+        // (CR 108.2 + CR 108.2b) and the any-graveyard scope must add no owner constraint —
+        // so `RepresentedByCard` alone, with no `Owned { Opponent }` and no other property.
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NonToken])
+                TypedFilter::default().properties(vec![FilterProp::RepresentedByCard])
             ))
         );
         // Regression: the exile branch stays backward-compatible after the dispatcher
@@ -36702,9 +36737,12 @@ mod opposition_agent_parser_tests {
         );
 
         let execute = definition.execute.as_deref().expect("execute definition");
+        // CR 608.2c: "they exile each card they find" — the searcher, whose own
+        // library is searched, performs the exile.
         assert!(matches!(
             execute.effect.as_ref(),
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
