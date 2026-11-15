@@ -514,6 +514,9 @@ pub(crate) struct PlayTrace {
     /// While a priority pass resolves the stack: the remembered answers made so far, each with the
     /// stack entry resolving when it was made, held until that entry's resolution is recorded.
     held: Option<Vec<(Option<ObjectId>, TraceEntry)>>,
+    /// For each resolution entry, the identity of the stack entry directly beneath the one that
+    /// resolved; `None` when it resolved alone.
+    beneath: im::HashMap<usize, Option<crate::game::period_confirm::TopOfStack>>,
 }
 
 impl PlayTrace {
@@ -543,6 +546,7 @@ impl PlayTrace {
             witnessed: [None, None],
             ordered: [None, None],
             held: None,
+            beneath: im::HashMap::new(),
         }
     }
 
@@ -703,7 +707,11 @@ impl PlayTrace {
     fn rerecord(&mut self, from: &PlayTrace, at: usize, entry: TraceEntry, begins_play: bool) {
         let prior = self.clone();
         let entry = self.reinterned(&from.nodes, entry);
+        let to = self.entries.len();
         self.record(&prior, entry, from.mana_ability_entries.get(&at).copied());
+        if let Some(beneath) = from.beneath.get(&at) {
+            self.beneath.insert(to, beneath.clone());
+        }
         if begins_play {
             self.begin_play(Box::new(prior));
         }
@@ -1733,11 +1741,26 @@ pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolutio
                     },
                     None,
                 );
+                trace
+                    .beneath
+                    .insert(at, beneath_identity(&before.stack, resolved));
             }
             record_held(state, &mut held, Some(entry.id));
         }
         record_held(state, &mut held, None);
     });
+}
+
+/// The identity of the entry directly beneath the one `resolved` places from the top of `stack`.
+fn beneath_identity(
+    stack: &im::Vector<StackEntry>,
+    resolved: usize,
+) -> Option<crate::game::period_confirm::TopOfStack> {
+    stack
+        .iter()
+        .rev()
+        .nth(resolved + 1)
+        .map(crate::game::period_confirm::entry_identity)
 }
 
 /// Whether `locus` names a mana ability's source that no longer exists.
@@ -1846,30 +1869,59 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
     Some(legal)
 }
 
-/// CR 104.4b + CR 732.4: how the span back to the last instance of the recurring triggered `node`
-/// is named — `TriggerTop` when its resolution asked an optional answer, or an optional answer
-/// and another node's repeat were made since with no play; `MandatoryRecurrence` when neither a
-/// play nor an optional answer was made since; otherwise not at all.
-fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCause)> {
-    let &start = trace.last.get(&node)?;
-    let played = trace.last_play.is_some_and(|play| play >= start);
+/// CR 104.4b + CR 732.4: how the span back to the start of the recurring triggered `node`'s
+/// period, ending at a frame with `stack`, is named — `TriggerTop` when its resolution asked an
+/// optional answer, or an optional answer and another node's repeat were made since with no play;
+/// `MandatoryRecurrence` when neither a play nor an optional answer was made since; otherwise not
+/// at all.
+fn trigger_top_cause(
+    trace: &PlayTrace,
+    node: usize,
+    stack: &im::Vector<StackEntry>,
+) -> Option<(usize, NamingCause)> {
+    if trace.optional_triggers.contains(&node) {
+        return period_start(trace, node, stack, None)
+            .map(|start| (start, NamingCause::TriggerTop));
+    }
+    let start = period_start(trace, node, stack, trace.last_play)?;
     let recurs_inside = || {
         trace
             .repeated
             .iter()
             .any(|repeated| trace.last.get(repeated).is_some_and(|&at| at > start))
     };
-    if trace.optional_triggers.contains(&node)
-        || (trace.last_optional.is_some_and(|optional| optional > start)
-            && !played
-            && recurs_inside())
-    {
+    if trace.last_optional.is_some_and(|optional| optional > start) && recurs_inside() {
         return Some((start, NamingCause::TriggerTop));
     }
     let answered = trace
         .last_optional
         .is_some_and(|optional| optional >= start);
-    (!played && !answered).then_some((start, NamingCause::MandatoryRecurrence))
+    (!answered).then_some((start, NamingCause::MandatoryRecurrence))
+}
+
+/// The latest resolution of the triggered `node` after `floor` that starts the period ending at a
+/// frame with `node` on top of `stack`.
+fn period_start(
+    trace: &PlayTrace,
+    node: usize,
+    stack: &im::Vector<StackEntry>,
+    floor: Option<usize>,
+) -> Option<usize> {
+    let depth = stack.len();
+    let beneath = beneath_identity(stack, 0);
+    // CR 104.4b + CR 732.2a: a period runs from a frame back to that frame. A printed trigger can
+    // resolve more than once a period (CR 603.6a: newcomers are checked too), so an earlier
+    // resolution of the top's node at this depth with a different entry beneath it is a point
+    // inside the period, not its start. At another depth the frame may hold accumulation beneath,
+    // which the replay's end admits.
+    (0..=*trace.last.get(&node)?)
+        .rev()
+        .take_while(|&at| floor.is_none_or(|floor| at > floor))
+        .find(|&at| {
+            let entry = &trace.entries[at];
+            matches!(entry.kind, EntryKind::Resolution { node: resolved } if resolved == node)
+                && (entry.depth != depth || trace.beneath.get(&at) == Some(&beneath))
+        })
 }
 
 /// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
@@ -2013,7 +2065,7 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
             let node = trigger_node(state, top, end).and_then(|key| trace.find(&key));
             if let Some(node) = node {
                 meter!(node_map_reads += 1);
-                if let Some((start, cause)) = trigger_top_cause(&trace, node) {
+                if let Some((start, cause)) = trigger_top_cause(&trace, node, &state.stack) {
                     trace
                         .named
                         .push_back(NamedSpan::in_window(start, end, cause));
@@ -2734,5 +2786,59 @@ mod tests {
                 "{action:?}"
             );
         }
+    }
+
+    /// CR 104.4b + CR 603.6a + CR 732.2a: a trigger resolving twice a period at the frame's depth
+    /// starts its span at the resolution with the frame's entry beneath it, for a mandatory
+    /// recurrence and for an optional trigger alike.
+    #[test]
+    fn a_recurring_trigger_span_starts_where_the_frame_entry_was_beneath() {
+        let stack = |names: &[&str]| -> im::Vector<StackEntry> {
+            names
+                .iter()
+                .map(|name| StackEntry {
+                    id: ObjectId(1),
+                    source_id: ObjectId(1),
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: ObjectId(1),
+                        ability: effect(ObjectId(1)),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: (*name).to_string(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                })
+                .collect()
+        };
+        let mut trace = PlayTrace::new(WindowKey::of(&GameState::new_two_player(1)));
+        let node = trace.intern(NodeKey::Unkeyed(0));
+        for beneath in ["Animate Dead", "Worldgorger Dragon"] {
+            let at = trace.entries.len();
+            let prior = trace.clone();
+            let entry = TraceEntry {
+                seat: PlayerId(0),
+                kind: EntryKind::Resolution { node },
+                depth: 2,
+                prompt: PromptClass::Priority,
+                next_object_id: 0,
+            };
+            trace.record(&prior, entry, None);
+            let before = stack(&[beneath, "Soul Warden"]);
+            trace.beneath.insert(at, beneath_identity(&before, 0));
+        }
+        let frame = stack(&["Animate Dead", "Soul Warden"]);
+        assert_eq!(
+            trigger_top_cause(&trace, node, &frame),
+            Some((0, NamingCause::MandatoryRecurrence))
+        );
+        trace.optional_triggers.insert(node);
+        assert_eq!(
+            trigger_top_cause(&trace, node, &frame),
+            Some((0, NamingCause::TriggerTop))
+        );
     }
 }

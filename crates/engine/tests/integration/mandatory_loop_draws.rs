@@ -4849,14 +4849,16 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
 
 /// CR 701.24a + CR 732.2a: beside Soul Warden on either seat, the period the play trace names
 /// holds no shuffle while its replay shuffles P0's library, so the period is offered, never
-/// declared, and every player accepting it draws the game; Off runs on. P0's accepted `Fixed(3)`
-/// performs three cycles, in each of which Wood Elves and Worldgorger Dragon enter, so Soul
-/// Warden's controller gains exactly 6 life (CR 603.2).
+/// declared, and every player accepting it draws the game; Off runs on. The period is whole on
+/// both seats, so a count is taken beside either Soul Warden (CR 603.6a: P0's Warden returns beside
+/// Wood Elves each cycle and triggers twice per period). P0's accepted `Fixed(3)` performs three
+/// cycles, in each of which Wood Elves and Worldgorger Dragon enter, so Soul Warden's controller
+/// gains exactly 6 life (CR 603.2).
 fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
-    for (seat, p1_cards) in [(P1, P1_SHORTENER), (P0, &[][..])] {
+    for seat in [P1, P0] {
         let board = Board {
             soul_warden: Some(seat),
-            p1_cards,
+            p1_cards: P1_SHORTENER,
             ..WOOD_ELVES
         };
         let leg = format!("{seat:?} {drive:?}");
@@ -4874,9 +4876,7 @@ fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
             offered.state().rng.get_word_pos() > 0,
             "{leg}: reach: the shuffles drew randomness"
         );
-        if seat == P1 {
-            assert_counted_take_performs(offered.state(), &leg);
-        }
+        assert_counted_take_performs(offered.state(), &leg);
         let (taken, _) = accepted_take(offered.state(), 3, &leg);
         assert_eq!(
             taken.players[seat.0 as usize].life,
