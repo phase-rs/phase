@@ -69,11 +69,16 @@ fn exact_payment(generic: u32) -> Vec<ManaUnit> {
 
 /// Stage Huskburster Swarm in P0's hand behind `exiled` creature cards P0 owns
 /// in exile and `buried` creature cards P0 owns in their graveyard.
-fn stage(exiled: u32, buried: u32) -> (GameScenario, ObjectId) {
+fn stage(exiled: u32, buried: u32) -> (GameScenario, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let mut exiled_ids = Vec::new();
     for index in 0..exiled {
-        scenario.add_creature_to_exile(P0, &format!("Exiled Beast {index}"), 2, 2);
+        exiled_ids.push(
+            scenario
+                .add_creature_to_exile(P0, &format!("Exiled Beast {index}"), 2, 2)
+                .id(),
+        );
     }
     for index in 0..buried {
         scenario.add_creature_to_graveyard(P0, &format!("Buried Beast {index}"), 2, 2);
@@ -82,15 +87,40 @@ fn stage(exiled: u32, buried: u32) -> (GameScenario, ObjectId) {
         .add_creature_to_hand_from_oracle(P0, "Huskburster Swarm", 6, 6, ORACLE)
         .with_mana_cost(printed_cost())
         .id();
-    (scenario, swarm)
+    (scenario, swarm, exiled_ids)
 }
 
 /// Assert the production cost readout, then prove that cost is the one actually
 /// charged by casting with exactly it.
 fn assert_payable_cost(exiled: u32, buried: u32, expected_generic: u32, why: &str) {
-    let (mut scenario, swarm) = stage(exiled, buried);
+    assert_payable_cost_with_face_down(exiled, buried, 0, expected_generic, why);
+}
+
+/// The same readout/exact-cast proof, with the first `face_down` exiled cards
+/// turned face down before the cost is determined. CR 406.3a: a card exiled
+/// face down has no characteristics, so a "creature card" reduction must not
+/// see its stored printed type.
+fn assert_payable_cost_with_face_down(
+    exiled: u32,
+    buried: u32,
+    face_down: u32,
+    expected_generic: u32,
+    why: &str,
+) {
+    let (mut scenario, swarm, exiled_ids) = stage(exiled, buried);
     scenario.with_mana_pool(P0, exact_payment(expected_generic));
     let mut runner = scenario.build();
+    for id in exiled_ids
+        .iter()
+        .take(usize::try_from(face_down).expect("face-down count fits usize"))
+    {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(id)
+            .expect("staged exiled card must exist")
+            .face_down = true;
+    }
 
     assert_eq!(
         display_spell_cost(runner.state(), P0, swarm),
@@ -201,5 +231,31 @@ fn huskburster_reduction_excludes_other_owners_and_noncreature_cards() {
         display_spell_cost(reached_runner.state(), P0, reached_swarm),
         Some(cost_with_generic(5)),
         "reach-guard: one owned creature card in each zone must reduce {{7}}{{B}} by exactly 2"
+    );
+}
+
+/// CR 406.3a: a card exiled face down has no characteristics, so it is not a
+/// "creature card" for Huskburster Swarm's reduction. The face-up companion is
+/// the reach control: the same exiled card DOES reduce the cost when face up,
+/// so the difference is the face-down status, not a missing exile read.
+///
+/// DISCRIMINATING through casting: at the reviewed head the filter read the
+/// stored printed type, so the face-down case also read {6}{B} — failing both
+/// the expected-{7}{B} readout and the exact-{7}{B} cast.
+#[test]
+fn huskburster_reduction_ignores_face_down_exiled_creature_cards() {
+    assert_payable_cost_with_face_down(
+        1,
+        0,
+        0,
+        6,
+        "control: one face-up exiled creature card must reduce {7}{B} by 1",
+    );
+    assert_payable_cost_with_face_down(
+        1,
+        0,
+        1,
+        7,
+        "CR 406.3a: a face-down exiled creature card has no characteristics and cannot reduce the cost",
     );
 }
