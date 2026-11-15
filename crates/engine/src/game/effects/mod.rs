@@ -30655,7 +30655,7 @@ pub(crate) fn evaluate_condition(
                     // names only the live population. A missing entry reads
                     // 0 either way.
                     AbilityUseTally::Activated => {
-                        let key = ability.announced_usage_key.clone().or_else(|| {
+                        let key = ability.announced_usage_key.as_deref().cloned().or_else(|| {
                             crate::game::restrictions::ability_usage_key(
                                 state,
                                 ability.source_id,

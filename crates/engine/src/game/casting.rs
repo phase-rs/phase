@@ -32072,7 +32072,9 @@ pub(crate) fn record_activated_ability_placed(
     // recorded activation skips the ledger row exactly like today's
     // missing-entry semantics.
     if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
-        StackEntryKind::ActivatedAbility { ability, .. } => ability.announced_usage_key.clone(),
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            ability.announced_usage_key.as_deref().cloned()
+        }
         _ => None,
     }) {
         restrictions::record_ability_activation(state, key, Some(record));
@@ -32087,7 +32089,9 @@ pub(crate) fn record_activated_ability_placed(
     // recompute shifts indices. A missing key skips the guard exactly like
     // the missing-entry ledger semantics above.
     if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
-        StackEntryKind::ActivatedAbility { ability, .. } => ability.announced_usage_key.clone(),
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            ability.announced_usage_key.as_deref().cloned()
+        }
         _ => None,
     }) {
         state.pending_activations.push(key);
@@ -32184,9 +32188,9 @@ pub(crate) fn record_activation_announcement(
     // never overwritten: the earliest announcement wins.
     if ability.announced_usage_key.is_none() {
         if let Some(definition) = activation_ability_definition(state, source_id, ability_index) {
-            ability.announced_usage_key = Some(
+            ability.announced_usage_key = Some(Box::new(
                 super::restrictions::ability_usage_key_for_definition(source_id, &definition),
-            );
+            ));
         }
     }
 }

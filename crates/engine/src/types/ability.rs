@@ -3212,7 +3212,7 @@ pub struct ResolvedAbility {
     /// capture is never overwritten, and placement never recomputes it.
     /// Engine authority: never shown to a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub announced_usage_key: Option<crate::types::game_state::AbilityUsageKey>,
+    pub announced_usage_key: Option<Box<crate::types::game_state::AbilityUsageKey>>,
     /// CR 608.2b: Declared target slots — numbered as
     /// `ability_utils::flatten_targets_in_chain` numbers this chain — whose
     /// target failed the legality check made as the chain began to resolve.
