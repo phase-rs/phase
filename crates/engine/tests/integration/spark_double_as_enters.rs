@@ -4492,6 +4492,143 @@ mod feldon_tokens {
         }
     }
 
+    const TEMPT_WITH_VENGEANCE: &str = "Tempting offer — Create X 1/1 red Elemental creature tokens with haste. Each opponent may create X 1/1 red Elemental creature tokens with haste. For each opponent who does, create X 1/1 red Elemental creature tokens with haste.";
+
+    /// Tempt with Vengeance (X = 1) in a three-player game after the active player resolved
+    /// Crafty Cutpurse this turn, so every opponent's Elemental is created under the active
+    /// player's control; Mister Fantastic watches the active player's tokens. Returns the
+    /// Elementals the active player controls and the draws Mister Fantastic offered. The
+    /// opponents answer in seat order with `answers` (P1, P2).
+    fn tempt_with_vengeance_through_cutpurse(answers: [bool; 2], persist: bool) -> (usize, usize) {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in (0..3).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        let cutpurse = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let tempt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Tempt with Vengeance", false, TEMPT_WITH_VENGEANCE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Red, ManaType::Colorless]
+                .iter()
+                .map(|&kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.cast(cutpurse).resolve();
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(runner.state().objects[&cutpurse].zone, Zone::Battlefield);
+        runner.cast(tempt).x(1).commit();
+        let mut offers = 0;
+        let mut draws_offered = 0;
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::OptionalEffectChoice {
+                    source_id, player, ..
+                } if *source_id == tempt => {
+                    let accept = answers[player.0 as usize - 1];
+                    offers += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } if *source_id == fantastic => {
+                    draws_offered += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(offers, 2, "both opponents are offered (restore: {persist})");
+        let elementals = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Elemental"
+                    && object.controller == P0
+            })
+            .count();
+        (elementals, draws_offered)
+    }
+
+    /// CR 101.4 + CR 608.2c + CR 603.6a: the opponents' Elementals of Tempt with Vengeance are one
+    /// simultaneous event (the offers' accepted answers), separate from the opening token and from
+    /// the caster's "for each opponent who does" tokens, whichever opponents decline, also across
+    /// a restore. Mister Fantastic's "one or more tokens you control enter" trigger therefore
+    /// offers one draw for the opening token, one for the accepting opponents' tokens (when any
+    /// accepted) and one for the caster's tokens (when any opponent did).
+    /// Not covered: the last opponent accepting while an earlier one declined. The accepted
+    /// opponent's token then enters in the same action as the caster's tokens with nothing held,
+    /// and two unpaused sequential token instructions share one scan (baseline limitation).
+    #[test]
+    fn declined_final_seat_keeps_the_opponents_entry_apart_from_the_casters() {
+        let mut mismatches = Vec::new();
+        for persist in [false, true] {
+            for (answers, expected) in [
+                ([true, true], (5, 3)),
+                ([true, false], (3, 3)),
+                ([false, false], (1, 1)),
+            ] {
+                let measured = tempt_with_vengeance_through_cutpurse(answers, persist);
+                if measured != expected {
+                    mismatches.push((answers, persist, measured, expected));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "(answers (P1, P2), restore, measured, expected): {mismatches:?}"
+        );
+    }
+
     const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
 
     /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."

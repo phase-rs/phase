@@ -6136,6 +6136,10 @@ fn resolve_optional_effect_decision_step(
                 // silently skip the branch's effect. Strip the consumed gate so the
                 // branch resolves on its own optional decision.
                 strip_consumed_decline_performed_gate(&mut resolved);
+                // CR 608.2c + CR 101.4: the declined instruction is complete, so the entries
+                // held for it (the tokens earlier seats accepted) are one entry event, observed
+                // before the surviving branch runs, as at the boundary of an accepted one.
+                settle_entries_before_instruction(state, events, &resolved, Some(&ability));
                 return resolve_ability_chain_step(state, &resolved, events, depth);
             }
         }
