@@ -2377,6 +2377,7 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
     if recovered_terminal_rest {
@@ -2386,7 +2387,6 @@ pub(crate) fn finalize_persisted_restore(
     // publishing it itself. Synchronize that wait before the one display
     // finalization below.
     finalize_rules_state(state);
-    restore_engine_derived_retarget_prompts(state)?;
     finalize_display_state(state);
     Ok(())
 }
@@ -2394,33 +2394,46 @@ pub(crate) fn finalize_persisted_restore(
 /// CR 707.10c + CR 115.7d: re-derive the engine-owned parts of a parked
 /// retarget prompt on the restored board before it is published — the copy
 /// target walk (mode, replayed picks, offered targets and keep permissions)
-/// and a `RetargetChoice`'s per-position `keep_is_distinct`.
+/// and every derived field of a `RetargetChoice`.
 fn restore_engine_derived_retarget_prompts(
     state: &mut GameState,
 ) -> Result<(), PersistedRestoreError> {
     effects::copy_choice::restore_copy_target_walk(state)?;
     if let WaitingFor::RetargetChoice {
+        player,
         stack_entry_index,
-        slots,
-        keep_is_distinct,
+        scope,
         ..
-    } = &state.waiting_for
+    } = state.waiting_for.clone()
     {
-        let recomputed = state
-            .stack
-            .get(*stack_entry_index)
-            .and_then(|entry| entry.ability())
-            .map(|ability| {
-                crate::game::ability_utils::retarget_keep_is_distinct(state, ability, slots)
-            })
-            .unwrap_or_default();
-        if recomputed != *keep_is_distinct {
-            if let WaitingFor::RetargetChoice {
-                keep_is_distinct, ..
-            } = &mut state.waiting_for
-            {
-                *keep_is_distinct = recomputed;
-            }
+        if let Some(prompt) =
+            effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
+        {
+            state.waiting_for = prompt;
+        } else {
+            let mut events = Vec::new();
+            let waiting_for = complete_retarget(state, &mut events, player, stack_entry_index)
+                .map_err(|error| {
+                    PersistedRestoreError::PrioritySettlementFailed(error.to_string())
+                })?;
+            // CR 608.2c + CR 608.2n + CR 603.3: completing the no-choice
+            // instruction also owes the ordinary resolution boundary. Its
+            // pipeline finishes the owning spell and settles the resulting
+            // trigger batch, or preserves a new continuation prompt. It makes
+            // no priority pass or decision to resolve another stack entry.
+            // Scan this same buffer so continuation events are not discarded.
+            // As in persisted terminal-rest settlement, a serialized
+            // construction recipient is not authority for exceptional priority.
+            state.pending_trigger_construction_priority_recipient = None;
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                &mut events,
+                0,
+                &waiting_for,
+                false,
+                false,
+            )
+            .map_err(|error| PersistedRestoreError::PrioritySettlementFailed(error.to_string()))?;
         }
     }
     Ok(())
@@ -14696,6 +14709,7 @@ fn apply_non_priority_pass_action(
                             *count,
                             choices,
                             &chosen,
+                            paid_cost.as_ref().map(|payment| payment.cost),
                             &mut events,
                         )?
                     }
@@ -14707,6 +14721,7 @@ fn apply_non_priority_pass_action(
                         *count,
                         choices,
                         &chosen,
+                        paid_cost.as_ref().map(|payment| payment.cost),
                         &mut events,
                     )?,
                     // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
@@ -18852,6 +18867,17 @@ fn apply_retarget(
         *stack_ability_mut = mutated;
     }
 
+    complete_retarget(state, events, player, stack_entry_index)
+}
+
+/// CR 608.2c: finish the parked instruction and resume its owning continuation,
+/// including when a restored retarget has no remaining choice to make.
+fn complete_retarget(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    player: PlayerId,
+    stack_entry_index: usize,
+) -> Result<WaitingFor, EngineError> {
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChangeTargets,
         source_id: state
@@ -19174,6 +19200,13 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
+    // occurrence is not a response, including through the legacy pool fallback.
+    if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: single-target change must choose a different target".into(),
+        ));
+    }
     let identities = crate::game::ability_utils::retarget_final_identities(
         state,
         pre,
