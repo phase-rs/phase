@@ -549,15 +549,26 @@ fn total_hand_size(runner: &engine::game::scenario::GameRunner) -> usize {
 /// the accepted optional silently moves nothing.
 ///
 /// The sibling is the module's declining row above, which takes the same prompt
-/// and asserts nothing moves. This row asserts only THAT a card moved: which
-/// object "it" names is a pre-existing parser binding defect, filed separately.
+/// and asserts nothing moves.
+///
+/// Issue #8003 — CR 603.4 + CR 608.2k: the card moved is Radroach ITSELF. "It"
+/// in "if this creature is in your graveyard, you may return it to your hand"
+/// names the intervening-if's subject (the source), not the milled card the
+/// event is about. Binding `TriggeringSource` instead bounced the opponent's
+/// milled Lightning Bolt to their hand and left Radroach in the graveyard.
 #[test]
-fn infesting_radroach_accepted_optional_return_moves_a_card() {
+fn infesting_radroach_accepted_optional_return_moves_itself() {
     let Some(db) = load_db() else {
         return;
     };
 
     let (mut runner, tome_scour) = infesting_radroach_board(db, false);
+    let radroach = runner.state().players[0]
+        .graveyard
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Infesting Radroach")
+        .expect("Radroach starts in P0's graveyard");
     cast_tome_scour(&mut runner, tome_scour, P1);
 
     assert!(
@@ -565,17 +576,48 @@ fn infesting_radroach_accepted_optional_return_moves_a_card() {
         "the opponent-scoped milled trigger must surface its optional choice; got {:?}",
         runner.state().waiting_for
     );
+    let p1_graveyard_before = runner.state().players[1].graveyard.len();
+    assert!(
+        p1_graveyard_before > 0,
+        "the mill really put P1's nonland cards into their graveyard"
+    );
 
     let hands_before = total_hand_size(&runner);
     runner
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accepting the optional return-to-hand should be legal");
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     assert_eq!(
         total_hand_size(&runner),
         hands_before + 1,
         "accepting the return must move exactly one card into a hand"
+    );
+    let p0 = &runner.state().players[0];
+    assert!(
+        p0.hand
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Infesting Radroach"),
+        "Radroach must be returned to its owner's hand; P0 hand = {:?}",
+        p0.hand
+    );
+    assert!(
+        !p0.graveyard.contains(&radroach),
+        "Radroach must have left P0's graveyard"
+    );
+    assert!(
+        runner.state().players[1].hand.is_empty(),
+        "no milled card may be returned to the opponent's hand"
+    );
+    assert_eq!(
+        runner.state().players[1].graveyard.len(),
+        p1_graveyard_before,
+        "the milled cards stay in P1's graveyard"
     );
 }
 
