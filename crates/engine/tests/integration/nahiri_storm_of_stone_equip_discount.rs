@@ -8,7 +8,9 @@
 //! reductions), CR 118.7a (a generic reduction affects only the generic component),
 //! CR 702.6a (equip is an activated ability of Equipment).
 
+use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -63,6 +65,51 @@ fn give_priority(runner: &mut GameRunner, active: PlayerId, priority: PlayerId) 
     state.active_player = active;
     state.priority_player = priority;
     state.waiting_for = WaitingFor::Priority { player: priority };
+}
+
+fn pass_priority(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::PassPriority)
+        .expect("passing priority must be accepted");
+}
+
+/// CR 500.1 + CR 117.3d: pass priority (declaring no attackers) until P1's turn
+/// begins and P0 receives priority in it.
+fn pass_into_p1_turn_until_p0_has_priority(runner: &mut GameRunner) {
+    for _ in 0..64 {
+        let state = runner.state();
+        match state.waiting_for {
+            WaitingFor::Priority { player } if state.active_player == P1 && player == P0 => {
+                return;
+            }
+            WaitingFor::Priority { .. } => pass_priority(runner),
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .declare_attackers(&[])
+                    .expect("declaring no attackers must be accepted");
+            }
+            ref other => panic!("unexpected prompt while passing the turn: {other:?}"),
+        }
+    }
+    panic!("P0 never received priority during P1's turn");
+}
+
+/// CR 605.3a: tap `land` for mana through the offered mana-ability action.
+fn tap_for_mana(runner: &mut GameRunner, land: ObjectId) {
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let action = grouped
+        .get(&land)
+        .and_then(|actions| {
+            actions.iter().find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == land)
+            })
+        })
+        .cloned()
+        .expect("tapping the land for mana must be offered");
+    runner
+        .act(action)
+        .expect("tapping the land for mana must be accepted");
 }
 
 /// Equip `side.sword` onto `target` as the current priority player; return the mana
@@ -125,9 +172,10 @@ fn nahiri_storm_of_stone_does_not_grant_equip_keyword_to_creatures() {
 }
 
 /// CR 604.1 + CR 109.5: "During your turn" scopes both conjuncts to Nahiri's
-/// controller's turn. On one board, P0's Nahiri first gives first strike and a {2}
-/// equip on P0's turn; after the turn passes to P1, Leonin Shikari lets P0 equip at
-/// instant speed (CR 117.1a), and both effects are gone.
+/// controller's turn. On one board, P0's Nahiri gives first strike and a {2} equip on
+/// P0's turn. The players then pass priority into P1's turn (CR 500.1); P0's floating
+/// mana empties (CR 500.5), P0 receives priority in P1's turn, taps three Plains,
+/// and equips through Leonin Shikari (CR 117.1a) with both effects gone.
 #[test]
 fn nahiri_storm_of_stone_effects_end_when_the_turn_changes() {
     let mut s = GameScenario::new();
@@ -135,6 +183,9 @@ fn nahiri_storm_of_stone_effects_end_when_the_turn_changes() {
     s.add_planeswalker_from_oracle(P0, "Nahiri, Storm of Stone", "Nahiri", 6, NAHIRI);
     let side = add_side(&mut s, P0, true);
     let second_bear = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let plains: Vec<ObjectId> = (0..3)
+        .map(|_| s.add_basic_land(P0, ManaColor::White))
+        .collect();
     let mut runner = s.build();
     engine::game::layers::evaluate_layers(runner.state_mut());
 
@@ -148,12 +199,26 @@ fn nahiri_storm_of_stone_effects_end_when_the_turn_changes() {
         "reach: on P0's turn, Nahiri discounts P0's Equip {{3}} to {{2}}"
     );
 
-    give_priority(&mut runner, P1, P0);
-    engine::game::layers::evaluate_layers(runner.state_mut());
+    let turn_before = runner.state().turn_number;
+    pass_into_p1_turn_until_p0_has_priority(&mut runner);
+    assert_eq!(
+        (runner.state().turn_number, runner.state().active_player),
+        (turn_before + 1, P1),
+        "reach: the game advanced into P1's next turn"
+    );
+    assert_eq!(
+        pool(&runner, P0),
+        0,
+        "reach: P0's floating mana emptied during the turn change"
+    );
     assert!(
         !runner.state().objects[&side.bear].has_keyword(&Keyword::FirstStrike),
         "first strike ends when the turn passes to P1"
     );
+    for land in &plains {
+        tap_for_mana(&mut runner, *land);
+    }
+    assert_eq!(pool(&runner, P0), 3, "reach: three Plains tapped for mana");
     assert_eq!(
         equip_cost(&mut runner, P0, &side, second_bear),
         3,
@@ -180,7 +245,12 @@ fn nahiri_storm_of_stone_discounts_only_her_controllers_equip() {
         2,
         "reach: on P1's turn, P1's Nahiri discounts P1's own Equip {{3}} to {{2}}"
     );
-    give_priority(&mut runner, P1, P0);
+    pass_priority(&mut runner);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "reach: P1 passed priority to P0"
+    );
     assert_eq!(
         equip_cost(&mut runner, P0, &mine, mine.bear),
         3,
@@ -213,14 +283,23 @@ fn nahiri_storm_of_stone_discount_ends_when_she_is_destroyed() {
         "reach: with Nahiri out, Equip {{3}} costs {{2}}"
     );
 
-    give_priority(&mut runner, P0, P1);
+    pass_priority(&mut runner);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 },
+        "reach: P0 passed priority to P1"
+    );
     runner.cast(downfall).target_object(nahiri).resolve();
     assert_eq!(
         runner.state().objects[&nahiri].zone,
         Zone::Graveyard,
         "reach: Hero's Downfall destroyed Nahiri"
     );
-    give_priority(&mut runner, P0, P0);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "reach: CR 117.3b — the active player P0 receives priority after it resolves"
+    );
     assert!(
         !runner.state().objects[&side.bear].has_keyword(&Keyword::FirstStrike),
         "first strike ends with Nahiri gone"
