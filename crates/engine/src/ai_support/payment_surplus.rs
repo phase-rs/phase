@@ -685,7 +685,7 @@ pub(crate) fn absorption_capacity(
             ShardRequirement::ColorlessHybrid(color) => {
                 usize::from(fits(color) || fits(ManaType::Colorless))
             }
-            // CR 107.4e: a {2/C} symbol can be paid with two generic mana.
+            // CR 107.4e: a {2/B} symbol can be paid with two mana of any type.
             ShardRequirement::TwoGenericHybrid(_)
             | ShardRequirement::TwoGenericHybridPhyrexian(_) => 2,
             // CR 107.4h.
