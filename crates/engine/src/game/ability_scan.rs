@@ -2202,9 +2202,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             |acc, f| acc.or(scan_target_filter(f, target_ctx, mode)),
         ),
         Effect::CreateDrawReplacement { replacement_effect } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect, mode));
-            acc
+            ability_definition_axes(replacement_effect, mode)
         }
         Effect::LoseTheGame { target } => {
             let mut acc = Axes::NONE;
