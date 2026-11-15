@@ -91,6 +91,18 @@ pub const MAX_TOURNAMENT_ENTRIES: usize =
 /// snapshot that cannot be written at all.
 pub const MAX_SNAPSHOT_ENCODED_BYTES: usize = 6 * 1024 * 1024;
 
+/// The physical single-key value ceiling of the Durable Object store the broker
+/// snapshot lives under (Cloudflare's 8 MiB). Distinct from
+/// [`MAX_SNAPSHOT_ENCODED_BYTES`], which is the *admission* budget kept
+/// deliberately below it: reservations make growth inside unused room free of
+/// charge against the committed total, so a restored snapshot already over the
+/// admission budget can still grow in actual encoded bytes. The persistence
+/// boundary therefore also refuses any growth of the actual encoded size past
+/// this value, so the Worker's `put` can never be handed an unstorable value.
+pub const PHYSICAL_SNAPSHOT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+const _: () = assert!(MAX_SNAPSHOT_ENCODED_BYTES < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
+
 /// Capacity guaranteed to every *admitted* tournament, in encoded bytes of that
 /// event's own serialized record (entrants, pairings, retained decks).
 ///
@@ -138,7 +150,7 @@ pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 
 /// First lobby version whose clients write today's format-config rules; never
 /// derived from `LOBBY_PROTOCOL_VERSION`.
-const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES: u32 = 23;
+pub const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES: u32 = 23;
 
 /// The client's self-reported identity from `ClientHello`. `build_commit` is
 /// the join-compatibility gate; `client_version` is the display-only string
@@ -614,17 +626,35 @@ impl Broker {
 
     /// Single entry for client frames. Returns the ordered side effects the
     /// shell must perform. The error helper keeps the many reject paths terse.
+    ///
+    /// Shells that persist the broker (the Durable Object) call
+    /// [`Broker::handle_reporting`] instead, which also says whether the frame
+    /// changed durable state.
     pub fn handle(
         &mut self,
         conn: &mut ConnState,
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        self.handle_reporting(conn, msg, env).outbounds
+    }
+
+    /// [`Broker::handle`], plus whether durable state changed
+    /// ([`Handled::persisted`]), so a persisting shell writes its snapshot only
+    /// for a frame that needs one. The host-liveness refresh is not part of this
+    /// report: it is decided by [`Broker::host_liveness_refresh_due`] before the
+    /// frame runs, and a shell combines the two.
+    pub fn handle_reporting(
+        &mut self,
+        conn: &mut ConnState,
+        msg: LobbyClientMessage,
+        env: &impl BrokerEnv,
+    ) -> Handled {
         // Frames answerable without broker state (an unhosted Ping) never
         // reach the liveness refresh, the guard or the dispatch below: none of
         // them has anything to do for such a frame.
         if let Some(reply) = Self::stateless_reply(conn, &msg) {
-            return vec![Outbound::ToSelf(reply)];
+            return Handled::unchanged(vec![Outbound::ToSelf(reply)]);
         }
         // Any frame from the socket that owns the current listing is proof its
         // host is alive, so it refreshes the listing's liveness clock. Scoped
@@ -644,17 +674,34 @@ impl Broker {
         // uncorrelated here.
         let request_id = msg.tournament_request_id();
         if let Err(reason) = crate::inbound_guard::guard_inbound(&msg) {
-            return vec![settle_rejection(request_id, &reason)];
+            return Handled::unchanged(vec![settle_rejection(request_id, &reason)]);
+        }
+        match persisted_effect(&msg) {
+            PersistedEffect::None => {
+                return Handled::unchanged(self.dispatch(conn, msg, request_id, env));
+            }
+            // A removal only deletes, so it cannot outgrow the store and needs no
+            // admission; it does change the persisted value.
+            PersistedEffect::Removes => {
+                return Handled::changed(self.dispatch(conn, msg, request_id, env));
+            }
+            PersistedEffect::MayGrow => {}
+        }
+        // A frame addressed to a tournament that does not exist can only be
+        // refused: every handler looks the event up first and mutates nothing
+        // before it succeeds. Answering it here skips the checkpoint clone and
+        // the whole-broker accounting below, whose cost is proportional to all
+        // retained state, not to the size of the request.
+        if self.addresses_missing_tournament(&msg) {
+            return Handled::unchanged(self.dispatch(conn, msg, request_id, env));
         }
         // The persistence boundary. Every frame that can grow the persisted value
         // runs against a checkpoint and is admitted only if the result still fits
         // the snapshot ceiling and every reservation (see
-        // [`Broker::committed_bytes`]); a refusal restores the checkpoint, so the
+        // [`Broker::committed_bytes`]) and never grows the actual encoded value
+        // past the physical key limit; a refusal restores the checkpoint, so the
         // caller never observes a success for state the Durable Object could not
         // store, and no per-handler check can be forgotten by a new growth path.
-        if !may_grow_persisted_state(&msg) {
-            return self.dispatch(conn, msg, request_id, env);
-        }
         let checkpoint = Checkpoint {
             lobby: self.lobby.clone(),
             tournaments: self.tournaments.clone(),
@@ -662,30 +709,63 @@ impl Broker {
         };
         let outbounds = self.dispatch(conn, msg, request_id, env);
         match self.admit_or_restore(checkpoint, conn) {
-            Ok(()) => outbounds,
+            Ok(()) => Handled::changed(outbounds),
             Err(reason) => {
                 warn!(%reason, "write refused at the persistence boundary");
-                vec![settle_rejection(request_id, &reason)]
+                Handled::unchanged(vec![settle_rejection(request_id, &reason)])
             }
         }
+    }
+
+    /// Whether `msg` is addressed, by code, to a tournament this broker does not
+    /// hold. Exhaustive over the frames that name an event, so a new one must be
+    /// classified deliberately.
+    fn addresses_missing_tournament(&self, msg: &LobbyClientMessage) -> bool {
+        let code = match msg {
+            LobbyClientMessage::JoinTournament { code, .. }
+            | LobbyClientMessage::RenewTournamentCredential { code, .. }
+            | LobbyClientMessage::StartTournamentRound { code, .. }
+            | LobbyClientMessage::ReportMatchResult { code, .. }
+            | LobbyClientMessage::SubmitTournamentDeck { code, .. }
+            | LobbyClientMessage::DropFromTournament { code, .. }
+            | LobbyClientMessage::EndTournament { code, .. } => code,
+            LobbyClientMessage::CreateGameWithSettings { .. }
+            | LobbyClientMessage::JoinGameWithPassword { .. }
+            | LobbyClientMessage::LookupJoinTarget { .. }
+            | LobbyClientMessage::UpdateLobbyMetadata { .. }
+            | LobbyClientMessage::CreateTournament { .. }
+            | LobbyClientMessage::ClientHello { .. }
+            | LobbyClientMessage::SubscribeLobby
+            | LobbyClientMessage::UnsubscribeLobby
+            | LobbyClientMessage::Ping { .. }
+            | LobbyClientMessage::GetTournament { .. }
+            | LobbyClientMessage::UnregisterLobby { .. } => return false,
+        };
+        self.tournaments.get(code).is_none()
     }
 
     /// Whether the persisted state after `self` would stay within capacity,
     /// otherwise restores `checkpoint` (broker and connection) and says why.
     ///
-    /// A write that does not increase [`Self::committed_bytes`] is always
-    /// admitted, even over the ceiling: a state restored from an older, larger
-    /// snapshot must still be able to shrink (drop, end, unregister).
+    /// Two independent bounds. The committed total ([`Self::committed_bytes`])
+    /// must stay within [`MAX_SNAPSHOT_ENCODED_BYTES`] unless the write does not
+    /// raise it, so a state restored from an older, larger snapshot can still
+    /// shrink (drop, end, unregister). And the *actual* encoded size must never
+    /// grow past [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`]: growth inside an unused
+    /// reservation leaves the committed total flat, so for a restored
+    /// over-budget snapshot the committed bound alone would let the real value
+    /// creep past what the store can hold. A write that reduces the actual
+    /// encoded size is always admitted.
     fn admit_or_restore(
         &mut self,
         checkpoint: Checkpoint,
         conn: &mut ConnState,
     ) -> Result<(), String> {
-        let after = self.committed_bytes();
-        if after <= MAX_SNAPSHOT_ENCODED_BYTES {
+        let (actual_after, committed_after) = self.accounting();
+        if committed_after <= MAX_SNAPSHOT_ENCODED_BYTES {
             return Ok(());
         }
-        // Over the ceiling: swap the checkpoint in to measure what it committed.
+        // Over the ceiling: swap the checkpoint in to measure what it held.
         // `checkpoint` then holds the candidate, so either side can be kept.
         let Checkpoint {
             mut lobby,
@@ -694,7 +774,11 @@ impl Broker {
         } = checkpoint;
         std::mem::swap(&mut self.lobby, &mut lobby);
         std::mem::swap(&mut self.tournaments, &mut tournaments);
-        if after <= self.committed_bytes() {
+        let (actual_before, committed_before) = self.accounting();
+        let shrinks = actual_after <= actual_before;
+        let within_bounds =
+            committed_after <= committed_before && actual_after <= PHYSICAL_SNAPSHOT_LIMIT_BYTES;
+        if shrinks || within_bounds {
             std::mem::swap(&mut self.lobby, &mut lobby);
             std::mem::swap(&mut self.tournaments, &mut tournaments);
             return Ok(());
@@ -703,7 +787,8 @@ impl Broker {
         Err(format!(
             "Refused: the server's persisted tournament state is at capacity \
              ({MAX_SNAPSHOT_ENCODED_BYTES} encoded bytes, including space held for \
-             other events); retry once activity subsides"
+             other events, and never past {PHYSICAL_SNAPSHOT_LIMIT_BYTES}); retry once \
+             activity subsides"
         ))
     }
 
@@ -1706,16 +1791,29 @@ impl Broker {
     /// reservations an invariant: growth inside an owner's reservation never
     /// raises it, so it is always admitted, and growth by anyone else can never
     /// consume the room another owner is still guaranteed.
+    #[cfg(test)]
     fn committed_bytes(&self) -> usize {
+        self.accounting().1
+    }
+
+    /// `(actual, committed)`: the exact encoded snapshot size and the committed
+    /// total built on it, from the existing encoded-size helpers. The one
+    /// place both quantities are computed, so no caller re-serializes to learn
+    /// the other.
+    fn accounting(&self) -> (usize, usize) {
+        #[cfg(test)]
+        ACCOUNTING_PASSES.with(|passes| passes.set(passes.get() + 1));
         let unused_events = self
             .tournaments
             .iter()
             .map(|meta| EVENT_RESERVE_ENCODED_BYTES.saturating_sub(encoded_len(meta)))
             .fold(0usize, usize::saturating_add);
         let unused_lobby = LOBBY_RESERVE_ENCODED_BYTES.saturating_sub(encoded_len(&self.lobby));
-        self.snapshot_encoded_bytes()
+        let actual = self.snapshot_encoded_bytes();
+        let committed = actual
             .saturating_add(unused_events)
-            .saturating_add(unused_lobby)
+            .saturating_add(unused_lobby);
+        (actual, committed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2134,12 +2232,19 @@ struct Checkpoint {
     conn: ConnState,
 }
 
-/// Whether a client frame can enlarge the persisted broker. Exhaustive so a new
-/// frame must be classified deliberately: `true` routes it through the
-/// capacity boundary. Pure reads and removals (an unregister only deletes) are
-/// `false`; everything that registers, joins, reserves, rotates a credential or
-/// records tournament progress is `true`.
-fn may_grow_persisted_state(msg: &LobbyClientMessage) -> bool {
+// Whole-broker accounting passes run on this thread, so a test can show that a
+// refused no-op request performed none. Test-only instrumentation.
+#[cfg(test)]
+thread_local! {
+    static ACCOUNTING_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How a client frame can change the persisted broker. Exhaustive so a new
+/// frame must be classified deliberately: `MayGrow` routes it through the
+/// capacity boundary. Pure reads are `None`; an unregister only deletes
+/// (`Removes`); everything that registers, joins, reserves, rotates a credential
+/// or records tournament progress is `MayGrow`.
+fn persisted_effect(msg: &LobbyClientMessage) -> PersistedEffect {
     match msg {
         LobbyClientMessage::CreateGameWithSettings { .. }
         | LobbyClientMessage::JoinGameWithPassword { .. }
@@ -2152,13 +2257,56 @@ fn may_grow_persisted_state(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::ReportMatchResult { .. }
         | LobbyClientMessage::SubmitTournamentDeck { .. }
         | LobbyClientMessage::DropFromTournament { .. }
-        | LobbyClientMessage::EndTournament { .. } => true,
+        | LobbyClientMessage::EndTournament { .. } => PersistedEffect::MayGrow,
+        LobbyClientMessage::UnregisterLobby { .. } => PersistedEffect::Removes,
         LobbyClientMessage::ClientHello { .. }
         | LobbyClientMessage::SubscribeLobby
         | LobbyClientMessage::UnsubscribeLobby
         | LobbyClientMessage::Ping { .. }
-        | LobbyClientMessage::GetTournament { .. }
-        | LobbyClientMessage::UnregisterLobby { .. } => false,
+        | LobbyClientMessage::GetTournament { .. } => PersistedEffect::None,
+    }
+}
+
+/// What a frame can do to the persisted broker; see [`persisted_effect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistedEffect {
+    None,
+    Removes,
+    MayGrow,
+}
+
+/// Whether handling a frame changed the state a persisting shell must store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistedChange {
+    /// Nothing durable changed: a read, a stateless reply, or a request refused
+    /// without effect (including one the persistence boundary restored). The
+    /// shell skips its snapshot write.
+    Unchanged,
+    /// The frame was applied to durable state, so the shell must snapshot it.
+    Changed,
+}
+
+/// The result of [`Broker::handle_reporting`]: the shell's side effects and
+/// whether durable state changed.
+#[derive(Debug)]
+pub struct Handled {
+    pub outbounds: Vec<Outbound>,
+    pub persisted: PersistedChange,
+}
+
+impl Handled {
+    fn unchanged(outbounds: Vec<Outbound>) -> Self {
+        Self {
+            outbounds,
+            persisted: PersistedChange::Unchanged,
+        }
+    }
+
+    fn changed(outbounds: Vec<Outbound>) -> Self {
+        Self {
+            outbounds,
+            persisted: PersistedChange::Changed,
+        }
     }
 }
 
@@ -7819,6 +7967,147 @@ mod tests {
                 error_reason(&out).contains("already joined"),
                 "a no-op refusal keeps its own reason: {out:?}"
             );
+        }
+
+        /// A broker the previous writer left far past today's admission budget,
+        /// sitting `gap` bytes under the physical single-key ceiling, serialized
+        /// and restored the way a cold start does. Returns it with the code of a
+        /// small event that still holds an unused reservation (the growth room).
+        fn restored_near_the_physical_ceiling(env: &FakeEnv, gap: usize) -> (Broker, String) {
+            let mut organizer = ConnState::default();
+            let mut broker = Broker::new();
+            let mut codes = Vec::new();
+            for _ in 0..21 {
+                codes
+                    .push(make_tournament(&mut organizer, &mut broker, env, BracketShape::Swiss).0);
+            }
+            let victim = codes.pop().expect("a spare event");
+            let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES - gap;
+            let (mut event, mut seat) = (0, 0);
+            while target - broker.snapshot_encoded_bytes() > 61_000 + 2_000 {
+                if seat == 8 {
+                    event += 1;
+                    seat = 0;
+                }
+                put_deck(&mut broker, env, &codes[event], &format!("s{seat}"), BIG);
+                seat += 1;
+            }
+            // Tune the last deck to land exactly on the target.
+            let key = "tune";
+            put_deck(&mut broker, env, &codes[event + 1], key, 1);
+            let base = broker.snapshot_encoded_bytes();
+            put_deck(
+                &mut broker,
+                env,
+                &codes[event + 1],
+                key,
+                1 + (target - base),
+            );
+            assert_eq!(
+                broker.snapshot_encoded_bytes(),
+                target,
+                "fixture lands on target"
+            );
+
+            let restored: Broker =
+                serde_json::from_str(&serialized(&broker)).expect("snapshot restores");
+            assert!(
+                restored.committed_bytes() > MAX_SNAPSHOT_ENCODED_BYTES,
+                "reach guard: the restored snapshot is over today's admission budget"
+            );
+            (restored, victim)
+        }
+
+        fn submit_frame(code: &str, token: &str, chars: usize, request: u64) -> LobbyClientMessage {
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.to_string(),
+                player_token: token.to_string(),
+                // Entries within the inbound wire guard, ~chars bytes in all.
+                deck: DeckData {
+                    main_deck: vec!["y".repeat(100); chars / 100],
+                    ..Default::default()
+                },
+                request_id: Some(TournamentRequestId(request)),
+            }
+        }
+
+        /// F1: a snapshot restored over the admission budget still loads, growth
+        /// inside an unused reservation cannot carry the real encoded value past
+        /// the physical key ceiling (refused with its request id, prior state
+        /// intact), and a write that shrinks the value always succeeds.
+        #[test]
+        fn a_restored_over_budget_snapshot_cannot_grow_past_the_physical_ceiling() {
+            let env = FakeEnv::new();
+            let (mut broker, victim) = restored_near_the_physical_ceiling(&env, 20_000);
+            assert!(broker.snapshot_encoded_bytes() < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
+
+            let mut alice = ConnState::default();
+            let token = join_tournament(&mut alice, &mut broker, &env, &victim, "a", "Alice");
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 10_000, 41), &env);
+            assert_eq!(
+                ack_of(&out).0,
+                TournamentRequestId(41),
+                "growth that stays under the physical ceiling is still served"
+            );
+
+            // This resubmission would add ~20 KB to the value, past the ceiling.
+            let before = serialized(&broker);
+            let before_conn = alice.clone();
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 30_000, 42), &env);
+            assert_eq!(serialized(&broker), before, "the prior snapshot is intact");
+            assert_eq!(alice, before_conn);
+            let (id, reason) = rejection_of(&out);
+            assert_eq!(id, TournamentRequestId(42), "refusal keeps its correlation");
+            assert!(reason.contains("at capacity"), "{reason}");
+            assert!(broker.snapshot_encoded_bytes() <= PHYSICAL_SNAPSHOT_LIMIT_BYTES);
+
+            // A write that reduces the encoded size always succeeds.
+            let size_before = broker.snapshot_encoded_bytes();
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 2_000, 43), &env);
+            assert_eq!(ack_of(&out).0, TournamentRequestId(43));
+            assert!(broker.snapshot_encoded_bytes() < size_before);
+        }
+
+        /// F4: a request for a tournament that does not exist is refused with its
+        /// correlated error, reported as changing nothing, and costs no
+        /// whole-broker checkpoint or accounting pass, however much state the
+        /// broker retains.
+        #[test]
+        fn a_missing_tournament_request_is_refused_without_admission_work() {
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut organizer = ConnState::default();
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            inflate(&mut broker, &env, &code, &["a", "b"]);
+            let before = serialized(&broker);
+
+            let mut conn = ConnState::default();
+            let passes = ACCOUNTING_PASSES.with(std::cell::Cell::get);
+            let handled = broker.handle_reporting(&mut conn, join_frame("NOSUCH", "z"), &env);
+            assert_eq!(
+                ACCOUNTING_PASSES.with(std::cell::Cell::get),
+                passes,
+                "no admission or accounting pass ran"
+            );
+            assert_eq!(handled.persisted, PersistedChange::Unchanged);
+            assert!(
+                error_reason(&handled.outbounds).contains("not found"),
+                "{:?}",
+                handled.outbounds
+            );
+
+            // A correlated gated frame keeps its request id.
+            let handled =
+                broker.handle_reporting(&mut conn, submit_frame("NOSUCH", "tok", 10, 51), &env);
+            assert_eq!(handled.persisted, PersistedChange::Unchanged);
+            assert_eq!(rejection_of(&handled.outbounds).0, TournamentRequestId(51));
+            assert_eq!(serialized(&broker), before);
+
+            // Control: the same frame against a real event is a real write.
+            let passes = ACCOUNTING_PASSES.with(std::cell::Cell::get);
+            let handled = broker.handle_reporting(&mut conn, join_frame(&code, "z"), &env);
+            assert_eq!(handled.persisted, PersistedChange::Changed);
+            assert!(ACCOUNTING_PASSES.with(std::cell::Cell::get) > passes);
         }
     }
 }

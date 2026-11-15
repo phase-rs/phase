@@ -15,7 +15,7 @@
 use lobby_broker::{
     compare_announcement_to_info, info_url, normalize_announced_url, parse_lobby_client_message,
     score, validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
-    LobbyClientMessage, LobbyServerMessage, Outbound, ParsedFrame, RawAnnouncement,
+    LobbyServerMessage, Outbound, ParsedFrame, PersistedChange, RawAnnouncement,
     ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
     PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS,
 };
@@ -164,48 +164,6 @@ fn reject_reply(message: &str) -> Vec<Outbound> {
     vec![Outbound::ToSelf(LobbyServerMessage::error(message))]
 }
 
-/// Whether a client frame can mutate the shared `LobbyManager` (and therefore
-/// requires the shell to re-snapshot it to DO storage). Conservative: read-only
-/// frames return `false` so a periodic `Ping`/`SubscribeLobby` never triggers a
-/// storage write (Subscribe only flips per-socket `ConnState`, which lives in
-/// the WS attachment, not storage). Exhaustive so a new protocol variant forces
-/// a deliberate classification here.
-fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
-    match msg {
-        LobbyClientMessage::CreateGameWithSettings { .. }
-        | LobbyClientMessage::JoinGameWithPassword { .. }
-        | LobbyClientMessage::LookupJoinTarget { .. }
-        | LobbyClientMessage::UpdateLobbyMetadata { .. }
-        | LobbyClientMessage::UnregisterLobby { .. }
-        // Every tournament write lands in the `TournamentManager` the broker
-        // snapshot carries, so each must mark the DO dirty. Classifying one of
-        // these `false` would lose the write on the next hibernation —
-        // silently, and only for tournaments, since lobby traffic would keep
-        // re-snapshotting around it.
-        | LobbyClientMessage::CreateTournament { .. }
-        | LobbyClientMessage::JoinTournament { .. }
-        | LobbyClientMessage::StartTournamentRound { .. }
-        | LobbyClientMessage::ReportMatchResult { .. }
-        | LobbyClientMessage::SubmitTournamentDeck { .. }
-        | LobbyClientMessage::DropFromTournament { .. }
-        | LobbyClientMessage::EndTournament { .. }
-        // Rotation REPLACES the stored secret, so it writes tournament state
-        // exactly as the six above do. Classifying it `false` would lose the
-        // rotation on the next hibernation and hand the holder back a secret
-        // the broker no longer accepts — the sharpest possible instance of
-        // this classification's silent failure mode, because the caller has
-        // already discarded the old one.
-        | LobbyClientMessage::RenewTournamentCredential { .. } => true,
-        // `GetTournament` is a pure read, like `SubscribeLobby`: classifying
-        // it `true` would write storage on every poll of a public listing.
-        LobbyClientMessage::GetTournament { .. }
-        | LobbyClientMessage::ClientHello { .. }
-        | LobbyClientMessage::SubscribeLobby
-        | LobbyClientMessage::UnsubscribeLobby
-        | LobbyClientMessage::Ping { .. } => false,
-    }
-}
-
 /// Result of a connection-scoped broker call ([`WasmBroker::handle`] /
 /// [`WasmBroker::on_disconnect`]). `conn` is the post-call per-socket state to
 /// write back to the WebSocket attachment.
@@ -303,12 +261,15 @@ impl WasmBroker {
                 // A host's frame may advance its listing's liveness clock, and
                 // that write must reach DO storage, or a restore after eviction
                 // hands back the stale clock and reaps a live host. Evaluated
-                // before `handle`, which performs the refresh. The refresh is
-                // quantized, so this is at most one write per host per
-                // `LIVENESS_REFRESH_SECS`.
-                let dirty =
-                    mutates_lobby(&msg) || self.inner.host_liveness_refresh_due(&conn, &env);
-                (self.inner.handle(&mut conn, *msg, &env), dirty, None)
+                // before `handle_reporting`, which performs the refresh. The
+                // refresh is quantized, so this is at most one write per host per
+                // `LIVENESS_REFRESH_SECS`. Whether the frame itself changed
+                // durable state is the broker's answer, not a classification of
+                // the variant: a refused no-op request writes nothing.
+                let liveness_due = self.inner.host_liveness_refresh_due(&conn, &env);
+                let handled = self.inner.handle_reporting(&mut conn, *msg, &env);
+                let dirty = handled.persisted == PersistedChange::Changed || liveness_due;
+                (handled.outbounds, dirty, None)
             }
             // A frame the parser couldn't accept — an unknown tag or a field
             // that failed validation (e.g. a blank display_name). Reply with an
@@ -546,95 +507,84 @@ fn result_json(r: CallResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lobby_broker::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, ServerMode};
+    use lobby_broker::{
+        BracketShape, LobbyClientMessage, MatchArity, ScoringPolicy, ServerMode,
+    };
 
-    /// The classification is the whole contract, and getting it wrong is
-    /// SILENT: a mutating frame classified `false` leaves the shell skipping
-    /// its snapshot, so the write survives until the DO next hibernates and
-    /// then vanishes. Every variant is enumerated explicitly rather than
-    /// sampled, because there is no runtime symptom to catch a missed one.
+    /// `dirty` is the broker's own report of whether durable state changed, and
+    /// getting it wrong is SILENT in the costly direction: a write reported clean
+    /// leaves the shell skipping its snapshot, so it survives only until the DO
+    /// next hibernates. Driven through the production `handle` path with real
+    /// events rather than a per-variant table.
     #[test]
-    fn tournament_variants_are_classified_by_whether_they_write() {
-        let mutating = [
-            LobbyClientMessage::CreateTournament {
-                name: "Friday Night".into(),
-                arity: MatchArity::HEAD_TO_HEAD,
-                scoring: Some(ScoringPolicy::default()),
-                bracket: BracketShape::Swiss,
-                total_rounds: None,
-                plus_rounds: None,
-                format: None,
-                match_type: None,
-            },
-            LobbyClientMessage::JoinTournament {
-                code: "TOUR01".into(),
-                player_key: "key-a".into(),
-                display_name: "Alice".into(),
-            },
-            // Uncorrelated fixtures: whether a gated frame WRITES is a property
-            // of the action, not of whether the caller asked to be told about
-            // it, so the correlator is irrelevant to this classification and
-            // `None` is the fixture that says so.
-            LobbyClientMessage::StartTournamentRound {
-                code: "TOUR01".into(),
-                organizer_token: "tok".into(),
-                request_id: None,
-            },
-            LobbyClientMessage::ReportMatchResult {
-                code: "TOUR01".into(),
-                pairing_id: 0,
-                player_token: "tok".into(),
-                outcome: PodOutcome::Draw,
-                request_id: None,
-            },
-            LobbyClientMessage::SubmitTournamentDeck {
-                code: "TOUR01".into(),
-                player_token: "tok".into(),
-                deck: Default::default(),
-                request_id: None,
-            },
-            LobbyClientMessage::DropFromTournament {
-                code: "TOUR01".into(),
-                player_token: "tok".into(),
-                request_id: None,
-            },
-            LobbyClientMessage::EndTournament {
-                code: "TOUR01".into(),
-                organizer_token: "tok".into(),
-                request_id: None,
-            },
-        ];
-        for msg in &mutating {
-            assert!(
-                mutates_lobby(msg),
-                "{msg:?} writes tournament state and MUST mark the DO dirty"
-            );
-        }
+    fn dirty_follows_whether_the_frame_changed_durable_state() {
+        const T0: f64 = 1_000_000.0;
+        let frame = |msg: &LobbyClientMessage| serde_json::to_string(msg).expect("frame encodes");
+        let mut b = WasmBroker::new();
+        let (conn, _) = call(&mut b, "{}", &frame(&create_tournament_msg()), T0);
+        let created: ConnState = serde_json::from_str(&conn).expect("conn parses");
+        let code = created
+            .organized_tournaments
+            .first()
+            .expect("reach guard: the create registered an event")
+            .clone();
 
+        let join = |code: &str, key: &str| {
+            frame(&LobbyClientMessage::JoinTournament {
+                code: code.into(),
+                player_key: key.into(),
+                display_name: key.into(),
+            })
+        };
+        let (_, dirty) = call(&mut b, "{}", &join(&code, "alice"), T0);
+        assert!(dirty, "a successful join writes tournament state");
+
+        let persisted = b.snapshot();
+        let (_, dirty) = call(&mut b, "{}", &join("NOSUCH", "bob"), T0);
+        assert!(!dirty, "a join to a missing event changes nothing");
+        assert_eq!(b.snapshot(), persisted, "and the snapshot is untouched");
+
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::GetTournament { code: code.clone() }),
+            T0,
+        );
         assert!(
-            !mutates_lobby(&LobbyClientMessage::GetTournament {
-                code: "TOUR01".into()
-            }),
+            !dirty,
             "GetTournament is a pure read; a `true` here writes storage on every poll"
         );
+        let (_, dirty) = call(&mut b, "{}", &frame(&LobbyClientMessage::SubscribeLobby), T0);
+        assert!(!dirty);
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::Ping { timestamp: 1 }),
+            T0,
+        );
+        assert!(!dirty);
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::UnregisterLobby {
+                game_code: "GAME01".into(),
+            }),
+            T0,
+        );
+        assert!(dirty, "an unregister removes state and is persisted");
     }
 
-    /// Regression guard: the pre-existing classifications are untouched by
-    /// this extension.
-    #[test]
-    fn pre_existing_variant_classifications_are_unchanged() {
-        assert!(mutates_lobby(&LobbyClientMessage::UnregisterLobby {
-            game_code: "GAME01".into()
-        }));
-        assert!(mutates_lobby(&LobbyClientMessage::UpdateLobbyMetadata {
-            game_code: "GAME01".into(),
-            current_players: 1,
-            max_players: 2,
-            consumed_reservation_tokens: Vec::new(),
-        }));
-        assert!(!mutates_lobby(&LobbyClientMessage::SubscribeLobby));
-        assert!(!mutates_lobby(&LobbyClientMessage::UnsubscribeLobby));
-        assert!(!mutates_lobby(&LobbyClientMessage::Ping { timestamp: 1 }));
+    fn create_tournament_msg() -> LobbyClientMessage {
+        LobbyClientMessage::CreateTournament {
+            name: "Friday Night".into(),
+            arity: MatchArity::HEAD_TO_HEAD,
+            scoring: Some(ScoringPolicy::default()),
+            bracket: BracketShape::Swiss,
+            total_rounds: None,
+            plus_rounds: None,
+            format: None,
+            match_type: None,
+        }
     }
 
     /// Drives one frame through the shim the way the DO does, returning the

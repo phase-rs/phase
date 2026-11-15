@@ -21939,10 +21939,20 @@ mod handshake_tests {
             }
             other => panic!("expected the strict refusal, got {other:?}"),
         }
+        // The boundary is pinned to the broker's own gate constant, never to the
+        // current tip, so later lobby protocol bumps cannot move this control.
+        use lobby_broker::broker::MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES as FIRST_STRICT;
+        let last_legacy = FIRST_STRICT - 1;
         assert!(matches!(
-            create(LOBBY_PROTOCOL_VERSION - 1).first(),
+            create(last_legacy).first(),
             Some(Outbound::ToSelf(LobbyServerMessage::GameCreated { .. }))
         ));
+        match create(FIRST_STRICT).as_slice() {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, .. })] => {
+                assert!(message.contains("commander_damage_threshold"), "{message}");
+            }
+            other => panic!("expected the strict refusal at the boundary, got {other:?}"),
+        }
     }
 
     #[test]
