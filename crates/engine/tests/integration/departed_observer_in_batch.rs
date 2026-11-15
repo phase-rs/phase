@@ -1286,3 +1286,237 @@ fn mass_exile_of_tokens_with_a_live_leaves_observer_collects_once() {
         "one trigger per exiled token"
     );
 }
+
+// ---------------------------------------------------------------------------
+// One instruction across a target list, and across a choice completion.
+//
+// More printed cards (Oracle text verbatim, data/card-data.json):
+//   Decimate — "Destroy target artifact, target creature, target enchantment,
+//     and target land. (You can't cast this spell unless you have legal
+//     choices for all its targets.)"
+//   Propaganda — "Creatures can't attack you unless their controller pays {2}
+//     for each creature they control that's attacking you."
+//   Sol Ring — "{T}: Add {C}{C}."
+//   Dryad Arbor — a Land Creature — Forest Dryad.
+//   Ornithopter — an Artifact Creature — Thopter with "Flying".
+//   Barter in Blood — "Each player sacrifices two creatures of their choice."
+// ---------------------------------------------------------------------------
+
+/// R4 (CR 608.2c + CR 603.10): Decimate's one sentence is one instruction,
+/// lowered as four chained `Destroy` list slots. Kalitas exiles the
+/// Ornithopter (artifact slot) instead and makes a Zombie; Soul Warden
+/// (creature slot) is exiled by the same instruction, so it does not exist
+/// immediately after that Zombie enters and does not trigger.
+#[test]
+fn kalitas_inside_decimate_is_not_seen_by_the_creature_destroyed_in_the_same_sentence() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let ornithopter = scenario.add_real_card(P1, "Ornithopter", Zone::Battlefield, db);
+    let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
+    let enchantment = scenario.add_real_card(P1, "Propaganda", Zone::Battlefield, db);
+    let forest = scenario.add_real_card(P1, "Forest", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let decimate = scenario.add_real_card(P0, "Decimate", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Red, ManaType::Green], 2);
+
+    let counters = cast_and_settle(
+        &mut runner,
+        decimate,
+        &[ornithopter, warden, enchantment, forest],
+    );
+
+    assert_eq!(
+        runner.state().objects[&ornithopter].zone,
+        Zone::Exile,
+        "reach: Kalitas exiled the Ornithopter instead"
+    );
+    assert_eq!(
+        runner.state().objects[&warden].zone,
+        Zone::Exile,
+        "reach: Kalitas exiled Soul Warden instead"
+    );
+    assert_eq!(runner.state().objects[&enchantment].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Graveyard);
+    assert_eq!(
+        tokens_named(&runner, P0, "Zombie").len(),
+        2,
+        "reach: each replaced death created a Zombie"
+    );
+    assert!(
+        counters.in_instruction_cuts > 0,
+        "reach: the Ornithopter's Zombie entry was cut from Soul Warden's window"
+    );
+    assert_eq!(counters.unstamped_departures, 0);
+    assert!(
+        triggers_from(&runner, warden).is_empty(),
+        "Soul Warden did not trigger"
+    );
+    let mut events = Vec::new();
+    drive(&mut runner, &mut events, P0, |r| r.state().stack.is_empty());
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Soul Warden left in the instruction that created the first Zombie"
+    );
+}
+
+/// R4b (CR 603.10a): Blood Artist (creature slot) dies in the same instruction
+/// as Dryad Arbor (land slot), so it sees that death as well as its own.
+#[test]
+fn decimate_blood_artist_sees_a_later_slot_death_in_the_same_sentence() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let artifact = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    let artist = scenario.add_real_card(P1, "Blood Artist", Zone::Battlefield, db);
+    let enchantment = scenario.add_real_card(P1, "Propaganda", Zone::Battlefield, db);
+    let arbor = scenario.add_real_card(P1, "Dryad Arbor", Zone::Battlefield, db);
+    let decimate = scenario.add_real_card(P0, "Decimate", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Red, ManaType::Green], 2);
+
+    let counters = cast_and_settle(
+        &mut runner,
+        decimate,
+        &[artifact, artist, enchantment, arbor],
+    );
+
+    for id in [artifact, artist, enchantment, arbor] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Graveyard,
+            "reach: every slot was destroyed"
+        );
+    }
+    assert_eq!(counters.unstamped_departures, 0);
+    assert_eq!(
+        triggers_from(&runner, artist).len(),
+        2,
+        "Blood Artist saw itself and Dryad Arbor die"
+    );
+}
+
+/// Cast `spell` and pass until it has left the stack, answering each player's
+/// sacrifice choice with `picks` and trigger targets with P0, leaving the
+/// triggers on the stack. Returns the departure-window counters of that span.
+fn settle_with_sacrifice_picks(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    picks: &[(PlayerId, Vec<ObjectId>)],
+) -> perf_counters::DepartureWindowCounters {
+    perf_counters::reset();
+    let _ = runner.cast(spell).commit();
+    for _ in 0..128 {
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !on_stack(runner, spell)
+        {
+            return perf_counters::departure_window_snapshot();
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice { player, .. } => GameAction::SelectCards {
+                cards: picks
+                    .iter()
+                    .find(|(chooser, _)| *chooser == player)
+                    .map(|(_, cards)| cards.clone())
+                    .expect("a pick for the choosing player"),
+            },
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                let wanted = TargetRef::Player(P0);
+                GameAction::ChooseTarget {
+                    target: Some(if legal.contains(&wanted) {
+                        wanted
+                    } else {
+                        legal.first().cloned().expect("a legal trigger target")
+                    }),
+                }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("driver stopped at an unexpected prompt: {other:?}"),
+        };
+        runner
+            .act(action)
+            .expect("the engine must accept the action");
+    }
+    panic!("the spell never left the stack");
+}
+
+/// R8 (CR 701.21a + CR 603.10): Barter in Blood's sacrifices happen at once
+/// after every player chose (its ruling: "Then all creatures are sacrificed
+/// simultaneously"). Kalitas exiles P1's Bears and Soul Warden instead and
+/// makes two Zombies inside that one event, so Soul Warden does not exist
+/// immediately after either Zombie enters. The choice completion emits its
+/// departures outside an instruction scope; the departure window fails closed
+/// for them (counted as unstamped) instead of admitting the Zombies.
+#[test]
+fn barter_in_blood_choice_completion_is_one_instruction_for_kalitas_zombies() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
+    let ornithopter = scenario.add_real_card(P1, "Ornithopter", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let fodder_a = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let fodder_b = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let barter = scenario.add_real_card(P0, "Barter in Blood", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Black, ManaType::Black], 2);
+
+    let counters = settle_with_sacrifice_picks(
+        &mut runner,
+        barter,
+        &[(P0, vec![fodder_a, fodder_b]), (P1, vec![bears, warden])],
+    );
+
+    assert_eq!(runner.state().objects[&fodder_a].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&fodder_b].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Exile,
+        "reach: Kalitas exiled P1's Bears instead"
+    );
+    assert_eq!(
+        runner.state().objects[&warden].zone,
+        Zone::Exile,
+        "reach: Kalitas exiled Soul Warden instead"
+    );
+    assert_eq!(
+        runner.state().objects[&ornithopter].zone,
+        Zone::Battlefield,
+        "reach: P1 kept the creature it did not choose"
+    );
+    assert_eq!(
+        tokens_named(&runner, P0, "Zombie").len(),
+        2,
+        "reach: each replaced death created a Zombie"
+    );
+    assert!(
+        counters.unstamped_departures > 0,
+        "reach: the choice completion's departures carry no instruction lead"
+    );
+    assert!(
+        triggers_from(&runner, warden).is_empty(),
+        "Soul Warden did not trigger"
+    );
+    let mut events = Vec::new();
+    drive(&mut runner, &mut events, P0, |r| r.state().stack.is_empty());
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Soul Warden left in the event that created the Zombies"
+    );
+}

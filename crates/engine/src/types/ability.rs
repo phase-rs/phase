@@ -3590,6 +3590,11 @@ pub struct ResolvedAbility {
     /// [`SiblingCondition`]. See [`SiblingCondition`].
     #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c: Copied through from the originating `AbilityDefinition`.
+    /// `ListSlot` makes this node continue the instruction its preceding
+    /// sibling began (`zones::within_instruction`). See [`InstructionJoin`].
+    #[serde(default, skip_serializing_if = "InstructionJoin::is_own")]
+    pub instruction_join: InstructionJoin,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
     /// `try_materialize_reflexive_trigger` can hand it to the PendingTrigger and
@@ -3761,6 +3766,7 @@ impl PartialEq for ResolvedAbility {
             target_reads: a_target_reads,
             entry_onset: a_entry_onset,
             sibling_condition: a_sibling_condition,
+            instruction_join: a_instruction_join,
             modal: a_modal,
             mode_abilities: a_mode_abilities,
             parent_target_missing_reason: a_parent_target_missing_reason,
@@ -3840,6 +3846,7 @@ impl PartialEq for ResolvedAbility {
             target_reads: b_target_reads,
             entry_onset: b_entry_onset,
             sibling_condition: b_sibling_condition,
+            instruction_join: b_instruction_join,
             modal: b_modal,
             mode_abilities: b_mode_abilities,
             parent_target_missing_reason: b_parent_target_missing_reason,
@@ -3921,6 +3928,7 @@ impl PartialEq for ResolvedAbility {
             && a_target_reads == b_target_reads
             && a_entry_onset == b_entry_onset
             && a_sibling_condition == b_sibling_condition
+            && a_instruction_join == b_instruction_join
             && a_modal == b_modal
             && a_mode_abilities == b_mode_abilities
             && a_parent_target_missing_reason == b_parent_target_missing_reason
@@ -4431,6 +4439,7 @@ impl ResolvedAbility {
             target_reads: TargetReadOrigin::OwnAnnouncement,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,

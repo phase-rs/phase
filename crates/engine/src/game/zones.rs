@@ -1,10 +1,11 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::types::ability::StaticDefinition;
+use crate::types::ability::{EffectKind, InstructionJoin, StaticDefinition};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, InstructionLead, LinkedExileLki, LinkedExileSnapshot, OpenInstruction,
-    ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus, ZoneChangeRecord,
+    ClosedInstruction, GameState, InstructionLead, LinkedExileLki, LinkedExileSnapshot,
+    OpenInstruction, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -2297,18 +2298,85 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
 /// Scopes nest; the innermost one stamps. The stack depth is restored on
 /// every return, including a body that restores `state` from a clone, so a
 /// scope never outlives its body or pops a foreign entry.
+///
+/// `node` names the effect node the scope is opened for. A node marked
+/// `InstructionJoin::ListSlot` is a further target slot of the instruction
+/// its preceding sibling began ("destroy target artifact, target creature,
+/// ..."), so it continues that instruction's start instead of opening a new
+/// one (`list_slot_start`).
 pub(crate) fn within_instruction<R>(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    node: Option<InstructionNode>,
     body: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> R,
 ) -> R {
     let depth = state.instruction_scopes.len();
-    state.instruction_scopes.push(OpenInstruction {
-        start: events.len(),
-    });
+    let start = node
+        .and_then(|node| list_slot_start(state, depth, node, events.len()))
+        .unwrap_or(events.len());
+    state.instruction_scopes.push(OpenInstruction { start });
     let result = body(state, events);
     state.instruction_scopes.truncate(depth);
+    // A scope opened for anything but an effect node breaks the sibling run.
+    state.last_closed_instruction = node.map(|node| ClosedInstruction {
+        depth,
+        kind: node.kind,
+        start,
+        end: events.len(),
+    });
     result
+}
+
+/// CR 608.2c: the effect node an instruction scope is opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InstructionNode {
+    pub(crate) kind: EffectKind,
+    pub(crate) join: InstructionJoin,
+}
+
+impl InstructionNode {
+    pub(crate) fn of(ability: &crate::types::ability::ResolvedAbility) -> Self {
+        Self {
+            kind: EffectKind::from(&ability.effect),
+            join: ability.instruction_join,
+        }
+    }
+}
+
+/// CR 608.2c: where a `ListSlot` node's instruction began — the start of the
+/// sibling that closed immediately before it, at the same scope depth, for the
+/// same verb, in the same buffer at the same length. Anything else (an `Own`
+/// node, a pause between the slots, an intervening node) opens a new
+/// instruction, whose window is never narrower than the list's.
+fn list_slot_start(
+    state: &GameState,
+    depth: usize,
+    node: InstructionNode,
+    events_len: usize,
+) -> Option<usize> {
+    match node.join {
+        InstructionJoin::Own => None,
+        InstructionJoin::ListSlot => state
+            .last_closed_instruction
+            .filter(|closed| {
+                closed.depth == depth
+                    && closed.kind == node.kind
+                    && closed.end == events_len
+                    && closed.start <= events_len
+            })
+            .map(|closed| closed.start),
+    }
+}
+
+/// CR 608.2c: the buffer index at which the innermost open instruction began,
+/// or `events_len` when none is open in this buffer.
+pub(crate) fn open_instruction_start(state: &GameState, events_len: usize) -> usize {
+    state
+        .instruction_scopes
+        .last()
+        .map(|scope| scope.start)
+        .filter(|&start| start <= events_len)
+        .unwrap_or(events_len)
 }
 
 /// CR 608.2c: the lead of an event about to be pushed at `events_len` in the
@@ -2327,7 +2395,7 @@ fn open_instruction_lead(state: &GameState, events_len: usize) -> Option<Instruc
 /// its record as the `ZoneChanged` is built, and on the per-turn ledger row
 /// `record_zone_change` already wrote, so both copies carry it before any
 /// claim or clone can see the record. Without an open instruction the record
-/// keeps `None` (the departure-window arm's whole-resolution window).
+/// keeps `None`, and the departure-window arm does not observe it.
 fn stamp_departure_instruction_lead(
     state: &mut GameState,
     record: &mut ZoneChangeRecord,
@@ -8088,9 +8156,9 @@ mod instruction_scope_tests {
         let mut events = vec![GameEvent::PriorityPassed {
             player_id: PlayerId(0),
         }];
-        within_instruction(&mut state, &mut events, |state, events| {
+        within_instruction(&mut state, &mut events, None, |state, events| {
             move_to_zone(state, first, Zone::Graveyard, events);
-            within_instruction(state, events, |state, events| {
+            within_instruction(state, events, None, |state, events| {
                 move_to_zone(state, second, Zone::Graveyard, events);
             });
         });
@@ -8114,7 +8182,7 @@ mod instruction_scope_tests {
         let first = battlefield_creature(&mut state, "First");
         let second = battlefield_creature(&mut state, "Second");
         let mut events = Vec::new();
-        within_instruction(&mut state, &mut events, |state, events| {
+        within_instruction(&mut state, &mut events, None, |state, events| {
             move_to_zone(state, first, Zone::Graveyard, events);
             move_to_zone(state, second, Zone::Graveyard, events);
             let at = events
@@ -8155,7 +8223,7 @@ mod instruction_scope_tests {
         state.instruction_scopes.push(OpenInstruction { start: 0 });
         let base = state.clone();
         let mut events = Vec::new();
-        within_instruction(&mut state, &mut events, |state, _| {
+        within_instruction(&mut state, &mut events, None, |state, _| {
             *state = base;
         });
         assert_eq!(state.instruction_scopes, vec![OpenInstruction { start: 0 }]);
@@ -8166,5 +8234,124 @@ mod instruction_scope_tests {
     fn start_index_saturates() {
         assert_eq!(InstructionLead(2).start_index(5), 3);
         assert_eq!(InstructionLead(7).start_index(5), 0);
+    }
+
+    fn node(kind: EffectKind, join: InstructionJoin) -> Option<InstructionNode> {
+        Some(InstructionNode { kind, join })
+    }
+
+    /// CR 608.2c: a `ListSlot` node continues the instruction its directly
+    /// preceding same-verb sibling began, so its departure's lead counts the
+    /// earlier slot's events; an `Own` node with the same verb opens anew.
+    #[test]
+    fn a_list_slot_continues_the_preceding_slots_instruction() {
+        let mut state = GameState::new_two_player(42);
+        let first = battlefield_creature(&mut state, "First");
+        let second = battlefield_creature(&mut state, "Second");
+        let third = battlefield_creature(&mut state, "Third");
+        let mut events = vec![GameEvent::PriorityPassed {
+            player_id: PlayerId(0),
+        }];
+        let destroy = EffectKind::Destroy;
+        within_instruction(
+            &mut state,
+            &mut events,
+            node(destroy, InstructionJoin::Own),
+            |state, events| move_to_zone(state, first, Zone::Graveyard, events),
+        );
+        within_instruction(
+            &mut state,
+            &mut events,
+            node(destroy, InstructionJoin::ListSlot),
+            |state, events| move_to_zone(state, second, Zone::Graveyard, events),
+        );
+        within_instruction(
+            &mut state,
+            &mut events,
+            node(destroy, InstructionJoin::Own),
+            |state, events| move_to_zone(state, third, Zone::Graveyard, events),
+        );
+        let at = |id: ObjectId| {
+            events
+                .iter()
+                .position(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == id)
+                })
+                .unwrap()
+        };
+        let (first_at, second_at) = (at(first), at(second));
+        assert!(
+            second_at > first_at,
+            "reach: the second slot ran after the first"
+        );
+        assert_eq!(
+            departure_record(&events, second).instruction_lead,
+            Some(InstructionLead(second_at - 1)),
+            "the list slot's instruction began where the first slot's did"
+        );
+        assert_eq!(
+            departure_record(&events, third).instruction_lead,
+            Some(InstructionLead(0)),
+            "an Own node is an instruction of its own"
+        );
+    }
+
+    /// A `ListSlot` whose preceding sibling used another verb, ran at another
+    /// depth, or closed at another buffer length (an intervening event, a
+    /// pause into a later action's buffer) falls back to a new instruction.
+    #[test]
+    fn a_list_slot_without_its_direct_sibling_opens_a_new_instruction() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = vec![GameEvent::PriorityPassed {
+            player_id: PlayerId(0),
+        }];
+        let slot = InstructionNode {
+            kind: EffectKind::Destroy,
+            join: InstructionJoin::ListSlot,
+        };
+        // Different verb.
+        state.last_closed_instruction = Some(ClosedInstruction {
+            depth: 0,
+            kind: EffectKind::Tap,
+            start: 0,
+            end: 1,
+        });
+        assert_eq!(list_slot_start(&state, 0, slot, 1), None);
+        // Different depth.
+        state.last_closed_instruction = Some(ClosedInstruction {
+            depth: 1,
+            kind: EffectKind::Destroy,
+            start: 0,
+            end: 1,
+        });
+        assert_eq!(list_slot_start(&state, 0, slot, 1), None);
+        // Stale: closed at another buffer length.
+        state.last_closed_instruction = Some(ClosedInstruction {
+            depth: 0,
+            kind: EffectKind::Destroy,
+            start: 0,
+            end: 4,
+        });
+        assert_eq!(list_slot_start(&state, 0, slot, 1), None);
+        let id = battlefield_creature(&mut state, "Slot");
+        within_instruction(&mut state, &mut events, Some(slot), |state, events| {
+            move_to_zone(state, id, Zone::Graveyard, events)
+        });
+        assert_eq!(
+            departure_record(&events, id).instruction_lead,
+            Some(InstructionLead(0)),
+            "the fallback is a fresh instruction"
+        );
+        // The direct sibling is reused.
+        state.last_closed_instruction = Some(ClosedInstruction {
+            depth: 0,
+            kind: EffectKind::Destroy,
+            start: 0,
+            end: 1,
+        });
+        assert_eq!(list_slot_start(&state, 0, slot, 1), Some(0));
+        // A non-node scope breaks the run.
+        within_instruction(&mut state, &mut events, None, |_, _| {});
+        assert_eq!(state.last_closed_instruction, None);
     }
 }

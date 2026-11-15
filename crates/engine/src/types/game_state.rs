@@ -1797,7 +1797,7 @@ pub struct ZoneChangeRecord {
     /// the instruction that moved this object were emitted before this record's
     /// `ZoneChanged`. Written once, when the event is built
     /// (`zones::move_to_zone`); `None` when no instruction scope was open, in
-    /// which case the departure-window arm keeps its whole-resolution window.
+    /// which case the departure-window arm does not observe it (fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_lead: Option<InstructionLead>,
     /// CR 400.7: the entrant's incarnation captured AFTER its battlefield-entry
@@ -2068,6 +2068,22 @@ impl InstructionLead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenInstruction {
     pub start: usize,
+}
+
+/// CR 608.2c: the effect node whose instruction scope closed last, so a
+/// following `InstructionJoin::ListSlot` sibling can continue the same
+/// instruction. Execution-local (`GameState::last_closed_instruction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosedInstruction {
+    /// Scope-stack depth the node ran at (its siblings run at the same depth).
+    pub depth: usize,
+    /// The node's effect kind: a list slot continues only a slot of its verb.
+    pub kind: crate::types::ability::EffectKind,
+    /// Buffer index at which the instruction began.
+    pub start: usize,
+    /// Buffer length when the node's scope closed. A sibling that opens at a
+    /// different length did not directly follow it in the same buffer.
+    pub end: usize,
 }
 
 impl ZoneChangeRecord {
@@ -26587,6 +26603,14 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) instruction_scopes: Vec<OpenInstruction>,
 
+    /// CR 608.2c: the effect node whose instruction scope closed last, read by
+    /// the next `InstructionJoin::ListSlot` sibling to continue that
+    /// instruction (`zones::within_instruction`). Execution-local like
+    /// `instruction_scopes`; a value left over from an earlier action can only
+    /// be reused at the exact buffer length it closed at.
+    #[serde(skip)]
+    pub(crate) last_closed_instruction: Option<ClosedInstruction>,
+
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -35331,6 +35355,7 @@ impl GameState {
             resolving_player_scope_tail: None,
             resolving_created_token_seats: None,
             instruction_scopes: Vec::new(),
+            last_closed_instruction: None,
             merged_card_component_route: None,
             leaving_game_departure: None,
             resolution_coin_flip: None,
@@ -40922,6 +40947,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_player_scope_tail: _,
         resolving_created_token_seats: _,
         instruction_scopes: _,
+        last_closed_instruction: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
         resolution_coin_flip: _,

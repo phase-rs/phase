@@ -4443,8 +4443,8 @@ pub(crate) struct ObservedDeparture {
     /// began, in `presence_start..=before_count`. Events from here up to the
     /// departure are part of the event that moved the observer; it does not
     /// exist immediately after them, so only look-back triggers see them
-    /// (CR 603.10). Equals `before_count` when the record carries no
-    /// instruction lead.
+    /// (CR 603.10). A departure without an instruction lead is not observed
+    /// at all (`ActionDepartures::from_positions`).
     instruction_start: usize,
     /// The departure's own record. Its source context is the observer, as it
     /// last existed on the battlefield (CR 608.2h).
@@ -4524,15 +4524,38 @@ impl ActionDepartures {
                 // CR 608.2c: the lead was written when the departure was emitted,
                 // relative to its own position. The window can never reach
                 // before this action or the departing incarnation's presence.
-                let instruction_start = match record.instruction_lead {
-                    Some(lead) => collector_index(lead.start_index(raw_idx).max(raw_start))
-                        .clamp(presence_start, before_count),
-                    None => {
-                        #[cfg(feature = "test-support")]
-                        super::perf_counters::record_unstamped_departure();
-                        before_count
-                    }
+                //
+                // Fail-closed for an unstamped departure (no lead): without the
+                // instruction's start the arm cannot tell the departing
+                // instruction's own events from the earlier instructions', so it
+                // admits none of them — the observer keeps only the CR 603.10a
+                // look-back arms, as before the departure window existed. Its
+                // own instruction may have made the very events it would see
+                // (Barter in Blood: Kalitas's Zombies enter in the one
+                // simultaneous sacrifice that also moves Soul Warden).
+                //
+                // SCAFFOLDING (follow-up issue): the producers that still emit
+                // battlefield departures outside an instruction scope, and so
+                // lose the window here, are the choice-resume completions
+                // (`advance_pending_player_scope_sacrifice_choice`,
+                // `perform_collected_player_scope_sacrifices_with_completion`
+                // from engine_resolution_choices.rs, the EffectZoneChoice /
+                // `sacrifice_unchosen` completions, the destroy and
+                // player-scope sacrifice resumes after a replacement choice,
+                // `drain_pending_batch_deliveries`), state-based actions
+                // (sba.rs), cost payment (casting_costs.rs), boss.rs hero
+                // events and player elimination (elimination.rs). Threading an
+                // instruction scope (with the carried lead of a paused
+                // instruction) through each of them restores the window there;
+                // `perf_counters::record_unstamped_departure` counts what is
+                // left.
+                let Some(lead) = record.instruction_lead else {
+                    #[cfg(feature = "test-support")]
+                    super::perf_counters::record_unstamped_departure();
+                    return None;
                 };
+                let instruction_start = collector_index(lead.start_index(raw_idx).max(raw_start))
+                    .clamp(presence_start, before_count);
                 Some(ObservedDeparture {
                     before_count,
                     presence_start,

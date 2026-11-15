@@ -9265,6 +9265,7 @@ fn instruction_outlives_declined_gate(
         sub_ability: _,
         sub_link: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // CR 611.2e: when the instruction's continuous effect starts, not what
         // it names.
         entry_onset: _,
@@ -13815,30 +13816,31 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         // ---- inert for a seat: bound `_` with a one-line justification ----
         optional_player: _, // selects the optional actor; `optional` records the choice
         sibling_condition: _, // replication marker for `condition`, evaluates nothing itself
-        player_scope: _,    // cleared on the per-seat template by the split
-        starting_with: _,   // APNAP start of the fan-out, fixed before the first seat
-        announced_x: _,     // announce-time count
-        multi_target: _,    // announce-time target-count bounds
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        player_scope: _,     // cleared on the per-seat template by the split
+        starting_with: _,    // APNAP start of the fan-out, fixed before the first seat
+        announced_x: _,      // announce-time count
+        multi_target: _,     // announce-time target-count bounds
         target_constraints: _, // announce-time cross-target legality
-        distribution: _,    // announce-time portions
-        distribute: _,      // announce-time division
-        targets: _,         // announced targets, already resolved
+        distribution: _,     // announce-time portions
+        distribute: _,       // announce-time division
+        targets: _,          // announced targets, already resolved
         declares_chosen_group: _, // announce-time identity
         reads_chosen_group: _, // bound selected targets
         declares_return_result: _, // publication marker
         reads_return_result: _, // consumes a settled value
-        source_id: _,       // object id
-        cast_occurrence: _, // cast provenance
+        source_id: _,        // object id
+        cast_occurrence: _,  // cast provenance
         source_incarnation: _, // self-transform epoch latch
         announced_source_incarnation: _, // announcement-time source epoch
         chosen_target_slots: _, // CR 115.1 announced-target record
         noted_mana_payment: _, // activation-payment snapshot
-        trigger_source: _,  // trigger provenance
+        trigger_source: _,   // trigger provenance
         trigger_definition_ref: _, // trigger provenance
-        delayed_origin: _,  // delayed-trigger identity
+        delayed_origin: _,   // delayed-trigger identity
         force_block_attacker: _, // force-block referent
         target_incarnations: _, // CR 400.7 referent pins
-        target_pins: _,     // CR 400.7 selected-target pins
+        target_pins: _,      // CR 400.7 selected-target pins
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
@@ -14586,15 +14588,20 @@ pub fn resolve_effect(
 
 /// CR 608.2c: each effect node is one instruction of its spell or ability, so
 /// it runs inside its own instruction scope (`zones::within_instruction`); the
-/// battlefield departures it emits record where that instruction began.
+/// battlefield departures it emits record where that instruction began. A
+/// node the parser marked as a further slot of a target list
+/// (`InstructionJoin::ListSlot`) continues its preceding slot's instruction.
 fn resolve_effect_step(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<EffectStep, EffectError> {
-    crate::game::zones::within_instruction(state, events, |state, events| {
-        resolve_effect_node(state, ability, events)
-    })
+    crate::game::zones::within_instruction(
+        state,
+        events,
+        Some(crate::game::zones::InstructionNode::of(ability)),
+        |state, events| resolve_effect_node(state, ability, events),
+    )
 }
 
 fn resolve_effect_node(
@@ -22155,7 +22162,18 @@ fn start_player_scope_sacrifice_choices(
         }
     }
 
-    match perform_player_scope_sacrifices(state, template, selections, None, events)? {
+    // CR 608.2c + CR 101.4: with every choice already made, the simultaneous
+    // sacrifice is this node's one instruction, carried out synchronously; it
+    // bypasses `resolve_effect_step`, so it opens the node's instruction scope
+    // itself. A sacrifice completed after a choice prompt resumes in a later
+    // action outside any scope (unstamped, see `ActionDepartures`).
+    let performed = crate::game::zones::within_instruction(
+        state,
+        events,
+        Some(crate::game::zones::InstructionNode::of(template)),
+        |state, events| perform_player_scope_sacrifices(state, template, selections, None, events),
+    )?;
+    match performed {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
             // CR 608.2c: park the detached tail before suspension, mirroring
             // the prompt arm above — the resumed drain completes through

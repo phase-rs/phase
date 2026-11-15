@@ -237,6 +237,41 @@ fn vengeful_regrowth_returns_its_targets_and_creates_that_many_plants() {
     assert_eq!(tokens_named(&runner, "Plant Warrior"), 2);
 }
 
+/// CR 608.2b: a target that became illegal as the spell resolves is not
+/// affected, while a sibling target that is still legal is. Both lands are
+/// declared through the production cast path; one leaves the graveyard while
+/// Vengeful Regrowth is on the stack, so one land returns and "that many"
+/// Plant Warriors is 1 (not the 2 targets declared).
+#[test]
+fn vengeful_regrowth_with_one_target_invalidated_returns_the_legal_sibling_only() {
+    let Some((mut runner, regrowth, lands)) = regrowth_board() else {
+        return;
+    };
+    let commit = runner.cast(regrowth).target_objects(&lands).commit();
+    let mut events = commit.events().to_vec();
+    let mut scratch = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), lands[0], Zone::Exile, &mut scratch);
+    assert_eq!(
+        runner.state().objects[&lands[0]].zone,
+        Zone::Exile,
+        "reach: the first target left the graveyard while the spell was on the stack"
+    );
+    pass_until(&mut runner, &mut events, |r| {
+        !r.state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == regrowth)
+    });
+    assert_eq!(
+        runner.state().objects[&lands[0]].zone,
+        Zone::Exile,
+        "the illegal target is untouched"
+    );
+    assert_eq!(runner.state().objects[&lands[1]].zone, Zone::Battlefield);
+    assert_eq!(tokens_named(&runner, "Plant Warrior"), 1);
+    assert_eq!(runner.state().last_effect_count, Some(1));
+}
+
 // ---------------------------------------------------------------------------
 // CR 400.7: an untargeted "it" whose referent was the source, after the source
 // changed zones (inferred-source guard).

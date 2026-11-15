@@ -223,7 +223,7 @@ pub struct DepartureWindowCounters {
     pub in_instruction_cuts: u64,
     /// Battlefield departures with no instruction lead: emitted outside any
     /// instruction scope, or read by the departure-window arm without one.
-    /// Their window falls back to the whole resolution.
+    /// The departure-window arm does not observe them (fail-closed).
     pub unstamped_departures: u64,
 }
 
