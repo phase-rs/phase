@@ -191,6 +191,7 @@ pub fn resolve(
                 .collect();
             events.push(GameEvent::CardsRevealed {
                 player: ability.controller,
+                occurrences: state.disclosed_occurrences(&cards),
                 card_ids: cards.clone(),
                 card_names,
             });
@@ -230,6 +231,7 @@ pub fn resolve(
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&cards),
             card_ids: cards.clone(),
             card_names,
         });
