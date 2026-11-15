@@ -213,14 +213,14 @@ fn four_pre_blink_activations_arm_the_delayed_sacrifice() {
         runner.state().delayed_triggers.is_empty(),
         "the delayed trigger fired at the end step"
     );
-    // The blink keeps the `ObjectId` and bumps the incarnation; the
-    // sacrifice names the source by id, so the returned Whelp — the same
-    // storage object the trigger's SelfRef resolves to — is sacrificed by the
-    // pre-existing sacrifice machinery (orthogonal to the tally fix).
+    // CR 603.7c + CR 400.7: the delayed trigger was created by the
+    // pre-blink incarnation's activation, so its SelfRef names that departed
+    // object — not the returned Whelp, which is a new object. The sacrifice
+    // epoch guard rejects the successor and the returned Whelp survives.
     assert_eq!(
         zone_of(&runner, whelp),
-        Zone::Graveyard,
-        "the armed delayed trigger sacrifices the returned Whelp at the end step"
+        Zone::Battlefield,
+        "the fired delayed trigger must not sacrifice the returned Whelp"
     );
 }
 

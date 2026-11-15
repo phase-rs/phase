@@ -18,8 +18,11 @@ use crate::types::zones::Zone;
 /// that ability's own capture — the exact incarnation that triggered, whose
 /// history and last known information answer source-relative questions
 /// ("creatures it blocked this turn", CR 113.7a). Spell and activated-ability
-/// sources carry no trigger provenance, so their current incarnation is
-/// captured here rather than later rebinding the stored `ObjectId`.
+/// sources carry no trigger provenance, so the storage object's incarnation is
+/// captured here rather than later rebinding the stored `ObjectId` — except an
+/// activated ability announced before a blink names its announced incarnation
+/// (CR 603.7c), so the epoch guards compare against the creator, not a
+/// successor that entered since.
 ///
 /// When the source changed zones before the delayed ability is created, the
 /// binding follows it only if the creating ability can find the new object it
@@ -35,10 +38,17 @@ pub(crate) fn delayed_source_context(
     delayed_source_id: ObjectId,
 ) -> Option<TriggerSourceContext> {
     let mut source_context = ability.trigger_source.clone().or_else(|| {
-        state
-            .objects
-            .get(&ability.source_id)
-            .map(|source| crate::game::triggers::trigger_source_context_for_latch(state, source))
+        let source = state.objects.get(&ability.source_id)?;
+        let mut context =
+            crate::game::triggers::trigger_source_context_for_latch(state, source);
+        // CR 603.7c: an activated ability's delayed child names the announced
+        // source incarnation, not whatever the storage id holds now. A blink
+        // between announcement and resolution leaves a successor that is a new
+        // object (CR 400.7); the epoch guards compare against this capture.
+        if let Some(announced) = ability.announced_source_incarnation {
+            context.identity.reference.incarnation = announced;
+        }
+        Some(context)
     })?;
     // The successor verdict is about `ability.source_id`, so it may only move a
     // capture of that same object: a forwarded `CreateBoon` child can carry a
