@@ -8735,13 +8735,41 @@ pub struct PendingTokenEventDelivery {
     pub source_id: ObjectId,
 }
 
+/// Delivery policy for entry events after a copied entry choice resumes.
+/// Serialized as the original v14 boolean to preserve saved continuations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum EntryEventReplay {
+    Required,
+    AlreadyDelivered,
+}
+
+impl From<bool> for EntryEventReplay {
+    fn from(required: bool) -> Self {
+        if required {
+            Self::Required
+        } else {
+            Self::AlreadyDelivered
+        }
+    }
+}
+
+impl From<EntryEventReplay> for bool {
+    fn from(replay: EntryEventReplay) -> Self {
+        match replay {
+            EntryEventReplay::Required => true,
+            EntryEventReplay::AlreadyDelivered => false,
+        }
+    }
+}
+
 /// CR 614.12a + CR 607.2d: counter evaluation held until an acquired entry
 /// choice has bound its answer. `None` exceptions retains the meld-only policy;
 /// `Some` retains the merged placement policy, including an empty exception list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyEntryPendingCounters {
     pub exceptions: Option<Vec<ContinuousModification>>,
-    pub replay_entry_events: bool,
+    pub replay_entry_events: EntryEventReplay,
 }
 
 /// CR 707.5 + CR 614.12a: remaining work for a copied as-enters choice.
