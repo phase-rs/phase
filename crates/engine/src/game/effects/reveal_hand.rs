@@ -201,6 +201,7 @@ pub fn resolve(
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: target_player,
+            occurrences: state.disclosed_occurrences(&hand),
             card_ids: hand.clone(),
             card_names,
         });

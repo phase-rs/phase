@@ -1273,6 +1273,7 @@
       "draw": "DRAW",
       "victory": "VICTORY",
       "defeat": "DEFEAT",
+      "complete": "GAME OVER",
       "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turns: {{count}}",
       "duration": "Duration: {{time}}",
@@ -2689,6 +2690,7 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
+    "fromCompanion": "From companion",
     "fromSideboard": "From sideboard",
     "fromBoosterPack": "From {{setCode}} booster pack",
     "fromCubeBoosterPack": "From a Cube booster pack"

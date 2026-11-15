@@ -856,6 +856,7 @@ fn deliver_collected_cards(
                     .iter()
                     .filter_map(|id| state.objects.get(id).map(|object| object.name.clone()))
                     .collect(),
+                occurrences: state.disclosed_occurrences(&card_ids),
                 card_ids,
             });
         }

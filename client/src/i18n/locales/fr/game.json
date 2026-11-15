@@ -1240,6 +1240,7 @@
       "draw": "MATCH NUL",
       "victory": "VICTOIRE",
       "defeat": "DÉFAITE",
+      "complete": "PARTIE TERMINÉE",
       "lifeSummary": "Vous : <player>{{playerLife}}</player> <sep>/</sep> Adversaire : <opponent>{{opponentLife}}</opponent>",
       "turns": "Tours : {{count}}",
       "duration": "Durée : {{time}}",
@@ -2651,6 +2652,7 @@
   },
   "outsideGame": {
     "fromExile": "Depuis l'exil",
+    "fromCompanion": "Depuis le compagnon",
     "fromSideboard": "Depuis la réserve",
     "fromBoosterPack": "D'un booster {{setCode}}",
     "fromCubeBoosterPack": "D'un booster du cube"

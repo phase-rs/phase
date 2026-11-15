@@ -52,6 +52,14 @@ export interface DraftRunState {
   lastOpponentSeat?: number;
   /** Exact engine tokens; an empty array is authoritative, absence is legacy. */
   draft_set_codes?: string[];
+  /**
+   * CR 100.2b + CR 702.139b: the draft session's resolved minimum deck size at
+   * launch (a Cube may configure other than 40). The match's format config
+   * carries it so the engine's "minimum deck size" companion condition reads
+   * the session's value. Absent in legacy records, which keep the format's.
+   */
+  min_deck_size?: number;
+  companion?: string | null;
   activeMatch?: DraftRunActiveMatch;
 }
 
@@ -90,8 +98,8 @@ export interface DraftMatchPayload {
    * Cube source applies.
    */
   booster_pack_pool?: string[] | null;
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
   ai_decks: never[];
 }
 

@@ -1240,6 +1240,7 @@
       "draw": "EMPATE",
       "victory": "VITÓRIA",
       "defeat": "DERROTA",
+      "complete": "FIM DE JOGO",
       "lifeSummary": "Você: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duração: {{time}}",
@@ -2651,6 +2652,7 @@
   },
   "outsideGame": {
     "fromExile": "Do exílio",
+    "fromCompanion": "Do companheiro",
     "fromSideboard": "Do sideboard",
     "fromBoosterPack": "De um booster de {{setCode}}",
     "fromCubeBoosterPack": "De um booster do cube"

@@ -2022,6 +2022,10 @@ pub fn fallback_action(
                                 pack_slot: *pack_slot,
                             }
                         }
+                        // CR 702.139a: the revealed companion is one card.
+                        OutsideGameChoiceSource::Companion { .. } => {
+                            OutsideGameSelection::Companion
+                        }
                     })
                 })
                 .take(*count)
@@ -9209,6 +9213,7 @@ mod tests {
                     },
                     target: TargetFilter::Player,
                     destination: Zone::Graveyard,
+                    position: engine::types::ability::LibraryPosition::Top,
                 },
             ),
         ];

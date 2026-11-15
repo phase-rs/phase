@@ -663,6 +663,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut exile_dup = false;
             let mut pack_slots_seen: HashSet<usize> = HashSet::new();
             let mut pack_slot_dup = false;
+            let mut companion_selections = 0usize;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -678,8 +679,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                             pack_slot_dup = true;
                         }
                     }
+                    OutsideGameSelection::Companion => companion_selections += 1,
                 }
             }
+            let bad_companion = companion_selections > 1
+                || (companion_selections == 1
+                    && !choices.iter().any(|choice| {
+                        matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                    }));
             let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
                 choices
                     .iter()
@@ -705,7 +712,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
                 ))
             });
-            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
+            !valid_count
+                || exile_dup
+                || pack_slot_dup
+                || bad_sideboard
+                || bad_exile
+                || bad_pack_slot
+                || bad_companion
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
