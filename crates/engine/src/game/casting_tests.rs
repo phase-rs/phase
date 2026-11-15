@@ -15984,13 +15984,13 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         },
     )
     .expect("cast should reach alternative-cost choice");
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
-            ..
-        }
-    ));
+    let WaitingFor::OptionalCostChoice { cost, .. } = &state.waiting_for else {
+        panic!("expected OptionalCostChoice");
+    };
+    let AdditionalCost::Choice(costs) = cost else {
+        panic!("expected AdditionalCost::Choice");
+    };
+    assert!(costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })));
 
     crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("paying alternative life cost should cast");
@@ -16023,7 +16023,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             shards: vec![ManaCostShard::Black],
             generic: 1,
         };
-        spell.additional_cost = Some(AdditionalCost::Choice(
+        spell.additional_cost = Some(AdditionalCost::Choice(vec![
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -16033,7 +16033,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 3 },
             },
-        ));
+        ]));
         let abilities = Arc::make_mut(&mut spell.abilities);
         abilities.clear();
         abilities.push(AbilityDefinition::new(
@@ -16180,19 +16180,16 @@ fn cast_without_mana_cost_option_checks_commander_control() {
             payment_mode: CastPaymentMode::Auto,
         },
     )
-    .expect("cast should reach the free-cast choice");
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(
-                AbilityCost::Mana {
-                    cost: ManaCost::NoCost
-                },
-                _
-            ),
-            ..
-        }
-    ));
+.expect("cast should reach the free-cast choice");
+    let WaitingFor::OptionalCostChoice { cost, .. } = &state.waiting_for else {
+        panic!("expected OptionalCostChoice");
+    };
+    let AdditionalCost::Choice(costs) = cost else {
+        panic!("expected AdditionalCost::Choice");
+    };
+    // Free cast option: choice between normal mana cost and ManaCost::NoCost
+    assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { cost: ManaCost::NoCost })));
+    assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { cost: ManaCost::Cost { .. } })));
 
     crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("choosing the free-cast branch should cast the spell");
@@ -16295,13 +16292,13 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         },
     )
     .expect("Snuff Out should reach the alternative-cost choice");
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
-            ..
-        }
-    ));
+    let WaitingFor::OptionalCostChoice { cost, .. } = &state.waiting_for else {
+        panic!("expected OptionalCostChoice");
+    };
+    let AdditionalCost::Choice(costs) = cost else {
+        panic!("expected AdditionalCost::Choice");
+    };
+    assert!(costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })));
 
     crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("paying 4 life should commit Snuff Out to the stack");
@@ -16421,7 +16418,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
     assert_eq!(*player, PlayerId(0));
     assert_eq!(
         *cost,
-        AdditionalCost::Choice(
+        AdditionalCost::Choice(vec![
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 4 },
             },
@@ -16431,7 +16428,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
                     generic: 3,
                 },
             },
-        )
+        ])
     );
     // CR 601.2c: the pending announcement retains this spell and its one target.
     assert_eq!(pending_cast.object_id, spell_id);
@@ -19332,14 +19329,14 @@ fn assist_only_affordability_remains_offered_through_choose_player_and_payment()
             player: Some(PlayerId(1)),
         },
     )
-    .expect("the helper must be selectable");
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::AssistPayment {
-            chosen: PlayerId(1),
-            ..
-        }
-    ));
+.expect("the helper must be selectable");
+    let WaitingFor::AssistPayment { caster, chosen, max_generic, .. } = &state.waiting_for else {
+        panic!("expected AssistPayment, got {:?}", state.waiting_for);
+    };
+    assert_eq!(*caster, PlayerId(0));
+    assert_eq!(*chosen, PlayerId(1));
+    // max_generic mirrors the spell's generic mana cost ({3}{R} = 3 generic)
+    assert_eq!(*max_generic, 3);
 }
 
 #[test]
@@ -26019,16 +26016,17 @@ fn kicked_spell_reducer_makes_kicker_offerable() {
     add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
 
     let mut events = Vec::new();
-    state.waiting_for =
+state.waiting_for =
         handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
 
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Kicker { .. },
-            ..
-        }
-    ));
+    let WaitingFor::OptionalCostChoice { cost, .. } = &state.waiting_for else {
+        panic!("expected OptionalCostChoice");
+    };
+    let AdditionalCost::Kicker { costs, .. } = cost else {
+        panic!("expected AdditionalCost::Kicker");
+    };
+    // Kicker cost is mana, not life
+    assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
     assert!(state.pending_cast.is_none());
 }
 
@@ -27789,7 +27787,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
         .add_spell_to_hand(P0, "One-Of Cost Offer Spell", false)
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text("Draw a card.")
-        .with_additional_cost(AdditionalCost::Choice(
+        .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 1 },
             },
@@ -27799,7 +27797,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             },
-        ))
+        ]))
         .id();
     let mut runner = scenario.build();
     let action = GameAction::CastSpell {
@@ -27817,7 +27815,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
     runner.act(action).expect("one-of-cost cast must start");
     let WaitingFor::OptionalCostChoice {
         pending_cast,
-        cost: AdditionalCost::Choice(_, _),
+        cost: AdditionalCost::Choice(_),
         ..
     } = &runner.state().waiting_for
     else {
@@ -39486,14 +39484,13 @@ mod remove_counter_cost {
                 targets: vec![selected_target],
             },
         )
-        .unwrap();
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::PayCost {
-                kind: PayCostKind::RemoveCounter { .. },
-                ..
-            }
-        ));
+.unwrap();
+    let WaitingFor::PayCost { kind, choices, count, .. } = &state.waiting_for else {
+        panic!("expected PayCost, got {:?}", state.waiting_for);
+    };
+    assert!(matches!(kind, PayCostKind::RemoveCounter { .. }));
+    assert!(!choices.is_empty());
+    assert_eq!(*count, 1);
 
         apply_as_current(
             &mut state,
@@ -56587,15 +56584,10 @@ fn graveyard_paid_cast_any_color_survives_offer_and_pays_off_color() {
                     ..
                 }
             )),
-        "acceptance must stamp the typed, player-bound ExileWithAltCost grant"
+"acceptance must stamp the typed, player-bound ExileWithAltCost grant"
     );
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::ManaPayment {
-            player: PlayerId(0),
-            ..
-        }
-    ));
+    // After accepting a graveyard paid cast offer, the player pays mana.
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
 
     apply_as_current(&mut state, GameAction::PassPriority)
         .expect("red mana must pay {U} under the carried AnyColor concession");

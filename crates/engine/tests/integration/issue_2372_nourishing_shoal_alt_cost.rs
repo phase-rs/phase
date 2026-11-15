@@ -85,7 +85,7 @@ fn nourishing_shoal_cast_surfaces_pitch_alternative_choice() {
         matches!(
             result.waiting_for,
             WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(_, _),
+                cost: AdditionalCost::Choice(_),
                 ..
             }
         ),
