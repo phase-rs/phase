@@ -397,6 +397,7 @@ mod myriad_landscape_shared_land_type;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
 mod nadu_lavaspur_boots_max_times;
+mod nahiri_storm_of_stone_equip_discount;
 mod najeela_extra_combat_grant_2898;
 mod name_comparison_filters;
 mod name_sticker_goblin;

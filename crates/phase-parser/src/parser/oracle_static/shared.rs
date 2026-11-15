@@ -6,6 +6,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::BlockPairDirection;
+use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
@@ -3013,6 +3014,90 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
     Some(vec![cast_def, activate_def])
 }
 
+/// The head of an activated-ability cost clause conjoined to a preceding grant:
+/// "and <kind> abilities <scope> activate cost …". Returns the clause after the
+/// conjunction ("<kind> abilities <scope> activate cost …").
+fn parse_and_ability_cost_conjunct(input: &str) -> OracleResult<'_, &str> {
+    let (clause, _) = tag("and ").parse(input)?;
+    // The conjunct must sit in the conjunction's own sentence.
+    let (rest, sentence) = is_not(".").parse(clause)?;
+    let (head, _kind) = take_until(" abilities ").parse(sentence)?;
+    let (head, _) = tag(" abilities ").parse(head)?;
+    let (head, _scope) = take_until(" activate cost").parse(head)?;
+    tag(" activate cost").parse(head)?;
+    Ok((rest, clause))
+}
+
+/// The cost clause must END at "to activate": the single-line activated-ability
+/// cost parser tolerates (and silently drops) trailing text, so anything after
+/// "to activate" in a compound line would be lost.
+fn parse_activate_cost_clause_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            take_until(" to activate"),
+            tag(" to activate"),
+            opt(tag(".")),
+            space0,
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 604.1 + CR 611.3a + CR 601.2f + CR 602.2b: Compound static that conjoins a
+/// continuous grant with an activated-ability cost modifier in one (optionally
+/// condition-scoped) sentence — "[<timing>,] <subject> <has|have|get|gets> <grant>
+/// and <kind> abilities <scope> activate cost {N} <less|more> to activate". The
+/// marquee member is Nahiri, Storm of Stone ("During your turn, creatures you
+/// control have first strike and equip abilities you activate cost {1} less to
+/// activate").
+///
+/// The single-return pipeline reads the whole predicate as a keyword list, so
+/// the cost conjunct never becomes a `ReduceAbilityCost`. This splits at the LAST
+/// "and" that opens an "<kind> abilities … activate cost" clause (so a multi-
+/// keyword grant such as "flying and first strike and equip abilities …" keeps
+/// its whole grant list) and types each half through the single-line pipeline:
+/// the grant half must be a `Continuous` static and the cost half a
+/// `ReduceAbilityCost` static. CR 604.1: a leading timing condition scopes the
+/// whole conjunction; the grant half carries it, so it is propagated onto the
+/// conditionless cost half.
+///
+/// Fail closed: once the conjunct shape is recognized, any half that does not
+/// type (or a cost clause with text after "to activate") yields NO statics, so
+/// the line stays an honest gap rather than a grant with a dropped conjunct.
+fn parse_compound_grant_and_ability_cost_modifier(text: &str) -> Option<Vec<StaticDefinition>> {
+    let (offset, cost_clause, _) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(text, |i| {
+            parse_and_ability_cost_conjunct(i)
+        })?;
+    let grant_clause = text[..offset].trim_end();
+    Some(type_grant_and_ability_cost_halves(text, grant_clause, cost_clause).unwrap_or_default())
+}
+
+fn type_grant_and_ability_cost_halves(
+    text: &str,
+    grant_clause: &str,
+    cost_clause: &str,
+) -> Option<Vec<StaticDefinition>> {
+    parse_activate_cost_clause_tail(cost_clause).ok()?;
+    let mut grant_def = parse_static_line(grant_clause)?;
+    let mut cost_def = parse_static_line(cost_clause)?;
+    if !matches!(grant_def.mode, StaticMode::Continuous)
+        || grant_def.modifications.is_empty()
+        || !matches!(cost_def.mode, StaticMode::ReduceAbilityCost { .. })
+    {
+        return None;
+    }
+    // CR 604.1: the shared leading condition gates both halves identically.
+    if cost_def.condition.is_none() {
+        cost_def.condition = grant_def.condition.clone();
+    }
+    grant_def.description = Some(text.to_string());
+    cost_def.description = Some(text.to_string());
+    Some(vec![grant_def, cost_def])
+}
+
 /// Split "<subject> costs <…> to cast and can be cast as though it had flash"
 /// into the cast-cost clause (through "to cast") and the lowercase subject.
 fn parse_cost_and_flash_clauses(input: &str) -> OracleResult<'_, (&str, &str)> {
@@ -3174,6 +3259,15 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // timing condition. Must precede the single-return fallback, which keeps the
     // cast half and silently drops the "and abilities …" activate half.
     if let Some(defs) = parse_compound_spell_and_ability_cost_tax(&stripped) {
+        return defs;
+    }
+
+    // CR 604.1 + CR 611.3a + CR 601.2f: "[<timing>,] <subject> have <grant> and
+    // <kind> abilities <scope> activate cost {N} less to activate" (Nahiri, Storm
+    // of Stone) — one continuous grant + one activated-ability-cost static under
+    // the shared leading condition. Must precede the single-return fallback, which
+    // reads the cost conjunct as part of the keyword list.
+    if let Some(defs) = parse_compound_grant_and_ability_cost_modifier(&stripped) {
         return defs;
     }
 
