@@ -240,16 +240,16 @@ fn steward_grants_exiled_land_abilities_to_creatures() {
     assert_eq!(zone_of(&b.runner, b.steward), Zone::Battlefield);
 
     // (b) Forest {T}: Add {G}, Strip Mine {T}: Add {C} and its destroy ability,
-    // Breeding Pool {T}: Add {U} and {T}: Add {G}. The layer-6 grant dedups
-    // structurally identical abilities (Forest's and Breeding Pool's green
-    // abilities), leaving 4 distinct activated abilities on a creature with no
-    // printed abilities.
-    assert_eq!(activated_count(&b.runner, b.own_creature), 4);
+    // Breeding Pool {T}: Add {U} and {T}: Add {G}. CR 113.2c keeps one copy
+    // per granter, so Forest's green ability and Breeding Pool's green ability
+    // coexist via their distinct provider stamps, leaving 5 activated
+    // abilities on a creature with no printed abilities.
+    assert_eq!(activated_count(&b.runner, b.own_creature), 5);
     assert!(mana_ability_index(&b.runner, b.own_creature, ManaColor::Green).is_some());
     assert!(mana_ability_index(&b.runner, b.own_creature, ManaColor::Blue).is_some());
     assert!(has_destroy_ability(&b.runner, b.own_creature));
     // Steward is itself a creature you control.
-    assert_eq!(activated_count(&b.runner, b.steward), 4);
+    assert_eq!(activated_count(&b.runner, b.steward), 5);
 
     // The Maze of Ith stayed in the graveyard: its ability is not granted.
     assert!(!b.runner.state().objects[&b.own_creature]
