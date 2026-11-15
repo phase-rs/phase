@@ -419,6 +419,9 @@ mod tests {
         assert_eq!(free_interaction(&cards), (0, Vec::new()));
     }
 
+    // Synthetic faces. Mono mirrors Gut Shot {R/P}; Hybrid carries the {G/U/P}
+    // symbol printed on Tamiyo, Compleated Sage; Generic mirrors Dismember
+    // {1}{B/P}{B/P}; Mixed is a control shape pairing {R/P} with a plain {R}.
     #[test]
     fn free_interaction_counts_phyrexian_only_printed_costs() {
         let mut mono = face(
@@ -432,7 +435,7 @@ mod tests {
         let mut hybrid = face(
             "Hybrid Phyrexian",
             ManaCost::Cost {
-                shards: vec![ManaCostShard::PhyrexianRed, ManaCostShard::PhyrexianBlue],
+                shards: vec![ManaCostShard::PhyrexianGreenBlue],
                 generic: 0,
             },
         );
