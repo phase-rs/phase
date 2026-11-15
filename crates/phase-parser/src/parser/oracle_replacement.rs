@@ -4785,20 +4785,7 @@ fn is_as_enters_roll_prefix(def: &AbilityDefinition) -> bool {
         Effect::RollDie { results, .. } => results.is_empty(),
         _ => false,
     };
-    bare_roll
-        && def.sub_ability.is_none()
-        && def.condition.is_none()
-        && !def.optional
-        && def.optional_player.is_none()
-        && def.optional_for.is_none()
-        && def.unless_pay.is_none()
-        && def.else_ability.is_none()
-        && def.player_scope.is_none()
-        && def.repeat_for.is_none()
-        && def.repeat_until.is_none()
-        && def.modal.is_none()
-        && def.mode_abilities.is_empty()
-        && def.unlowered_guard.is_none()
+    bare_roll && def.sub_ability.is_none() && is_mandatory_unconditional_node(def)
 }
 
 /// CR 614.1c + CR 706.1: split a two-sentence "As ~ enters, roll <dice>.

@@ -67,6 +67,49 @@ pub struct PerfCounterSnapshot {
     pub sba_empty_battlefield_short_circuits: u64,
 }
 
+/// Work at the copy-entry view seam, separate from AI baseline counters.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyEntryWorkCounters {
+    pub full_state_board_builds: u64,
+    pub membership_probes: u64,
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static COPY_ENTRY_WORK_COUNTERS: Cell<CopyEntryWorkCounters> = const {
+        Cell::new(CopyEntryWorkCounters { full_state_board_builds: 0, membership_probes: 0 })
+    };
+}
+
+#[cfg(feature = "test-support")]
+pub fn copy_entry_work_snapshot() -> CopyEntryWorkCounters {
+    COPY_ENTRY_WORK_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_copy_entry_work_counters() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| cell.set(CopyEntryWorkCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_pre_entry_board_build() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.full_state_board_builds += 1;
+        cell.set(value);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_copy_entrant_membership_probe() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.membership_probes += 1;
+        cell.set(value);
+    });
+}
+
 /// Test-only cache-use counters for the homogeneous target-selection walk.
 ///
 /// Kept separate from [`PerfCounterSnapshot`], whose serialized field set powers

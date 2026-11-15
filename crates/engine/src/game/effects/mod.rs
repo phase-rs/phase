@@ -27715,6 +27715,13 @@ fn resolve_chain_body(
                 ability.effect,
                 Effect::RollDie { .. } | Effect::GiftDelivery { .. }
             ) || sub_clone.reads_return_result.is_some()
+                || matches!(
+                    ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                )
                 || state
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start)
@@ -27725,8 +27732,10 @@ fn resolve_chain_body(
                 // so insert it outside the whole child stack, at the boundary captured
                 // before resolving the producer. A named-result reader needs this because
                 // a replacement post-effect may have parked a continuation beneath the
-                // producer's batch frame; a copy-token producer parks its own batch owner
-                // at that boundary; a die roll parks its DieRoll frame, and a gift delivery
+                // producer's batch frame; a battlefield move must finish its entry
+                // replacements before its later instructions (Flash's payment);
+                // a copy-token producer parks its own batch owner at that boundary;
+                // a die roll parks its DieRoll frame, and a gift delivery
                 // (`gift_delivery::resolve`) its own completion, at the boundary captured
                 // before the producer, so the rest of the chain is inserted outside both.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);

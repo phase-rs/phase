@@ -803,9 +803,8 @@ fn handle_replacement_choice_inner(
                     // is recorded for the settled take.
                     if enters_battlefield {
                         flush_deferred_entry_events_into_priority_scan(state, object_id, events);
-                    } else {
-                        record_parked_land_play_completion(state, object_id);
                     }
+                    record_parked_land_play_completion(state, object_id);
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
                     if state.has_post_replacement_drain() {
@@ -4313,7 +4312,152 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
             source_id: attach_source_id,
             ..
         } => *attach_source_id == source_id,
-        _ => false,
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::SpellCast { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::Melded { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Milled { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::SagaChapterAbilityResolved { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => false,
     }
 }
 
@@ -4334,7 +4478,153 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
                 if parked_record.recorded_turn_number == record.recorded_turn_number
                     && parked_record.turn_zone_change_index == record.turn_zone_change_index
         ),
-        _ => parked == event,
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::SpellCast { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::Melded { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Milled { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::SagaChapterAbilityResolved { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => parked == event,
     }
 }
 
@@ -4632,7 +4922,152 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             GameEvent::ZoneChanged { record, .. } => {
                 entry_record_is_of_incarnation(record, entrant.incarnation)
             }
-            _ => true,
+            GameEvent::GameStarted
+            | GameEvent::HiddenSearchViewed { .. }
+            | GameEvent::TurnStarted { .. }
+            | GameEvent::ExtraTurnCreated { .. }
+            | GameEvent::PhaseChanged { .. }
+            | GameEvent::PriorityPassed { .. }
+            | GameEvent::SpellCast { .. }
+            | GameEvent::Mutated { .. }
+            | GameEvent::Augmented { .. }
+            | GameEvent::Melded { .. }
+            | GameEvent::SpellCopied { .. }
+            | GameEvent::XValueChosen { .. }
+            | GameEvent::AbilityActivated { .. }
+            | GameEvent::LifeChanged { .. }
+            | GameEvent::ManaAdded { .. }
+            | GameEvent::TappedForMana { .. }
+            | GameEvent::ManaAbilityProduced { .. }
+            | GameEvent::ManaPoolEmptied { .. }
+            | GameEvent::ManaBurn { .. }
+            | GameEvent::ManaRecolored { .. }
+            | GameEvent::PermanentTapped { .. }
+            | GameEvent::CreatureExerted { .. }
+            | GameEvent::CreatureEnlisted { .. }
+            | GameEvent::ArmyAmassed { .. }
+            | GameEvent::Foretold { .. }
+            | GameEvent::BecameForetold { .. }
+            | GameEvent::PlayerLost { .. }
+            | GameEvent::MulliganStarted
+            | GameEvent::CardsDrawn { .. }
+            | GameEvent::CardDrawn { .. }
+            | GameEvent::PermanentUntapped { .. }
+            | GameEvent::PermanentPhasedOut { .. }
+            | GameEvent::PermanentPhasedIn { .. }
+            | GameEvent::PlayerPhasedOut { .. }
+            | GameEvent::PlayerPhasedIn { .. }
+            | GameEvent::LandPlayed { .. }
+            | GameEvent::StackPushed { .. }
+            | GameEvent::StackResolved { .. }
+            | GameEvent::Discarded { .. }
+            | GameEvent::Milled { .. }
+            | GameEvent::DamageCleared { .. }
+            | GameEvent::GameOver { .. }
+            | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
+            | GameEvent::DamageDealt { .. }
+            | GameEvent::DamagePrevented { .. }
+            | GameEvent::SpellCountered { .. }
+            | GameEvent::CounterAdded { .. }
+            | GameEvent::SagaChapterAbilityResolved { .. }
+            | GameEvent::ObjectIntensified { .. }
+            | GameEvent::Evolved { .. }
+            | GameEvent::UnTellPerformed { .. }
+            | GameEvent::PhraseSaid { .. }
+            | GameEvent::GotchaSaid { .. }
+            | GameEvent::ObjectTouched { .. }
+            | GameEvent::CounterRemoved { .. }
+            | GameEvent::TokenCreated { .. }
+            | GameEvent::ObjectConjured { .. }
+            | GameEvent::CardCopyCreated { .. }
+            | GameEvent::CreatureDestroyed { .. }
+            | GameEvent::PermanentSacrificed { .. }
+            | GameEvent::ControllerChanged { .. }
+            | GameEvent::EffectResolved { .. }
+            | GameEvent::Unattached { .. }
+            | GameEvent::ContinuousEffectEnded { .. }
+            | GameEvent::AttackersDeclared { .. }
+            | GameEvent::BlockersDeclared { .. }
+            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+            | GameEvent::CombatTaxPaid { .. }
+            | GameEvent::CombatTaxDeclined { .. }
+            | GameEvent::BecomesTarget { .. }
+            | GameEvent::VehicleCrewed { .. }
+            | GameEvent::Stationed { .. }
+            | GameEvent::Saddled { .. }
+            | GameEvent::ReplacementApplied { .. }
+            | GameEvent::Transformed { .. }
+            | GameEvent::Flipped { .. }
+            | GameEvent::Specialized { .. }
+            | GameEvent::DayNightChanged { .. }
+            | GameEvent::TurnedFaceUp { .. }
+            | GameEvent::TurnedFaceDown { .. }
+            | GameEvent::CardsRevealed { .. }
+            | GameEvent::ChosenNumbersRevealed { .. }
+            | GameEvent::CombatDamageDealtToPlayer { .. }
+            | GameEvent::PlayerEliminated { .. }
+            | GameEvent::CrimeCommitted { .. }
+            | GameEvent::Cycled { .. }
+            | GameEvent::PlayerPerformedAction { .. }
+            | GameEvent::CardPredicateGuessMade { .. }
+            | GameEvent::CardNamed { .. }
+            | GameEvent::Regenerated { .. }
+            | GameEvent::CreatureSuspected { .. }
+            | GameEvent::CreatureNoLongerSuspected { .. }
+            | GameEvent::Detained { .. }
+            | GameEvent::BecamePrepared { .. }
+            | GameEvent::BecameUnprepared { .. }
+            | GameEvent::CaseSolved { .. }
+            | GameEvent::ClassLevelGained { .. }
+            | GameEvent::MonarchChanged { .. }
+            | GameEvent::CityBlessingGained { .. }
+            | GameEvent::EnduringStoryGained { .. }
+            | GameEvent::DieRolled { .. }
+            | GameEvent::DieRollIgnored { .. }
+            | GameEvent::StartingPlayerContest { .. }
+            | GameEvent::CoinFlipped { .. }
+            | GameEvent::RingTemptsYou { .. }
+            | GameEvent::RoomEntered { .. }
+            | GameEvent::RoomDoorUnlocked { .. }
+            | GameEvent::BecomesPlotted { .. }
+            | GameEvent::DungeonCompleted { .. }
+            | GameEvent::Planeswalked { .. }
+            | GameEvent::ChaosEnsued { .. }
+            | GameEvent::PlanarDieRolled { .. }
+            | GameEvent::SchemeSetInMotion { .. }
+            | GameEvent::SchemeAbandoned { .. }
+            | GameEvent::InitiativeTaken { .. }
+            | GameEvent::AttractionOpened { .. }
+            | GameEvent::ContraptionAssembled { .. }
+            | GameEvent::StickerPlaced { .. }
+            | GameEvent::AttractionsRolledToVisit { .. }
+            | GameEvent::AttractionVisited { .. }
+            | GameEvent::ContraptionCranked { .. }
+            | GameEvent::Firebend { .. }
+            | GameEvent::Airbend { .. }
+            | GameEvent::Earthbend { .. }
+            | GameEvent::Waterbend { .. }
+            | GameEvent::CompanionRevealed { .. }
+            | GameEvent::CompanionMovedToHand { .. }
+            | GameEvent::NinjutsuActivated { .. }
+            | GameEvent::KeywordAbilityActivated { .. }
+            | GameEvent::CreatureExploited { .. }
+            | GameEvent::EnergyChanged { .. }
+            | GameEvent::SpeedChanged { .. }
+            | GameEvent::PlayerCounterChanged { .. }
+            | GameEvent::ManaExpended { .. }
+            | GameEvent::PhysicalContestStarted { .. }
+            | GameEvent::PhysicalContestResolved { .. }
+            | GameEvent::Clash { .. }
+            | GameEvent::VoteCast { .. }
+            | GameEvent::VoteResolved { .. }
+            | GameEvent::PowerToughnessChanged { .. }
+            | GameEvent::CascadeMissed { .. }
+            | GameEvent::DebugActionUsed { .. }
+            | GameEvent::DebugPermissionGranted { .. }
+            | GameEvent::DebugPermissionRevoked { .. } => true,
         }
 }
 
@@ -4967,7 +5402,153 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
                 record,
                 ..
             } if *parked_id == object_id => Some((record.owner, record.arrival.controller)),
-            _ => None,
+            GameEvent::GameStarted
+            | GameEvent::HiddenSearchViewed { .. }
+            | GameEvent::TurnStarted { .. }
+            | GameEvent::ExtraTurnCreated { .. }
+            | GameEvent::PhaseChanged { .. }
+            | GameEvent::PriorityPassed { .. }
+            | GameEvent::SpellCast { .. }
+            | GameEvent::Mutated { .. }
+            | GameEvent::Augmented { .. }
+            | GameEvent::Melded { .. }
+            | GameEvent::SpellCopied { .. }
+            | GameEvent::XValueChosen { .. }
+            | GameEvent::AbilityActivated { .. }
+            | GameEvent::ZoneChanged { .. }
+            | GameEvent::LifeChanged { .. }
+            | GameEvent::ManaAdded { .. }
+            | GameEvent::TappedForMana { .. }
+            | GameEvent::ManaAbilityProduced { .. }
+            | GameEvent::ManaPoolEmptied { .. }
+            | GameEvent::ManaBurn { .. }
+            | GameEvent::ManaRecolored { .. }
+            | GameEvent::PermanentTapped { .. }
+            | GameEvent::CreatureExerted { .. }
+            | GameEvent::CreatureEnlisted { .. }
+            | GameEvent::ArmyAmassed { .. }
+            | GameEvent::Foretold { .. }
+            | GameEvent::BecameForetold { .. }
+            | GameEvent::PlayerLost { .. }
+            | GameEvent::MulliganStarted
+            | GameEvent::CardsDrawn { .. }
+            | GameEvent::CardDrawn { .. }
+            | GameEvent::PermanentUntapped { .. }
+            | GameEvent::PermanentPhasedOut { .. }
+            | GameEvent::PermanentPhasedIn { .. }
+            | GameEvent::PlayerPhasedOut { .. }
+            | GameEvent::PlayerPhasedIn { .. }
+            | GameEvent::LandPlayed { .. }
+            | GameEvent::StackPushed { .. }
+            | GameEvent::StackResolved { .. }
+            | GameEvent::Discarded { .. }
+            | GameEvent::Milled { .. }
+            | GameEvent::DamageCleared { .. }
+            | GameEvent::GameOver { .. }
+            | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
+            | GameEvent::DamageDealt { .. }
+            | GameEvent::DamagePrevented { .. }
+            | GameEvent::SpellCountered { .. }
+            | GameEvent::CounterAdded { .. }
+            | GameEvent::SagaChapterAbilityResolved { .. }
+            | GameEvent::ObjectIntensified { .. }
+            | GameEvent::Evolved { .. }
+            | GameEvent::UnTellPerformed { .. }
+            | GameEvent::PhraseSaid { .. }
+            | GameEvent::GotchaSaid { .. }
+            | GameEvent::ObjectTouched { .. }
+            | GameEvent::CounterRemoved { .. }
+            | GameEvent::TokenCreated { .. }
+            | GameEvent::ObjectConjured { .. }
+            | GameEvent::CardCopyCreated { .. }
+            | GameEvent::CreatureDestroyed { .. }
+            | GameEvent::PermanentSacrificed { .. }
+            | GameEvent::ControllerChanged { .. }
+            | GameEvent::EffectResolved { .. }
+            | GameEvent::Unattached { .. }
+            | GameEvent::ContinuousEffectEnded { .. }
+            | GameEvent::AttackersDeclared { .. }
+            | GameEvent::BlockersDeclared { .. }
+            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+            | GameEvent::CombatTaxPaid { .. }
+            | GameEvent::CombatTaxDeclined { .. }
+            | GameEvent::BecomesTarget { .. }
+            | GameEvent::VehicleCrewed { .. }
+            | GameEvent::Stationed { .. }
+            | GameEvent::Saddled { .. }
+            | GameEvent::ReplacementApplied { .. }
+            | GameEvent::Transformed { .. }
+            | GameEvent::Flipped { .. }
+            | GameEvent::Specialized { .. }
+            | GameEvent::DayNightChanged { .. }
+            | GameEvent::TurnedFaceUp { .. }
+            | GameEvent::TurnedFaceDown { .. }
+            | GameEvent::CardsRevealed { .. }
+            | GameEvent::ChosenNumbersRevealed { .. }
+            | GameEvent::CombatDamageDealtToPlayer { .. }
+            | GameEvent::PlayerEliminated { .. }
+            | GameEvent::CrimeCommitted { .. }
+            | GameEvent::Cycled { .. }
+            | GameEvent::PlayerPerformedAction { .. }
+            | GameEvent::CardPredicateGuessMade { .. }
+            | GameEvent::CardNamed { .. }
+            | GameEvent::Regenerated { .. }
+            | GameEvent::CreatureSuspected { .. }
+            | GameEvent::CreatureNoLongerSuspected { .. }
+            | GameEvent::Detained { .. }
+            | GameEvent::BecamePrepared { .. }
+            | GameEvent::BecameUnprepared { .. }
+            | GameEvent::CaseSolved { .. }
+            | GameEvent::ClassLevelGained { .. }
+            | GameEvent::MonarchChanged { .. }
+            | GameEvent::CityBlessingGained { .. }
+            | GameEvent::EnduringStoryGained { .. }
+            | GameEvent::DieRolled { .. }
+            | GameEvent::DieRollIgnored { .. }
+            | GameEvent::StartingPlayerContest { .. }
+            | GameEvent::CoinFlipped { .. }
+            | GameEvent::RingTemptsYou { .. }
+            | GameEvent::RoomEntered { .. }
+            | GameEvent::RoomDoorUnlocked { .. }
+            | GameEvent::BecomesPlotted { .. }
+            | GameEvent::DungeonCompleted { .. }
+            | GameEvent::Planeswalked { .. }
+            | GameEvent::ChaosEnsued { .. }
+            | GameEvent::PlanarDieRolled { .. }
+            | GameEvent::SchemeSetInMotion { .. }
+            | GameEvent::SchemeAbandoned { .. }
+            | GameEvent::InitiativeTaken { .. }
+            | GameEvent::AttractionOpened { .. }
+            | GameEvent::ContraptionAssembled { .. }
+            | GameEvent::StickerPlaced { .. }
+            | GameEvent::AttractionsRolledToVisit { .. }
+            | GameEvent::AttractionVisited { .. }
+            | GameEvent::ContraptionCranked { .. }
+            | GameEvent::Firebend { .. }
+            | GameEvent::Airbend { .. }
+            | GameEvent::Earthbend { .. }
+            | GameEvent::Waterbend { .. }
+            | GameEvent::CompanionRevealed { .. }
+            | GameEvent::CompanionMovedToHand { .. }
+            | GameEvent::NinjutsuActivated { .. }
+            | GameEvent::KeywordAbilityActivated { .. }
+            | GameEvent::CreatureExploited { .. }
+            | GameEvent::EnergyChanged { .. }
+            | GameEvent::SpeedChanged { .. }
+            | GameEvent::PlayerCounterChanged { .. }
+            | GameEvent::ManaExpended { .. }
+            | GameEvent::PhysicalContestStarted { .. }
+            | GameEvent::PhysicalContestResolved { .. }
+            | GameEvent::Clash { .. }
+            | GameEvent::VoteCast { .. }
+            | GameEvent::VoteResolved { .. }
+            | GameEvent::PowerToughnessChanged { .. }
+            | GameEvent::CascadeMissed { .. }
+            | GameEvent::DebugActionUsed { .. }
+            | GameEvent::DebugPermissionGranted { .. }
+            | GameEvent::DebugPermissionRevoked { .. } => None,
         })
     };
     let identity = match event {
@@ -4982,7 +5563,150 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
                 .get(object_id)
                 .map(|obj| (obj.owner, obj.controller))
         }),
-        _ => None,
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::SpellCast { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::Melded { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Milled { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::SagaChapterAbilityResolved { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => None,
     };
     identity.is_some_and(|(owner, controller)| {
         !super::players::is_alive(state, owner) || !super::players::is_alive(state, controller)
@@ -5377,7 +6101,63 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
                 filters.iter().any(filter_uses_event_target)
             }
             TargetFilter::Not { filter } => filter_uses_event_target(filter),
-            _ => false,
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(..)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
         }
     }
 

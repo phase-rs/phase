@@ -7793,6 +7793,7 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
+                        let member_child_boundary = state.resolution_stack.capture_child_boundary();
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
                             &mut entrants,
@@ -7833,7 +7834,7 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         library_reorder: None,
                                         pending_return_result_producer,
@@ -7878,6 +7879,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    member_child_boundary,
                                 );
                                 return Ok(action_result_outcome(
                                     events,
@@ -7907,7 +7909,7 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         library_reorder: None,
                                         pending_return_result_producer,
@@ -7959,12 +7961,23 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    member_child_boundary,
                                 );
-                                state.waiting_for =
-                                    super::replacement::replacement_choice_waiting_for(
-                                        choice_player,
-                                        state,
-                                    );
+                                // CR 706.6 + CR 614.12a: the selected member's
+                                // roll owns its keep/order prompt; its zone owner
+                                // waits below the complete child stack.
+                                let roll_owns_wait =
+                                    (matches!(state.waiting_for, WaitingFor::DieKeepChoice { .. })
+                                        && state.resolution_stack.active_die_roll().is_some())
+                                    || (state.pending_die_roll_instruction.is_some()
+                                        && matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }));
+                                if !roll_owns_wait {
+                                    state.waiting_for =
+                                        super::replacement::replacement_choice_waiting_for(
+                                            choice_player,
+                                            state,
+                                        );
+                                }
                                 return Ok(action_result_outcome(
                                     events,
                                     state.waiting_for.clone(),

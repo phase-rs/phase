@@ -25015,6 +25015,26 @@ pub struct TrackedMemberOrigin {
     pub departure_incarnation: u64,
 }
 
+// A pre-entry board keeps its objects and their derived indexes together. Every
+// other field is refreshed exhaustively from live state by declare_game_state.
+macro_rules! refresh_pre_entry_context_field {
+    ($view:ident, $live:ident, objects) => {};
+    ($view:ident, $live:ident, battlefield) => {};
+    ($view:ident, $live:ident, layers_dirty) => {};
+    ($view:ident, $live:ident, layers_read_current_step) => {};
+    ($view:ident, $live:ident, static_gate_truth) => {};
+    ($view:ident, $live:ident, trigger_index) => {};
+    ($view:ident, $live:ident, replacement_index) => {};
+    ($view:ident, $live:ident, static_source_index) => {};
+    ($view:ident, $live:ident, static_mode_presence) => {};
+    ($view:ident, $live:ident, attribution) => {};
+    ($view:ident, $live:ident, remote_type_layer_recipients) => {};
+    ($view:ident, $live:ident, pre_entry_board_cache) => {};
+    ($view:ident, $live:ident, $field:ident) => {
+        $view.$field.clone_from(&$live.$field);
+    };
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -25051,6 +25071,14 @@ macro_rules! declare_game_state {
         }
 
         impl GameState {
+            /// CR 614.12: share the resident object projection, but refresh all
+            /// resolution context and history before re-evaluating its layers.
+            /// New fields participate automatically; only the explicit board
+            /// components above retain the pre-entry population.
+            pub(crate) fn refresh_pre_entry_context_from(&mut self, live: &Self) {
+                $(refresh_pre_entry_context_field!(self, live, $field);)*
+            }
+
             /// CR 733.1: restore only fields touched by inverse casting edits.
             /// Runtime-only handles and unrelated live fields retain custody.
             pub(crate) fn restore_cast_fields(
@@ -25192,6 +25220,11 @@ declare_game_state! {
     /// instead. Never serialized and never compared.
     #[serde(skip)]
     pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
+    /// CR 614.12: reusable scratch allocation for one synchronous copy-owner
+    /// delivery segment. Not persisted, cloned, or compared; live state keeps
+    /// every continuation and trigger journal authoritative.
+    #[serde(skip)]
+    pub(crate) pre_entry_board_cache: crate::game::pre_entry_view::PreEntryBoardCache,
     /// CR 111.1 + CR 603.6a: the tokens the copy-token resolution being drained
     /// inline has already created, which enter in one event with the token it is
     /// creating now (`token_copy::publish_committed_copy_tokens`). `None` outside
@@ -35738,6 +35771,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_simultaneous_entrants: Vec::new(),
+            pre_entry_board_cache: Default::default(),
             active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
@@ -39470,6 +39504,7 @@ impl GameState {
             active_rules_execution_node: _,
             // Synchronous-window `ObjectId` lists, never serialized and never compared.
             active_simultaneous_entrants: _,
+            pre_entry_board_cache: _,
             active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
@@ -41280,6 +41315,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_simultaneous_entrants: _,
+        pre_entry_board_cache: _,
         active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,

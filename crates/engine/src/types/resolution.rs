@@ -1278,7 +1278,37 @@ impl ResolutionStack {
         let slot = self.frames.slot_at_captured_depth(child_stack_start)?;
         match self.frames.get_mut(slot) {
             Some(ResolutionFrame::BatchDelivery(pending)) => Some(pending),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -1293,7 +1323,37 @@ impl ResolutionStack {
             .and_then(|slot| self.frames.get(slot))
         {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -1306,7 +1366,37 @@ impl ResolutionStack {
         let slot = self.frames.slot_at_captured_depth(child_stack_start)?;
         match self.frames.get_mut(slot) {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -1508,7 +1598,37 @@ impl ResolutionStack {
             ) {
                 return match self.frames.get_mut(current) {
                     Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
-                    _ => None,
+                    Some(
+                        ResolutionFrame::RepeatFor(_)
+                        | ResolutionFrame::RepeatUntil(_)
+                        | ResolutionFrame::RepeatedOptionalPayment(_)
+                        | ResolutionFrame::ChangeZone(_)
+                        | ResolutionFrame::BatchDelivery(_)
+                        | ResolutionFrame::CounterMoves(_)
+                        | ResolutionFrame::CounterRemovals(_)
+                        | ResolutionFrame::CounterAdditions(_)
+                        | ResolutionFrame::CopyToken(_)
+                        | ResolutionFrame::DebugCardEntries(_)
+                        | ResolutionFrame::EachPlayerCopyChosen(_)
+                        | ResolutionFrame::ChooseOneOf(_)
+                        | ResolutionFrame::VoteBallot(_)
+                        | ResolutionFrame::PerPlayerZoneChoice(_)
+                        | ResolutionFrame::PerCategoryZoneChoice(_)
+                        | ResolutionFrame::OptionalEffect(_)
+                        | ResolutionFrame::CoinFlip(_)
+                        | ResolutionFrame::DieRoll(_)
+                        | ResolutionFrame::Proliferate(_)
+                        | ResolutionFrame::MultiDraw(_)
+                        | ResolutionFrame::Discard(_)
+                        | ResolutionFrame::ConniveReentry(_)
+                        | ResolutionFrame::LifeTotalAssignment(_)
+                        | ResolutionFrame::SpellResolution(_)
+                        | ResolutionFrame::MutateMerge(_)
+                        | ResolutionFrame::CipherEncode(_)
+                        | ResolutionFrame::EntryAttackSeat(_)
+                        | ResolutionFrame::PostReplacement(_),
+                    )
+                    | None => None,
                 };
             }
             slot = self.frames.below(current);
@@ -2046,7 +2166,37 @@ impl ResolutionStack {
         }
         match self.frames.get_mut(found?) {
             Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -2927,7 +3077,37 @@ impl ResolutionStack {
     pub fn active_entry_attack_seat(&self) -> Option<&PendingEntryAttackSeat> {
         match self.last() {
             Some(ResolutionFrame::EntryAttackSeat(frame)) => Some(frame),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -2991,7 +3171,33 @@ impl ResolutionStack {
                 .as_ref()
                 .is_some_and(|paused| paused.member.object_id == member)
                 .then_some(&pending.logical_zone_change_group),
-            _ => None,
+            ResolutionFrame::AbilityContinuation(_)
+            | ResolutionFrame::RepeatFor(_)
+            | ResolutionFrame::RepeatUntil(_)
+            | ResolutionFrame::RepeatedOptionalPayment(_)
+            | ResolutionFrame::CounterMoves(_)
+            | ResolutionFrame::CounterRemovals(_)
+            | ResolutionFrame::CounterAdditions(_)
+            | ResolutionFrame::CopyToken(_)
+            | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::EachPlayerCopyChosen(_)
+            | ResolutionFrame::ChooseOneOf(_)
+            | ResolutionFrame::VoteBallot(_)
+            | ResolutionFrame::PerPlayerZoneChoice(_)
+            | ResolutionFrame::PerCategoryZoneChoice(_)
+            | ResolutionFrame::OptionalEffect(_)
+            | ResolutionFrame::CoinFlip(_)
+            | ResolutionFrame::DieRoll(_)
+            | ResolutionFrame::Proliferate(_)
+            | ResolutionFrame::MultiDraw(_)
+            | ResolutionFrame::Discard(_)
+            | ResolutionFrame::ConniveReentry(_)
+            | ResolutionFrame::LifeTotalAssignment(_)
+            | ResolutionFrame::SpellResolution(_)
+            | ResolutionFrame::MutateMerge(_)
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
+            | ResolutionFrame::PostReplacement(_) => None,
         })
     }
 
@@ -4508,6 +4714,9 @@ const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 /// plan or settled-choice stage. Missing stages keep their legacy meaning.
 const LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION: u64 = 13;
 
+/// Last writer without an explicit prospective-entrant list on logical-zone owners.
+const LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION: u64 = 14;
+
 /// Bound random-result branches identify their v11 format, not unrelated
 /// features added to later full-state resolution versions.
 const RANDOM_RESULT_BINDING_WIRE_VERSION: u64 =
@@ -5232,6 +5441,61 @@ fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
     }
 }
 
+/// Pre-v15 logical-zone owners did not record prospective entrants. Their
+/// missing list retains the legacy empty-list meaning; present lists, including
+/// malformed ones, remain untouched so the strict group decoder validates them.
+/// This migration is confined to the two owner schemas and their v1 slots.
+fn migrate_legacy_prospective_entrants(value: &mut Value, version: u64) {
+    if version > LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION {
+        return;
+    }
+
+    fn migrate_owner(owner: &mut Value) {
+        if let Some(group) = owner
+            .get_mut("logical_zone_change_group")
+            .and_then(Value::as_object_mut)
+        {
+            group
+                .entry("prospective_entrants")
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    for key in [
+        "pending_change_zone_iteration",
+        "pending_batch_deliveries",
+        "pending_mill_deliveries",
+    ] {
+        if let Some(owner) = value.get_mut(key) {
+            migrate_owner(owner);
+        }
+    }
+    if let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    {
+        for frame in frames {
+            match frame.get("type").and_then(Value::as_str) {
+                Some("ChangeZone") => {
+                    if let Some(owner) = frame
+                        .get_mut("data")
+                        .and_then(|data| data.get_mut("pending"))
+                    {
+                        migrate_owner(owner);
+                    }
+                }
+                Some("BatchDelivery") => {
+                    if let Some(owner) = frame.get_mut("data") {
+                        migrate_owner(owner);
+                    }
+                }
+                Some(_) | None => {}
+            }
+        }
+    }
+}
+
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
 /// payload. The only place in the engine permitted to infer a wire version.
 ///
@@ -5583,6 +5847,7 @@ impl ResolutionStateWire {
         };
 
         let decode_mode = Self::decode_mode_for_version(version, RESOLUTION_STATE_WIRE_VERSION)?;
+        migrate_legacy_prospective_entrants(&mut value, version);
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -10798,6 +11063,78 @@ mod tests {
             "reach: a draw frame"
         );
         assert!(!wire.to_string().contains("\"dealer\""));
+    }
+
+    fn logical_zone_owner_wire(batch: bool) -> Value {
+        let mut state = GameState::new_two_player(55);
+        state.next_logical_zone_change_group_id = 2;
+        state.resolution_stack.push_inner(if batch {
+            batch_delivery_frame(55)
+        } else {
+            change_zone_frame(55)
+        });
+        serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("an actual logical-zone owner serializes")
+    }
+
+    fn logical_zone_owner_group(wire: &mut Value, batch: bool) -> &mut Map<String, Value> {
+        let data = &mut wire["resolution_frames"]["frames"][0]["data"];
+        let owner = if batch { data } else { &mut data["pending"] };
+        owner["logical_zone_change_group"]
+            .as_object_mut()
+            .expect("both owner schemas carry a logical-zone group")
+    }
+
+    #[test]
+    fn legacy_logical_zone_owners_restore_missing_prospective_entrants() {
+        for batch in [false, true] {
+            for version in [11, 14] {
+                let mut wire = logical_zone_owner_wire(batch);
+                wire["resolution_state_version"] = Value::from(version);
+                assert!(logical_zone_owner_group(&mut wire, batch)
+                    .remove("prospective_entrants")
+                    .is_some());
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap_or_else(|error| panic!("v{version}, batch={batch}: {error}"));
+                let mut rewritten = serde_json::to_value(restored).expect("restored owner writes");
+                assert_eq!(
+                    logical_zone_owner_group(&mut rewritten, batch)["prospective_entrants"],
+                    serde_json::json!([]),
+                    "legacy missing entrants retain their empty-list meaning"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn current_logical_zone_owners_require_prospective_entrants() {
+        for batch in [false, true] {
+            let mut wire = logical_zone_owner_wire(batch);
+            assert_eq!(wire["resolution_state_version"], Value::from(15));
+            serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect("reach: the complete current owner restores");
+            logical_zone_owner_group(&mut wire, batch).remove("prospective_entrants");
+            let error = serde_json::from_value::<ResolutionStateWire>(wire)
+                .expect_err("current owners cannot omit the recorded entrant list")
+                .to_string();
+            assert!(
+                error.contains("missing field `prospective_entrants`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_logical_zone_owners_do_not_default_malformed_prospective_entrants() {
+        for batch in [false, true] {
+            for malformed in [Value::Null, Value::Bool(false)] {
+                let mut wire = logical_zone_owner_wire(batch);
+                wire["resolution_state_version"] = Value::from(11);
+                logical_zone_owner_group(&mut wire, batch)
+                    .insert("prospective_entrants".to_string(), malformed);
+                assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
+            }
+        }
     }
 
     #[test]
