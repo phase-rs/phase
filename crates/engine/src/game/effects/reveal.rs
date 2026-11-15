@@ -54,6 +54,7 @@ pub fn resolve(
 
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&object_ids),
             card_ids: object_ids,
             card_names,
         });
@@ -105,6 +106,7 @@ mod tests {
                 player,
                 card_ids,
                 card_names,
+                ..
             } => Some((*player, card_ids.clone(), card_names.clone())),
             _ => None,
         });
