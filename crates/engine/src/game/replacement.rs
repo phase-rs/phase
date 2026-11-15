@@ -127,6 +127,16 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// definition shape, built by `database::synthesis::dredge_replacement_definition`
 /// (extracted from `synthesize_dredge` for this reuse).
 const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
+/// CR 614.1d + CR 607.1c + CR 616.1: the enters-tapped rider of the graveyard
+/// cast permission a spell was cast through ("If you cast a spell this way,
+/// that artifact enters tapped." — Edgar, Master Machinist). The rider is a
+/// replacement effect of the permission's source, not of the entering card, so
+/// it is offered as an ordinary CR 616.1 candidate (ordered against Archelos,
+/// Lagoon Mystic and the like) rather than pre-applied. Its source left with the
+/// cast's terms (CR 601.2a), so it is keyed on the ENTERING spell, which carries
+/// the latched rider in `GameObject::cast_permission_enter_tapped` until it
+/// leaves the stack.
+const CAST_PERMISSION_ENTER_TAPPED_INDEX: usize = usize::MAX - 11;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -395,6 +405,27 @@ fn granted_dredge_replacement_id(object_id: ObjectId) -> ReplacementId {
 
 fn is_granted_dredge_replacement(rid: ReplacementId) -> bool {
     rid.index == GRANTED_DREDGE_INDEX
+}
+
+fn cast_permission_enter_tapped_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: CAST_PERMISSION_ENTER_TAPPED_INDEX,
+    }
+}
+
+fn is_cast_permission_enter_tapped_replacement(rid: ReplacementId) -> bool {
+    rid.index == CAST_PERMISSION_ENTER_TAPPED_INDEX
+}
+
+/// CR 614.1d + CR 607.1c: whether `object_id` is a spell on the stack that was
+/// cast through a graveyard permission whose rider makes it enter tapped. Reads
+/// only the spell's own latched rider, never the permission's source.
+fn spell_carries_cast_permission_enter_tapped(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.zone == Zone::Stack && obj.cast_permission_enter_tapped.is_tapped())
 }
 
 /// The PRINTED Dredge value carried by `obj`'s base (unmodified)
@@ -1894,6 +1925,10 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
     }
     if is_finality_counter_replacement(rid) {
         return "Exile it instead".to_string();
+    }
+    // CR 614.1d: the cast-this-way rider ("that artifact enters tapped").
+    if is_cast_permission_enter_tapped_replacement(rid) {
+        return "Enters tapped".to_string();
     }
     // CR 616.1: these name what each skip is, because which one is used up is the
     // affected player's choice.
@@ -8995,6 +9030,25 @@ pub fn find_applicable_replacements(
         }
     }
 
+    // CR 614.1d + CR 607.1c + CR 616.1: a spell cast through a graveyard
+    // permission with an enters-tapped rider (Edgar, Master Machinist) carries
+    // that rider until it leaves the stack. As it resolves onto the battlefield,
+    // the rider is one applicable replacement among the entry's candidates.
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        from: Zone::Stack,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    {
+        let rid = cast_permission_enter_tapped_replacement_id(*object_id);
+        if !event.already_applied(&rid)
+            && spell_carries_cast_permission_enter_tapped(state, *object_id)
+        {
+            candidates.push(rid);
+        }
+    }
+
     // CR 702.150a: Compleated replaces the loyalty counters a permanent enters
     // with when life was paid for its Phyrexian mana symbols. In this engine,
     // ETB counters are delivered through the shared AddCounter replacement
@@ -10474,6 +10528,13 @@ fn rule_derived_candidate_executes(
             pending_combat_phase_skip_position(rid) < state.pending_combat_phase_skips.len(),
         );
     }
+    // CR 614.1d: a parked rider still executes while its spell is on the
+    // stack carrying it (the spell hasn't moved; the event is only parked).
+    if is_cast_permission_enter_tapped_replacement(rid) {
+        return Some(spell_carries_cast_permission_enter_tapped(
+            state, rid.source,
+        ));
+    }
     (is_compleated_replacement(rid)
         || is_granted_etb_keyword_replacement(rid)
         || shield_counter_replacement_kind(rid).is_some()
@@ -10568,6 +10629,32 @@ fn apply_single_replacement(
 
     if is_umbra_armor_replacement(rid) {
         return apply_umbra_armor_replacement(state, proposed, rid, events);
+    }
+
+    // CR 614.1d + CR 110.5b: the cast-this-way rider makes the entering
+    // permanent enter tapped — a whole-field write of the entry's tap state,
+    // which a later-applied "enters untapped" effect may overwrite (CR 616.1f).
+    // Re-confirmed at application: a parked choice may resume after the spell
+    // stopped carrying it.
+    if is_cast_permission_enter_tapped_replacement(rid) {
+        let carries = spell_carries_cast_permission_enter_tapped(state, rid.source);
+        if let ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            enter_tapped,
+            ..
+        } = &mut proposed
+        {
+            if *object_id == rid.source && carries {
+                *enter_tapped = EtbTapState::Tapped;
+                events.push(GameEvent::ReplacementApplied {
+                    source_id: rid.source,
+                    event_type: ReplacementEvent::Moved.to_string(),
+                });
+            }
+        }
+        proposed.mark_applied(rid);
+        return Ok(proposed);
     }
 
     // CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip — "skip [the combat
@@ -11973,6 +12060,17 @@ fn candidate_materiality(
     // zone redirects on one event force the CR 616.1e player ordering choice.
     if is_finality_counter_replacement(rid) {
         return CandidateMateriality::Unconditional;
+    }
+
+    // CR 614.1d + CR 616.1e/f: the cast-this-way enters-tapped rider stamps the
+    // entry's whole tap state, exactly like a single-target `SetTapState::Tap`
+    // entry replacement: order-material against an "enters untapped" writer
+    // (Archelos, Lagoon Mystic), idempotent with another "enters tapped".
+    if is_cast_permission_enter_tapped_replacement(rid) {
+        return CandidateMateriality::Writes {
+            field: EventField::EnterTapped,
+            commute: CommuteClass::EnterTapped,
+        };
     }
 
     // CR 702.89a: Umbra armor fully replaces the destruction (prevents it), so it
@@ -15291,6 +15389,84 @@ mod tests {
         assert_eq!(
             find_applicable_replacements(&state, &event, registry),
             legacy
+        );
+    }
+
+    /// CR 614.1d + CR 616.2 (C20, boundary row): a spell cast through Edgar,
+    /// Master Machinist's permission carries "that artifact enters tapped" on
+    /// the Stack-zone object. Any Stack→Battlefield entry of that object — its
+    /// own resolution, or a counter that puts it onto the battlefield instead
+    /// (Desertion, ratified reading) — finds the rider as a candidate, and
+    /// applying it stamps the entry tapped. (C21) No other move finds it: not
+    /// from another zone, not to another zone, not once applied, and not when
+    /// the object no longer carries it.
+    #[test]
+    fn cast_permission_rider_applies_to_any_stack_to_battlefield_entry() {
+        use crate::types::zones::EtbTapState;
+
+        let mut state = test_state_with_object(ObjectId(10), Zone::Stack, vec![]);
+        state.battlefield.retain(|id| *id != ObjectId(10));
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_permission_enter_tapped = EtbTapState::Tapped;
+        let registry = replacement_registry();
+        let rid = cast_permission_enter_tapped_replacement_id(ObjectId(10));
+
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Stack, Zone::Battlefield, None);
+        assert!(find_applicable_replacements(&state, &entry, registry).contains(&rid));
+        assert!(matches!(
+            candidate_materiality(&state, rid, &entry),
+            CandidateMateriality::Writes {
+                field: EventField::EnterTapped,
+                commute: CommuteClass::EnterTapped,
+            }
+        ));
+        let mut events = Vec::new();
+        let applied = apply_single_replacement(
+            &mut state,
+            entry,
+            rid,
+            ReplacementBranch::Execute,
+            registry,
+            &mut events,
+        )
+        .expect("the rider applies");
+        assert!(matches!(
+            applied,
+            ProposedEvent::ZoneChange {
+                enter_tapped: EtbTapState::Tapped,
+                ..
+            }
+        ));
+        assert!(
+            !find_applicable_replacements(&state, &applied, registry).contains(&rid),
+            "CR 616.1f: an applied effect isn't offered again"
+        );
+
+        for (from, to) in [
+            (Zone::Exile, Zone::Battlefield),
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Stack, Zone::Graveyard),
+            (Zone::Stack, Zone::Exile),
+        ] {
+            let event = ProposedEvent::zone_change(ObjectId(10), from, to, None);
+            assert!(
+                !find_applicable_replacements(&state, &event, registry).contains(&rid),
+                "{from:?}→{to:?} isn't the spell's entry"
+            );
+        }
+
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_permission_enter_tapped = EtbTapState::Unspecified;
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Stack, Zone::Battlefield, None);
+        assert!(
+            !find_applicable_replacements(&state, &entry, registry).contains(&rid),
+            "a spell not cast this way has no rider"
         );
     }
 
