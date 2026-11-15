@@ -559,6 +559,7 @@ mod quest_counter_sacrifice_it_cost;
 mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
+mod ral_crackling_wit_emblem_storm;
 mod rally_the_righteous_radiance_pump;
 mod random_discard_cost_replacement_resume;
 mod rankle_and_torbran;

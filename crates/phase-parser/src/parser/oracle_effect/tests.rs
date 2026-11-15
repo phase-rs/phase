@@ -27107,15 +27107,95 @@ fn effect_emblem_tamiyo_field_researcher_hand_free_cast() {
     }
 }
 
+/// CR 114.4 + CR 113.6b: every static ability of a parsed emblem declares the
+/// command zone as its zone of function, whatever its mode and however many
+/// statics the body defines. Ral, Crackling Wit's −10 body is a `CastWithKeyword`
+/// grant whose static-line parse declares `[Battlefield]` for a permanent; on
+/// the emblem the command zone replaces it. Kaito, Bane of Nightmares (+1,
+/// `Continuous`) and Gideon of the Trials (0, `CantLoseTheGame` +
+/// `CantWinTheGame`) cover the other modes and a multi-static body.
+#[test]
+fn effect_emblem_statics_declare_command_zone() {
+    // Ral, Crackling Wit −10 (verbatim emblem clause).
+    let e =
+        parse_effect("You get an emblem with \"Instant and sorcery spells you cast have storm.\"");
+    match e {
+        Effect::CreateEmblem { statics, triggers } => {
+            assert!(triggers.is_empty(), "static-only emblem, got {triggers:?}");
+            assert_eq!(statics.len(), 1);
+            assert_eq!(
+                statics[0].mode,
+                StaticMode::CastWithKeyword {
+                    keyword: Keyword::Storm
+                }
+            );
+            // CR 114.4: the emblem static functions from the command zone only.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+
+    // Sibling: the same grant printed on a permanent (Prismari, the
+    // Inspiration, reminder text omitted) keeps its battlefield zone of
+    // function (CR 113.6); only the emblem owner restamps it.
+    let on_permanent = crate::parser::oracle_static::parse_static_line(
+        "Instant and sorcery spells you cast have storm.",
+    )
+    .expect("Prismari's storm grant must parse as a static");
+    assert_eq!(
+        on_permanent.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Storm
+        }
+    );
+    assert_eq!(on_permanent.active_zones, vec![Zone::Battlefield]);
+
+    // Kaito, Bane of Nightmares +1 (verbatim).
+    let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
+    match e {
+        Effect::CreateEmblem { statics, .. } => {
+            assert_eq!(statics.len(), 1);
+            assert_eq!(statics[0].mode, StaticMode::Continuous);
+            // CR 114.4: the emblem static functions from the command zone.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+
+    // Gideon of the Trials 0 (verbatim): one body, two statics.
+    let e = parse_effect(
+        "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+    );
+    match e {
+        Effect::CreateEmblem { statics, triggers } => {
+            assert!(triggers.is_empty(), "static-only emblem, got {triggers:?}");
+            let modes: Vec<&StaticMode> = statics.iter().map(|s| &s.mode).collect();
+            assert_eq!(
+                modes,
+                vec![&StaticMode::CantLoseTheGame, &StaticMode::CantWinTheGame],
+                "Gideon's emblem carries both outcome-lock statics"
+            );
+            // CR 114.4: every emblem static functions from the command zone.
+            for static_def in &statics {
+                assert_eq!(static_def.active_zones, vec![Zone::Command]);
+            }
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+}
+
 #[test]
 fn effect_you_have_no_max_hand_size_for_rest_of_game() {
-    // CR 402.2 + CR 114.1: Spell effect "you have no maximum hand size for the rest
-    // of the game" creates an emblem with NoMaximumHandSize.
+    // CR 611.2 + CR 402.2: the spell effect "you have no maximum hand size for the rest
+    // of the game" is a continuous effect that changes a rule of the game; the engine carries
+    // it on an emblem whose NoMaximumHandSize static functions from the command zone (CR 114.4).
     let e = parse_effect("You have no maximum hand size for the rest of the game.");
     match e {
         Effect::CreateEmblem { statics, .. } => {
             assert_eq!(statics.len(), 1);
             assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+            // CR 114.4: the emblem static functions from the command zone.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
         }
         other => panic!("expected CreateEmblem, got {:?}", other),
     }

@@ -9865,8 +9865,9 @@ fn pt_value_is_fixed(value: &PtValue) -> bool {
 /// own, so it refers to nothing beyond its mode, its modifications and its
 /// `affected` filter, which each caller audits. The one classification of
 /// every field of `StaticDefinition`: a new field is a compile error until it
-/// is classified.
-fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
+/// is classified. `host_zones` are the zones the static's host functions from
+/// by rule, so declaring them states no zone scope of the static's own.
+fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) -> bool {
     let StaticDefinition {
         // Audited by each caller.
         mode: _,
@@ -9891,7 +9892,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && per_player_condition.is_none()
         && affected_zone.is_none()
         && effect_zone.is_none()
-        && active_zones.is_empty()
+        && active_zones.iter().all(|zone| host_zones.contains(zone))
         && !characteristic_defining
         && attack_defended.is_none()
         && source_controller.is_none()
@@ -9915,7 +9916,7 @@ fn static_grant_referent(static_ability: &StaticDefinition) -> Option<&TargetFil
                 ContinuousModification::AddStaticMode { mode } if static_mode_names_no_referent(mode)
             )
         })
-        && static_binds_nothing(static_ability);
+        && static_binds_nothing(static_ability, &[]);
     if referent_free {
         static_ability.affected.as_ref()
     } else {
@@ -9945,7 +9946,9 @@ fn static_mode_names_no_referent(mode: &StaticMode) -> bool {
 fn emblem_static_names_no_referent(static_ability: &StaticDefinition) -> bool {
     matches!(static_ability.mode, StaticMode::NoMaximumHandSize)
         && static_ability.modifications.is_empty()
-        && static_binds_nothing(static_ability)
+        // CR 114.4: an emblem's statics function in the command zone; declaring it
+        // (parser + grant_emblem) names the emblem's own zone, not a scope.
+        && static_binds_nothing(static_ability, &[Zone::Command])
 }
 
 /// CR 608.2c + CR 400.7: whether the object or player `filter` names exists
@@ -36799,6 +36802,60 @@ mod tests {
             scope: NamedDefenderScope::Player,
         };
         assert!(audit_later_instruction(&effect).referents.is_none());
+    }
+
+    /// CR 608.2c + CR 114.4: an emblem's statics function in the command zone,
+    /// so an emblem static that declares the command zone (as every parsed
+    /// emblem static does) names no zone scope of its own and the declined-gate
+    /// audit still lists its referents. A foreign zone stays governed. A static
+    /// granted by `GenericEffect` has no host zone by rule, so declaring the
+    /// command zone there is a scope of its own and stays governed.
+    #[test]
+    fn emblem_static_declaring_command_zone_names_no_referent() {
+        let emblem = |zones: Vec<Zone>| Effect::CreateEmblem {
+            statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize).active_zones(zones)],
+            triggers: Vec::new(),
+        };
+        // CR 114.4: the emblem's own zone of function is not a scope.
+        assert!(
+            audit_later_instruction(&emblem(vec![Zone::Command]))
+                .referents
+                .is_some(),
+            "an emblem static declaring the command zone names no referent"
+        );
+        assert!(
+            audit_later_instruction(&emblem(Vec::new()))
+                .referents
+                .is_some(),
+            "positive control: an emblem static with no declared zone names no referent"
+        );
+        assert!(
+            audit_later_instruction(&emblem(vec![Zone::Graveyard]))
+                .referents
+                .is_none(),
+            "an emblem static declaring a zone other than the command zone is governed"
+        );
+
+        let granted = |zones: Vec<Zone>| Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::Controller)
+                .active_zones(zones)],
+            duration: None,
+            target: None,
+            end_cost: None,
+        };
+        assert!(
+            audit_later_instruction(&granted(Vec::new()))
+                .referents
+                .is_some(),
+            "positive control: a granted static with no declared zone lists its referent"
+        );
+        assert!(
+            audit_later_instruction(&granted(vec![Zone::Command]))
+                .referents
+                .is_none(),
+            "a granted static declaring the command zone is governed"
+        );
     }
 
     /// Phase 7, J-3 (the building block): after a declined gate, each later
