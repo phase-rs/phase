@@ -3834,13 +3834,15 @@ fn with_settled_damage_guards<T>(
     settled_guards: Vec<SettledDamageGuard>,
     body: impl FnOnce(&mut GameState) -> T,
 ) -> T {
-    let restore = state.damage_batch_ledger.replace(DamageBatchLedger {
-        applications: Vec::new(),
-        settled_guards,
-        paused_rider: None,
-        held_riders: None,
-        split_portions: Vec::new(),
-    });
+    let restore = state
+        .damage_batch_ledger
+        .replace(Box::new(DamageBatchLedger {
+            applications: Vec::new(),
+            settled_guards,
+            paused_rider: None,
+            held_riders: None,
+            split_portions: Vec::new(),
+        }));
     let result = body(state);
     state.damage_batch_ledger = restore;
     result
@@ -15283,13 +15285,15 @@ pub(crate) fn replace_combat_damage_batch(
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
     let settled_guards = read_damage_guards(state);
-    let restore_ledger = state.damage_batch_ledger.replace(DamageBatchLedger {
-        applications: Vec::new(),
-        settled_guards,
-        paused_rider: None,
-        held_riders: None,
-        split_portions: Vec::new(),
-    });
+    let restore_ledger = state
+        .damage_batch_ledger
+        .replace(Box::new(DamageBatchLedger {
+            applications: Vec::new(),
+            settled_guards,
+            paused_rider: None,
+            held_riders: None,
+            split_portions: Vec::new(),
+        }));
     // The ledger's `applications` are keyed by AppliedReplacementKey, which is registry-index
     // based, exactly as combat_prevention_tally's keys are. Its `settled_guards` are keyed by
     // object incarnation and condition, so none of the following applies to them.
@@ -20463,13 +20467,13 @@ mod tests {
                 reading: DamageGuardReading::Fails,
             }]
         );
-        state.damage_batch_ledger = Some(DamageBatchLedger {
+        state.damage_batch_ledger = Some(Box::new(DamageBatchLedger {
             applications: Vec::new(),
             settled_guards: guards,
             paused_rider: None,
             held_riders: None,
             split_portions: Vec::new(),
-        });
+        }));
 
         let obj = state.objects.get_mut(&champion).unwrap();
         let mut reordered = vec![make_repl(ReplacementEvent::Moved)];
@@ -20524,7 +20528,7 @@ mod tests {
             is_combat: true,
             applied: HashSet::new(),
         };
-        state.damage_batch_ledger = Some(DamageBatchLedger {
+        state.damage_batch_ledger = Some(Box::new(DamageBatchLedger {
             applications: vec![(
                 AppliedReplacementKey::for_event(&combat_portion, rid),
                 source,
@@ -20533,13 +20537,13 @@ mod tests {
             paused_rider: None,
             held_riders: None,
             split_portions: Vec::new(),
-        });
+        }));
         assert!(consumed_replacement_applies_in_combat_batch(
             &state,
             &combat_portion,
             rid
         ));
-        state.damage_batch_ledger = Some(DamageBatchLedger::default());
+        state.damage_batch_ledger = Some(Box::new(DamageBatchLedger::default()));
         assert!(!consumed_replacement_applies_in_combat_batch(
             &state,
             &combat_portion,

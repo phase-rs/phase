@@ -28901,9 +28901,10 @@ declare_game_state! {
     /// before the next portion; the prevention tally remains active. Restored to its prior
     /// value before returning; excluded from serialization and equality like the
     /// prevention tally. A batch that pauses hands its guards to `PendingReplacement` and
-    /// to its remaining portions (`SpellContext::settled_damage_guards`).
+    /// to its remaining portions (`SpellContext::settled_damage_guards`). Boxed: it is
+    /// populated only while a batch settles (`game_state_size.rs`).
     #[serde(skip)]
-    pub(crate) damage_batch_ledger: Option<DamageBatchLedger>,
+    pub(crate) damage_batch_ledger: Option<Box<DamageBatchLedger>>,
     /// CR 104.4a + CR 614.6 + CR 120.4: how an effect-stated win or loss settles while a
     /// two-phase damage batch runs (`elimination::event_outcomes`): recorded with the batch's one
     /// simultaneous event (its damage and substitution actions), or at once. `None` outside a

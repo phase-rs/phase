@@ -2204,7 +2204,7 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
     // is open, so this one carries them).
     let saved = state.damage_batch_ledger.take();
     let ledger = match saved.clone() {
-        Some(ledger) => ledger,
+        Some(ledger) => *ledger,
         None => DamageBatchLedger {
             settled_guards: state
                 .pending_replacement
@@ -2214,10 +2214,10 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
             ..DamageBatchLedger::default()
         },
     };
-    state.damage_batch_ledger = Some(DamageBatchLedger {
+    state.damage_batch_ledger = Some(Box::new(DamageBatchLedger {
         held_riders: Some(Vec::new()),
         ..ledger
-    });
+    }));
     let result = answer(state);
     let held = take_held_riders(state);
     // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
