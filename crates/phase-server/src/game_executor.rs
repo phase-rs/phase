@@ -1244,6 +1244,7 @@ mod tests {
                 (1..=count)
                     .map(|seq| GameLogEntry {
                         seq,
+                        game_number: 1,
                         turn: 1,
                         phase: Phase::PreCombatMain,
                         category: LogCategory::Game,

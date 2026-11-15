@@ -1525,6 +1525,14 @@ pub enum GameEvent {
         source: ObjectIdentityBinding,
         returns: ObjectIdentityBinding,
     },
+    /// Un-card touch (no CR entry): `player` touched `object_id` (the client
+    /// reports the player's cursor entering the card). Consumed by
+    /// `TriggerMode::Touched` — "Whenever a player's skin or fingernail touches
+    /// this creature" (Vile Bile).
+    ObjectTouched {
+        player: PlayerId,
+        object_id: ObjectId,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,
@@ -1542,6 +1550,14 @@ pub enum GameEvent {
     },
     /// Digital-only: A card was conjured from outside the game into a zone.
     ObjectConjured {
+        object_id: ObjectId,
+        name: String,
+    },
+    /// CR 707.13: A copy of a card was created from its NAME rather than from an
+    /// object in a zone (Garth One-Eye). Separate from `ObjectConjured` because
+    /// the product is a copy, not a card: CR 704.5e sweeps it out of any zone but
+    /// the stack and the battlefield, and the log must not call it a conjure.
+    CardCopyCreated {
         object_id: ObjectId,
         name: String,
     },
@@ -1731,6 +1747,17 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+        /// CR 400.7 + CR 701.20a/d: the exact occurrence of each card at the
+        /// instant it was disclosed ([`GameState::disclosed_occurrences`]). The
+        /// action-boundary knowledge finalizer binds viewer knowledge to these,
+        /// never to whatever later occurrence reuses the storage id, so a card
+        /// reordered after its reveal in the same action stays hidden. Engine
+        /// bookkeeping: `filter_events_for_viewer` strips it. Empty on legacy
+        /// events, which then disclose nothing durable.
+        ///
+        /// [`GameState::disclosed_occurrences`]: crate::types::game_state::GameState::disclosed_occurrences
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        occurrences: Vec<ObjectIncarnationRef>,
     },
     /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
     /// instruction ("then all players reveal those numbers simultaneously" —

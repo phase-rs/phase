@@ -180,6 +180,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Evolved => return (keys, true),
         // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
         TriggerMode::GotchaSaid => return (keys, true),
+        // Un-card touch: consumes the dedicated `GameEvent::ObjectTouched`; rare, so unclassified.
+        TriggerMode::Touched => return (keys, true),
         TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
@@ -638,12 +640,16 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Evolved { .. } => {}
         GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
-        | GameEvent::GotchaSaid { .. } => {}
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
             push(TriggerEventKey::TokenCreated);
         }
+        // CR 111.1 + CR 707.13: a copy of a card created from a name is not a
+        // token, so it must not fire "whenever a token is created".
+        GameEvent::CardCopyCreated { .. } => {}
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
@@ -1016,6 +1022,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure
+        | EffectKind::CreateCardCopyByName
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook

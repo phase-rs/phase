@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::StaticDefinition;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+pub(crate) use crate::types::game_state::LibraryReorderOperation;
 use crate::types::game_state::{
     GameState, LinkedExileLki, LinkedExileSnapshot, ResolutionSourceRelatch, StackEntry,
     StackEntryKind, ZoneChangeCombatStatus,
@@ -242,6 +245,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         // represented on the stack, never to the new object after it leaves.
         if from == Zone::Stack && to != Zone::Stack {
             obj.cast_occurrence = None;
+            obj.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
             obj.prepared_copy_source = None;
             // CR 400.7: the spell's identity ends with the spell.
             obj.spell_announcement = None;
@@ -256,12 +260,43 @@ pub(crate) fn apply_zone_exit_cleanup(
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.
-    state
+    //
+    // CR 400.7 + CR 608.2h: the erased entries migrate (not copied) into the
+    // departed-side tables tagged with the departing incarnation
+    // (`occurrence`, captured pre-move above): an ability the old object
+    // announced keeps reading its count through the announced carrier, while
+    // the returned object's live journals start at zero. The blink keeps the
+    // `ObjectId` and bumps the incarnation, so the tag — not the id — is what
+    // keeps the two histories independent.
+    let departed_incarnation = occurrence.incarnation;
+    let departed_turn: Vec<_> = state
         .activated_abilities_this_turn
-        .retain(|(id, _), _| *id != object_id);
-    state
+        .iter()
+        .filter(|(key, _)| key.source == object_id)
+        .map(|(key, count)| (key.clone(), *count))
+        .collect();
+    for (key, _) in &departed_turn {
+        state.activated_abilities_this_turn.remove(key);
+    }
+    for (key, count) in departed_turn {
+        state
+            .departed_activated_abilities_this_turn
+            .insert((key, departed_incarnation), count);
+    }
+    let departed_game: Vec<_> = state
         .activated_abilities_this_game
-        .retain(|(id, _), _| *id != object_id);
+        .iter()
+        .filter(|(key, _)| key.source == object_id)
+        .map(|(key, count)| (key.clone(), *count))
+        .collect();
+    for (key, _) in &departed_game {
+        state.activated_abilities_this_game.remove(key);
+    }
+    for (key, count) in departed_game {
+        state
+            .departed_activated_abilities_this_game
+            .insert((key, departed_incarnation), count);
+    }
     clear_exert_history_on_zone_change(state, object_id, from, to);
 
     // CR 400.7: Snapshot LKI before a zone change out of any zone whose
@@ -1427,6 +1462,7 @@ pub fn apply_resolved_zone_change(
     // must reproduce the live Stack-exit carrier clear from the recorded move.
     if command.from == Zone::Stack && command.to != Zone::Stack {
         object.cast_occurrence = None;
+        object.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
         object.prepared_copy_source = None;
         object.spell_announcement = None;
     }
@@ -2223,6 +2259,12 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// before it enters) and is skipped; its replay collects against the realized object.
 /// Idempotent. An entrant that is no longer the exact entered incarnation on the battlefield is
 /// not observed.
+///
+/// CR 603.6a: entrants of the same instruction published in earlier answers
+/// (`unsettled_entry_batch_events`, held by `triggers::settle_entry_batch_scan`) are observed in
+/// the same pass as the ones in `events`, so every co-entrant is read at one boundary — but not
+/// while another battlefield entry is still being made, when the boundary belongs to a chain run
+/// inside that entry and the held entrants' event is not complete.
 pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
     let parked_entry_keys: Vec<(u32, usize)> = state
         .deferred_entry_events
@@ -2234,8 +2276,14 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             _ => None,
         })
         .collect();
-    let pending: Vec<(usize, ObjectId, Option<u64>)> = events
+    let held: &[GameEvent] = if super::triggers::battlefield_entry_in_progress(state) {
+        &[]
+    } else {
+        &state.unsettled_entry_batch_events
+    };
+    let pending: Vec<(usize, ObjectId, Option<u64>)> = held
         .iter()
+        .chain(events.iter())
         .filter_map(|event| match event {
             GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
             _ => None,
@@ -2731,6 +2779,88 @@ pub(crate) fn capture_combat_status(
     }
 }
 
+/// CR 701.20d: If cards in a player's library are shuffled or otherwise
+/// reordered, any revealed cards that are reordered stop being revealed and
+/// become new objects. This includes stack-bound reveal leases (CR 701.20a)
+/// — a reordered card becomes a new object, so all reveal leases for the
+/// old occurrence end.
+pub(crate) fn retire_reordered_library_reveals(state: &mut GameState, cards: &[ObjectId]) {
+    for &object_id in cards {
+        let is_revealed = state.revealed_cards.contains(&object_id)
+            || state.public_revealed_cards.contains(&object_id)
+            || state.holds_stack_bound_reveal(object_id);
+        if is_revealed {
+            if let Some(obj) = state.objects.get(&object_id) {
+                let occurrence = ObjectIncarnationRef::from_object(obj);
+                // CR 701.20d + CR 701.20a: Clear all reveal information (controller,
+                // public, and stack-bound) for the old occurrence, then bump the
+                // incarnation so the card becomes a new object.
+                state.clear_revealed_information_on_zone_exit(occurrence, Zone::Library);
+            }
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.bump_incarnation();
+            }
+        }
+    }
+}
+
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+///
+/// The carrier itself lives in `types::game_state` so a paused delivery can
+/// resume it; this module owns creating and settling it.
+impl LibraryReorderOperation {
+    /// Capture the libraries holding any of `members` before delivery starts.
+    pub(crate) fn begin(state: &GameState, members: &[ObjectId]) -> Self {
+        let mut libraries: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+        for obj in members.iter().filter_map(|id| state.objects.get(id)) {
+            if obj.zone == Zone::Library && !libraries.iter().any(|(p, _)| *p == obj.owner) {
+                libraries.push((
+                    obj.owner,
+                    state.library_of(obj.owner).iter().copied().collect(),
+                ));
+            }
+        }
+        Self {
+            members: members.to_vec(),
+            libraries,
+        }
+    }
+
+    /// CR 701.20d: Settle the completed operation. When a library's order
+    /// changed, every member that was in it before and is still in it now was
+    /// reordered by this instruction, so any of them still revealed stops being
+    /// revealed and becomes a new object. A lone member is left to
+    /// [`reorder_within_library`], which already retires it only if it moved.
+    ///
+    /// CR 401.4 + CR 701.20d: A library owner may arrange simultaneously placed
+    /// cards privately. Retire reveals for two or more members present before
+    /// and after placement, even when the chosen order matches the input.
+    pub(crate) fn finish(self, state: &mut GameState) {
+        for (player, before) in self.libraries {
+            let after: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
+            let reordered: Vec<ObjectId> = self
+                .members
+                .iter()
+                .copied()
+                .filter(|id| before.contains(id) && after.contains(id))
+                .collect();
+            // A lone member is settled by `reorder_within_library` (retired only
+            // if it actually moved), so an in-place singleton placement keeps
+            // any independent stack-bound reveal lease on it.
+            if reordered.len() > 1 {
+                retire_reordered_library_reveals(state, &reordered);
+            }
+        }
+    }
+}
+
 /// Reorder objects that remain in one player's library without performing a
 /// zone change. `ordered` is placed at `index` in the supplied order, or
 /// appended when `index` is `None`.
@@ -2740,13 +2870,106 @@ pub(crate) fn reorder_within_library(
     ordered: &[ObjectId],
     index: Option<usize>,
 ) {
-    let library = state.library_of_mut(player);
-    library.retain(|id| !ordered.contains(id));
-    let insert_index = index.unwrap_or(library.len()).min(library.len());
-    for (offset, &object_id) in ordered.iter().enumerate() {
-        library.insert(insert_index + offset, object_id);
-    }
+    let mut arrangement: Vec<ObjectId> = state
+        .library_of(player)
+        .iter()
+        .copied()
+        .filter(|id| !ordered.contains(id))
+        .collect();
+    let insert_index = index.unwrap_or(arrangement.len()).min(arrangement.len());
+    arrangement.splice(insert_index..insert_index, ordered.iter().copied());
+    settle_library_arrangement(state, player, &arrangement, ordered);
+}
+
+/// CR 401.4 + CR 701.20d: The library placement authority. Replace `player`'s
+/// library with the complete `arrangement` in one step — `placed` names the
+/// cards this instruction put there — and retire every revealed card the
+/// arrangement reordered.
+///
+/// Settling the whole arrangement at once is what keeps a multi-card placement
+/// exact: replaying it as one-card moves lets a later move shift an earlier
+/// card off its chosen slot.
+pub(crate) fn settle_library_arrangement(
+    state: &mut GameState,
+    player: PlayerId,
+    arrangement: &[ObjectId],
+    placed: &[ObjectId],
+) {
+    let old_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
+    debug_assert!(
+        placed.iter().all(|id| arrangement.contains(id)),
+        "every placed card occupies a slot in the settled arrangement"
+    );
+    *state.library_of_mut(player) = arrangement.iter().copied().collect();
     state.advance_library_knowledge_epoch(player);
+
+    // CR 701.20d: An effect that reveals multiple cards may state that the cards
+    // are to be reordered; any revealed cards that are reordered stop being
+    // revealed and become new objects.
+    //
+    // An insertion shifts every card below it to a new library position, so the
+    // reorder covers each card whose index changed — including cards this
+    // instruction did not name. Leaving a shifted card revealed would publish
+    // the new index the placement gave it (a random bottom placement delivered
+    // one card at a time keeps moving cards already placed by earlier
+    // deliveries).
+    //
+    // A card that keeps its position was not reordered and stays revealed:
+    // Calibrated Blast bottoming the only card of a 1-card library leaves it
+    // exactly where it already was.
+    if !placed.is_empty() && old_order != arrangement {
+        let old_positions: HashMap<ObjectId, usize> = old_order
+            .iter()
+            .enumerate()
+            .map(|(position, &id)| (id, position))
+            .collect();
+        // The cards this instruction placed. A multi-card placement reorders the
+        // whole named set as one instruction, even when the chosen arrangement
+        // leaves one of them in place; a lone card is reordered only when it
+        // actually moved (Calibrated Blast bottoming the only card of a 1-card
+        // library leaves it exactly where it already was).
+        let mut reordered_cards: Vec<ObjectId> = if placed.len() > 1 {
+            placed.to_vec()
+        } else {
+            placed
+                .first()
+                .copied()
+                .filter(|id| {
+                    !state.is_active_library_reorder_member(*id)
+                        && old_positions.get(id).copied()
+                            != arrangement.iter().position(|candidate| candidate == id)
+                })
+                .into_iter()
+                .collect()
+        };
+        let mut reordered_seen: HashSet<ObjectId> = reordered_cards.iter().copied().collect();
+        // An insertion shifts every card below it to a new position. A card whose
+        // library position is public (`revealed_cards` / `public_revealed_cards`)
+        // would publish that new position, so it is reordered too and stops being
+        // revealed. A stack-bound reveal lease (CR 701.20a) publishes only the
+        // card's identity, never its library position, and lasts until its
+        // trigger leaves the stack — an unrelated insertion does not end it.
+        // Members of an in-flight whole-library reorder are settled by its terminal
+        // finish, not piecemeal during intermediate deliveries.
+        for (position, &object_id) in arrangement.iter().enumerate() {
+            let Some(old_position) = old_positions.get(&object_id).copied() else {
+                continue;
+            };
+            if old_position == position
+                || state.is_active_library_reorder_member(object_id)
+                || !(state.revealed_cards.contains(&object_id)
+                    || state.public_revealed_cards.contains(&object_id))
+            {
+                continue;
+            }
+            if reordered_seen.insert(object_id) {
+                reordered_cards.push(object_id);
+            }
+        }
+        if !reordered_cards.is_empty() {
+            retire_reordered_library_reveals(state, &reordered_cards);
+        }
+    }
 
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
@@ -5062,22 +5285,71 @@ mod tests {
             Zone::Battlefield,
         );
 
-        state.activated_abilities_this_turn.insert((id, 0), 1);
-        state.activated_abilities_this_game.insert((id, 0), 1);
-        state.activated_abilities_this_turn.insert((other, 0), 1);
-        state.activated_abilities_this_game.insert((other, 0), 1);
+        // CR 400.7 + CR 602.5c: entries are keyed by per-acquisition usage
+        // keys; the zone exit clears every key naming the moved source (both
+        // the printed and an acquired instance) while the other source keeps
+        // its entries.
+        let native = crate::types::game_state::AbilityUsageKey {
+            source: id,
+            provenance: None,
+            description: None,
+            fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
+        };
+        let acquired = crate::types::game_state::AbilityUsageKey {
+            source: id,
+            provenance: Some(crate::types::identifiers::ObjectIncarnationRef::of(
+                other, 0,
+            )),
+            description: Some("acquired".to_string()),
+            fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
+        };
+        let other_key = crate::types::game_state::AbilityUsageKey {
+            source: other,
+            provenance: None,
+            description: None,
+            fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
+        };
+        state
+            .activated_abilities_this_turn
+            .insert(native.clone(), 1);
+        state.activated_abilities_this_game.insert(native, 1);
+        state
+            .activated_abilities_this_turn
+            .insert(acquired.clone(), 1);
+        state.activated_abilities_this_game.insert(acquired, 1);
+        state
+            .activated_abilities_this_turn
+            .insert(other_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(other_key.clone(), 1);
+
+        // Reach-guard: both of the source's keys are present before the move.
+        assert_eq!(state.activated_abilities_this_turn.len(), 3);
+        assert_eq!(state.activated_abilities_this_game.len(), 3);
 
         let mut events = Vec::new();
         move_to_zone(&mut state, id, Zone::Hand, &mut events);
 
-        assert!(!state.activated_abilities_this_turn.contains_key(&(id, 0)));
-        assert!(!state.activated_abilities_this_game.contains_key(&(id, 0)));
+        // Both of the moved source's keys are gone …
+        assert!(!state
+            .activated_abilities_this_turn
+            .keys()
+            .any(|key| key.source == id));
+        assert!(!state
+            .activated_abilities_this_game
+            .keys()
+            .any(|key| key.source == id));
+        // … while the unmoved source keeps its entries.
         assert_eq!(
-            state.activated_abilities_this_turn.get(&(other, 0)),
+            state.activated_abilities_this_turn.get(&other_key),
             Some(&1)
         );
         assert_eq!(
-            state.activated_abilities_this_game.get(&(other, 0)),
+            state.activated_abilities_this_game.get(&other_key),
             Some(&1)
         );
     }
@@ -5312,6 +5584,96 @@ mod tests {
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             [second, third, first]
+        );
+    }
+
+    /// CR 701.20d: an insertion shifts every card below it to a new library
+    /// position, so a revealed card the instruction did not name is reordered
+    /// too and stops being revealed (it becomes a new object). A card that keeps
+    /// its position was not reordered and keeps its reveal.
+    #[test]
+    fn reorder_within_library_retires_every_revealed_card_whose_position_changed() {
+        let mut state = setup();
+        let first = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [first, second, third],
+            "top-to-bottom staging"
+        );
+
+        // A fully revealed library: every card's position is public.
+        state.revealed_cards.extend([first, second, third]);
+        let incarnations: Vec<u64> = [first, second, third]
+            .iter()
+            .map(|id| state.objects[id].incarnation)
+            .collect();
+
+        // The bottom card is inserted on top. `second` is not named by the
+        // instruction but shifts from index 1 to index 2.
+        reorder_within_library(&mut state, PlayerId(0), &[third], Some(0));
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [third, first, second]
+        );
+        for ((id, label), incarnation_before) in [first, second, third]
+            .into_iter()
+            .zip(["First", "Second", "Third"])
+            .zip(incarnations)
+        {
+            assert!(
+                !state.revealed_cards.contains(&id),
+                "{label} changed position and must stop being revealed"
+            );
+            assert!(
+                state.objects[&id].incarnation > incarnation_before,
+                "{label} changed position and must become a new object"
+            );
+        }
+
+        // A singleton that keeps its position is not reordered: Calibrated Blast
+        // bottoming the only card of a 1-card library leaves it where it is.
+        let mut state = setup();
+        let only = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Only".to_string(),
+            Zone::Library,
+        );
+        state.revealed_cards.insert(only);
+        let incarnation_before = state.objects[&only].incarnation;
+        reorder_within_library(&mut state, PlayerId(0), &[only], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [only]
+        );
+        assert!(
+            state.revealed_cards.contains(&only),
+            "a card that keeps its position is not reordered"
+        );
+        assert_eq!(
+            state.objects[&only].incarnation, incarnation_before,
+            "a card that keeps its position does not become a new object"
         );
     }
 
@@ -6547,6 +6909,74 @@ mod tests {
             hostile.objects[&id].cast_occurrence,
             Some(occurrence),
             "only a Stack exit owns cast-occurrence cleanup"
+        );
+    }
+
+    #[test]
+    fn cast_permission_enter_tapped_is_cleared_on_every_stack_exit_live_and_replayed() {
+        // CR 400.7 + CR 614.1d: the cast-this-way enters-tapped rider belongs to
+        // the spell; any Stack exit ends it, and replay must match the live clear.
+        for destination in [Zone::Battlefield, Zone::Graveyard] {
+            let mut live = setup();
+            let id = create_object(
+                &mut live,
+                CardId(9770),
+                PlayerId(0),
+                "Edgar-Cast Spell".to_string(),
+                Zone::Stack,
+            );
+            live.objects
+                .get_mut(&id)
+                .unwrap()
+                .cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+            let mut replayed = live.clone();
+            let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+                id,
+                Some(Zone::Stack),
+                destination,
+            );
+            let command = resolve_and_apply_zone_change(
+                &mut live,
+                id,
+                Zone::Stack,
+                destination,
+                PlayerId(0),
+                None,
+                record,
+            )
+            .expect("live Stack exit resolves");
+            assert_eq!(
+                live.objects[&id].cast_permission_enter_tapped,
+                crate::types::zones::EtbTapState::Unspecified,
+                "live Stack exit to {destination:?} clears the rider"
+            );
+            apply_resolved_zone_change(&mut replayed, &command)
+                .expect("recorded Stack exit replays");
+            assert_eq!(
+                replayed.objects[&id].cast_permission_enter_tapped,
+                crate::types::zones::EtbTapState::Unspecified,
+                "replayed Stack exit to {destination:?} clears the rider"
+            );
+        }
+
+        let mut hostile = setup();
+        let id = create_object(
+            &mut hostile,
+            CardId(9771),
+            PlayerId(0),
+            "Not a Stack Exit".to_string(),
+            Zone::Hand,
+        );
+        hostile
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+        move_to_zone(&mut hostile, id, Zone::Exile, &mut Vec::new());
+        assert_eq!(
+            hostile.objects[&id].cast_permission_enter_tapped,
+            crate::types::zones::EtbTapState::Tapped,
+            "only a Stack exit owns the rider's cleanup"
         );
     }
 

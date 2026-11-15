@@ -158,8 +158,17 @@ impl GameRng {
     }
 }
 
-fn default_game_number() -> u8 {
+/// The first game of a match: what a state or a log entry without a game
+/// number reads as.
+pub(super) fn default_game_number() -> u8 {
     1
+}
+
+/// Whether `game_number` is the first game's. A log entry leaves it off the
+/// wire then, so a single game and the first game of a match serialize as
+/// they did before entries named their game.
+pub(super) fn is_first_game(game_number: &u8) -> bool {
+    *game_number == default_game_number()
 }
 
 fn initial_delayed_trigger_instance_id() -> u64 {
@@ -423,6 +432,371 @@ mod tuple_key_map {
         }
 
         deserializer.deserialize_map(TupleKeyVisitor(std::marker::PhantomData))
+    }
+}
+
+/// Serde module for an `AbilityUsageKey -> u32` map — JSON requires string keys,
+/// so each key encodes as `{source}#{provenance}#{has_description}#{description}`
+/// where `{provenance}` is `-` for a printed ability or `{object_id}.{incarnation}`
+/// for an acquired one and `{has_description}` is `0`/`1`. The description rides
+/// in the final segment, so free text (including `#`) decodes intact; every
+/// other segment is strictly parsed. A legacy `"objectId_index"` key has no `#`
+/// and is refused — old-save wire compat is impossible (provenance is
+/// unrecoverable from an index), so decoding fails closed instead of guessing.
+mod ability_usage_key_map {
+    use super::*;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    /// CR 602.2a: the fingerprint rides between provenance and description so
+    /// the description — the one component that may itself contain `#` —
+    /// stays the unbounded tail (parsed with `splitn(5, …)`). The fingerprint
+    /// is percent-escaped (`%` then `#`) for the same reason: its `{:?}`
+    /// encoding can carry `#` inside quoted string payloads.
+    pub(super) fn escape_component(raw: &str) -> String {
+        raw.replace('%', "%25").replace('#', "%23")
+    }
+
+    pub(super) fn unescape_component(raw: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(char) = chars.next() {
+            if char != '%' {
+                out.push(char);
+                continue;
+            }
+            let (Some(high), Some(low)) = (chars.next(), chars.next()) else {
+                return Err(format!("invalid escape in ability usage key: {raw}"));
+            };
+            match (high, low) {
+                ('2', '5') => out.push('%'),
+                ('2', '3') => out.push('#'),
+                _ => return Err(format!("invalid escape in ability usage key: {raw}")),
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn encode_key(key: &AbilityUsageKey) -> String {
+        let provenance = match key.provenance {
+            None => "-".to_string(),
+            Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
+        };
+        let fingerprint = escape_component(&key.fingerprint);
+        // CR 602.5c + CR 113.2c: re-donation lineage rides its own segment
+        // (never escaped: stamps are `object_id.incarnation` pairs, which
+        // carry no `#`); the `#`-bearing description stays the unbounded
+        // tail. A pre-chain five-segment encoding no longer decodes — the
+        // chain is total, so a key without one names no live budget.
+        let chain = key
+            .grant_chain
+            .iter()
+            .map(|stamp| format!("{}.{}", stamp.object_id.0, stamp.incarnation))
+            .collect::<Vec<_>>()
+            .join(",");
+        match &key.description {
+            None => format!(
+                "{}#{}#0#{}#{}#",
+                key.source.0, provenance, fingerprint, chain
+            ),
+            Some(text) => format!(
+                "{}#{}#1#{}#{}#{}",
+                key.source.0, provenance, fingerprint, chain, text
+            ),
+        }
+    }
+
+    pub(super) fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
+        let mut parts = raw.splitn(6, '#');
+        let (
+            Some(source),
+            Some(provenance),
+            Some(has_description),
+            Some(fingerprint),
+            Some(chain),
+            Some(description),
+        ) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        )
+        else {
+            return Err(format!("invalid ability usage key: {raw}"));
+        };
+        let source = source
+            .parse::<u64>()
+            .map(ObjectId)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let provenance = match provenance {
+            "-" => None,
+            stamped => {
+                let (oid, incarnation) = stamped
+                    .split_once('.')
+                    .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                let oid = oid
+                    .parse::<u64>()
+                    .map(ObjectId)
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                let incarnation = incarnation
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                Some(ObjectIncarnationRef::of(oid, incarnation))
+            }
+        };
+        let fingerprint = unescape_component(fingerprint)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let description = match has_description {
+            "0" if description.is_empty() => None,
+            "1" => Some(description.to_string()),
+            _ => return Err(format!("invalid ability usage key: {raw}")),
+        };
+        let grant_chain = if chain.is_empty() {
+            Vec::new()
+        } else {
+            chain
+                .split(',')
+                .map(|segment| {
+                    let (oid, incarnation) = segment
+                        .split_once('.')
+                        .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                    let oid = oid
+                        .parse::<u64>()
+                        .map(ObjectId)
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    let incarnation = incarnation
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    Ok(ObjectIncarnationRef::of(oid, incarnation))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
+        Ok(AbilityUsageKey {
+            source,
+            provenance,
+            description,
+            fingerprint,
+            grant_chain,
+        })
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a AbilityUsageKey, &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<(AbilityUsageKey, u32)>,
+    {
+        struct AbilityUsageKeyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<(AbilityUsageKey, u32)>> Visitor<'de> for AbilityUsageKeyVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded ability usage key strings")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(AbilityUsageKeyVisitor(std::marker::PhantomData))
+    }
+}
+
+/// CR 400.7: string codec for the departed-incarnation tally maps
+/// (`departed_activated_abilities_this_turn` /
+/// `departed_activated_abilities_this_game`). The departing incarnation rides
+/// its own `#`-free numeric segment ahead of the standard usage-key
+/// encoding, so decoding splits once on the first `#` and reuses
+/// [`ability_usage_key_map`] untouched.
+mod departed_activation_tally_map {
+    use super::ability_usage_key_map;
+    use super::AbilityUsageKey;
+    use serde::{de, ser::SerializeMap, Deserializer, Serializer};
+    use std::fmt;
+
+    pub(super) fn encode_key(key: &(AbilityUsageKey, u64)) -> String {
+        format!("{}#{}", key.1, ability_usage_key_map::encode_key(&key.0))
+    }
+
+    fn decode_key(raw: &str) -> Result<(AbilityUsageKey, u64), String> {
+        let (incarnation, rest) = raw
+            .split_once('#')
+            .ok_or_else(|| format!("invalid departed activation tally key: {raw}"))?;
+        let incarnation = incarnation
+            .parse::<u64>()
+            .map_err(|_| format!("invalid departed activation tally key: {raw}"))?;
+        let key = ability_usage_key_map::decode_key(rest)?;
+        Ok((key, incarnation))
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a (AbilityUsageKey, u64), &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<((AbilityUsageKey, u64), u32)>,
+    {
+        struct DepartedTallyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<((AbilityUsageKey, u64), u32)>> de::Visitor<'de>
+            for DepartedTallyVisitor<T>
+        {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded departed activation tally keys")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(DepartedTallyVisitor(std::marker::PhantomData))
+    }
+}
+
+#[cfg(test)]
+mod ability_usage_key_map_tests {
+    use super::*;
+
+    /// A legacy `"objectId_index"` map key has no `#` segments and is
+    /// refused: provenance is unrecoverable from an index, so decoding
+    /// fails closed instead of guessing (reach-guard: the current
+    /// encoding still decodes).
+    #[test]
+    fn legacy_tuple_key_fails_closed() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Probe {
+            #[serde(with = "super::ability_usage_key_map")]
+            map: std::collections::HashMap<AbilityUsageKey, u32>,
+        }
+
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42_0":1}}"#)
+            .expect_err("legacy tuple key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.2a: the pre-fingerprint three-component encoding (`source`,
+        // provenance, description only) is refused too — the fingerprint is
+        // total, so a key without one names no live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#":1}}"#)
+            .expect_err("fingerprint-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.5c + CR 113.2c: the pre-chain five-segment encoding is
+        // refused too — the chain is total, so a key without one names no
+        // live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#fp#":1}}"#)
+            .expect_err("chain-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        let ok: Probe =
+            serde_json::from_str(r#"{"map":{"42#-#0#fp##":1}}"#).expect("new encoding decodes");
+        assert_eq!(ok.map.len(), 1);
+        let (key, count) = ok.map.into_iter().next().expect("one entry");
+        assert_eq!(key.source, ObjectId(42));
+        assert_eq!(key.provenance, None);
+        assert_eq!(key.description, None);
+        assert_eq!(key.fingerprint, "fp");
+        assert_eq!(key.grant_chain, Vec::new());
+        assert_eq!(count, 1);
+
+        // A chained key round-trips its lineage oldest-first.
+        let chained: Probe = serde_json::from_str(r#"{"map":{"7#9.3#1#fp#11.1,13.2#{T}: Tap":1}}"#)
+            .expect("chained encoding decodes");
+        let (key, _) = chained.map.into_iter().next().expect("one entry");
+        assert_eq!(
+            key.grant_chain,
+            vec![
+                ObjectIncarnationRef::of(ObjectId(11), 1),
+                ObjectIncarnationRef::of(ObjectId(13), 2),
+            ],
+            "chain order is oldest-first"
+        );
+        assert_eq!(key.description.as_deref(), Some("{T}: Tap"));
+    }
+
+    /// The fingerprint rides escaped between two `#` separators while a
+    /// `#`-bearing description stays the unbounded tail: the encoding
+    /// round-trips both, and a malformed escape fails closed.
+    #[test]
+    fn usage_key_escapes_fingerprint_and_description() {
+        let key = AbilityUsageKey {
+            source: ObjectId(7),
+            provenance: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            description: Some("{T}: Add #1.".to_string()),
+            fingerprint: "a#b%{c}".to_string(),
+            grant_chain: vec![ObjectIncarnationRef::of(ObjectId(11), 1)],
+        };
+        let encoded = super::ability_usage_key_map::encode_key(&key);
+        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#11.1#{T}: Add #1.");
+        let decoded =
+            super::ability_usage_key_map::decode_key(&encoded).expect("escaped key decodes");
+        assert_eq!(decoded, key);
+
+        let bad = super::ability_usage_key_map::decode_key("7#-#0#a%zz#");
+        assert!(
+            bad.is_err(),
+            "a malformed escape must fail closed, got {bad:?}"
+        );
     }
 }
 
@@ -1272,6 +1646,17 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
         }
     }
 
+    /// CR 601.2a + CR 707.13: whether the source was cast from OUTSIDE the game,
+    /// so its `cast_from_zone` stamp is only a staging zone. A latched snapshot
+    /// answers `false`: an outside-the-game copy ceases to exist (CR 704.5e) when
+    /// it leaves the stack or battlefield, so no departed incarnation is read.
+    pub fn cast_from_outside_game(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.created_outside_game,
+            Self::Latched(_) => false,
+        }
+    }
+
     pub fn played_from_zone(self) -> Option<Zone> {
         match self {
             Self::ExactLive(object) => object.played_from_zone,
@@ -1431,6 +1816,42 @@ pub struct AbilityActivationRecord {
     pub targets: Vec<ActivationTargetFact>,
 }
 
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage budget of one
+/// activated ability. A printed ability (`provenance: None`) and each
+/// acquisition of that same text from another object (`provenance: the
+/// immediate-provider stamp`) are distinct instances with distinct budgets;
+/// two textually-identical printed abilities on one source share one budget
+/// (indistinguishable instances). The index is not in the key: layer
+/// recomputes shift indices while the acquisition stays the same.
+///
+/// CR 602.2a: `fingerprint` is the stable identity of the announced
+/// definition's `(cost, effect, ability_tag)` triple
+/// (`restrictions::ability_fingerprint`). Three-part keys alone collide on
+/// undescribed same-acquisition abilities that differ only in body — two
+/// equip costs on one object, or reconfigure's attach vs unattach modes (all
+/// `description: None`) — so the fingerprint discriminates them. It is a
+/// plain `String`, never absent: every definition has a cost/effect shape.
+/// It never participates in Tier-2 definition equality or layer stamps; it is
+/// a usage-budget discriminator only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AbilityUsageKey {
+    /// The object holding the ability.
+    pub source: ObjectId,
+    /// The immediate provider's incarnation stamp (`None` for printed).
+    pub provenance: Option<ObjectIncarnationRef>,
+    /// The ability's rules text (`None` for an undescribed/token ability).
+    /// Stable across recomputes and index shifts; never unwrapped.
+    pub description: Option<String>,
+    /// Stable encoding of the announced def's `(cost, effect, ability_tag)`.
+    pub fingerprint: String,
+    /// CR 602.5c + CR 113.2c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. Carried from the announced definition's
+    /// `grant_chain` so twins re-donated through one carrier hold distinct
+    /// budgets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_chain: Vec<ObjectIncarnationRef>,
+}
+
 fn battlefield_zone() -> Zone {
     Zone::Battlefield
 }
@@ -1492,6 +1913,11 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 601.2a + CR 707.13 + CR 400.11: the spell was cast from OUTSIDE the game
+    /// (the copy Garth One-Eye creates), so `from_zone` holds only its staging
+    /// zone and every "cast from [zone]" predicate over this record must be false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_outside_game: bool,
     /// CR 702.185c: The alternative-cast variant chosen when this spell was
     /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
     /// conditions ("a spell was warped this turn") can answer after the spell
@@ -1565,6 +1991,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             has_adventure: false,
             from_zone: Zone::Hand,
+            from_outside_game: false,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
@@ -1740,6 +2167,16 @@ pub struct ZoneChangeRecord {
     /// accumulated event vector.
     #[serde(default)]
     pub co_departed: Vec<ObjectId>,
+    /// CR 603.6a: ObjectIds of the other objects the SAME event moved onto the battlefield (every
+    /// battlefield entry of one completed logical zone-change group: Storm of Souls' or Living
+    /// Death's mass return), excluding this object. Stamped only by
+    /// `LogicalZoneChangeGroup::stamp_battlefield_entries` when the group completes; empty for a
+    /// lone entry, an entry outside a group, and a group still paused. A newcomer listed here
+    /// observes this entry and its entry counter prefix (CR 122.6) although the group delivered
+    /// this object first; every other event keeps each newcomer's own entry boundary. This is the
+    /// authority for entry simultaneity: trigger collection must not infer it from event order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_entered: Vec<ObjectId>,
     /// CR 400.7: the entrant's incarnation captured AFTER its battlefield-entry
     /// bump, so a later leave + re-entry (same ObjectId, higher incarnation) is
     /// distinguishable from the original entrant at intervening-if recheck.
@@ -1886,6 +2323,8 @@ struct ZoneChangeRecordWire {
     #[serde(default)]
     co_departed: Vec<ObjectId>,
     #[serde(default)]
+    co_entered: Vec<ObjectId>,
+    #[serde(default)]
     entered_incarnation: Option<u64>,
     #[serde(default)]
     attached_to: Option<AttachTarget>,
@@ -1931,6 +2370,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -1967,6 +2407,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -2145,6 +2586,22 @@ pub(crate) fn exact_battlefield_departure_row(
 }
 
 impl GameState {
+    /// CR 608.2c + CR 603.6a: which instruction recorded the ledger row at `ledger_index`: the
+    /// number of instruction boundaries at or below it. Rows with the same value were recorded
+    /// between the same two boundaries (one instruction, or one performance of a repeated keyword action),
+    /// so a battlefield entry among them is treated as part of the same simultaneous entry
+    /// event as the others (every permanent, newcomers included, is checked against it).
+    pub(crate) fn instruction_of_zone_change(&self, ledger_index: usize) -> usize {
+        self.instruction_boundary_marks
+            .partition_point(|mark| *mark <= ledger_index)
+    }
+
+    /// CR 608.2c: the ledger length at the last instruction boundary; every row below it was
+    /// recorded by an instruction that has completed.
+    pub(crate) fn completed_instruction_ledger_len(&self) -> usize {
+        self.instruction_boundary_marks.last().copied().unwrap_or(0)
+    }
+
     /// CR 603.10 + CR 400.7: the settled observation of the battlefield entry `record` describes,
     /// or `None`. Exact: this turn's row at this record's ledger index, naming this record's object
     /// at its post-entry incarnation; a later entry reusing the storage id is a different object
@@ -2339,6 +2796,7 @@ impl ZoneChangeRecord {
             combat_status: ZoneChangeCombatStatus::default(),
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -3769,9 +4227,13 @@ pub struct LatchedSuppressTrigger {
 
 /// Complete ownership for one logical zone-change action.
 ///
-/// Both pause carriers persist this same shape. It deliberately has no serde
-/// defaults: an active legacy carrier cannot reconstruct the original member
-/// set, terminal outcomes, or already-delivered event authority safely.
+/// Both pause carriers persist this same shape. Its terminal and occurrence
+/// authority deliberately has no serde defaults: an active legacy carrier cannot
+/// reconstruct the original member set, terminal outcomes, or already-delivered
+/// event authority safely. `announced_members` alone defaults to empty, because a
+/// legacy carrier without it only loses the CR 614.4 co-entrant exclusion for its
+/// later members (they are checked against every permanent on the battlefield, as
+/// before).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
@@ -3795,6 +4257,13 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_after_latched: bool,
     pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order. A member's battlefield entry proposal is stamped with the others
+    /// (`CoEntrants`), so a member delivered earlier is not a replacement source for a later one.
+    /// A group parked by an older build has none; its later members are checked against every
+    /// permanent on the battlefield, as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub announced_members: Vec<ObjectIncarnationRef>,
 }
 
 /// Wire-only mirror used to reject malformed paused logical-zone authority at
@@ -3813,6 +4282,8 @@ struct LogicalZoneChangeGroupWire {
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    #[serde(default)]
+    announced_members: Vec<ObjectIncarnationRef>,
 }
 
 impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
@@ -3829,6 +4300,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
+            announced_members: wire.announced_members,
         }
     }
 }
@@ -4073,7 +4545,20 @@ impl LogicalZoneChangeGroup {
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
+            announced_members: Vec::new(),
         }
+    }
+
+    /// CR 614.4: record every announced member as it was when the event began.
+    pub(crate) fn with_announced_members(mut self, members: Vec<ObjectIncarnationRef>) -> Self {
+        self.announced_members = members;
+        self
+    }
+
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order (empty for a group parked by an older build).
+    pub fn announced_members(&self) -> &[ObjectIncarnationRef] {
+        &self.announced_members
     }
 
     /// Install the one authoritative pre-delivery trigger latch. Re-latching a
@@ -4697,6 +5182,58 @@ impl LogicalZoneChangeGroup {
         }
         Ok(())
     }
+
+    /// CR 603.6a: stamp each battlefield entry of this completed group with the other objects the
+    /// group moved onto the battlefield, so trigger collection reads one event, not an order. The
+    /// group's entrants are its retained moves to the battlefield from another zone
+    /// (`from: Some(_)`). An object created on the battlefield while the group delivers
+    /// (`from: None`: CR 111.1, a token another effect puts onto the battlefield) is not one of
+    /// them. Fewer than two entrants stamp nothing. Known gap: membership is read from the
+    /// occurrence shape, so a card that a replacement effect moves onto the battlefield while the
+    /// group delivers would be stamped as a co-entrant. No printed card reaches it: the
+    /// battlefield-destination replacements (Obstinate Baloth's, Out of the Tombs') replace a
+    /// discard or a draw, which no entry's delivery performs.
+    pub fn stamp_battlefield_entries(&mut self) {
+        let mut entrant_ids: Vec<ObjectId> = Vec::new();
+        for occurrence in &self.all_origin_occurrences {
+            if let Some(object_id) = battlefield_entrant(&occurrence.event) {
+                if !entrant_ids.contains(&object_id) {
+                    entrant_ids.push(object_id);
+                }
+            }
+        }
+        if entrant_ids.len() < 2 {
+            return;
+        }
+        for occurrence in &mut self.all_origin_occurrences {
+            let Some(object_id) = battlefield_entrant(&occurrence.event) else {
+                continue;
+            };
+            let GameEvent::ZoneChanged { record, .. } = &mut occurrence.event else {
+                unreachable!("battlefield_entrant matches only ZoneChanged occurrences");
+            };
+            record.co_entered = entrant_ids
+                .iter()
+                .copied()
+                .filter(|entrant| *entrant != object_id)
+                .collect();
+        }
+    }
+}
+
+/// CR 603.6a: the object a retained group occurrence moved onto the battlefield from another zone,
+/// or `None` for any other occurrence (a departure, or an object created on the battlefield).
+fn battlefield_entrant(event: &GameEvent) -> Option<ObjectId> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from: Some(_),
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(*object_id)
 }
 
 /// The one zone-change delivery currently paused inside a logical owner.
@@ -4928,6 +5465,26 @@ impl PendingZoneChangeDelivery {
     }
 }
 
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+///
+/// CR 616.1: a delivery can pause on a replacement ordering choice between the
+/// captures and the settlement, so the operation rides on the delivery's resume
+/// carrier (`PendingChangeZoneIteration::library_reorder` or
+/// `PendingBatchDeliveries::library_reorder`) and is settled by the drain that
+/// completes the instruction — never by the call that started it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryReorderOperation {
+    pub(crate) members: Vec<ObjectId>,
+    pub(crate) libraries: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -5008,16 +5565,31 @@ pub struct PendingChangeZoneIteration {
     /// pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 611.2e + CR 614.12: the with-entry effect derived at the ChangeZone
+    /// instruction's resolver entry (the source, controller and continuous
+    /// modifications of a same-resolution "is/has" instruction that applies
+    /// with the entry), carried across a replacement-ordering / as-enters
+    /// pause so a resumed entry still carries it (Xu-Ifit, Osteoharmonist's
+    /// "has no abilities" withholds the entrant's own entry abilities).
+    /// `None` = no such effect. Mirrors the `face_down_profile` carry-through
+    /// above; never re-derived at the drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
     /// CR 401.4 + CR 701.24a: Library placement override carried across a
     /// replacement-ordering pause so Endurance-style "on the bottom of their
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this delivery performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
     /// position of a terminal-shuffle operation, carried across the pause.
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
@@ -5189,6 +5761,39 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+    /// CR 608.2c + CR 603.7a: the tracked set the producing instruction published when it
+    /// paused with this owner parked ("those tokens"). On completion the owner extends exactly
+    /// this set with every token it created and re-establishes it as the chain's set, so the
+    /// parked tail binds it even when a nested resolution reset the chain scope. `None` for an
+    /// owner that never paused under a tracked-set consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referent_set: Option<TrackedSetId>,
+    /// CR 614.6 + CR 608.2c: see [`OfferedBatchCustody`]. Set only by the owner's own
+    /// replacement-prompt park; settled by the delivery that hands the batch's tokens over,
+    /// or by the owner's adoption on resume.
+    #[serde(default, skip_serializing_if = "OfferedBatchCustody::is_settled")]
+    pub offered_batch: OfferedBatchCustody,
+}
+
+/// CR 614.6 + CR 608.2c: whether the batch a CopyToken owner offered to the replacement
+/// pipeline still owes the owner its tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OfferedBatchCustody {
+    /// Every batch the owner offered has handed it its tokens (or none is outstanding).
+    #[default]
+    Settled,
+    /// The offered batch's creation event paused on a replacement prompt, and no delivery
+    /// has handed its tokens over yet. If the answer replaces the event with a different
+    /// creation (Jinnie Fay's Cats or Dogs, Moonlit Meditation's or Esix's copies), that
+    /// creation's tokens are this batch's tokens (CR 614.6), and the owner adopts them when
+    /// it resumes.
+    AtReplacementPrompt,
+}
+
+impl OfferedBatchCustody {
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled)
+    }
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -6859,14 +7464,16 @@ impl EnclosingPostReplacementFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
-    /// Remaining per-object counter removals.
-    pub remaining: Vec<PendingCounterRemoval>,
+    /// Remaining per-object counter removals, consumed from the front. A
+    /// `VecDeque` serializes as the same JSON sequence a `Vec` did.
+    pub remaining: VecDeque<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries. Retained for diagnostics and
-    /// legacy wire compatibility; use `applied_total` for effect result context.
+    /// Total counters requested across all entries, saturating at `u32::MAX` (each
+    /// entry keeps its true count). Retained for diagnostics and legacy wire
+    /// compatibility; use `applied_total` for effect result context.
     pub total: u32,
     /// Counters actually removed so far, after clamping and replacements.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -6919,7 +7526,7 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
                     })
                     .ok_or_else(|| serde::de::Error::missing_field("source_id")),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<VecDeque<_>, _>>()?;
         Ok(Self {
             remaining,
             effect_kind: wire.effect_kind,
@@ -6967,6 +7574,11 @@ pub struct PendingBatchDeliveries {
     /// for newly parked actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this batch performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
     /// `enter_tapped` mod survives the pause boundary).
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -7085,7 +7697,7 @@ pub struct PendingBatchZoneMoveRequest {
     /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7515,8 +8127,16 @@ pub enum BatchCompletion {
         /// determines the printed placement order and remains the
         /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
-        /// Selection members that were already in a library at delivery time.
-        /// They are repositions, not replaceable zone-change requests.
+        /// CR 401.4: Selection members that were already in a library when the
+        /// owner's arrangement was answered, for a completion parked by a build
+        /// that queued only the non-library moves and left these members to be
+        /// repositioned by this tail. A current completion writes this empty
+        /// because every selected member — this set included — is delivered by
+        /// the replacement-consulting batch (CR 614.1 + CR 701.20d). A non-empty
+        /// restored set is therefore the migration marker for the legacy
+        /// arrange-then-reposition shape: the completion settles it through
+        /// [`super::game::engine_resolution_choices`]'s legacy reposition rather
+        /// than resuming the non-library moves and silently dropping the order.
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
@@ -7792,6 +8412,13 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards were taken
+        /// from. Only top-edge moves publish `Milled` events.
+        #[serde(default)]
+        position: LibraryPosition,
+        /// CR 701.17a: Destination zone for the cards. Only Graveyard counts as mill.
+        #[serde(default = "default_zone_graveyard")]
+        destination: Zone,
     },
     /// Horde advanced legendary rule
     /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
@@ -7810,6 +8437,10 @@ pub enum BatchCompletion {
         /// battlefield phases out synchronously (CR 702.26).
         legendary_cohort: Vec<ObjectId>,
     },
+}
+
+const fn default_zone_graveyard() -> Zone {
+    Zone::Graveyard
 }
 
 /// CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused for a
@@ -8089,6 +8720,29 @@ pub struct PendingTokenEventDelivery {
     pub source_id: ObjectId,
 }
 
+/// CR 614.12a + CR 607.2d: counter evaluation held until an acquired entry
+/// choice has bound its answer. `None` exceptions retains the meld-only policy;
+/// `Some` retains the merged placement policy, including an empty exception list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyEntryPendingCounters {
+    pub exceptions: Option<Vec<ContinuousModification>>,
+    pub replay_entry_events: bool,
+}
+
+/// CR 707.5 + CR 614.12a: remaining work for a copied as-enters choice.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyEntryResumeStage {
+    /// Counters have settled and the tail still offers the acquired choice:
+    /// the order when no counter reads it, and the meaning of a save that
+    /// predates this field.
+    #[default]
+    ChoiceOwedAfterCounters,
+    /// The acquired choice is answered; counters have settled.
+    ChoiceSettled,
+    /// The acquired choice paused before counter evaluation.
+    BeforeCounters(Box<CopyEntryPendingCounters>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -8245,9 +8899,10 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary or liminal-token interactive
-    /// enter-as-copy entry after its merged counter placement settles. Never
-    /// minted by Meld. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: resume an interactive enter-as-copy entry after
+    /// its acquired choice or merged counter placement settles. Meld uses this
+    /// only before counters; its own completion still owns the post-counter tail.
+    /// The incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
@@ -8262,12 +8917,16 @@ pub enum PendingCounterPostAction {
     ///   + CR 616.1; this is not a leaf-reference layer.
     ///
     /// Serialized surface: PendingEffectResolved::post_actions on the existing
-    /// resolution-state frame wire, exactly like ContinueProliferateActions
-    /// and ContinuePlayerScopeSacrifice. Backward compatible, not forward
-    /// compatible: older builds cannot load a save containing this new tag.
-    /// Same one-way contract; no game protocol or resolution-state wire bump.
+    /// resolution-state frame wire. Version 14 protects the new resume stages:
+    /// older readers reject that version before decoding or dispatching state,
+    /// rather than silently ignoring `resume_stage` on this existing tag.
+    /// Legacy saves without the field retain ChoiceOwedAfterCounters semantics.
+    /// Full-game and P2P protocol versions move together for this state change.
     FinishCopyTargetChoiceEntry {
         entrant: ObjectIncarnationRef,
+        /// Missing on legacy saves that still owe the acquired choice.
+        #[serde(default)]
+        resume_stage: CopyEntryResumeStage,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -8937,6 +9596,32 @@ pub enum SpellAlternativeCostElection {
     Legacy,
 }
 
+/// CR 601.3 + CR 601.6: the route that let this cast begin outside sorcery timing,
+/// fixed when the cast is proposed and read, never re-derived, by payment and finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastTimingRoute {
+    /// CR 702.8a + CR 601.3b: flash, or a permission to cast it as though it had flash, needing no cost or target.
+    Permission,
+    /// CR 601.3c + CR 601.3d: only the spell's own "as though it had flash" option.
+    SpellOption,
+    /// CR 118.9 + CR 601.3c: only a granted alternative cost that carries the timing.
+    AlternativeCost,
+    /// CR 702.48a: only an Offering sacrifice.
+    Offering,
+}
+
+impl CastTimingRoute {
+    /// The provenance stamped on the cast object (CR 601.3b timing permission used).
+    pub fn permission(self) -> CastTimingPermission {
+        match self {
+            Self::Offering => CastTimingPermission::Offering,
+            Self::Permission | Self::SpellOption | Self::AlternativeCost => {
+                CastTimingPermission::AsThoughHadFlash
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -9007,6 +9692,11 @@ pub struct PendingCast {
     /// commit decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepaid_finalization: Option<Box<PrepaidSpellFinalization>>,
+    /// CR 601.2g + CR 601.2h: a life-gain cost owed by other players (Invigorate,
+    /// Reverent Silence), paid at the payment commit after mana abilities; see
+    /// `DeferredLifeGainCost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_life_gain_cost: Option<DeferredLifeGainCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -9031,7 +9721,7 @@ pub struct PendingCast {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
+    pub cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9202,15 +9892,21 @@ fn default_origin_zone() -> Zone {
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Exact outer cost action suspended after a
-/// life payment committed but its replacement's interactive post-effect did
-/// not finish. The replacement continuation remains the immediate child; this
-/// owner resumes only after that child drains.
+/// life payment (CR 119.4) or a life-gain cost event (CR 119.3) committed but
+/// its replacement's interactive post-effect did not finish. The replacement
+/// continuation remains the immediate child; this owner resumes only after that
+/// child drains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredLifeCostResume {
     /// Continue a spell cast or activated-ability payment without replaying the
     /// life payment. Mana-payment callers set `cost` to `NoCost` and preserve
     /// the amount already spent in `prepaid_actual_mana_spent`.
+    ///
+    /// `player` is always the payer whose cast resumes. The prompt that parked
+    /// the root may belong to a different player: for a life-gain cost, CR 616.1
+    /// gives the replacement choice to the recipient. Consumers must key on the
+    /// resolution depth and `Priority` window, never on the answering player.
     Cast {
         player: PlayerId,
         /// The announcing caller attaches its complete cast/activation root
@@ -9359,6 +10055,23 @@ pub struct FinalizePrePaymentChecks {
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
+/// CR 602.2b + CR 605.3b: progress of a mana ability's activation publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityActivationStage {
+    /// Costs are not yet fully paid; the activation has not been published.
+    #[default]
+    Unpublished,
+    /// The activation event was emitted and its triggers observed.
+    Published,
+}
+
+impl ManaAbilityActivationStage {
+    fn is_unpublished(&self) -> bool {
+        matches!(self, Self::Unpublished)
+    }
+}
+
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
 /// the activator to choose the produced mana. An auto-tap plan already selected
 /// production; a direct activation has not.
@@ -9412,6 +10125,14 @@ pub struct ManaAbilityCostParent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaAbilityCostCursor {
     pub remaining: Vec<AbilityCost>,
+    /// CR 602.2b + CR 605.3b: whether this activation's `AbilityActivated` event
+    /// and trigger observation already happened at the paid-cost boundary. A
+    /// resume after a paused inline preamble continues past that boundary.
+    #[serde(
+        default,
+        skip_serializing_if = "ManaAbilityActivationStage::is_unpublished"
+    )]
+    pub activation: ManaAbilityActivationStage,
     /// CR 118.3b + CR 119.4 + CR 616.1: Selected Phyrexian life components
     /// that follow an already-paid component whose replacement post-effect
     /// paused. They complete before the cursor advances to mana production.
@@ -10037,6 +10758,74 @@ impl DeferredHandDiscardCost {
     }
 }
 
+/// CR 601.2g + CR 601.2h + CR 118.3: a spell cost that has other players gain life
+/// ("have an opponent gain 3 life", "have each other player gain 6 life"). Mana
+/// abilities are activated before costs are paid (CR 601.2g), and a "can't gain
+/// life" lock decides payability when the cost is paid (CR 119.7), so the cost
+/// waits for the payment commit; its recipients are determined there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DeferredLifeGainCost {
+    /// Accepted with the alternative cost, not yet paid. `cost` is the
+    /// `AbilityCost::EffectCost` whose `player_recipient_cost` view the commit pays.
+    Unpaid { cost: Box<AbilityCost> },
+    /// Being paid: `recipients` (APNAP order, CR 101.4) still owe the `amount`
+    /// gain — after the payer's CR 115.10a choice, or after an earlier
+    /// recipient's gain paused for a CR 616.1 replacement choice. Every
+    /// recipient's gain is staged through the replacement pipeline before any is
+    /// applied, so the gains happen simultaneously (CR 101.4 + CR 119.3).
+    Owed {
+        recipients: Vec<PlayerId>,
+        amount: u32,
+        /// Outcomes that already went through replacement, waiting to be settled
+        /// together once every recipient is staged.
+        #[serde(default, skip_serializing_if = "StagedLifeGains::is_empty")]
+        staged: StagedLifeGains,
+        /// The recipient whose gain is parked on a CR 616.1 replacement choice;
+        /// the answer's surviving event is staged for them rather than applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused_on: Option<PlayerId>,
+    },
+}
+
+/// CR 101.4 + CR 119.3 + CR 614.6: the outcomes of one simultaneous life gain
+/// whose recipients are still being run through the replacement pipeline. Each
+/// recipient's replacements read the life totals as they stood before the
+/// instruction, so nothing here is applied until every recipient is staged; the
+/// whole batch is then settled together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGains {
+    /// Gains that survived replacement, `(recipient, final amount)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gains: Vec<(PlayerId, u32)>,
+    /// Gains a cross-event substitute replaced outright (Tainted Remedy), in
+    /// staging order. Each keeps its own continuation: the continuation slot
+    /// holds one entry, so two substitutes in one batch cannot share it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutes: Vec<StagedLifeGainSubstitute>,
+}
+
+impl StagedLifeGains {
+    pub fn is_empty(&self) -> bool {
+        self.gains.is_empty() && self.substitutes.is_empty()
+    }
+}
+
+/// CR 614.6: a life gain replaced by a different event, captured at staging so
+/// its substitute runs with the rest of the batch rather than while later
+/// recipients are still being staged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGainSubstitute {
+    /// The substitute's continuation with its event context (the affected
+    /// player, the replacing source, its controller).
+    pub drain: PostReplacementDrain,
+    /// CR 614.6: the modified event occurs instead of the replaced gain, so it
+    /// reads that gain's amount ("that much life"), which the continuation takes
+    /// from `last_effect_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
+}
+
 impl PendingCast {
     pub fn new(
         object_id: ObjectId,
@@ -10059,6 +10848,7 @@ impl PendingCast {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -10320,6 +11110,36 @@ impl GameState {
         }
     }
 
+    /// CR 400.7 + CR 701.20a: The exact occurrence of each live card a reveal
+    /// is disclosing right now, in `card_ids` order. Captured into
+    /// [`GameEvent::CardsRevealed`] where the event is built, so knowledge
+    /// finalized later in the action attaches to the disclosed object and not
+    /// to a new object that reuses its storage id (CR 701.20d reorders).
+    ///
+    /// [`GameEvent::CardsRevealed`]: crate::types::events::GameEvent::CardsRevealed
+    pub fn disclosed_occurrences(&self, card_ids: &[ObjectId]) -> Vec<ObjectIncarnationRef> {
+        card_ids
+            .iter()
+            .filter_map(|id| self.objects.get(id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect()
+    }
+
+    /// CR 400.7 + CR 701.20a/d: The storage id through which a disclosure of
+    /// `occurrence` still identifies a card, or `None` once that object is gone.
+    ///
+    /// The disclosed object itself qualifies while it is still current. Once it
+    /// has become a new object, only a move into a hand carries the disclosure
+    /// along: the table saw which card was put there (CR 701.20a), the same
+    /// destination rule `clear_revealed_information_on_zone_exit` applies to a
+    /// publication made before the move. A card reordered within its library
+    /// (CR 701.20d) or moved anywhere else is a new object nobody was shown.
+    pub(crate) fn disclosure_survivor(&self, occurrence: ObjectIncarnationRef) -> Option<ObjectId> {
+        let object = self.objects.get(&occurrence.object_id)?;
+        (ObjectIncarnationRef::from_object(object) == occurrence || object.zone == Zone::Hand)
+            .then_some(occurrence.object_id)
+    }
+
     /// Returns whether `viewer` learned this exact still-current card
     /// occurrence. A library fact is valid only for the library generation in
     /// which it was disclosed; other-zone facts are unaffected by library churn.
@@ -10493,6 +11313,34 @@ impl GameState {
         owners
     }
 
+    /// The casting stage of the live announcement, read from the prompt being answered when it
+    /// embeds the cast, since another owner may hold the same cast in custody meanwhile.
+    pub(crate) fn pending_cast_stage(&self) -> Option<PendingCastStage> {
+        if let Some((_, stage)) = self.waiting_for.pending_cast_with_stage() {
+            return Some(stage);
+        }
+        Some(match *self.live_pending_cast_owners().first()? {
+            PendingCastOwner::Prompt => self.waiting_for.pending_cast_with_stage()?.1,
+            // CR 601.2d: a division announced before costs keeps `distribute`; the X-deferred
+            // division raised after mana payment holds a fresh cast without it.
+            PendingCastOwner::External => match (&self.waiting_for, self.pending_cast.as_deref()) {
+                (
+                    WaitingFor::DistributeAmong {
+                        scope: DistributionScope::AnnouncedTargets,
+                        ..
+                    },
+                    Some(pending),
+                ) if pending.distribute.is_some() && !pending.activation_cost_committed => {
+                    PendingCastStage::Proposal
+                }
+                _ => PendingCastStage::Costs,
+            },
+            PendingCastOwner::DeferredLifeCost
+            | PendingCastOwner::CostMove
+            | PendingCastOwner::DiscardForCost => PendingCastStage::Costs,
+        })
+    }
+
     /// The [`PendingCast`] held by `owner`, if that owner is live.
     pub(crate) fn pending_cast_at(&self, owner: PendingCastOwner) -> Option<&PendingCast> {
         match owner {
@@ -10659,6 +11507,15 @@ impl GameState {
             };
         }
     }
+}
+
+/// Where an announced cast is, in the order the engine raises its prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingCastStage {
+    /// CR 601.2a–d: the proposal, before the total cost is determined.
+    Proposal,
+    /// CR 601.2f–h: determining and paying the total cost.
+    Costs,
 }
 
 /// CR 601.2 + CR 602.2b: every typed owner of an announced cast or activation
@@ -11296,6 +12153,14 @@ pub struct PendingManaAbility {
     /// and resume; never restamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced_source_incarnation: Option<u64>,
+    /// CR 602.2a + CR 602.5c: this mana ability's own usage key, announced
+    /// before any cost is paid (`mana_abilities::activate_mana_ability`) and
+    /// consumed when the inline completion records
+    /// (`complete_mana_ability_activation`) — never re-derived there, so a
+    /// self-sacrifice cost cannot unresolve the slot. An existing capture is
+    /// never overwritten; carried through every payment pause and resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<AbilityUsageKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -12041,6 +12906,16 @@ pub enum OutsideGameChoiceSource {
         /// would raise it.
         card: Box<crate::types::card::CardFace>,
     },
+    /// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+    /// outside the game (`Player::companion` with `used == false`). Revealing it
+    /// does not bring it into the game, so an effect that finds cards "from
+    /// outside the game" can find it until the companion special action (or a
+    /// prior such effect) puts it into hand (CR 702.139c). It leaves the
+    /// sideboard pool at the reveal, so it is not a `Sideboard` entry. Boxed for
+    /// the same `WaitingFor` size budget as `BoosterPack`.
+    Companion {
+        card: Box<crate::types::card::CardFace>,
+    },
 }
 
 /// Where an opened booster pack came from, for display. Every card in one pack
@@ -12719,6 +13594,10 @@ pub struct GraveyardPermissionLatch {
     pub extra_cost: Option<crate::types::statics::CastExtraCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    /// CR 614.1d + CR 607.1c: the grant's "that artifact enters tapped" rider
+    /// (Edgar, Master Machinist), kept from announcement (CR 601.2a).
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
     /// CR 601.3 + CR 601.2i: a `Single` grant allows one cast and ends when
     /// this cast becomes cast.
     #[serde(
@@ -13213,7 +14092,33 @@ pub(crate) struct PrecastShortcutBreakpoint {
 #[derive(Debug, Clone)]
 pub struct TrustedGameStateEnvelope {
     state: GameState,
+    // Persistence metadata only. Absence retains legacy repair authority until restore.
+    block_history_format: Option<BlockHistoryFormat>,
     precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+/// The block-history format a trusted envelope was written in. An envelope
+/// without one predates it: its writer recorded a creature put onto the
+/// battlefield blocking as having blocked (CR 509.4), so restore repairs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockHistoryFormat {
+    /// CR 509.4: only declared blocks are recorded.
+    DeclaredOnly,
+}
+
+impl BlockHistoryFormat {
+    const fn wire_value(self) -> u64 {
+        match self {
+            Self::DeclaredOnly => 1,
+        }
+    }
+
+    fn from_wire_value(value: &serde_json::Value) -> Option<Self> {
+        match value.as_u64() {
+            Some(1) => Some(Self::DeclaredOnly),
+            _ => None,
+        }
+    }
 }
 
 fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameState, String> {
@@ -13253,6 +14158,102 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
         }
     }
     Ok(())
+}
+
+/// Strips the pre-route `"AsThoughHadFlash"` timing value from every serialized
+/// `PendingCast` and lists those casts' objects in `legacy_unrouted_pending_casts`,
+/// where restore recovers their route from the board.
+fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
+    fn visit(value: &mut serde_json::Value, ids: &mut Vec<serde_json::Value>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                // `card_id` and `ability` are required `PendingCast` fields; a
+                // `PendingSpellResolution` carries the same value legitimately.
+                if object.contains_key("card_id")
+                    && object.contains_key("ability")
+                    && object
+                        .get("cast_timing_permission")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("AsThoughHadFlash")
+                {
+                    object.remove("cast_timing_permission");
+                    if let Some(id) = object.get("object_id").filter(|id| !ids.contains(id)) {
+                        ids.push(id.clone());
+                    }
+                }
+                for child in object.values_mut() {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    let mut ids = Vec::new();
+    visit(value, &mut ids);
+    if let (false, Some(state)) = (ids.is_empty(), value.as_object_mut()) {
+        state.insert(
+            "legacy_unrouted_pending_casts".into(),
+            serde_json::Value::Array(ids),
+        );
+    }
+}
+
+/// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`,
+/// and its ability's resolution choice.
+fn migrate_legacy_as_though_flash_grants(value: &mut serde_json::Value) {
+    fn legacy_grant(value: &serde_json::Value) -> bool {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility")
+            && value.pointer("/definition/mode")
+                == Some(&serde_json::json!({"CastWithKeyword": {"keyword": "Flash"}}))
+    }
+    // CR 601.3 + CR 608.2d: that permission's "may" is exercised by later casts, not chosen while
+    // the grant resolves; its old writer lowered it as a resolution choice.
+    if value.get("optional") == Some(&serde_json::Value::Bool(true))
+        && value
+            .pointer("/effect/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("GenericEffect")
+        && value
+            .pointer("/effect/static_abilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|statics| {
+                statics.iter().any(|static_ability| {
+                    static_ability
+                        .get("modifications")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|modifications| modifications.iter().any(legacy_grant))
+                })
+            })
+    {
+        value["optional"] = serde_json::Value::Bool(false);
+    }
+    // CR 609.4: "as though it had flash" doesn't give a spell flash, and only
+    // that permission's old writer granted CastWithKeyword { Flash } as an ability.
+    if legacy_grant(value) {
+        if let Some(mode) = value.pointer_mut("/definition/mode") {
+            *mode = serde_json::Value::from("CastWithFlash");
+        }
+    }
+    match value {
+        serde_json::Value::Object(object) => object
+            .values_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 /// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
@@ -13677,6 +14678,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     // namespace. Live deferred events keep their own recorded turn separately.
     // Retain the old positions so current-turn replay keys can follow their
     // ledger row through this compaction.
+    let original_ledger_len = ledger.len();
     let mut old_to_current_index = HashMap::new();
     let mut current_ledger = Vec::with_capacity(ledger.len());
     for (old_index, record) in std::mem::take(ledger).into_iter().enumerate() {
@@ -13723,6 +14725,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     }
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
+    remap_persisted_instruction_boundary_marks(state, original_ledger_len, &old_to_current_index)?;
 
     let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
@@ -13730,6 +14733,129 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     })?;
 
     Ok(())
+}
+
+/// CR 608.2c + CR 603.6a: `instruction_boundary_marks` are ledger lengths. They must strictly
+/// increase and lie within the ledger as it was persisted, before stale rows are pruned; a value
+/// past it would declare unfinished entries complete. Pruning stale rows removes rows below a
+/// mark, so each mark follows the rows that survive (a mark with no surviving row below it
+/// disappears).
+fn remap_persisted_instruction_boundary_marks(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    original_ledger_len: usize,
+    old_to_current_index: &HashMap<usize, usize>,
+) -> Result<(), String> {
+    let Some(marks) = state.get_mut("instruction_boundary_marks") else {
+        return Ok(());
+    };
+    let marks = marks
+        .as_array_mut()
+        .ok_or_else(|| "instruction_boundary_marks must be an array".to_string())?;
+    let mut surviving: Vec<usize> = old_to_current_index.keys().copied().collect();
+    surviving.sort_unstable();
+    let mut previous = 0;
+    let mut remapped: Vec<usize> = Vec::with_capacity(marks.len());
+    for mark in marks.iter() {
+        let mark = json_usize(mark)
+            .ok_or_else(|| "instruction_boundary_marks entries must be integers".to_string())?;
+        if mark <= previous || mark > original_ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = mark;
+        let kept = surviving.partition_point(|old_index| *old_index < mark);
+        if kept > remapped.last().copied().unwrap_or(0) {
+            remapped.push(kept);
+        }
+    }
+    *marks = remapped.into_iter().map(serde_json::Value::from).collect();
+    Ok(())
+}
+
+/// CR 603.6a + CR 400.7: the restored entry hold must be coherent with the ledger it indexes.
+/// The marks strictly increase within the ledger; the held entries are battlefield entries of this
+/// turn, each naming a distinct ledger row of the same object and incarnation. A duplicate
+/// would be collected twice on release, and a stale mark would release unfinished entries.
+fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
+    let ledger_len = state.zone_changes_this_turn.len();
+    let mut previous = 0;
+    for mark in &state.instruction_boundary_marks {
+        if *mark <= previous || *mark > ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = *mark;
+    }
+    let mut seen = HashSet::new();
+    for event in &state.unsettled_entry_batch_events {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to: Zone::Battlefield,
+            record,
+        } = event
+        else {
+            return Err(
+                "unsettled_entry_batch_events may hold only battlefield-entry events".to_string(),
+            );
+        };
+        // The matcher reads the event's own origin, so it must be the record's.
+        if *from != record.from_zone || record.to_zone != Zone::Battlefield {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with its own record".to_string(),
+            );
+        }
+        if record.recorded_turn_number != state.turn_number {
+            return Err(
+                "unsettled_entry_batch_events holds an entry from another turn".to_string(),
+            );
+        }
+        let row = state
+            .zone_changes_this_turn
+            .get(record.turn_zone_change_index)
+            .ok_or_else(|| {
+                "unsettled_entry_batch_events entry points outside the current ledger".to_string()
+            })?;
+        if row.object_id != *object_id
+            || record.object_id != *object_id
+            || row.to_zone != Zone::Battlefield
+            || row.entered_incarnation != record.entered_incarnation
+        {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with the current ledger".to_string(),
+            );
+        }
+        if !seen.insert(record.turn_zone_change_index) {
+            return Err("unsettled_entry_batch_events holds one entry twice".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// CR 603.6a + CR 608.2c: a saved instruction mark is a ledger position, not evidence that the
+/// instruction below it completed, and nothing else in a save records that for a held entry. A
+/// mark above a held entry's row would release that entry to the observer scan while its
+/// co-entrants may still be entering, so such marks are not restored: the held entries stay
+/// held until the engine establishes their completion again (the next instruction boundary it
+/// reaches, or the action settling). Marks at or below every held row are kept; they cut
+/// completed instructions that hold nothing.
+fn withhold_unestablished_entry_completion(state: &mut GameState) {
+    let Some(first_held_row) = state
+        .unsettled_entry_batch_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+            _ => None,
+        })
+        .min()
+    else {
+        return;
+    };
+    state
+        .instruction_boundary_marks
+        .retain(|mark| *mark <= first_held_row);
 }
 
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
@@ -14114,6 +15240,7 @@ fn visit_persisted_live_zone_changed_records(
     // `resolved_rules_journal` snapshots.
     const LIVE_EVENT_CARRIER_FIELDS: &[&str] = &[
         "deferred_entry_events",
+        "unsettled_entry_batch_events",
         "pending_trigger",
         "pending_trigger_event_batch",
         "deferred_triggers",
@@ -16548,6 +17675,12 @@ impl Serialize for TrustedGameStateEnvelope {
         S: serde::Serializer,
     {
         let mut value = serde_json::Map::new();
+        if let Some(format) = self.block_history_format {
+            value.insert(
+                "block_history_format".to_string(),
+                format.wire_value().into(),
+            );
+        }
         value.insert(
             "state".to_string(),
             serde_json::to_value(ResolutionStateWire::from_game_state(self.state.clone()))
@@ -16571,6 +17704,13 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         let object = value
             .as_object_mut()
             .ok_or_else(|| serde::de::Error::custom("trusted state must be a JSON object"))?;
+        let block_history_format = match object.remove("block_history_format") {
+            None => None,
+            Some(value) => Some(
+                BlockHistoryFormat::from_wire_value(&value)
+                    .ok_or_else(|| serde::de::Error::custom("unsupported block history format"))?,
+            ),
+        };
         let state = object
             .remove("state")
             .ok_or_else(|| serde::de::Error::custom("trusted state is missing state"))?;
@@ -16585,6 +17725,7 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
             state,
+            block_history_format,
             precast_shortcut_runtime,
         })
     }
@@ -16596,6 +17737,7 @@ impl TrustedGameStateEnvelope {
     pub fn capture(state: GameState) -> Self {
         Self {
             precast_shortcut_runtime: state.precast_shortcut_runtime.clone(),
+            block_history_format: Some(BlockHistoryFormat::DeclaredOnly),
             state,
         }
     }
@@ -17161,6 +18303,8 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    #[error("persisted legacy pending cast cannot be restored: {0}")]
+    LegacyPendingCastNotRestorable(String),
 }
 
 /// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks
@@ -17408,6 +18552,10 @@ impl PersistedGameState {
     /// without publishing it. This is private on purpose: every external
     /// restore must first pass the checked terminal-rest preparation below.
     fn into_game_state_unchecked(self) -> GameState {
+        let repair_legacy_history = match &self {
+            Self::Raw(_) => true,
+            Self::Trusted(envelope) => envelope.block_history_format.is_none(),
+        };
         let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
@@ -17422,14 +18570,20 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
+        if repair_legacy_history {
+            crate::game::combat::migrate_restored_entering_block_history(&mut state);
+        }
         // The recovery checkpoint nested in a staged payment is restored state
-        // too; its parked replacement prompt gets the same repair.
+        // too; its parked replacement prompt and block history get the same repairs.
         if let Some(checkpoint) = state
             .payment_transaction
             .as_deref_mut()
             .and_then(|transaction| transaction.recovered.as_deref_mut())
         {
             checkpoint.state.migrate_restored_replacement_choice_kind();
+            if repair_legacy_history {
+                crate::game::combat::migrate_restored_entering_block_history(&mut checkpoint.state);
+            }
         }
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
@@ -17504,6 +18658,8 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.rehydrate_recovered_checkpoint_rng();
+        crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
+        crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -17778,6 +18934,30 @@ pub struct HeroEventDepartureCarry {
 pub struct PendingAttackExert {
     pub attacker: ObjectId,
     pub permission: TriggerDefinitionRef,
+}
+
+/// CR 601.2 + CR 115.10a: Why the caster is choosing an opponent mid-cast in
+/// `WaitingFor::ChooseGiftRecipient`. The choice is a CHOICE, not a target; the
+/// purpose decides how `handle_choose_gift_recipient` consumes the answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastOpponentChoicePurpose {
+    /// CR 702.174a: the promised gift's recipient (latched into
+    /// `SpellContext::gift_recipient`). Default so pre-existing serialized Gift
+    /// prompts (which carry no `purpose`) read back unchanged.
+    #[default]
+    Gift,
+    /// CR 601.2h + CR 118.3: the player an effect-as-cost acts on ("have an
+    /// opponent gain 3 life"), chosen at the payment commit. `cost` is the spell
+    /// cost being paid; the answer pays it for the chosen player and resumes the
+    /// commit (`casting_costs::handle_choose_gift_recipient`).
+    EffectCost { cost: Box<AbilityCost> },
+}
+
+impl CastOpponentChoicePurpose {
+    fn is_gift(&self) -> bool {
+        matches!(self, Self::Gift)
+    }
 }
 
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
@@ -18568,6 +19748,21 @@ pub enum WaitingFor {
         /// use an empty selection to skip their follow-up instead.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decline_runs_continuation: bool,
+        /// CR 608.2d: how many distinct `cards` a non-declining selection must
+        /// hold. `Exactly { count: 1 }` (the default) is the historical single
+        /// post-reveal pick. CR 107.1c + CR 701.20a: `AnyNumber` ("reveal any
+        /// number of artifact cards in your hand") admits any subset of `cards`,
+        /// including none, and the chosen cards are exactly the ones revealed.
+        #[serde(
+            default = "super::ability::ObjectSelectionCardinality::single",
+            skip_serializing_if = "super::ability::ObjectSelectionCardinality::is_single"
+        )]
+        cardinality: super::ability::ObjectSelectionCardinality,
+        /// CR 605.3b: the activated mana ability this reveal belongs to, when the
+        /// choice is part of a mana ability's immediate resolution (Metalworker).
+        /// Its production resumes from this record once the selection is made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
@@ -18862,6 +20057,16 @@ pub enum WaitingFor {
         /// `enter_transformed` / `enters_under_player` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+        /// CR 611.2e + CR 614.12: the with-entry effect derived at the
+        /// ChangeZone instruction's resolver entry and carried across the
+        /// `EffectZoneChoice` round-trip, so the resumed move of a chosen card
+        /// carries the same-resolution "is/has" effect that applies with its
+        /// entry (a "has no abilities" effect still withholds its own entry
+        /// abilities). Mirrors the `face_down_profile` carry-through above.
+        /// Never re-derived at the resume. `None` at every non-ChangeZone
+        /// producer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
         /// CR 122.1 + CR 614.1c: Unconditional entry-time counters carried across
         /// the `EffectZoneChoice` round-trip (e.g. "enters with two +1/+1
         /// counters").
@@ -18886,7 +20091,7 @@ pub enum WaitingFor {
         /// chosen merged permanent's components share it on resume.
         #[serde(
             default,
-            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+            skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
         /// Exact origin/identity snapshot for a fresh CR 401.4 owner
@@ -19134,14 +20339,19 @@ pub enum WaitingFor {
         gift_kind: Option<crate::types::keywords::GiftKind>,
         pending_cast: Box<PendingCast>,
     },
-    /// CR 702.174a: After promising a Gift with ≥2 opponents, choose which
-    /// opponent receives the gift. Distinct from `ChooseAnnouncingOpponent`
-    /// (CR 115.1 target-chooser).
+    /// CR 601.2 + CR 115.10a: the caster chooses one opponent from `candidates`
+    /// while casting. `purpose` says why: CR 702.174a Gift recipient (default),
+    /// or CR 601.2h + CR 118.3 the player an effect-as-cost acts on. Distinct
+    /// from `ChooseAnnouncingOpponent` (CR 115.1 target-chooser).
     ChooseGiftRecipient {
         player: PlayerId,
         candidates: Vec<PlayerId>,
+        /// CR 702.174: the gift kind for UI labels. `Some` only when `purpose`
+        /// is `Gift` (kept top-level so the Gift wire shape is unchanged).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gift_kind: Option<crate::types::keywords::GiftKind>,
+        #[serde(default, skip_serializing_if = "CastOpponentChoicePurpose::is_gift")]
+        purpose: CastOpponentChoicePurpose,
         pending_cast: Box<PendingCast>,
     },
     /// CR 702.47a–e: As an Arcane (or other matching-subtype) spell is cast, its
@@ -21585,6 +22795,12 @@ impl WaitingFor {
     /// mid-payment detail for opponents while preserving the public "spell on
     /// the stack" view elsewhere. `has_pending_cast()` accounts for this.
     pub fn pending_cast_ref(&self) -> Option<&PendingCast> {
+        self.pending_cast_with_stage().map(|(pending, _)| pending)
+    }
+
+    /// [`Self::pending_cast_ref`] with the casting stage the engine raises each prompt in.
+    pub(crate) fn pending_cast_with_stage(&self) -> Option<(&PendingCast, PendingCastStage)> {
+        use PendingCastStage::{Costs, Proposal};
         match self {
             WaitingFor::ChooseXValue { pending_cast, .. }
             | WaitingFor::TargetSelection { pending_cast, .. }
@@ -21593,12 +22809,14 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::OrderCostReductions { pending_cast, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => {
+                Some((pending_cast, Proposal))
+            }
+            WaitingFor::OrderCostReductions { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::HarmonizeTapChoice { pending_cast, .. }
-            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => Some(pending_cast),
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some((pending_cast, Costs)),
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
@@ -21606,14 +22824,14 @@ impl WaitingFor {
                 | CostResume::SpellCost {
                     spell: pending_cast,
                     ..
-                } => Some(pending_cast),
+                } => Some((pending_cast, Costs)),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
                 | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
-                CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
+                CollectEvidenceResume::Casting { pending_cast, .. } => Some((pending_cast, Costs)),
                 CollectEvidenceResume::Effect { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
@@ -21922,6 +23140,12 @@ impl WaitingFor {
             WaitingFor::PayAmountChoice {
                 pending_mana_ability,
                 ..
+            }
+            // CR 605.3b + CR 701.20a: a reveal selection inside a mana
+            // ability's immediate resolution (Metalworker).
+            | WaitingFor::RevealChoice {
+                pending_mana_ability,
+                ..
             } => pending_mana_ability.as_deref(),
             WaitingFor::PayManaAbilityMana {
                 pending_mana_ability,
@@ -21977,7 +23201,6 @@ impl WaitingFor {
             | WaitingFor::DigChoice { .. }
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
-            | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -22208,7 +23431,8 @@ impl WaitingFor {
             // CR 608.2d: a reveal choice the chooser cannot decline is no stop.
             || matches!(
                 self,
-                WaitingFor::RevealChoice { optional: false, cards, .. } if cards.len() >= 2
+                WaitingFor::RevealChoice { optional: false, cards, cardinality, .. }
+                    if cardinality.has_multiple_selections(cards.len())
             )
             || matches!(
                 self,
@@ -22262,8 +23486,11 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 optional: false,
                 cards,
+                cardinality,
                 ..
-            } if cards.len() >= 2 => Some(ChoicePoint::ResolutionSet),
+            } if cardinality.has_multiple_selections(cards.len()) => {
+                Some(ChoicePoint::ResolutionSet)
+            }
             _ => None,
         }
     }
@@ -22274,10 +23501,13 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 cards,
                 optional: false,
+                cardinality,
                 ..
-            } if cards.len() == 1 => Some(crate::types::actions::GameAction::SelectCards {
-                cards: cards.clone(),
-            }),
+            } if cardinality.forces_all_eligible(cards.len()) => {
+                Some(crate::types::actions::GameAction::SelectCards {
+                    cards: cards.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -24524,6 +25754,14 @@ declare_game_state! {
     // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 111.1 + CR 614.12: the tokens the copy-token resolution whose owner frame is off the
+    /// resolution stack (drained inline, or held by a compound token event's delivery) has
+    /// already created; they enter in one event with the token being created now (Clone Legion
+    /// ruling 2015-02-25). `None` when the owner is parked; its frame is read instead
+    /// (`token_copy::copy_token_co_entrants`). Published only by
+    /// `token_copy::publish_committed_copy_tokens`; never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_copy_token_resolution_tokens: Option<Vec<ObjectId>>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -24553,6 +25791,14 @@ declare_game_state! {
     /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
     pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    /// CR 603.6a: the ledger rows of the battlefield entries in an entry cohort that included an
+    /// entry held across answers, set by `triggers::settle_entry_batch_scan` and
+    /// `triggers::collect_completed_entry_instruction` for the collection that follows. Only
+    /// these entries are observed by a co-entrant that entered later in their instruction
+    /// (`triggers::source_enters_with_event`); every other entry keeps the positional
+    /// lifetime guard. Transient — never serialized, cleared per action.
+    #[serde(skip)]
+    pub(crate) released_entry_rows: Vec<usize>,
     /// A replacement's computed life, player-counter or energy quantity
     /// overflowed while the current event was being replaced (see
     /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
@@ -24781,6 +26027,18 @@ declare_game_state! {
     /// (Soul Warden) match against the fully-realized copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
+
+    /// CR 603.6a + CR 611.3c: battlefield-entry events of an entering
+    /// instruction that had not completed when its action stopped while a
+    /// co-entrant's entry was still being made (its CR 616.1 ordering, CR 707.5
+    /// copy choice or CR 614.12a entry choice). All permanents, newcomers
+    /// included, are checked against the event once it has finished, so these
+    /// wait unmatched. `triggers::settle_entry_batch_scan` is the only writer:
+    /// it releases them to the first observer scan that runs once no entry is
+    /// in progress, their instruction has completed, or the action has settled. `zones::settle_battlefield_entry_observations` reads
+    /// them so their entrants are observed with the last co-entrant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled_entry_batch_events: Vec<GameEvent>,
 
     /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
     /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
@@ -25029,18 +26287,25 @@ declare_game_state! {
     #[serde(default)]
     pub cancelled_casts: Vec<ObjectId>,
 
-    /// (source_id, ability_index) pairs for activated abilities pushed to the
-    /// stack during the current priority window. Transient AI-guard that
-    /// prevents the AI's softmax policy from re-choosing the same activated
-    /// ability while its prior activation is still unresolved on the stack —
-    /// a pathological scoring outcome when the effect is redundant (e.g.
-    /// self-exile with delayed return, or gain indestructible UEOT when the
-    /// buff is already active). CR 117.1b permits unbounded activation at
-    /// priority, and absent a CR 602.5b restriction there is no per-turn cap,
-    /// so this is a pure AI-pathology mitigation, not a rules concern.
+    /// [`AbilityUsageKey`]s for activated abilities pushed to the stack during
+    /// the current priority window. Transient AI-guard that prevents the AI's
+    /// softmax policy from re-choosing the same activated ability while its
+    /// prior activation is still unresolved on the stack — a pathological
+    /// scoring outcome when the effect is redundant (e.g. self-exile with
+    /// delayed return, or gain indestructible UEOT when the buff is already
+    /// active). CR 117.1b permits unbounded activation at priority, and
+    /// absent a CR 602.5b restriction there is no per-turn cap, so this is a
+    /// pure AI-pathology mitigation, not a rules concern.
     /// Cleared on PassPriority (when the stack will begin resolving).
+    ///
+    /// CR 602.2a: the entry is the announcement-bound usage key read off the
+    /// placed stack entry — never a `(source_id, ability_index)` pair. Layer
+    /// recomputes shift indices while the acquisition stays the same, so an
+    /// index-keyed entry goes stale when a grant is withdrawn (a cost exiles
+    /// its provider) and would then suppress the innocent ability that
+    /// shifted into the recorded slot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_activations: Vec<(ObjectId, usize)>,
+    pub pending_activations: Vec<AbilityUsageKey>,
 
     // Triggered ability targeting
     #[serde(default)]
@@ -25711,20 +26976,42 @@ declare_game_state! {
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_turn: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_turn: im::HashMap<AbilityUsageKey, u32>,
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_game: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_game: im::HashMap<AbilityUsageKey, u32>,
+    /// CR 400.7 + CR 608.2c: the per-turn activation tallies that belonged
+    /// to a departed incarnation, keyed by `(usage key, departing
+    /// incarnation)`. `apply_zone_exit_cleanup` migrates the erased live
+    /// entries here (not copies) so an ability announced by the old object
+    /// still reads its count while the returned object's live journals start
+    /// at zero. Cleared at the turn boundary beside the live per-turn
+    /// journal; trusted save/restore retains it, projection clears it.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_turn: im::HashMap<(AbilityUsageKey, u64), u32>,
+    /// CR 400.7: the per-game twin of the departed per-turn table. Migrated
+    /// symmetrically at zone exit and never cleared at the turn boundary,
+    /// mirroring the live per-game journal.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_game: im::HashMap<(AbilityUsageKey, u64), u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
     /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
-    /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
+    /// (keyed by [`AbilityUsageKey`]). Cleared at turn start.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
@@ -26138,6 +27425,26 @@ declare_game_state! {
     /// every viewer projection.
     #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
     pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
+    /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
+    /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
+    /// not that boundary deferred the entry observations), strictly increasing and never zero.
+    /// A mark is written only while no battlefield entry is in progress
+    /// (`triggers::battlefield_entry_in_progress`: a rider chain run inside an entry has
+    /// boundaries of its own) and no paused player-scope clause is between seat legs resuming
+    /// under its sidecar (`resolving_player_scope_tail`: CR 101.4 makes its seats' actions one
+    /// event). A repeated keyword action ("Populate X times", "Investigate twice") is
+    /// performed that many times in succession, so each occurrence after the first is a
+    /// boundary too (`effects::settle_entries_before_repeat_occurrence`); any other repeated
+    /// entering effect ("for each …, create …") is one instruction. The marks cut the ledger into instructions: rows between two marks were
+    /// recorded by one instruction, so every battlefield entry among them is treated as one
+    /// simultaneous entry event
+    /// ([`GameState::instruction_of_zone_change`]), and every entry below the last mark is a
+    /// completed event that `triggers::settle_entry_batch_scan` never holds. Cleared with the
+    /// ledger, zeroed with it by the loop projection
+    /// (`analysis::resource::project_out_resources`), validated and remapped by the persisted
+    /// restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_boundary_marks: Vec<usize>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -26536,6 +27843,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_label_this_resolution: Option<String>,
 
+    /// CR 201.4 + CR 608.2c: the card name the current resolution's most recent
+    /// card-name choice named ("the card with the chosen name", Garth One-Eye).
+    /// Unlike the source's `ChosenAttribute::CardName` history, this answers
+    /// what THIS resolution chose: an impossible choice (an exhausted closed
+    /// domain, CR 609.3) leaves it `None`, and it is written even when the
+    /// source has left its zone (CR 113.7a: the ability still resolves).
+    /// Cleared at every top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_card_name_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -26634,8 +27951,17 @@ declare_game_state! {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+    /// CR 608.2c: how many times a look/reveal instruction has published its
+    /// result into `last_revealed_ids` (`effects::record_revealed_result`).
+    /// A resolving instruction compares the count before and after its own
+    /// step to tell its exact result, an empty one included, apart from an
+    /// earlier producer's entry still in the ledger. Only ever compared within
+    /// one synchronous step, so it is never serialized and is not part of
+    /// state equality (a monotonic tally would break AI-search dedup).
+    #[serde(skip)]
+    pub(crate) revealed_publications: u64,
 
-    /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
+    /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` / library search came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
@@ -27314,6 +28640,11 @@ declare_game_state! {
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cast: Option<Box<PendingCast>>,
+
+    /// Decode-only carrier: pending casts an old save recorded only as cast "as though it had
+    /// flash"; always empty after `PersistedGameState::prepare_for_restore`.
+    #[serde(default, skip_serializing)]
+    pub(crate) legacy_unrouted_pending_casts: Vec<ObjectId>,
 
     /// CR 601.2c + CR 601.2i: a spell announcement's trigger carrier, held here
     /// for the duration of ONE reducer action and returned to whichever
@@ -29051,6 +30382,8 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        migrate_legacy_pending_cast_timing(&mut value);
+        migrate_legacy_as_though_flash_grants(&mut value);
         if let Some(config) = value.get_mut("format_config") {
             crate::types::format::FormatConfig::migrate_persisted(config);
         }
@@ -29075,6 +30408,8 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
+        validate_restored_entry_hold(&state)?;
+        withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -29381,7 +30716,7 @@ pub struct PendingConniveReentry {
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
 /// `Ready(work)` → `Dispatching` → `Paused` → popped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
     /// carries targets captured at shield-install time.
@@ -29415,7 +30750,7 @@ pub struct PostReplacementDrainDispatch {
     depth: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
@@ -29707,6 +31042,16 @@ impl PostReplacementDrainStack {
                 true
             }
         }
+    }
+
+    /// CR 101.4 + CR 614.6: remove the resident drain when its continuation has
+    /// not run yet, so a caller can hold it until a whole simultaneous
+    /// instruction has been staged. `None` when there is nothing ready.
+    pub(crate) fn take_ready_resident(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Ready(_)) {
+            return self.drains.pop();
+        }
+        None
     }
 
     /// CR 615.5: take the resident continuation and mark the drain `Dispatching`,
@@ -31552,6 +32897,30 @@ impl GameState {
         self.resolution_stack.take_active_batch_delivery()
     }
 
+    /// CR 701.20d + CR 701.20a: Whether `card_id` is tracked by an active
+    /// in-flight whole-library reorder operation whose terminal finish settles
+    /// reveal retirement at the batch completion boundary, so per-card reorder
+    /// moves do not prematurely retire it during intermediate deliveries.
+    pub fn is_active_library_reorder_member(&self, card_id: ObjectId) -> bool {
+        if let Some(pending) = self.active_batch_delivery() {
+            if let Some(reorder) = &pending.library_reorder {
+                if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                    return true;
+                }
+            }
+        }
+        if let Some(frame) = self.active_change_zone_frame() {
+            if let Some(pending) = &frame.pending {
+                if let Some(reorder) = &pending.library_reorder {
+                    if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Returns the CounterMoves queue only when its typed frame owns the stack
     /// top.
     pub fn active_counter_moves(&self) -> Option<&PendingCounterMoveQueue> {
@@ -32639,6 +34008,18 @@ impl GameState {
         }
     }
 
+    /// CR 101.4 + CR 614.6: take the active resident drain while its
+    /// continuation is still ready, retiring the frame it leaves empty. The
+    /// caller owns the drain and re-installs it with
+    /// [`Self::install_post_replacement_drain`] when it is due.
+    pub(crate) fn take_ready_post_replacement_drain(&mut self) -> Option<PostReplacementDrain> {
+        let taken = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::take_ready_resident)?;
+        self.remove_empty_active_post_replacement_frame();
+        Some(taken)
+    }
+
     /// Removes an exhausted general-drain frame only when it is the active top.
     /// A paired parent becomes eligible only after its MultiDraw child has been
     /// popped; no parent is searched for or removed through an active child.
@@ -32948,6 +34329,20 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 603.6a: the zone change that put the exact object `identity` onto the
+    /// battlefield this turn (its `entered_incarnation`). An incarnation enters at most once.
+    /// `None` when it has not entered this turn (the ledger is per-turn).
+    pub(crate) fn incarnation_entry_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record.to_zone == Zone::Battlefield
+                && record.entered_incarnation == Some(identity.incarnation)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -32974,11 +34369,7 @@ impl GameState {
             .and_then(|history| history.get(&identity.incarnation))?;
         let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
-        let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
-            record.object_id == object_id
-                && record.to_zone == Zone::Battlefield
-                && record.entered_incarnation == Some(identity.incarnation)
-        });
+        let entered_this_turn = self.incarnation_entry_record(identity).is_some();
         Some(ConniveSubject {
             snapshot: EventObjectSnapshot {
                 identity,
@@ -33538,7 +34929,15 @@ impl GameState {
                 identity: ObjectIncarnationRef::from_object(object),
             })
             .collect();
+        // CR 614.4: every announced member, wherever it is, as the object it is before
+        // any member moves (`CoEntrants`).
+        let identities = announced_members
+            .iter()
+            .filter_map(|object_id| self.objects.get(object_id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect();
         LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+            .with_announced_members(identities)
     }
 
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
@@ -34807,11 +36206,13 @@ impl GameState {
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
+            active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
+            released_entry_rows: Vec::new(),
             replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
@@ -34849,6 +36250,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            unsettled_entry_batch_events: Vec::new(),
             pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             layers_read_current_step: layers_read_current_step_unknown(),
@@ -34943,6 +36345,8 @@ impl GameState {
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
             activated_abilities_this_game: im::HashMap::new(),
+            departed_activated_abilities_this_turn: im::HashMap::new(),
+            departed_activated_abilities_this_game: im::HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
@@ -34995,6 +36399,7 @@ impl GameState {
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
             battlefield_entry_observations: im::OrdMap::new(),
+            instruction_boundary_marks: Vec::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -35051,6 +36456,7 @@ impl GameState {
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
             named_label_this_resolution: None,
+            named_card_name_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -35064,6 +36470,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            revealed_publications: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -35128,6 +36535,7 @@ impl GameState {
             trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
+            legacy_unrouted_pending_casts: Vec::new(),
             in_flight_spell_trigger_carrier: None,
             announcement_event_scope: AnnouncementEventScope::Unowned,
             ring_level: HashMap::new(),
@@ -36248,6 +37656,7 @@ impl GameState {
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
         self.named_label_this_resolution.hash(&mut h);
+        self.named_card_name_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -36643,6 +38052,7 @@ impl GameState {
         self.die_result_publication = None;
         self.consumed_before_priority_trigger_events.clear();
         self.ingress_life_window = None;
+        self.released_entry_rows.clear();
         self.replacement_quantity_overflow = None;
     }
 
@@ -37021,6 +38431,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -37110,6 +38521,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
@@ -37158,6 +38570,7 @@ impl GameState {
                 combat_status,
                 block_pairs,
                 co_departed: _,
+                co_entered: _,
                 entered_incarnation: _,
                 attached_to: _,
                 turn_zone_change_index: _,
@@ -37382,9 +38795,11 @@ impl GameState {
                 | GameEvent::UnTellPerformed { .. }
                 | GameEvent::PhraseSaid { .. }
                 | GameEvent::GotchaSaid { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -37562,6 +38977,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -37647,6 +39063,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
@@ -38491,6 +39908,9 @@ impl GameState {
             // `ZoneChanged` record inside it would hold unranked pins; but
             // `is_loop_comparable` requires both empty, so no sampled position holds one.
             deferred_entry_events: _,
+            // Likewise: held battlefield-entry events (`GameState::unsettled_entry_batch_events`),
+            // and `is_loop_comparable` requires them empty.
+            unsettled_entry_batch_events: _,
             pending_attack_trigger_events: _,
             // The hero-event batch is likewise excluded by `is_loop_comparable`.
             pending_hero_event: _,
@@ -38528,11 +39948,14 @@ impl GameState {
             ability_onset_record: _,
             active_payment_pins: _,
             active_rules_execution_node: _,
+            // A synchronous-window `ObjectId` list, never serialized and never compared.
+            active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
             ingress_life_window: _,
+            released_entry_rows: _,
             replacement_quantity_overflow: _,
             active_auto_tap_row_policy: _,
             battlefield: _,
@@ -38651,6 +40074,11 @@ impl GameState {
             sideboard_submitted: _,
             activated_abilities_this_turn: _,
             activated_abilities_this_game: _,
+            // NOT THIS CLASS either: the same activation-budget ledger class
+            // keyed one step further out (departing incarnation) — unbounded
+            // per blink, so ranked like the live journals (not ranked at all).
+            departed_activated_abilities_this_turn: _,
+            departed_activated_abilities_this_game: _,
             loyalty_abilities_activated_this_turn: _,
             extra_loyalty_activations_this_turn: _,
             exerted_this_turn: _,
@@ -38728,6 +40156,7 @@ impl GameState {
             chosen_color_this_resolution: _,
             named_color_this_resolution: _,
             named_label_this_resolution: _,
+            named_card_name_this_resolution: _,
             placed_sticker_this_resolution: _,
             noted_numbers_this_resolution: _,
             last_chosen_damage_source: _,
@@ -38741,6 +40170,7 @@ impl GameState {
             log_player_names: _,
             last_created_token_ids: _,
             last_revealed_ids: _,
+            revealed_publications: _,
             last_parent_target_missing_reason: _,
             private_look_ids: _,
             private_look_player: _,
@@ -38789,6 +40219,7 @@ impl GameState {
             trigger_construction_finisher_ran_this_action: _,
             pending_discard_for_cost: _,
             pending_cast: _,
+            legacy_unrouted_pending_casts: _,
             in_flight_spell_trigger_carrier: _,
             announcement_event_scope: _,
             ring_level: _,
@@ -38855,6 +40286,10 @@ impl GameState {
             sacrificed_permanents_this_turn: _,
             zone_changes_this_turn: _,
             battlefield_entry_observations: _,
+            // Ledger lengths (`GameState::instruction_boundary_marks`), one per entering
+            // instruction: they hold no incarnation id, grow with the ledger they index and
+            // are cleared with it by the loop projection.
+            instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
@@ -38973,6 +40408,7 @@ impl GameState {
             && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
             && self.deferred_entry_events.is_empty()
+            && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
             && self
                 .combat
@@ -40279,6 +41715,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // spell remains on the stack.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
+        // CR 614.1d: the cast-this-way enters-tapped rider decides the entry's
+        // tap state, so two stack spells differing only in it are different.
+        && x.cast_permission_enter_tapped == y.cast_permission_enter_tapped
         // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
         // never equates to its pre-reveal self on this axis alone.
         && x.is_horde_deck_token == y.is_horde_deck_token
@@ -40330,11 +41769,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
+        active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
+        released_entry_rows: _,
         replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
@@ -40384,6 +41825,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        unsettled_entry_batch_events: _,
         pending_token_battlefield_entry: _,
         layers_dirty: _,
         layers_read_current_step: _,
@@ -40501,6 +41943,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
+        // COMPARED alongside the live journals: the same activation-budget
+        // class, so two positions that differ only in a departed tally are
+        // different positions (fail-closed, like the live journals).
+        departed_activated_abilities_this_turn: _,
+        departed_activated_abilities_this_game: _,
         crew_activated_this_turn: _,
         crew_resolved_this_turn: _,
         crew_history_this_turn: _,
@@ -40553,6 +42000,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
         battlefield_entry_observations: _,
+        instruction_boundary_marks: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -40595,6 +42043,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
         named_label_this_resolution: _,
+        named_card_name_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -40608,6 +42057,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
+        revealed_publications: _,
         last_parent_target_missing_reason: _,
         private_look_ids: _,
         private_look_player: _,
@@ -40684,6 +42134,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
+        legacy_unrouted_pending_casts: _,
         in_flight_spell_trigger_carrier: _,
         announcement_event_scope: _,
         ring_level: _,
@@ -41100,6 +42551,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.unsettled_entry_batch_events == other.unsettled_entry_batch_events
             && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike
@@ -41187,6 +42639,10 @@ impl PartialEq for GameState {
                 == other.triggered_abilities_added_mana_this_turn
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.departed_activated_abilities_this_turn
+                == other.departed_activated_abilities_this_turn
+            && self.departed_activated_abilities_this_game
+                == other.departed_activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.crew_history_this_turn == other.crew_history_this_turn
@@ -41242,6 +42698,7 @@ impl PartialEq for GameState {
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entry_observations == other.battlefield_entry_observations
+            && self.instruction_boundary_marks == other.instruction_boundary_marks
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
@@ -41302,6 +42759,7 @@ impl PartialEq for GameState {
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
             && self.named_label_this_resolution == other.named_label_this_resolution
+            && self.named_card_name_this_resolution == other.named_card_name_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
@@ -41379,6 +42837,7 @@ mod resolved_information_tests {
                 selection: CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -41470,7 +42929,7 @@ mod resolved_information_tests {
     }
 
     #[test]
-    fn reveal_until_reveal_only_records_exact_retained_information() {
+    fn reveal_until_reveal_only_records_controller_until_action_boundary() {
         let mut state = GameState::new_two_player(42);
         let revealed = create_object(
             &mut state,
@@ -41503,8 +42962,11 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
+        // CR 701.20a: the reveal lasts while the effect still needs it. The
+        // resolver records only the controller reveal; the resolution's completion
+        // boundary ends it, and a reveal-only pile is never published durably.
         assert!(state.revealed_cards.contains(&revealed));
-        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
             .entries()
@@ -41514,7 +42976,8 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(information.len(), 2);
+        assert_eq!(information.len(), 1);
+        assert_eq!(information[0].edit, ResolvedInformationEdit::Reveal);
 
         let mut replay = pre_state;
         for command in &information {
@@ -41639,6 +43102,8 @@ mod forced_cascade_window_tests {
             filter: crate::types::ability::default_target_filter_any(),
             optional,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         }
     }
 
@@ -42907,6 +44372,30 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
 
+    #[test]
+    fn copy_entry_resume_stage_defaults_to_legacy_choice_owed() {
+        let action = PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant: ObjectIncarnationRef {
+                object_id: ObjectId(42),
+                incarnation: LEGACY_INCARNATION,
+            },
+            resume_stage: CopyEntryResumeStage::ChoiceSettled,
+        };
+        let mut json = serde_json::to_value(action).unwrap();
+        json["FinishCopyTargetChoiceEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resume_stage");
+        let restored: PendingCounterPostAction = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            restored,
+            PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                resume_stage: CopyEntryResumeStage::ChoiceOwedAfterCounters,
+                ..
+            }
+        ));
+    }
+
     fn exact_destination() -> EntryAttackDestination {
         EntryAttackDestination::Exact {
             target: crate::game::combat::AttackTarget::Player(PlayerId(2)),
@@ -43303,6 +44792,8 @@ mod tests {
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(42),
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
         state
     }
@@ -44752,7 +46243,7 @@ mod tests {
     fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
         let source_id = ObjectId(17);
         let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
-            remaining: Vec::new(),
+            remaining: VecDeque::new(),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
             total: 2,
@@ -45389,6 +46880,7 @@ mod tests {
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -45405,6 +46897,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -46269,6 +47762,35 @@ mod tests {
             panic!("legacy deferred fixture retains its zone-change event");
         };
         assert_eq!(record.recorded_turn_number, 0);
+    }
+
+    /// CR 603.6a: `co_entered` is omitted when empty, a record without it (resolution wire v12
+    /// and earlier) decodes with no co-entrants, and a stamped record round-trips.
+    #[test]
+    fn zone_change_record_co_entered_is_omitted_when_empty_and_roundtrips() {
+        let lone = ZoneChangeRecord::test_minimal(
+            ObjectId(9_005),
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        );
+        let wire = serde_json::to_value(&lone).expect("record serializes");
+        assert!(
+            wire.get("co_entered").is_none(),
+            "an empty co_entered is omitted: {wire}"
+        );
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("a record without co_entered decodes");
+        assert!(decoded.co_entered.is_empty());
+
+        let stamped = ZoneChangeRecord {
+            co_entered: vec![ObjectId(7)],
+            ..lone
+        };
+        let wire = serde_json::to_value(&stamped).expect("stamped record serializes");
+        assert_eq!(wire["co_entered"], serde_json::json!([7]));
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("stamped record decodes");
+        assert_eq!(decoded.co_entered, vec![ObjectId(7)]);
     }
 
     fn persisted_zone_change_record(
@@ -47235,6 +48757,144 @@ mod tests {
             19,
             0
         )));
+    }
+
+    fn persisted_entry_record(object_id: ObjectId, index: usize, turn: u32) -> ZoneChangeRecord {
+        ZoneChangeRecord {
+            recorded_turn_number: turn,
+            turn_zone_change_index: index,
+            ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
+        }
+    }
+
+    /// The state at a pause between two co-entrants: two battlefield entries on
+    /// this turn's ledger, the first held, `marks` as the instruction boundaries.
+    fn persisted_entry_hold_fixture(marks: Vec<usize>) -> GameState {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let first = persisted_entry_record(ObjectId(9_140), 0, 19);
+        let second = persisted_entry_record(ObjectId(9_141), 1, 19);
+        state.zone_changes_this_turn.push_back(first.clone());
+        state.zone_changes_this_turn.push_back(second);
+        state.unsettled_entry_batch_events = vec![persisted_zone_change_event(first)];
+        state.instruction_boundary_marks = marks;
+        state
+    }
+
+    fn restore_error(state: GameState) -> String {
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("the restore must reject this state")
+            .to_string()
+    }
+
+    /// CR 608.2c + CR 603.6a: the instruction-boundary marks index the ledger, so
+    /// pruning a stale row below them moves them down with the rows, and a mark
+    /// with no surviving row below it disappears.
+    #[test]
+    fn persisted_instruction_boundary_marks_follow_the_pruned_ledger() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
+        let current = persisted_zone_change_record(ObjectId(9_127), 19, 1);
+        state.zone_changes_this_turn.push_back(stale);
+        state.zone_changes_this_turn.push_back(current.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
+        state.instruction_boundary_marks = vec![1, 2];
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("stale ledger history is pruned")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+
+        assert_eq!(restored.zone_changes_this_turn.len(), 1);
+        assert_eq!(
+            restored.instruction_boundary_marks,
+            vec![1],
+            "the mark after the stale row is gone, the one after the current row stays"
+        );
+    }
+
+    /// CR 608.2c: a mark past the ledger, a mark that does not increase and a zero
+    /// mark are rejected rather than clamped: each would declare unfinished
+    /// entries complete and release them before their co-entrants settle.
+    #[test]
+    fn persisted_instruction_boundary_marks_outside_the_ledger_are_rejected() {
+        for marks in [vec![1_000_000], vec![2, 1], vec![1, 1], vec![0]] {
+            let error = restore_error(persisted_entry_hold_fixture(marks.clone()));
+            assert!(
+                error.contains("instruction_boundary_marks"),
+                "{marks:?}: {error}"
+            );
+        }
+        // Positive control: marks within the ledger restore. The fixture holds the entry at
+        // row 0, so both marks lie above a held entry and are withheld (CR 603.6a): a saved
+        // position is not proof that the held entry's instruction completed.
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(
+            persisted_entry_hold_fixture(vec![1, 2]),
+        )))
+        .expect("fixture serializes");
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("marks within the ledger restore")
+            .into_game_state()
+            .expect("checked restore");
+        assert_eq!(restored.instruction_boundary_marks, Vec::<usize>::new());
+        assert_eq!(restored.unsettled_entry_batch_events.len(), 1);
+    }
+
+    /// CR 603.6a + CR 400.7: the held entries are battlefield entries naming
+    /// distinct ledger rows of this turn; a duplicate would be collected twice on
+    /// release.
+    #[test]
+    fn persisted_entry_hold_rejects_duplicate_and_foreign_entries() {
+        let mut duplicate = persisted_entry_hold_fixture(Vec::new());
+        let held = duplicate.unsettled_entry_batch_events[0].clone();
+        duplicate.unsettled_entry_batch_events.push(held);
+        assert!(restore_error(duplicate).contains("holds one entry twice"));
+
+        // A ledger-backed event that is not a battlefield entry.
+        let mut not_an_entry = persisted_entry_hold_fixture(Vec::new());
+        let leaves = persisted_zone_change_record(ObjectId(9_144), 19, 2);
+        not_an_entry
+            .zone_changes_this_turn
+            .push_back(leaves.clone());
+        not_an_entry.unsettled_entry_batch_events = vec![persisted_zone_change_event(leaves)];
+        assert!(restore_error(not_an_entry).contains("only battlefield-entry events"));
+
+        // An entry of another turn.
+        let mut earlier_turn = persisted_entry_hold_fixture(Vec::new());
+        let earlier = persisted_entry_record(ObjectId(9_145), 0, 18);
+        earlier_turn.unsettled_entry_batch_events = vec![persisted_zone_change_event(earlier)];
+        let error = restore_error(earlier_turn);
+        assert!(
+            error.contains("another turn") || error.contains("ledger occurrence"),
+            "{error}"
+        );
+
+        // An event whose own origin disagrees with its record and ledger row: the trigger
+        // matcher reads the event's origin.
+        let mut forged_origin = persisted_entry_hold_fixture(Vec::new());
+        if let GameEvent::ZoneChanged { from, .. } =
+            &mut forged_origin.unsettled_entry_batch_events[0]
+        {
+            *from = Some(Zone::Graveyard);
+        }
+        assert!(restore_error(forged_origin).contains("disagrees with its own record"));
+
+        // An entry that names no ledger row.
+        let mut off_ledger = persisted_entry_hold_fixture(Vec::new());
+        off_ledger.unsettled_entry_batch_events = vec![persisted_zone_change_event(
+            persisted_entry_record(ObjectId(9_143), 7, 19),
+        )];
+        let error = restore_error(off_ledger);
+        assert!(
+            error.contains("outside the current ledger") || error.contains("ledger occurrence"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -49993,6 +51653,7 @@ mod tests {
                         rules_execution_node: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
+                        announced_usage_key: None,
                         color_override: None,
                         resume: ManaAbilityResume::Priority,
                         cost_move_resume: None,
@@ -50110,6 +51771,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -50310,6 +51972,37 @@ mod tests {
                     "paused trigger continuation has no active resolving trigger carrier"
                 ),
                 "expected orphaned-continuation rejection, got {error}"
+            );
+        }
+    }
+
+    /// CR 602.5c: a released-writer save whose activation journals still use
+    /// the pre-occurrence `objectId_index` encoding is explicitly rejected in
+    /// both envelopes — provenance is unrecoverable from an index, so no
+    /// guessed identity is admitted (a granted Ranger use can neither restore
+    /// spent under the wrong key nor silently unspend: the load fails closed).
+    #[test]
+    fn persisted_restore_rejects_legacy_usage_keys_in_both_envelopes() {
+        let state = GameState::new_two_player(42);
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+
+        for mut persisted in [raw, trusted] {
+            let state = if persisted.get("state").is_some() {
+                persisted
+                    .get_mut("state")
+                    .expect("trusted fixture has an inner state")
+            } else {
+                &mut persisted
+            };
+            state["activated_abilities_this_turn"]["7_0"] = serde_json::json!(1);
+            let error = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect_err("persisted restore must reject legacy usage keys");
+            assert!(
+                error.to_string().contains("invalid ability usage key"),
+                "expected legacy-key rejection, got {error}"
             );
         }
     }
@@ -56493,6 +58186,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
@@ -58342,6 +60036,129 @@ mod tests {
         );
     }
 
+    /// CR 614.1d + CR 104.4b: two stack spells identical except for the
+    /// cast-this-way enters-tapped rider (Edgar, Master Machinist) resolve
+    /// differently, so object, loop-state and departed-spell equality must all
+    /// tell them apart. Revert-failing: dropping the field's line from
+    /// `object_content_eq` makes all three compare equal.
+    #[test]
+    fn equality_distinguishes_cast_permission_enter_tapped() {
+        use crate::types::ability::Effect;
+        use crate::types::zones::EtbTapState;
+
+        let spell = |rider: EtbTapState| {
+            let mut object = GameObject::new(
+                ObjectId(600),
+                CardId(1),
+                PlayerId(0),
+                "Ornithopter".to_string(),
+                Zone::Stack,
+            );
+            object.cast_permission_enter_tapped = rider;
+            object
+        };
+        let tapped = spell(EtbTapState::Tapped);
+        let plain = spell(EtbTapState::Unspecified);
+        assert!(object_content_eq(&tapped, &tapped.clone()), "reach guard");
+        assert!(!object_content_eq(&tapped, &plain));
+
+        let mut a = GameState::new_two_player(7);
+        a.objects.insert(ObjectId(600), tapped.clone());
+        let mut b = a.clone();
+        b.objects.insert(ObjectId(600), plain.clone());
+        assert!(loop_states_equal(
+            &a.normalize_for_loop(),
+            &a.normalize_for_loop()
+        ));
+        assert!(!loop_states_equal(
+            &a.normalize_for_loop(),
+            &b.normalize_for_loop()
+        ));
+
+        let departed = |object: GameObject| DepartedStackSpell {
+            entry: StackEntry {
+                id: ObjectId(600),
+                source_id: ObjectId(600),
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: ObjectId(600),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(600),
+                        PlayerId(0),
+                    )),
+                },
+            },
+            object: Box::new(object),
+        };
+        assert!(departed(tapped.clone()) == departed(tapped.clone()));
+        assert!(departed(tapped) != departed(plain));
+    }
+
+    /// C25c + C26: a populated `GraveyardPermissionLatch` written without
+    /// `enter_tapped` (the pre-field shape: the key is skipped when
+    /// `Unspecified`) loads as `Unspecified` with its other terms intact, and a
+    /// latch carrying the rider round-trips. Same for the `GameObject` carrier.
+    #[test]
+    fn enter_tapped_carriers_load_legacy_json_and_round_trip() {
+        use crate::types::zones::EtbTapState;
+
+        let latch = |rider: EtbTapState| GraveyardPermissionLatch {
+            permission: GraveyardPermissionId {
+                source: ObjectId(7),
+                grant: PermissionGrant::Static { index: 0 },
+            },
+            extra_cost: None,
+            enters_with_counter: Some(crate::types::counter::CounterType::Finality),
+            enter_tapped: rider,
+            cast_limit: crate::types::statics::PermissionCastLimit::Single,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            enters_modifications: Default::default(),
+        };
+        let legacy = serde_json::to_value(latch(EtbTapState::Unspecified)).unwrap();
+        let keys = legacy.as_object().unwrap();
+        assert!(
+            !keys.contains_key("enter_tapped"),
+            "pre-field shape: {legacy}"
+        );
+        assert!(
+            keys.contains_key("enters_with_counter")
+                && keys.contains_key("cast_limit")
+                && keys.contains_key("mana_spend_permission"),
+            "reach guard: a populated latch, {legacy}"
+        );
+        let loaded: GraveyardPermissionLatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded, latch(EtbTapState::Unspecified));
+
+        let populated = latch(EtbTapState::Tapped);
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(json.contains("\"enter_tapped\":\"Tapped\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<GraveyardPermissionLatch>(&json).unwrap(),
+            populated
+        );
+
+        let mut object = GameObject::new(
+            ObjectId(8),
+            CardId(1),
+            PlayerId(0),
+            "Ornithopter".to_string(),
+            Zone::Stack,
+        );
+        let legacy = serde_json::to_value(&object).unwrap();
+        assert!(legacy.get("cast_permission_enter_tapped").is_none());
+        let loaded: GameObject = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            loaded.cast_permission_enter_tapped,
+            EtbTapState::Unspecified
+        );
+        object.cast_permission_enter_tapped = EtbTapState::Tapped;
+        let loaded: GameObject =
+            serde_json::from_str(&serde_json::to_string(&object).unwrap()).unwrap();
+        assert_eq!(loaded.cast_permission_enter_tapped, EtbTapState::Tapped);
+    }
+
     /// L1 / CR 104.4b: an object's `timestamp` is layer-ordering metadata
     /// (CR 613.7) that `objects_content_eq` deliberately omits, like
     /// `incarnation`. Two states differing ONLY in a per-object timestamp must
@@ -59161,6 +60978,7 @@ mod tests {
                 activation_cost_paused_on_draw: false,
                 deferred_hand_discard_cost: None,
                 prepaid_finalization: None,
+                deferred_life_gain_cost: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -59460,6 +61278,19 @@ mod tests {
             player: PlayerId(0),
             candidates: vec![PlayerId(1)],
             gift_kind: Some(crate::types::keywords::GiftKind::Card),
+            purpose: CastOpponentChoicePurpose::Gift,
+            pending_cast: dummy_pending(),
+        }));
+        // CR 601.2h + CR 118.3: the same prompt asking for an effect-as-cost's player.
+        variants.push(Box::new(WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind: None,
+            purpose: CastOpponentChoicePurpose::EffectCost {
+                cost: Box::new(crate::parser::oracle_cost::parse_oracle_cost(
+                    "have an opponent gain 3 life",
+                )),
+            },
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -59592,6 +61423,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -59617,7 +61449,7 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 42);
+        assert_eq!(variants.len(), 43);
     }
 
     #[test]
@@ -59684,6 +61516,86 @@ mod tests {
         assert_eq!(back, MulliganChoice::FreeReveal);
     }
 
+    fn cast_opponent_prompt(purpose: CastOpponentChoicePurpose) -> WaitingFor {
+        let ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Unimplemented {
+                name: "Dummy".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let gift_kind = matches!(purpose, CastOpponentChoicePurpose::Gift)
+            .then_some(crate::types::keywords::GiftKind::Card);
+        WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind,
+            purpose,
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ability,
+                ManaCost::NoCost,
+            )),
+        }
+    }
+
+    /// W1 — CR 702.174a: a Gift prompt serializes exactly as before the `purpose`
+    /// field existed (no `purpose` key). The protocol bump versions the new
+    /// EffectCost purpose, which an older reader would show as a gift.
+    #[test]
+    fn choose_gift_recipient_gift_purpose_wire_shape_unchanged() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert_eq!(json["type"], "ChooseGiftRecipient");
+        let keys: BTreeSet<&str> = json["data"]
+            .as_object()
+            .expect("adjacently tagged data object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["player", "candidates", "gift_kind", "pending_cast"])
+        );
+    }
+
+    /// W2 — a legacy Gift frame (no `purpose` key) reads back as `Gift`.
+    #[test]
+    fn choose_gift_recipient_legacy_frame_defaults_to_gift_purpose() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert!(json["data"].get("purpose").is_none(), "legacy shape");
+        let back: WaitingFor = serde_json::from_value(json).expect("legacy frame deserializes");
+        let WaitingFor::ChooseGiftRecipient { purpose, .. } = back else {
+            panic!("round-trip changed the variant: {back:?}");
+        };
+        assert_eq!(purpose, CastOpponentChoicePurpose::Gift);
+    }
+
+    /// W3 — CR 601.2h + CR 118.3: the effect-cost purpose round-trips, carrying the
+    /// cost being paid under an internal `type` tag that doesn't collide with the
+    /// cost's own tag.
+    #[test]
+    fn choose_gift_recipient_effect_cost_purpose_round_trips() {
+        let cost = crate::parser::oracle_cost::parse_oracle_cost("have an opponent gain 3 life");
+        assert!(
+            cost.player_recipient_cost().is_some(),
+            "fixture is a recipient effect-cost: {cost:?}"
+        );
+        let prompt = cast_opponent_prompt(CastOpponentChoicePurpose::EffectCost {
+            cost: Box::new(cost),
+        });
+        let json = serde_json::to_value(&prompt).expect("serialize effect-cost prompt");
+        assert_eq!(json["data"]["purpose"]["type"], "EffectCost");
+        assert_eq!(json["data"]["purpose"]["cost"]["type"], "EffectCost");
+        assert!(json["data"].get("gift_kind").is_none());
+        let back: WaitingFor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, prompt);
+    }
+
     #[test]
     fn pending_cast_ref_is_single_source_of_truth_for_inline_variants() {
         // CR 601.2f: Every WaitingFor variant that carries `pending_cast: Box<PendingCast>`
@@ -59716,6 +61628,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
@@ -59827,6 +61740,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -60091,6 +62005,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -60509,6 +62424,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -60762,6 +62678,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -60796,6 +62713,18 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the with-entry effect must survive the
+            // pause/resume serde round-trip (Xu-Ifit, Osteoharmonist).
+            with_entry_effect: Some(Box::new(crate::types::proposed_event::WithEntryEffect {
+                source_id: ObjectId(7),
+                controller: PlayerId(0),
+                modifications: vec![
+                    crate::types::ability::ContinuousModification::AddSubtype {
+                        subtype: "Skeleton".to_string(),
+                    },
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ],
+            })),
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
@@ -60828,8 +62757,30 @@ mod tests {
             parsed.face_down_profile, original.face_down_profile,
             "face_down_profile must survive the pause/resume round-trip"
         );
+        assert!(original.with_entry_effect.is_some());
+        assert_eq!(
+            parsed.with_entry_effect, original.with_entry_effect,
+            "with_entry_effect must survive the pause/resume round-trip"
+        );
         assert_eq!(parsed, original);
 
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // carrier without the key (the v12-and-earlier shape) decodes `None`, and `None`
+        // is omitted.
+        let mut absent = carrier.clone();
+        absent
+            .as_object_mut()
+            .expect("pending carrier serializes as an object")
+            .remove("with_entry_effect")
+            .expect("a carried with-entry effect is serialized");
+        let decoded: PendingChangeZoneIteration =
+            serde_json::from_value(absent).expect("reads without the key");
+        assert_eq!(decoded.with_entry_effect, None);
+        let retained = serde_json::to_value(&decoded).expect("serialize carrier without an effect");
+        assert!(
+            retained.get("with_entry_effect").is_none(),
+            "None must not be serialized: {retained}"
+        );
         let mut missing_actor = serde_json::to_value(&original).expect("serialize carrier");
         missing_actor
             .as_object_mut()
@@ -60948,6 +62899,100 @@ mod tests {
             vec![LogicalZoneChangeTerminalOutcome::Pending]
         );
         assert!(group.all_origin_occurrences.is_empty());
+    }
+
+    /// U3 — CR 614.4 + CR 603.6a: the group records every announced member (the hand member
+    /// too, which is no prospective battlefield member) as it was at allocation. The field
+    /// round-trips, and a group serialized without it decodes with none and still validates.
+    #[test]
+    fn logical_zone_change_group_records_and_round_trips_announced_members() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(71);
+        let hand_id = ObjectId(72);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(71),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut hand = GameObject::new(
+            hand_id,
+            CardId(72),
+            PlayerId(0),
+            "hand member".to_string(),
+            Zone::Hand,
+        );
+        hand.incarnation = 7;
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(hand_id, hand);
+        state.battlefield.push_back(battlefield_id);
+
+        let mut group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
+
+        assert_eq!(
+            group.announced_members(),
+            &[
+                ObjectIncarnationRef::of(battlefield_id, 4),
+                ObjectIncarnationRef::of(hand_id, 7),
+            ]
+        );
+        let value = serde_json::to_value(&group).expect("group serializes");
+        let roundtripped: LogicalZoneChangeGroup =
+            serde_json::from_value(value.clone()).expect("group deserializes");
+        assert_eq!(roundtripped, group);
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("group serializes as an object")
+            .remove("announced_members")
+            .expect("announced members are serialized");
+        let legacy: LogicalZoneChangeGroup =
+            serde_json::from_value(legacy).expect("a legacy group decodes and validates");
+        assert!(legacy.announced_members().is_empty());
+        assert_eq!(
+            legacy.prospective_battlefield_members,
+            group.prospective_battlefield_members
+        );
+    }
+
+    /// U4 — CR 400.7 + CR 603.6a: `incarnation_entry_record` finds the ledger row that put
+    /// that exact incarnation onto the battlefield, and none for an incarnation that never
+    /// entered.
+    #[test]
+    fn incarnation_entry_record_finds_each_incarnations_own_entry() {
+        let mut state = GameState::new_two_player(19);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Returned card".to_string(),
+            Zone::Graveyard,
+        );
+        let identity = |state: &GameState| ObjectIncarnationRef::from_object(&state.objects[&card]);
+        let in_graveyard = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let first = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let second = identity(&state);
+        assert_ne!(first, second, "each entry is a new object");
+
+        assert!(state.incarnation_entry_record(in_graveyard).is_none());
+        let first_record = state
+            .incarnation_entry_record(first)
+            .expect("the first entry is recorded");
+        let second_record = state
+            .incarnation_entry_record(second)
+            .expect("the second entry is recorded");
+        assert_eq!(first_record.entered_incarnation, Some(first.incarnation));
+        assert_eq!(second_record.entered_incarnation, Some(second.incarnation));
+        assert!(!std::ptr::eq(first_record, second_record));
     }
 
     #[test]
@@ -61290,6 +63335,85 @@ mod tests {
         }
     }
 
+    /// CR 603.6a: the entry stamp lists, on each retained move onto the battlefield from another
+    /// zone, the group's other such entrants. A departure and an object created on the
+    /// battlefield (CR 111.1) are not entrants and stay unstamped.
+    #[test]
+    fn logical_zone_change_group_stamps_battlefield_entries() {
+        fn graveyard_card(id: u64, name: &str) -> GameObject {
+            GameObject::new(
+                ObjectId(id),
+                CardId(id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            )
+        }
+        fn zone_changed(object: &GameObject, from: Option<Zone>, to: Zone) -> GameEvent {
+            GameEvent::ZoneChanged {
+                object_id: object.id,
+                from,
+                to,
+                record: Box::new(object.snapshot_for_zone_change(object.id, from, to)),
+            }
+        }
+        fn stamped_group(events: &[GameEvent]) -> LogicalZoneChangeGroup {
+            let mut group = LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(5), Vec::new());
+            group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("test group owns an explicit pre-delivery latch");
+            group
+                .append_delivery_events(events)
+                .expect("append the group's occurrences");
+            group.stamp_battlefield_entries();
+            group
+        }
+        fn co_entered(group: &LogicalZoneChangeGroup) -> Vec<(ObjectId, Vec<ObjectId>)> {
+            group
+                .all_origin_occurrences
+                .iter()
+                .map(|occurrence| {
+                    let GameEvent::ZoneChanged {
+                        object_id, record, ..
+                    } = &occurrence.event
+                    else {
+                        unreachable!("test retained only zone changes");
+                    };
+                    (*object_id, record.co_entered.clone())
+                })
+                .collect()
+        }
+
+        let giant = graveyard_card(91, "Hill Giant");
+        let warden = graveyard_card(92, "Soul Warden");
+        let mut forest = graveyard_card(93, "Forest");
+        forest.zone = Zone::Battlefield;
+        let token = graveyard_card(94, "Spirit");
+
+        let group = stamped_group(&[
+            zone_changed(&giant, Some(Zone::Graveyard), Zone::Battlefield),
+            zone_changed(&forest, Some(Zone::Battlefield), Zone::Graveyard),
+            zone_changed(&token, None, Zone::Battlefield),
+            zone_changed(&warden, Some(Zone::Graveyard), Zone::Battlefield),
+        ]);
+        assert_eq!(
+            co_entered(&group),
+            vec![
+                (giant.id, vec![warden.id]),
+                (forest.id, Vec::new()),
+                (token.id, Vec::new()),
+                (warden.id, vec![giant.id]),
+            ]
+        );
+
+        let lone = stamped_group(&[zone_changed(
+            &giant,
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        )]);
+        assert_eq!(co_entered(&lone), vec![(giant.id, Vec::new())]);
+    }
+
     #[test]
     fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
         let wf = WaitingFor::EffectZoneChoice {
@@ -61321,6 +63445,18 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the with-entry effect must keep its value
+            // across the `EffectZoneChoice` round-trip.
+            with_entry_effect: Some(Box::new(crate::types::proposed_event::WithEntryEffect {
+                source_id: ObjectId(10),
+                controller: PlayerId(0),
+                modifications: vec![
+                    crate::types::ability::ContinuousModification::AddSubtype {
+                        subtype: "Skeleton".to_string(),
+                    },
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ],
+            })),
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -61339,6 +63475,40 @@ mod tests {
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);
+        let WaitingFor::EffectZoneChoice {
+            with_entry_effect: parsed_effect,
+            ..
+        } = &parsed
+        else {
+            panic!("expected EffectZoneChoice, got {parsed:?}");
+        };
+        assert!(
+            parsed_effect.is_some(),
+            "the with-entry effect must survive the round-trip"
+        );
+
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // choice without the key (the v12-and-earlier shape) decodes `None`, and `None`
+        // is omitted.
+        let mut absent = serde_json::to_value(&wf).expect("serialize");
+        absent["data"]
+            .as_object_mut()
+            .expect("EffectZoneChoice payload object")
+            .remove("with_entry_effect")
+            .expect("a carried with-entry effect is serialized");
+        let decoded: WaitingFor = serde_json::from_value(absent).expect("reads without the key");
+        let WaitingFor::EffectZoneChoice {
+            with_entry_effect, ..
+        } = &decoded
+        else {
+            panic!("expected EffectZoneChoice, got {decoded:?}");
+        };
+        assert_eq!(*with_entry_effect, None);
+        let retained = serde_json::to_value(&decoded).expect("serialize choice without an effect");
+        assert!(
+            retained["data"].get("with_entry_effect").is_none(),
+            "None must not be serialized: {retained}"
+        );
     }
 
     /// CR 608.2c: the performer carried on a `ChangeZone` selection round-trips
@@ -61367,6 +63537,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -62423,6 +64594,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            from_outside_game: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -63673,6 +65845,7 @@ mod tests {
             },
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             cast_limit: crate::types::statics::PermissionCastLimit::Single,
             mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
             enters_modifications: Default::default(),
@@ -65107,6 +67280,7 @@ mod restored_exact_attack_authority_tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume,
             cost_move_resume: None,
@@ -65230,6 +67404,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        library_reorder: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

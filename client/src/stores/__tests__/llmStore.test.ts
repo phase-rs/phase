@@ -9,9 +9,9 @@ import { draftProfile, isMissingApiKey, isProfileUsable, profileForSeat, useLlmS
 import type { LlmProfile, LlmProviderCatalogEntry } from "../../services/llm/types";
 
 const CATALOG: readonly LlmProviderCatalogEntry[] = [
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [] },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ];
 
 function reset(): void {
@@ -126,7 +126,7 @@ describe("llmStore", () => {
   it("requires a key for OpenRouter like the other hosted providers", () => {
     const catalog: LlmProviderCatalogEntry[] = [
       ...CATALOG,
-      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [] },
+      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
     ];
     const id = useLlmStore.getState().addProfile({ provider: "OpenRouter", model: "openrouter/auto", enabled: true });
     const profile = () => useLlmStore.getState().profiles.find((p) => p.id === id);
@@ -292,6 +292,21 @@ describe("llmStore", () => {
     const id = useLlmStore.getState().addProfile({ apiKey: "sk-test", model: "m", enabled: true });
     const profile = useLlmStore.getState().profiles.find((p) => p.id === id) as LlmProfile;
     expect(profile.apiKey).toBe("sk-test");
+  });
+
+  it("starts a new profile on self-contained requests and persists an explicit opt-in", () => {
+    const id = useLlmStore.getState().addProfile({ provider: "Anthropic", model: "m" });
+    const stored = () => {
+      const raw = JSON.parse(localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "{}");
+      return raw.state.profiles.find((profile: { id: string }) => profile.id === id);
+    };
+    expect(useLlmStore.getState().profiles[0].decisionContext).toBe("selfContained");
+    expect(stored().decisionContext).toBe("selfContained");
+
+    useLlmStore.getState().updateProfile(id, { decisionContext: "messageThread" });
+
+    expect(useLlmStore.getState().profiles[0].decisionContext).toBe("messageThread");
+    expect(stored().decisionContext).toBe("messageThread");
   });
 
   it("never writes the API key to persistent storage", () => {

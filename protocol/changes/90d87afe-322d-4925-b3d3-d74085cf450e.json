@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingCopyTokenResolution gains referent_set (Option<TrackedSetId>), the tracked set a paused copy-token instruction published; on completion the owner publishes every token it created into it (CR 608.2c 'those tokens'). Serde-defaulted, so an older full-game or P2P peer restoring a paused copy batch drops it and leaves post-pause tokens out of the referent. It also gains offered_batch (OfferedBatchCustody, default Settled): a batch whose creation a replacement replaced with a different one (Jinnie Fay, Moonlit Meditation, Esix) is adopted by the owner on resume (CR 614.6). An older peer restoring a paused substitution drops it and leaves the substitute's tokens out of 'those tokens'."
+}

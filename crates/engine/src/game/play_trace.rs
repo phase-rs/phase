@@ -13,8 +13,8 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::engine::in_simulation_probe;
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, DelayedAbilityOrigin, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerPrintedOrigin,
+    AbilityDefinition, AbilityKind, DelayedAbilityOrigin, ObjectSelectionCardinality,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerPrintedOrigin,
 };
 use crate::types::actions::GameAction;
 use crate::types::card::PrintedCardRef;
@@ -487,6 +487,9 @@ pub(crate) struct PlayTrace {
     witnessed: [Option<(usize, Witnessed)>; 2],
     /// The every-option proof kept for the mandatory span starting at this entry.
     ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
+    /// For each resolution entry, the identity of the stack entry directly beneath the one that
+    /// resolved; `None` when it resolved alone.
+    beneath: im::HashMap<usize, Option<crate::game::period_confirm::TopOfStack>>,
 }
 
 impl PlayTrace {
@@ -515,6 +518,7 @@ impl PlayTrace {
             carrying: im::HashMap::new(),
             witnessed: [None; 2],
             ordered: None,
+            beneath: im::HashMap::new(),
         }
     }
 
@@ -670,7 +674,11 @@ impl PlayTrace {
     fn rerecord(&mut self, from: &PlayTrace, at: usize, entry: TraceEntry, begins_play: bool) {
         let prior = self.clone();
         let entry = self.reinterned(&from.nodes, entry);
+        let to = self.entries.len();
         self.record(&prior, entry, from.mana_ability_entries.get(&at).copied());
+        if let Some(beneath) = from.beneath.get(&at) {
+            self.beneath.insert(to, beneath.clone());
+        }
         if begins_play {
             self.begin_play(Box::new(prior));
         }
@@ -1144,7 +1152,12 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::HeroEventChoice { up_to, min, .. } => {
             optional_if(*up_to && *min == 0)
         }
-        WaitingFor::RevealChoice { optional, .. } => optional_if(*optional),
+        // CR 107.1c: "any number" always admits the empty selection.
+        WaitingFor::RevealChoice {
+            optional,
+            cardinality,
+            ..
+        } => optional_if(*optional || *cardinality == ObjectSelectionCardinality::AnyNumber),
         // CR 732.2a + CR 104.4b: the shortcut and Resolve All negotiations are not instructions.
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
@@ -1639,8 +1652,23 @@ pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolutio
                 },
                 None,
             );
+            trace
+                .beneath
+                .insert(at, beneath_identity(&before.stack, resolved));
         }
     });
+}
+
+/// The identity of the entry directly beneath the one `resolved` places from the top of `stack`.
+fn beneath_identity(
+    stack: &im::Vector<StackEntry>,
+    resolved: usize,
+) -> Option<crate::game::period_confirm::TopOfStack> {
+    stack
+        .iter()
+        .rev()
+        .nth(resolved + 1)
+        .map(crate::game::period_confirm::entry_identity)
 }
 
 /// Whether `locus` names a mana ability's source that no longer exists.
@@ -1750,7 +1778,8 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
 }
 
 /// CR 104.4b + CR 732.4: the span back to the last instance of the triggered node on top of the
-/// stack, when nothing optional was asked or played since; `None` outside a recording boundary.
+/// stack at the frame's depth and with the frame's entry beneath it, or at another depth, when
+/// nothing optional was asked or played since; `None` outside a recording boundary.
 pub(crate) fn mandatory_recurrence(state: &GameState) -> Option<NamedSpan> {
     if !recording(state) {
         return None;
@@ -1763,13 +1792,30 @@ pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> 
     let trace = current(state)?;
     let end = trace.entries.len();
     let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
-    let start = *trace.last.get(&node)?;
-    let mandatory = !trace.optional_triggers.contains(&node)
-        && !trace
-            .last_optional
-            .is_some_and(|optional| optional >= start)
-        && !trace.last_play.is_some_and(|play| play >= start);
-    mandatory.then(|| NamedSpan::in_window(start, end, NamingCause::MandatoryRecurrence))
+    if trace.optional_triggers.contains(&node) {
+        return None;
+    }
+    let floor = trace.last_optional.max(trace.last_play);
+    let depth = state.stack.len();
+    let beneath = beneath_identity(&state.stack, 0);
+    // CR 104.4b + CR 732.2a: a period runs from a frame back to that frame. A printed trigger can
+    // resolve more than once a period (CR 603.6a: newcomers are checked too), so an earlier
+    // resolution of the top's node at this depth with a different entry beneath it is a point
+    // inside the period, not its start. At another depth the frame may hold accumulation beneath,
+    // which the replay's end admits.
+    let start = (0..=*trace.last.get(&node)?)
+        .rev()
+        .take_while(|&at| floor.is_none_or(|floor| at > floor))
+        .find(|&at| {
+            let entry = &trace.entries[at];
+            matches!(entry.kind, EntryKind::Resolution { node: resolved } if resolved == node)
+                && (entry.depth != depth || trace.beneath.get(&at) == Some(&beneath))
+        })?;
+    Some(NamedSpan::in_window(
+        start,
+        end,
+        NamingCause::MandatoryRecurrence,
+    ))
 }
 
 /// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
@@ -2425,6 +2471,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         };
         let may = WaitingFor::OptionalEffectChoice {
             player,
@@ -2463,6 +2511,12 @@ mod tests {
         ];
         let one_card = reveal(vec![source]);
         let two_cards = reveal(vec![source, ObjectId(2)]);
+        // CR 107.1c: with "any number", one eligible card still has two legal answers (none, or
+        // it), so the prompt is neither forced nor mandatory.
+        let mut any_number_one_card = reveal(vec![source]);
+        if let WaitingFor::RevealChoice { cardinality, .. } = &mut any_number_one_card {
+            *cardinality = crate::types::ability::ObjectSelectionCardinality::AnyNumber;
+        }
         let reveals = [
             (
                 "one-card forced reveal",
@@ -2475,6 +2529,12 @@ mod tests {
                 &two_cards,
                 select(vec![source]),
                 Some(Mandatory),
+            ),
+            (
+                "one-card any-number reveal",
+                &any_number_one_card,
+                select(vec![source]),
+                Some(Optional),
             ),
         ];
         let misread: Vec<&str> = rows
