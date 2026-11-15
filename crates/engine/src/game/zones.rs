@@ -3,8 +3,8 @@ use crate::types::ability::StaticDefinition;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, LinkedExileLki, LinkedExileSnapshot, ResolutionSourceRelatch, StackEntry,
-    StackEntryKind, ZoneChangeCombatStatus,
+    GameState, InstructionLead, LinkedExileLki, LinkedExileSnapshot, OpenInstruction,
+    ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -2133,6 +2133,9 @@ pub(crate) fn move_to_zone_with_entry_flags(
         });
     }
 
+    if from == Zone::Battlefield {
+        stamp_departure_instruction_lead(state, &mut zone_change_record, events.len());
+    }
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: Some(from),
@@ -2281,6 +2284,70 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             state
                 .battlefield_entry_observations
                 .insert(index, observation);
+        }
+    }
+}
+
+/// CR 608.2c: carry out `body` as one instruction of the current action. A
+/// battlefield departure emitted inside it records how many of the
+/// instruction's events precede it (`ZoneChangeRecord::instruction_lead`), so
+/// the departure-window arm of trigger collection can tell the departing
+/// object's own instruction from the earlier ones (CR 603.10).
+///
+/// Scopes nest; the innermost one stamps. The stack depth is restored on
+/// every return, including a body that restores `state` from a clone, so a
+/// scope never outlives its body or pops a foreign entry.
+pub(crate) fn within_instruction<R>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    body: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> R,
+) -> R {
+    let depth = state.instruction_scopes.len();
+    state.instruction_scopes.push(OpenInstruction {
+        start: events.len(),
+    });
+    let result = body(state, events);
+    state.instruction_scopes.truncate(depth);
+    result
+}
+
+/// CR 608.2c: the lead of an event about to be pushed at `events_len` in the
+/// innermost open instruction's buffer. `None` when no instruction is open, or
+/// when the buffer is shorter than the instruction's start (a shadow-state
+/// probe that cloned the open scopes and emits into a fresh local buffer).
+fn open_instruction_lead(state: &GameState, events_len: usize) -> Option<InstructionLead> {
+    state
+        .instruction_scopes
+        .last()
+        .and_then(|scope| events_len.checked_sub(scope.start))
+        .map(InstructionLead)
+}
+
+/// CR 608.2c + CR 603.10: stamp a battlefield departure's instruction lead on
+/// its record as the `ZoneChanged` is built, and on the per-turn ledger row
+/// `record_zone_change` already wrote, so both copies carry it before any
+/// claim or clone can see the record. Without an open instruction the record
+/// keeps `None` (the departure-window arm's whole-resolution window).
+fn stamp_departure_instruction_lead(
+    state: &mut GameState,
+    record: &mut ZoneChangeRecord,
+    events_len: usize,
+) {
+    let Some(lead) = open_instruction_lead(state, events_len) else {
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_unstamped_departure();
+        return;
+    };
+    record.instruction_lead = Some(lead);
+    if record.recorded_turn_number != state.turn_number {
+        return;
+    }
+    if let Some(row) = state
+        .zone_changes_this_turn
+        .get_mut(record.turn_zone_change_index)
+    {
+        if row.object_id == record.object_id && row.from_zone == Some(Zone::Battlefield) {
+            row.instruction_lead = Some(lead);
         }
     }
 }
@@ -2948,6 +3015,9 @@ pub fn move_to_library_at_index(
         });
     }
 
+    if from == Zone::Battlefield {
+        stamp_departure_instruction_lead(state, &mut zone_change_record, events.len());
+    }
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: Some(from),
@@ -7967,5 +8037,134 @@ mod capture_combat_status_tests {
         let no_combat = capture_combat_status(&state, a_player);
         assert!(!no_combat.attacking, "reach guard: combat is gone");
         assert_eq!(no_combat.attack_target, None);
+    }
+}
+
+#[cfg(test)]
+mod instruction_scope_tests {
+    use super::*;
+
+    fn battlefield_creature(state: &mut GameState, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn departure_record(events: &[GameEvent], id: ObjectId) -> &ZoneChangeRecord {
+        events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    record,
+                    ..
+                } if *object_id == id => Some(&**record),
+                _ => None,
+            })
+            .expect("the battlefield departure was emitted")
+    }
+
+    /// CR 608.2c: a departure stamps how many of its instruction's events
+    /// precede it, on the emitted record and on the ledger row alike; the
+    /// innermost scope wins and the stack is empty after the scope closes.
+    #[test]
+    fn departure_records_its_lead_in_the_innermost_instruction() {
+        let mut state = GameState::new_two_player(42);
+        let first = battlefield_creature(&mut state, "First");
+        let second = battlefield_creature(&mut state, "Second");
+        let mut events = vec![GameEvent::PriorityPassed {
+            player_id: PlayerId(0),
+        }];
+        within_instruction(&mut state, &mut events, |state, events| {
+            move_to_zone(state, first, Zone::Graveyard, events);
+            within_instruction(state, events, |state, events| {
+                move_to_zone(state, second, Zone::Graveyard, events);
+            });
+        });
+        assert!(state.instruction_scopes.is_empty());
+        let first_record = departure_record(&events, first).clone();
+        let second_record = departure_record(&events, second).clone();
+        assert_eq!(first_record.instruction_lead, Some(InstructionLead(0)));
+        assert_eq!(second_record.instruction_lead, Some(InstructionLead(0)));
+        assert_eq!(
+            state.zone_changes_this_turn[first_record.turn_zone_change_index].instruction_lead,
+            Some(InstructionLead(0)),
+            "the ledger row carries the same lead"
+        );
+    }
+
+    /// A departure emitted after an earlier event of the same instruction
+    /// counts it; one emitted with no open instruction stays unstamped.
+    #[test]
+    fn lead_counts_the_instructions_earlier_events_and_none_outside_a_scope() {
+        let mut state = GameState::new_two_player(42);
+        let first = battlefield_creature(&mut state, "First");
+        let second = battlefield_creature(&mut state, "Second");
+        let mut events = Vec::new();
+        within_instruction(&mut state, &mut events, |state, events| {
+            move_to_zone(state, first, Zone::Graveyard, events);
+            move_to_zone(state, second, Zone::Graveyard, events);
+            let at = events
+                .iter()
+                .position(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == second)
+                })
+                .unwrap();
+            assert!(at > 0, "reach: the first departure precedes it");
+            assert_eq!(
+                departure_record(events, second).instruction_lead,
+                Some(InstructionLead(at))
+            );
+        });
+        let third = battlefield_creature(&mut state, "Third");
+        move_to_zone(&mut state, third, Zone::Graveyard, &mut events);
+        assert_eq!(departure_record(&events, third).instruction_lead, None);
+    }
+
+    /// N1: a shadow probe that cloned an open scope and emits into a fresh
+    /// local buffer shorter than the scope's start yields no lead, not a panic.
+    #[test]
+    fn a_buffer_shorter_than_the_open_scope_yields_no_lead() {
+        let mut state = GameState::new_two_player(42);
+        state.instruction_scopes.push(OpenInstruction { start: 5 });
+        assert_eq!(open_instruction_lead(&state, 0), None);
+        let id = battlefield_creature(&mut state, "Probe");
+        let mut local = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut local);
+        assert_eq!(departure_record(&local, id).instruction_lead, None);
+    }
+
+    /// A body that restores `state` from a clone taken outside the scope
+    /// cannot leave a scope open or pop a foreign one.
+    #[test]
+    fn a_state_restore_inside_the_scope_restores_the_depth() {
+        let mut state = GameState::new_two_player(42);
+        state.instruction_scopes.push(OpenInstruction { start: 0 });
+        let base = state.clone();
+        let mut events = Vec::new();
+        within_instruction(&mut state, &mut events, |state, _| {
+            *state = base;
+        });
+        assert_eq!(state.instruction_scopes, vec![OpenInstruction { start: 0 }]);
+    }
+
+    /// The instruction start never underflows below the list's first index.
+    #[test]
+    fn start_index_saturates() {
+        assert_eq!(InstructionLead(2).start_index(5), 3);
+        assert_eq!(InstructionLead(7).start_index(5), 0);
     }
 }

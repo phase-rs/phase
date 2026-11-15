@@ -3169,6 +3169,7 @@ impl GameObject {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).

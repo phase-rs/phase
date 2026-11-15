@@ -1793,6 +1793,13 @@ pub struct ZoneChangeRecord {
     /// authority for entry simultaneity: trigger collection must not infer it from event order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_entered: Vec<ObjectId>,
+    /// CR 608.2c + CR 603.10: for a battlefield departure, how many events of
+    /// the instruction that moved this object were emitted before this record's
+    /// `ZoneChanged`. Written once, when the event is built
+    /// (`zones::move_to_zone`); `None` when no instruction scope was open, in
+    /// which case the departure-window arm keeps its whole-resolution window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_lead: Option<InstructionLead>,
     /// CR 400.7: the entrant's incarnation captured AFTER its battlefield-entry
     /// bump, so a later leave + re-entry (same ObjectId, higher incarnation) is
     /// distinguishable from the original entrant at intervening-if recheck.
@@ -1940,6 +1947,7 @@ struct ZoneChangeRecordWire {
     co_departed: Vec<ObjectId>,
     #[serde(default)]
     co_entered: Vec<ObjectId>,
+    instruction_lead: Option<InstructionLead>,
     #[serde(default)]
     entered_incarnation: Option<u64>,
     #[serde(default)]
@@ -1987,6 +1995,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             block_pairs,
             co_departed,
             co_entered,
+            instruction_lead,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -2024,6 +2033,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             block_pairs,
             co_departed,
             co_entered,
+            instruction_lead,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -2033,6 +2043,31 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             departure,
         }
     }
+}
+
+/// CR 608.2c + CR 603.10: the number of events of a departing instruction
+/// emitted before the departure's own `ZoneChanged`. Relative rather than an
+/// absolute index, so it survives the event list being re-based (a prefix
+/// prepended, or a truncation that drops the departure with its prefix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstructionLead(pub usize);
+
+impl InstructionLead {
+    /// The index at which the instruction began, given the departure's index
+    /// in the same list. Saturates at 0 for a lead larger than the index.
+    pub fn start_index(self, departure_idx: usize) -> usize {
+        departure_idx.saturating_sub(self.0)
+    }
+}
+
+/// CR 608.2c: one instruction of the current action that is still being
+/// carried out — the index in the instruction's event buffer at which it began.
+/// Execution-local (`GameState::instruction_scopes`), opened and closed by
+/// `zones::within_instruction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenInstruction {
+    pub start: usize,
 }
 
 impl ZoneChangeRecord {
@@ -2397,6 +2432,7 @@ impl ZoneChangeRecord {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -26542,6 +26578,15 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) resolving_created_token_seats: Option<CreatedTokenSeatsHandoff>,
 
+    /// CR 608.2c: the instructions being carried out right now, innermost
+    /// last. Execution-local: `zones::within_instruction` pushes on entry and
+    /// truncates on every return, so the stack is empty between actions. The
+    /// battlefield-departure emit sites read the innermost entry to stamp
+    /// `ZoneChangeRecord::instruction_lead`. Never serialized and excluded from
+    /// equality and hashing, like the other execution-local views above.
+    #[serde(skip)]
+    pub(crate) instruction_scopes: Vec<OpenInstruction>,
+
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -35285,6 +35330,7 @@ impl GameState {
             resolving_head_payment_origin: ResolutionPaymentOrigin::FreshChoice,
             resolving_player_scope_tail: None,
             resolving_created_token_seats: None,
+            instruction_scopes: Vec::new(),
             merged_card_component_route: None,
             leaving_game_departure: None,
             resolution_coin_flip: None,
@@ -37450,6 +37496,7 @@ impl GameState {
                 block_pairs,
                 co_departed: _,
                 co_entered: _,
+                instruction_lead: _,
                 entered_incarnation: _,
                 attached_to: _,
                 turn_zone_change_index: _,
@@ -40874,6 +40921,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_head_payment_origin: _,
         resolving_player_scope_tail: _,
         resolving_created_token_seats: _,
+        instruction_scopes: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
         resolution_coin_flip: _,

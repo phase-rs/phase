@@ -25,7 +25,7 @@ use engine::game::perf_counters;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -146,7 +146,6 @@ fn soul_warden_destroyed_before_the_horror_enters_does_not_see_it() {
 /// Warden is exiled by the same event, so it does not exist immediately
 /// after the Zombies enter and does not trigger.
 #[test]
-#[ignore = "D6 blocker: the departure window admits events of the same simultaneous instruction"]
 fn soul_warden_exiled_by_the_same_wipe_does_not_see_its_zombies() {
     let Some(db) = shared_card_db() else {
         return;
@@ -161,7 +160,9 @@ fn soul_warden_exiled_by_the_same_wipe_does_not_see_its_zombies() {
     let mut runner = scenario.build();
     add_mana(&mut runner, P0, &[ManaType::White, ManaType::White], 2);
 
+    perf_counters::reset();
     runner.cast(wipe).resolve();
+    let counters = perf_counters::departure_window_snapshot();
 
     assert_eq!(
         runner.state().objects[&bears].zone,
@@ -178,6 +179,11 @@ fn soul_warden_exiled_by_the_same_wipe_does_not_see_its_zombies() {
         2,
         "reach: each replaced death created a Zombie"
     );
+    assert!(
+        counters.in_instruction_cuts > 0,
+        "reach: the Bears' Zombie entry was cut from Soul Warden's window"
+    );
+    assert_eq!(counters.unstamped_departures, 0);
     assert_eq!(
         runner.life(P1),
         20,
@@ -862,4 +868,421 @@ fn soul_warden_bounced_after_the_gift_fish_entered_saw_it() {
         "reach: Soul Warden was returned"
     );
     assert_eq!(runner.life(P1), 21, "Soul Warden saw the Fish enter");
+}
+
+// ---------------------------------------------------------------------------
+// D6: the departing instruction (CR 608.2c + CR 603.10). An observer that
+// leaves the battlefield in an instruction does not exist immediately after
+// that instruction's other events, so it sees only the look-back ones; the
+// events of EARLIER instructions stay visible.
+//
+// More printed cards (Oracle text verbatim, data/card-data.json):
+//   Reckless Spite — "Destroy two target nonblack creatures. You lose 5
+//     life."
+//   Diaochan, Artful Beauty — "{T}: Destroy target creature of your choice,
+//     then destroy target creature of an opponent's choice. Activate only
+//     during your turn, before attackers are declared."
+//   Femeref Enchantress — "Whenever an enchantment is put into a graveyard
+//     from the battlefield, draw a card."
+//   Hyena Umbra — "Enchant creature / Enchanted creature gets +1/+1 and has
+//     first strike. / Umbra armor (If enchanted creature would be destroyed,
+//     instead remove all damage from it and destroy this Aura.)"
+//   Gideon's Avenger — "Whenever a creature an opponent controls becomes
+//     tapped, put a +1/+1 counter on this creature."
+//   Lotleth Troll — "Trample / Discard a creature card: Put a +1/+1 counter
+//     on this creature. / {B}: Regenerate this creature."
+//   Evacuation — "Return all creatures to their owners' hands."
+//   Extractor Demon — "Flying / Whenever another creature leaves the
+//     battlefield, you may have target player mill two cards. / Unearth
+//     {2}{B} (...)"
+//   Raise the Alarm — "Create two 1/1 white Soldier creature tokens."
+// ---------------------------------------------------------------------------
+
+/// Cast `spell` and pass until it has left the stack, leaving its triggers on
+/// the stack. Returns the departure-window counters of that span.
+fn cast_and_settle(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    targets: &[ObjectId],
+) -> perf_counters::DepartureWindowCounters {
+    perf_counters::reset();
+    let mut events = runner
+        .cast(spell)
+        .target_objects(targets)
+        .commit()
+        .events()
+        .to_vec();
+    drive(runner, &mut events, P0, |r| !on_stack(r, spell));
+    perf_counters::departure_window_snapshot()
+}
+
+/// R2 (CR 122.1c + CR 603.10): Day of Judgment would destroy P1's shielded
+/// Bears and P1's Cloudsculpt Armorer together. The shield counter replaces
+/// the Bears' destruction with its own removal inside that one event, and the
+/// Armorer leaves in it; a counter removal does not look back in time, so the
+/// Armorer does not seek.
+#[test]
+fn cloudsculpt_armorer_destroyed_with_a_shield_removal_in_the_same_wipe_does_not_seek() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    // The Bears first: the wipe walks the battlefield in order, so the shield
+    // is removed before the Armorer leaves.
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.with_counter(bears, CounterType::Shield, 1);
+    let armorer = scenario.add_real_card(P1, "Cloudsculpt Armorer", Zone::Battlefield, db);
+    let wipe = scenario.add_real_card(P0, "Day of Judgment", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::White, ManaType::White], 2);
+
+    let counters = cast_and_settle(&mut runner, wipe, &[]);
+
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Battlefield,
+        "reach: the shield counter saved the Bears"
+    );
+    assert_eq!(
+        counters_on(&runner, bears, CounterType::Shield),
+        0,
+        "reach: the shield counter was removed"
+    );
+    assert_eq!(runner.state().objects[&armorer].zone, Zone::Graveyard);
+    assert!(
+        counters.in_instruction_cuts > 0,
+        "reach: the Bears' counter removal was cut from the Armorer's window"
+    );
+    assert_eq!(counters.unstamped_departures, 0);
+    assert!(
+        triggers_from(&runner, armorer).is_empty(),
+        "the Armorer left in the event that removed the counter"
+    );
+}
+
+/// R2+ (paired positive): the Armorer shielded itself, so it survives the
+/// wipe and sees its own shield counter removed. Nothing is cut.
+#[test]
+fn live_cloudsculpt_armorer_seeks_when_its_own_shield_is_removed_by_the_wipe() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let armorer = scenario.add_real_card(P1, "Cloudsculpt Armorer", Zone::Battlefield, db);
+    scenario.with_counter(armorer, CounterType::Shield, 1);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let wipe = scenario.add_real_card(P0, "Day of Judgment", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::White, ManaType::White], 2);
+
+    let counters = cast_and_settle(&mut runner, wipe, &[]);
+
+    assert_eq!(runner.state().objects[&armorer].zone, Zone::Battlefield);
+    assert_eq!(counters_on(&runner, armorer, CounterType::Shield), 0);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(counters.in_instruction_cuts, 0);
+    assert_eq!(counters.unstamped_departures, 0);
+    assert_eq!(
+        triggers_from(&runner, armorer).len(),
+        1,
+        "the surviving Armorer seeks once"
+    );
+}
+
+/// R3 (CR 608.2c): Reckless Spite destroys both targets in one instruction.
+/// Kalitas exiles the Bears and makes a Zombie inside that event, and Soul
+/// Warden leaves in the same event, so it does not see the Zombie. The life
+/// loss is the next instruction.
+#[test]
+fn kalitas_replacement_inside_a_two_target_destroy_is_not_seen_by_the_other_victim() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let spite = scenario.add_real_card(P0, "Reckless Spite", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Black, ManaType::Black], 1);
+
+    let counters = cast_and_settle(&mut runner, spite, &[bears, warden]);
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&warden].zone, Zone::Exile);
+    assert_eq!(tokens_named(&runner, P0, "Zombie").len(), 2);
+    assert_eq!(runner.life(P0), 15, "reach: the next instruction resolved");
+    assert!(counters.in_instruction_cuts > 0);
+    assert_eq!(counters.unstamped_departures, 0);
+    assert!(
+        triggers_from(&runner, warden).is_empty(),
+        "Soul Warden did not trigger"
+    );
+    let mut events = Vec::new();
+    drive(&mut runner, &mut events, P0, |r| r.state().stack.is_empty());
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Soul Warden left in the event that created the first Zombie"
+    );
+}
+
+/// Activate Diaochan, destroying `yours` first and then `theirs` (the
+/// opponent's choice), and resolve it and every trigger it raises, aiming
+/// trigger targets at P0. Returns the departure-window counters of that span.
+fn diaochan(
+    runner: &mut GameRunner,
+    diaochan: ObjectId,
+    yours: ObjectId,
+    theirs: ObjectId,
+) -> perf_counters::DepartureWindowCounters {
+    perf_counters::reset();
+    runner
+        .activate(diaochan, 0)
+        .target_objects(&[yours, theirs])
+        .target_player(P0)
+        .resolve();
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach: everything resolved"
+    );
+    perf_counters::departure_window_snapshot()
+}
+
+/// R-D1 (CR 608.2c, preservation): "..., then destroy ..." is two
+/// instructions in order. The Bears are exiled and their Zombie enters while
+/// Soul Warden is still on the battlefield, so it gains 1; the Warden is then
+/// exiled by the second instruction and does not see its own Zombie.
+#[test]
+fn diaochan_then_chain_keeps_the_first_destruction_visible() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let beauty = scenario.add_real_card(P0, "Diaochan, Artful Beauty", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let counters = diaochan(&mut runner, beauty, bears, warden);
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&warden].zone, Zone::Exile);
+    assert_eq!(tokens_named(&runner, P0, "Zombie").len(), 2);
+    assert_eq!(
+        counters.in_instruction_cuts, 0,
+        "the Warden's own Zombie entered after it left"
+    );
+    assert_eq!(counters.unstamped_departures, 0);
+    assert_eq!(
+        runner.life(P1),
+        21,
+        "Soul Warden saw the Zombie of the earlier instruction"
+    );
+}
+
+/// R-D2 (CR 608.2c, preservation): Blood Artist is destroyed by the first
+/// instruction and the Bears by the second, so the Artist sees only its own
+/// death: one trigger, so P1 gains 1 and P0 loses 1.
+#[test]
+fn diaochan_blood_artist_sees_only_its_own_death() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let beauty = scenario.add_real_card(P0, "Diaochan, Artful Beauty", Zone::Battlefield, db);
+    let artist = scenario.add_real_card(P1, "Blood Artist", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let counters = diaochan(&mut runner, beauty, artist, bears);
+
+    assert_eq!(runner.state().objects[&artist].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(counters.unstamped_departures, 0);
+    assert_eq!(runner.life(P0), 19, "one Blood Artist trigger resolved");
+    assert_eq!(
+        runner.life(P1),
+        21,
+        "Blood Artist had left before the Bears died"
+    );
+}
+
+fn hand_size(runner: &GameRunner, player: PlayerId) -> usize {
+    runner.state().players[player.0 as usize].hand.len()
+}
+
+/// Day of Judgment on P1's Bears enchanted by Hyena Umbra and P1's Femeref
+/// Enchantress, in the given battlefield order. Returns the Enchantress's
+/// draws once every trigger has resolved.
+fn femeref_umbra_wipe(enchantress_first: bool) -> Option<usize> {
+    let db = shared_card_db()?;
+    let mut scenario = main_phase();
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    // Placed while the Bears are the only creature, so it enchants them.
+    let umbra = scenario.add_real_card(P1, "Hyena Umbra", Zone::Battlefield, db);
+    let femeref = scenario.add_real_card(P1, "Femeref Enchantress", Zone::Battlefield, db);
+    let wipe = scenario.add_real_card(P0, "Day of Judgment", Zone::Hand, db);
+    let mut runner = scenario.build();
+    if enchantress_first {
+        // The wipe walks the battlefield in order: destroy the Enchantress
+        // before the enchanted Bears.
+        let battlefield = &mut runner.state_mut().battlefield;
+        battlefield.retain(|id| *id != femeref);
+        battlefield.push_front(femeref);
+    }
+    assert_eq!(
+        runner.state().objects[&umbra]
+            .attached_to
+            .and_then(|target| target.as_object()),
+        Some(bears),
+        "reach: Hyena Umbra enchants the Bears"
+    );
+    add_mana(&mut runner, P0, &[ManaType::White, ManaType::White], 2);
+    let hand_before = hand_size(&runner, P1);
+
+    let counters = cast_and_settle(&mut runner, wipe, &[]);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Battlefield,
+        "reach: umbra armor saved the Bears"
+    );
+    assert_eq!(runner.state().objects[&umbra].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&femeref].zone, Zone::Graveyard);
+    assert_eq!(counters.unstamped_departures, 0);
+    let mut events = Vec::new();
+    drive(&mut runner, &mut events, P0, |r| r.state().stack.is_empty());
+    Some(hand_size(&runner, P1) - hand_before)
+}
+
+/// R5 (CR 603.10a + CR 702.89a): umbra armor destroys Hyena Umbra inside the
+/// wipe that destroys Femeref Enchantress. A battlefield exit looks back in
+/// time, so the Enchantress draws once.
+#[test]
+fn femeref_enchantress_sees_the_umbra_aura_destroyed_by_the_same_wipe() {
+    let Some(draws) = femeref_umbra_wipe(false) else {
+        return;
+    };
+    assert_eq!(draws, 1, "the Enchantress saw the Aura go to the graveyard");
+}
+
+/// R5b: the same with Femeref Enchantress BEFORE the enchanted Bears, so the
+/// Aura leaves after the Enchantress within the one event (CR 603.10a: they
+/// left simultaneously).
+#[test]
+fn femeref_enchantress_destroyed_first_sees_the_umbra_aura_of_the_same_wipe() {
+    let Some(draws) = femeref_umbra_wipe(true) else {
+        return;
+    };
+    assert_eq!(draws, 1, "the Enchantress saw the Aura go to the graveyard");
+}
+
+/// R7 (CR 701.19a, preservation): P0's Lotleth Troll regenerates inside the
+/// wipe — regeneration taps it — and P1's Gideon's Avenger leaves in the same
+/// event. A tap does not look back in time, so the Avenger does not trigger.
+/// The engine taps a regenerated permanent without publishing a tap event
+/// (`GameEvent::Regenerated` keys nothing), so no event reaches the
+/// Avenger's window and nothing is cut; this row pins the outcome only.
+#[test]
+fn gideons_avenger_destroyed_with_a_regenerating_troll_does_not_see_the_tap() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    // The Troll first, so its regeneration happens before the Avenger leaves.
+    let troll = scenario.add_real_card(P0, "Lotleth Troll", Zone::Battlefield, db);
+    let avenger = scenario.add_real_card(P1, "Gideon's Avenger", Zone::Battlefield, db);
+    let wipe = scenario.add_real_card(P0, "Day of Judgment", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Black], 0);
+    let regenerate = runner.state().objects[&troll]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::Regenerate { .. }))
+        .expect("Lotleth Troll has a Regenerate ability");
+    runner.activate(troll, regenerate).resolve();
+    add_mana(&mut runner, P0, &[ManaType::White, ManaType::White], 2);
+
+    let counters = cast_and_settle(&mut runner, wipe, &[]);
+
+    let troll_now = &runner.state().objects[&troll];
+    assert_eq!(
+        troll_now.zone,
+        Zone::Battlefield,
+        "reach: the Troll regenerated"
+    );
+    assert!(troll_now.tapped, "reach: regeneration tapped the Troll");
+    assert_eq!(runner.state().objects[&avenger].zone, Zone::Graveyard);
+    assert_eq!(counters.unstamped_departures, 0);
+    assert!(
+        triggers_from(&runner, avenger).is_empty(),
+        "the Avenger left in the event that tapped the Troll"
+    );
+}
+
+/// PH (a) (CR 603.10a): Evacuation returns the Bears and Extractor Demon
+/// together; the Demon sees the Bears leave (a leaves-the-battlefield trigger
+/// looks back in time) and the departure is collected exactly once.
+#[test]
+fn mass_bounce_with_a_departing_leaves_observer_collects_once() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let evacuation = scenario.add_real_card(P0, "Evacuation", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Blue, ManaType::Blue], 3);
+
+    let counters = cast_and_settle(&mut runner, evacuation, &[]);
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&demon].zone, Zone::Hand);
+    assert_eq!(counters.unstamped_departures, 0);
+    assert_eq!(
+        triggers_from(&runner, demon).len(),
+        1,
+        "one trigger for the Bears"
+    );
+}
+
+/// PH (b) (CR 603.10a): Aether Snap exiles two creature tokens; the live
+/// Extractor Demon triggers once for each.
+#[test]
+#[ignore = "pre-existing double collection: the live Demon triggers twice per exiled token (4), also at 77a08dca9"]
+fn mass_exile_of_tokens_with_a_live_leaves_observer_collects_once() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let alarm = scenario.add_real_card(P0, "Raise the Alarm", Zone::Hand, db);
+    let aether_snap = scenario.add_real_card(P0, "Aether Snap", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::White], 1);
+    runner.cast(alarm).resolve();
+    let tokens = tokens_named(&runner, P0, "Soldier");
+    assert_eq!(tokens.len(), 2, "reach: Raise the Alarm made two Soldiers");
+
+    perf_counters::reset();
+    let events = snap(&mut runner, aether_snap);
+
+    for id in tokens {
+        assert!(
+            left_battlefield_to_exile(&events, id),
+            "reach: token exiled"
+        );
+    }
+    assert_eq!(runner.state().objects[&demon].zone, Zone::Battlefield);
+    assert_eq!(
+        perf_counters::departure_window_snapshot().unstamped_departures,
+        0
+    );
+    assert_eq!(
+        triggers_from(&runner, demon).len(),
+        2,
+        "one trigger per exiled token"
+    );
 }

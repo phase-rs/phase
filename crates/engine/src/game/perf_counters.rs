@@ -217,6 +217,14 @@ pub struct DepartureWindowCounters {
     /// (earlier event, departed observer) pairs admitted past the departure
     /// row and event-key gates, so the observer's latched context was matched.
     pub context_resolutions: u64,
+    /// CR 608.2c + CR 603.10: (event, departed observer) pairs skipped because
+    /// the event belongs to the observer's own departing instruction and does
+    /// not look back in time, so the observer no longer existed after it.
+    pub in_instruction_cuts: u64,
+    /// Battlefield departures with no instruction lead: emitted outside any
+    /// instruction scope, or read by the departure-window arm without one.
+    /// Their window falls back to the whole resolution.
+    pub unstamped_departures: u64,
 }
 
 /// Test-only counters for the stack's bulk token executor
@@ -676,6 +684,8 @@ thread_local! {
     static DEPARTURE_WINDOW_COUNTERS: Cell<DepartureWindowCounters> = const {
         Cell::new(DepartureWindowCounters {
             context_resolutions: 0,
+            in_instruction_cuts: 0,
+            unstamped_departures: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1310,6 +1320,27 @@ pub fn record_departure_window_context_resolution() {
     DEPARTURE_WINDOW_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.context_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 608.2c + CR 603.10: one event of a departed observer's own instruction
+/// cut from its departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_in_instruction_cut() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.in_instruction_cuts += 1;
+        cell.set(counters);
+    });
+}
+
+/// One battlefield departure without an instruction lead.
+#[cfg(feature = "test-support")]
+pub fn record_unstamped_departure() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.unstamped_departures += 1;
         cell.set(counters);
     });
 }

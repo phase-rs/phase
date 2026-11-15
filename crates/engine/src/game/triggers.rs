@@ -4439,6 +4439,13 @@ pub(crate) struct ObservedDeparture {
     /// The collector index from which the departing incarnation was on the
     /// battlefield (the window's inclusive start).
     presence_start: usize,
+    /// CR 608.2c: the collector index at which the departing instruction
+    /// began, in `presence_start..=before_count`. Events from here up to the
+    /// departure are part of the event that moved the observer; it does not
+    /// exist immediately after them, so only look-back triggers see them
+    /// (CR 603.10). Equals `before_count` when the record carries no
+    /// instruction lead.
+    instruction_start: usize,
     /// The departure's own record. Its source context is the observer, as it
     /// last existed on the battlefield (CR 608.2h).
     record: crate::types::game_state::ZoneChangeRecord,
@@ -4451,6 +4458,12 @@ impl ObservedDeparture {
 
     fn window_contains(&self, collector_idx: usize) -> bool {
         (self.presence_start..self.before_count).contains(&collector_idx)
+    }
+
+    /// CR 608.2c: whether the collector event belongs to the departing
+    /// instruction itself.
+    fn in_instruction(&self, collector_idx: usize) -> bool {
+        (self.instruction_start..self.before_count).contains(&collector_idx)
     }
 }
 
@@ -4504,11 +4517,26 @@ impl ActionDepartures {
                 if context.trigger_entries.is_empty() {
                     return None;
                 }
-                let presence_start =
-                    battlefield_presence_start_before(raw, raw_start, raw_idx, *object_id);
+                let presence_start = collector_index(battlefield_presence_start_before(
+                    raw, raw_start, raw_idx, *object_id,
+                ));
+                let before_count = collector_index(raw_idx);
+                // CR 608.2c: the lead was written when the departure was emitted,
+                // relative to its own position. The window can never reach
+                // before this action or the departing incarnation's presence.
+                let instruction_start = match record.instruction_lead {
+                    Some(lead) => collector_index(lead.start_index(raw_idx).max(raw_start))
+                        .clamp(presence_start, before_count),
+                    None => {
+                        #[cfg(feature = "test-support")]
+                        super::perf_counters::record_unstamped_departure();
+                        before_count
+                    }
+                };
                 Some(ObservedDeparture {
-                    before_count: collector_index(raw_idx),
-                    presence_start: collector_index(presence_start),
+                    before_count,
+                    presence_start,
+                    instruction_start,
                     record: (**record).clone(),
                 })
             })
@@ -4577,6 +4605,33 @@ impl DepartureAdmission {
             Self::Classified(keys) => crate::game::trigger_index::keys_from_event(event, state)
                 .iter()
                 .any(|key| keys.contains(key)),
+        }
+    }
+
+    /// CR 603.10: whether an event of the observer's own departing instruction
+    /// can still be seen by it. The observer does not exist immediately after
+    /// that event, so only a trigger that looks back in time sees it: one of
+    /// the observer's event keys that the event carries is look-back, or the
+    /// event is itself a look-back zone change (CR 603.10a: it leaves the
+    /// battlefield or a graveyard, or is put into a hand or library). The zone
+    /// shape covers the observers the index routes to its unclassified bucket,
+    /// whose event keys say nothing; it over-approximates toward observation.
+    fn admits_in_instruction(&self, event: &GameEvent, state: &GameState) -> bool {
+        if let GameEvent::ZoneChanged { from, to, .. } = event {
+            if matches!(from, Some(Zone::Battlefield | Zone::Graveyard))
+                || matches!(to, Zone::Hand | Zone::Library)
+            {
+                return true;
+            }
+        }
+        let event_keys = crate::game::trigger_index::keys_from_event(event, state);
+        match self {
+            Self::AnyEvent => event_keys
+                .iter()
+                .any(crate::types::triggers::TriggerEventKey::is_look_back),
+            Self::Classified(keys) => event_keys
+                .iter()
+                .any(|key| key.is_look_back() && keys.contains(key)),
         }
     }
 }
@@ -7685,6 +7740,17 @@ fn collect_pending_triggers_with_collection(
                 {
                     continue;
                 }
+            }
+            // CR 608.2c + CR 603.10: an event of the observer's own departing
+            // instruction happened as part of the event that moved it, so it
+            // did not exist immediately after it; only a look-back trigger
+            // sees it.
+            if departure.in_instruction(event_idx)
+                && !observer.admission.admits_in_instruction(event, state)
+            {
+                #[cfg(feature = "test-support")]
+                super::perf_counters::record_departure_window_in_instruction_cut();
+                continue;
             }
             let Some(source_context) = departure.record.trigger_source_context() else {
                 continue;

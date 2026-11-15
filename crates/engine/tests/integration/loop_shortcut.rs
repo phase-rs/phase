@@ -998,6 +998,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         // logical group in this fixture moves two objects onto the battlefield.
         .replace(", co_entered: []", "")
         .replace(", departure: Moved", "")
+        // `instruction_lead` joined `ZoneChangeRecord` after the golden was cut;
+        // it is stamped only on battlefield departures, and this stream has none.
+        .replace(", instruction_lead: None", "")
         // `attack_target` was added to the combat status after the golden was cut;
         // no combat is live in this fixture, so its derived value is None (CR 506.3).
         .replace(", attack_target: None", "")

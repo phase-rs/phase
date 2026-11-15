@@ -178,6 +178,81 @@ pub enum TriggerEventKey {
     PhaseOut,
 }
 
+impl TriggerEventKey {
+    /// CR 603.10: whether an ability that triggers on an event with this key
+    /// "looks back in time", so a permanent that left the battlefield in the
+    /// same event (or the same instruction) as the event still sees it.
+    /// Every other trigger checks the objects that exist immediately after the
+    /// event.
+    pub fn is_look_back(&self) -> bool {
+        match self {
+            // CR 603.10a: leaves-the-battlefield abilities (dying included) and
+            // abilities that trigger when a player sacrifices a permanent.
+            Self::LeaveBattlefield(_) | Self::Dies(_) | Self::Sacrificed => true,
+            // CR 603.10b: abilities that trigger when a permanent phases out.
+            Self::PhaseOut => true,
+            // CR 603.10c: abilities that trigger when an object becomes
+            // unattached. The key is coarse (attach and unattach share it), so
+            // this over-approximates toward observation.
+            Self::AttachmentChanged => true,
+            // CR 603.10d: abilities that trigger when a player loses control of
+            // an object.
+            Self::ChangesController => true,
+            // CR 603.10f: abilities that trigger when a player loses the game.
+            Self::PlayerLost => true,
+            Self::EnterBattlefield(_)
+            | Self::SpellCast(_)
+            | Self::BecomesTarget
+            | Self::Attacks
+            | Self::Blocks
+            | Self::DealsDamage
+            | Self::DamagePrevented
+            | Self::CardsDrawn
+            | Self::LifeChanged
+            | Self::ManaProduced
+            | Self::ManaSpent
+            | Self::CounterAdded
+            | Self::CounterRemoved
+            | Self::BeginningOfPhase(_)
+            | Self::Taps
+            | Self::TapsForMana
+            | Self::Untaps
+            | Self::Destroyed
+            | Self::Discarded
+            | Self::Milled
+            | Self::TokenCreated
+            | Self::FaceOrTransform
+            | Self::PlayerCounterChanged
+            | Self::DieOrCoin
+            | Self::MonarchOrInitiative
+            | Self::VisitAttraction
+            | Self::Specializes
+            | Self::Clashed
+            | Self::Voted
+            | Self::DayNightChanged
+            | Self::DungeonOrClassOrCase
+            | Self::PlayerActionPerformed
+            | Self::Bending
+            | Self::TurnStarted
+            | Self::Exiled
+            | Self::Revealed
+            | Self::AbilityOrCopyActivated
+            | Self::Renowned
+            | Self::BecomesMonstrous
+            | Self::ManifestDreadResolved
+            | Self::Explored
+            | Self::DiscoverResolved
+            | Self::AdaptResolved
+            | Self::ConniveResolved
+            | Self::Exerted
+            | Self::Enlisted
+            | Self::Foretold
+            | Self::Fight
+            | Self::PhaseIn => false,
+        }
+    }
+}
+
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AttackTargetFilter {

@@ -14584,7 +14584,20 @@ pub fn resolve_effect(
     resolve_effect_step(state, ability, events).map(|step| step.result)
 }
 
+/// CR 608.2c: each effect node is one instruction of its spell or ability, so
+/// it runs inside its own instruction scope (`zones::within_instruction`); the
+/// battlefield departures it emits record where that instruction began.
 fn resolve_effect_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<EffectStep, EffectError> {
+    crate::game::zones::within_instruction(state, events, |state, events| {
+        resolve_effect_node(state, ability, events)
+    })
+}
+
+fn resolve_effect_node(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
