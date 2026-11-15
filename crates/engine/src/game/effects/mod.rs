@@ -236,6 +236,7 @@ pub mod ripple;
 pub mod roll_die;
 pub mod sacrifice;
 pub mod saddle;
+pub mod scoped_discard;
 pub mod scoped_library_search;
 pub mod scry;
 pub mod search_library;
@@ -2030,6 +2031,35 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
     }
 }
 
+/// CR 504.1 + CR 805.4b: a draw-step draw whose replacement asked a player to
+/// choose ("each player returns a permanent they control … instead") stays
+/// parked at the front of `pending_team_draw_step` while that choice is open.
+/// When the resumed draw frame completes, that draw is done: settle it and
+/// perform the draw owed by every seat still queued, so a teammate's mandatory
+/// draw is never dropped before the step's priority.
+///
+/// A draw that is still parked, or one that is not the front of the queue (a
+/// replacement-choice resume settles and pops its own), is left alone.
+fn continue_team_draw_step_after_resumed_draw(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    drawer: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let completed = state
+        .active_draw_sequence()
+        .is_none_or(|frame| frame.frame_id != frame_id);
+    if !completed
+        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.pending_team_draw_step.first() != Some(&drawer)
+    {
+        return;
+    }
+    state.pending_team_draw_step.remove(0);
+    // A teammate's own draw that parks sets `state.waiting_for` itself.
+    let _ = crate::game::turns::drain_pending_team_draw_step(state, events);
+}
+
 /// Resume the active typed resolution frame through its runtime stack authority.
 ///
 /// The dispatcher reads only the stack top. The one shipped coupled shape is
@@ -2161,8 +2191,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                     .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
                     .is_some());
             }
-            if let Some(frame_id) = state.active_draw_sequence().map(|draw| draw.frame_id) {
+            if let Some((frame_id, drawer)) = state
+                .active_draw_sequence()
+                .map(|draw| (draw.frame_id, draw.player))
+            {
                 let _ = draw::resume_draw_sequence(state, frame_id, events);
+                continue_team_draw_step_after_resumed_draw(state, frame_id, drawer, events);
             }
             // CR 614.11a + CR 615.5: the completed child draw promotes its
             // already-parked continuation above the exact paused parent. Drain
@@ -21446,8 +21480,7 @@ fn nested_payload_reads_created_referent(effect: &Effect) -> bool {
     });
     reads
         || match effect {
-            Effect::CreateDrawReplacement { replacement_effect }
-            | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            Effect::CreatePlaneswalkReplacement { replacement_effect } => {
                 effect_reads_created_referent(replacement_effect)
             }
             Effect::AddTargetReplacement { replacement, .. } => {
@@ -24595,6 +24628,37 @@ fn resolve_chain_body(
                 controller,
                 &matching_players,
                 after_scope,
+                events,
+                depth,
+            )?;
+            return Ok(progress);
+        }
+
+        if bounce::should_collect_player_scope_choices(&scoped_template) {
+            progress = bounce::start_player_scope_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                after_scope,
+                events,
+                depth,
+            )?;
+            return Ok(progress);
+        }
+
+        // CR 101.4: "each opponent discards a card" — every player chooses
+        // before any chosen card leaves a hand. A tail the clause is chained
+        // into reads the per-seat results the generic route publishes, so only
+        // a clause that ends here is collected.
+        if after_scope.is_none()
+            && scoped_discard::should_collect_player_scope_choices(&scoped_template)
+        {
+            progress = scoped_discard::start_player_scope_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
                 events,
                 depth,
             )?;
@@ -46866,32 +46930,28 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: the zero-fill's domain on a PAUSED fan-out. Seat 1 holds two
-    /// cards facing a "discard a card" fan-out, so its iteration stops on a
-    /// `DiscardChoice` it has not answered. Seat 0 completed; seats 1..3 did not.
-    ///
-    /// The bound is `i`, not `i + 1`: publishing the pausing seat as a zero says
-    /// it contributed nothing, when in fact it has not yet been given the chance
-    /// to contribute — a `Min` read taken mid-pause would answer 0 off that.
-    ///
-    /// This pins the domain only. It deliberately does NOT assert that the table
-    /// survives the continuation: each resumed leg replaces it rather than
-    /// extending it, which is pre-existing and documented at the fill site.
+    /// CR 101.4 + CR 101.4a: a scoped discard whose later seat must choose holds
+    /// every earlier seat's discard back. Seat 1 holds two cards facing a
+    /// "discard a card" fan-out, so the walk parks on its `DiscardChoice`; seat 0
+    /// (one card, a forced discard) has not discarded yet, because no card leaves
+    /// a hand until every player has chosen. Nothing is published mid-pause: the
+    /// clause's per-player table is one result, published when it completes.
     #[test]
-    fn paused_fan_out_excludes_the_seat_that_has_not_answered_its_choice() {
+    fn scoped_discard_holds_earlier_seats_back_while_a_later_seat_chooses() {
         let mut state = GameState::new(FormatConfig::standard(), 4, 42);
-        // Seat 0: exactly one card — a forced discard, no choice, completes.
-        // Seat 1: two cards — must choose, so the fan-out pauses here.
+        let mut hands = Vec::new();
         for (seat, cards) in [(0u8, 1u32), (1, 2), (2, 1), (3, 1)] {
+            let mut hand = Vec::new();
             for n in 0..cards {
-                create_object(
+                hand.push(create_object(
                     &mut state,
                     CardId(100 + u64::from(seat) * 10 + u64::from(n)),
                     PlayerId(seat),
                     format!("P{seat} Card {n}"),
                     Zone::Hand,
-                );
+                ));
             }
+            hands.push(hand);
         }
 
         let mut ability = ResolvedAbility::new(
@@ -46914,25 +46974,22 @@ mod tests {
         assert!(
             matches!(
                 state.waiting_for,
-                crate::types::game_state::WaitingFor::DiscardChoice { .. }
+                crate::types::game_state::WaitingFor::DiscardChoice {
+                    player: PlayerId(1),
+                    ..
+                }
             ),
-            "reach guard: the fan-out must actually be paused on seat 1's choice, \
-             got {:?}",
+            "reach guard: the walk must actually be parked on seat 1's choice,              got {:?}",
             state.waiting_for
         );
-
-        let mut rows: Vec<(u8, i32)> = state
-            .last_effect_counts_by_player
-            .iter()
-            .map(|(p, n)| (p.0, *n))
-            .collect();
-        rows.sort();
         assert_eq!(
-            rows,
-            vec![(0, 1)],
-            "only the seat that COMPLETED before the pause belongs to the domain; \
-             the paused seat has not had the chance to contribute and must not be \
-             published as a zero"
+            state.objects[&hands[0][0]].zone,
+            Zone::Hand,
+            "seat 0's forced discard waits for the later seat's choice"
+        );
+        assert!(
+            state.last_effect_counts_by_player.is_empty(),
+            "no per-player table is published while the clause is still collecting"
         );
     }
 
@@ -47413,14 +47470,15 @@ mod tests {
                 stale_fan_out,
             );
 
+            // An `unless_filter` keeps the instruction on the generic per-seat
+            // route (the CR 101.4 collector takes only the bare instruction),
+            // which is the route whose hand-off this predicate guards.
+            let mut clause = scoped_discard_one(clause_source);
+            if let Effect::Discard { unless_filter, .. } = &mut clause.effect {
+                *unless_filter = Some(TargetFilter::Any);
+            }
             let mut events = Vec::new();
-            resolve_ability_chain(
-                &mut state,
-                &scoped_discard_one(clause_source),
-                &mut events,
-                0,
-            )
-            .unwrap();
+            resolve_ability_chain(&mut state, &clause, &mut events, 0).unwrap();
 
             assert!(
                 matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
@@ -54796,7 +54854,7 @@ mod tests {
             (
                 "CreateDrawReplacement",
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(placement()),
+                    replacement_effect: payload(),
                 },
             ),
             (
