@@ -93,9 +93,17 @@ pub fn resolve(
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
+    // CR 800.4a + CR 609.3: a player who has left the game no longer has a
+    // library; the instruction does only as much as possible, so it shuffles
+    // nothing. Without this liveness check an owner who conceded in response
+    // still admits a ShuffledLibrary action (which can trigger Cosi's Trickster).
     // The effect itself still resolves (EffectResolved fires below).
-    let suppressed =
-        crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
+    let suppressed = !crate::game::players::is_alive(state, target_player)
+        || crate::game::static_abilities::player_has_static_other(
+            state,
+            target_player,
+            "CantShuffle",
+        );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,

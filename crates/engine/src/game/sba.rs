@@ -13,6 +13,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
@@ -131,6 +132,28 @@ fn run_state_based_actions(
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
 ) {
+    // CR 104.1 + CR 704.3: a game that has already ended is terminal, and no
+    // player will receive priority again — so no state-based actions are
+    // performed. Without this guard the player-loss collectors below would run
+    // after the winning effect recorded `GameOver` and eliminate the player the
+    // effect just named the winner when the same resolution also set a loss
+    // condition (an empty-library draw resolving into "you win the game" —
+    // Fblthp, Impossibly Lost; issue #10451). `game_end` is the CR 104.1
+    // terminal record, written only by `elimination::end_game`; the
+    // `WaitingFor::GameOver` arm also covers a restored/terminal wait whose
+    // record predates the field. `match_phase` covers the persisted Bo3
+    // between-games boundary: `game_end` is `#[serde(skip)]`, so a restored
+    // state keeps the prior winner's serialized empty-library flag but loses
+    // the record, and the next `SubmitSideboard` would otherwise run this net
+    // against that earlier game's winner. This is the same InGame predicate
+    // `elimination::check_game_over` uses.
+    if state.game_end.is_some()
+        || state.match_phase != MatchPhase::InGame
+        || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+    {
+        return;
+    }
+
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -5618,6 +5641,55 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    /// CR 104.1 + CR 704.3: a game that has already ended never runs state-based
+    /// actions. Regression for #10451: the winning resolution draws from an empty
+    /// library (setting the CR 704.5b flag) and then wins the game; the terminal
+    /// player-loss safety net must not turn that flag into a `PlayerLost` for the
+    /// winner after `GameOver` is recorded.
+    #[test]
+    fn sba_terminal_player_loss_does_not_run_after_the_game_ended() {
+        let mut state = setup();
+        state.players[0].drew_from_empty_library = true;
+        let mut events = Vec::new();
+
+        // The win resolves while the draw flag is set: the opponent leaves and
+        // the CR 104.1 result is recorded.
+        crate::game::elimination::eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            &mut events,
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "the winner is recorded before the terminal SBA net runs, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.game_end.is_some());
+        let game_over_at = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::GameOver { .. }))
+            .expect("the win emitted GameOver");
+
+        // The terminal player-loss safety net runs after the winning action.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[0].is_eliminated,
+            "the winner must not be eliminated by the empty-library flag its own win left behind"
+        );
+        assert!(
+            !events[game_over_at..].iter().any(
+                |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == PlayerId(0))
+            ),
+            "no PlayerLost for the winner after GameOver"
+        );
     }
 
     // --- CR 704.5j: Legend rule choice tests ---
