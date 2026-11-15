@@ -10281,15 +10281,52 @@ pub enum DeferredLifeGainCost {
     Owed {
         recipients: Vec<PlayerId>,
         amount: u32,
-        /// Gains that already survived replacement, `(recipient, final amount)`,
-        /// waiting to be applied together once every recipient is staged.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        staged: Vec<(PlayerId, u32)>,
+        /// Outcomes that already went through replacement, waiting to be settled
+        /// together once every recipient is staged.
+        #[serde(default, skip_serializing_if = "StagedLifeGains::is_empty")]
+        staged: StagedLifeGains,
         /// The recipient whose gain is parked on a CR 616.1 replacement choice;
         /// the answer's surviving event is staged for them rather than applied.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         paused_on: Option<PlayerId>,
     },
+}
+
+/// CR 101.4 + CR 119.3 + CR 614.6: the outcomes of one simultaneous life gain
+/// whose recipients are still being run through the replacement pipeline. Each
+/// recipient's replacements read the life totals as they stood before the
+/// instruction, so nothing here is applied until every recipient is staged; the
+/// whole batch is then settled together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGains {
+    /// Gains that survived replacement, `(recipient, final amount)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gains: Vec<(PlayerId, u32)>,
+    /// Gains a cross-event substitute replaced outright (Tainted Remedy), in
+    /// staging order. Each keeps its own continuation: the continuation slot
+    /// holds one entry, so two substitutes in one batch cannot share it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutes: Vec<StagedLifeGainSubstitute>,
+}
+
+impl StagedLifeGains {
+    pub fn is_empty(&self) -> bool {
+        self.gains.is_empty() && self.substitutes.is_empty()
+    }
+}
+
+/// CR 614.6: a life gain replaced by a different event, captured at staging so
+/// its substitute runs with the rest of the batch rather than while later
+/// recipients are still being staged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGainSubstitute {
+    /// The substitute's continuation with its event context (the affected
+    /// player, the replacing source, its controller).
+    pub drain: PostReplacementDrain,
+    /// CR 615.5: the replaced gain's amount ("that much life"), which the
+    /// continuation reads from `last_effect_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
 }
 
 impl PendingCast {
@@ -29923,7 +29960,7 @@ pub struct PendingConniveReentry {
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
 /// `Ready(work)` → `Dispatching` → `Paused` → popped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
     /// carries targets captured at shield-install time.
@@ -29957,7 +29994,7 @@ pub struct PostReplacementDrainDispatch {
     depth: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
@@ -30249,6 +30286,16 @@ impl PostReplacementDrainStack {
                 true
             }
         }
+    }
+
+    /// CR 101.4 + CR 614.6: remove the resident drain when its continuation has
+    /// not run yet, so a caller can hold it until a whole simultaneous
+    /// instruction has been staged. `None` when there is nothing ready.
+    pub(crate) fn take_ready_resident(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Ready(_)) {
+            return self.drains.pop();
+        }
+        None
     }
 
     /// CR 615.5: take the resident continuation and mark the drain `Dispatching`,
@@ -33203,6 +33250,18 @@ impl GameState {
             // for the remaining co-arrivers.
             self.clear_completed_active_devour_snapshot();
         }
+    }
+
+    /// CR 101.4 + CR 614.6: take the active resident drain while its
+    /// continuation is still ready, retiring the frame it leaves empty. The
+    /// caller owns the drain and re-installs it with
+    /// [`Self::install_post_replacement_drain`] when it is due.
+    pub(crate) fn take_ready_post_replacement_drain(&mut self) -> Option<PostReplacementDrain> {
+        let taken = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::take_ready_resident)?;
+        self.remove_empty_active_post_replacement_frame();
+        Some(taken)
     }
 
     /// Removes an exhausted general-drain frame only when it is the active top.

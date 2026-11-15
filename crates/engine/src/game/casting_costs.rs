@@ -26,7 +26,7 @@ use crate::types::game_state::{
     PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
     PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
     PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    StackEntryKind, StackPaidSnapshot, StagedLifeGains, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -1130,7 +1130,7 @@ pub(crate) fn handle_choose_gift_recipient(
             pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
                 recipients: vec![opponent],
                 amount,
-                staged: Vec::new(),
+                staged: StagedLifeGains::default(),
                 paused_on: None,
             });
             pay_deferred_life_gain_cost_at_commit(state, player, pending, *finalization, events)
@@ -1214,7 +1214,7 @@ fn pay_deferred_life_gain_cost_at_commit(
                 LifeGainCostRecipients::All(recipients) => (
                     super::effects::life::order_life_gain_recipients(state, &recipients),
                     amount,
-                    Vec::new(),
+                    StagedLifeGains::default(),
                 ),
             }
         }
@@ -1232,14 +1232,23 @@ fn pay_deferred_life_gain_cost_at_commit(
         events,
     ) {
         StagedLifeGainOutcome::Staged => {
-            // CR 614.6: a substitute the batch left paused for input owes nothing
-            // further; the carrier resumes once it drains.
-            super::effects::life::settle_staged_life_gains(
-                state,
-                std::mem::take(&mut staged),
-                events,
-            )
-            .is_err()
+            // CR 614.6: a substitute that pauses for input leaves the outcomes
+            // still owed in `staged`; the carrier resumes them once it drains.
+            let settled =
+                super::effects::life::settle_staged_life_gains(state, &mut staged, events);
+            if settled.is_err() {
+                if !staged.is_empty() {
+                    pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
+                        recipients: Vec::new(),
+                        amount,
+                        staged,
+                        paused_on: None,
+                    });
+                }
+                true
+            } else {
+                false
+            }
         }
         StagedLifeGainOutcome::Deferred => {
             // CR 616.1: the recipient (not the payer) may own the pending prompt;
@@ -2885,7 +2894,7 @@ pub(crate) fn stage_answered_life_gain_cost(
         return false;
     }
     *paused_on = None;
-    staged.push((*player_id, *amount));
+    staged.gains.push((*player_id, *amount));
     true
 }
 

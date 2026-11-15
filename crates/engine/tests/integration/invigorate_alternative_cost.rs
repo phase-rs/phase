@@ -1728,6 +1728,11 @@ fn v24_skyshroud_cutter_each_other_player_gains_five() {
     assert_eq!(runner.state().objects[&cutter].zone, Zone::Battlefield);
 }
 
+const LEYLINE_OF_ANTICIPATION: &str =
+    "If this card is in your opening hand, you may begin the game with it on the battlefield.
+You may cast spells as though they had flash.";
+const TAINTED_REMEDY: &str =
+    "If an opponent would gain life, that player loses that much life instead.";
 const PHIAL_OF_GALADRIEL: &str = "If you would draw a card while you have no cards in hand, draw two cards instead.\nIf you would gain life while you have 5 or less life, you gain twice that much life instead.\n{T}: Add one mana of any color.";
 
 /// F3 — CR 101.4 + CR 119.3 + CR 810.9a: "each other player gain 6 life" gains are
@@ -1760,7 +1765,8 @@ fn v25_each_other_player_gains_settle_together_under_team_life_replacements() {
 
 /// F3 — CR 101.4 + CR 616.1: competing life-gain replacements on several
 /// recipients surface their ordering choices in APNAP order, not seat order. P2
-/// is the active player and P0 casts Reverent Silence at instant speed, so the
+/// is the active player and P0 casts the printed sorcery Reverent Silence during
+/// P2's turn under Leyline of Anticipation (CR 307.1 + CR 601.3b), so the
 /// recipients P1, P2, P3 are asked as P2, P3, P1. Doctor Strange doubles and Pest
 /// Rescuer adds one, so every recipient has an ordering to make; each gain is
 /// applied once, with the order each recipient chose (doubler first: 6 doubled to 12, plus 1 = 13).
@@ -1769,8 +1775,9 @@ fn v26_recipient_replacement_choices_follow_apnap_order() {
     let mut scenario = GameScenario::new_n_player(4, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE_OF_ANTICIPATION);
     let mut builder =
-        scenario.add_spell_to_hand_from_oracle(P0, "Reverent Silence", true, REVERENT_SILENCE);
+        scenario.add_spell_to_hand_from_oracle(P0, "Reverent Silence", false, REVERENT_SILENCE);
     builder.with_mana_cost(ManaCost::Cost {
         generic: 3,
         shards: vec![ManaCostShard::Green],
@@ -1840,4 +1847,68 @@ fn v26_recipient_replacement_choices_follow_apnap_order() {
             "{player:?}: 6 doubled to 12, plus 1"
         );
     }
+}
+
+/// F1 — CR 101.4 + CR 614.6 + CR 810.9a: a gain that Tainted Remedy turns into a
+/// life loss is part of the same simultaneous instruction, so it must not change
+/// the life total a later recipient's replacement reads. The opposing team is at
+/// 10 (5 + 5), so Phial of Galadriel on P3 ("5 or less life") never applies; had
+/// P2's substituted loss been applied while staging, the team would read 4 and
+/// Phial would double P3's replaced gain into a 12-point loss. Each opposing
+/// recipient loses exactly 6 (10 - 12 = -2) with no ordering prompt, and the
+/// caster gains nothing and pays no mana.
+#[test]
+fn v27_substituted_gain_does_not_change_the_life_later_recipients_read() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    let (silence, forest, _anthem) = reverent_silence_board(&mut scenario);
+    scenario.add_enchantment_from_oracle(P0, "Tainted Remedy", TAINTED_REMEDY);
+    scenario.add_artifact_from_oracle(P3, "Phial of Galadriel", PHIAL_OF_GALADRIEL);
+    scenario.with_life(P2, 5);
+    scenario.with_life(P3, 5);
+    let mut runner = scenario.build();
+    assert_eq!(team_life_total(runner.state(), P2), 10);
+    let p0_before = runner.life(P0);
+
+    let card_id = runner.state().objects[&silence].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: silence,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast should start");
+    let mut saw_optional_cost = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                saw_optional_cost = true;
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("accept the alternative cost");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("finalize");
+            }
+            // CR 810.8c: the opposing team ends at -2, so it loses at payment.
+            WaitingFor::GameOver { winner } => {
+                assert_eq!(winner, Some(P0), "the caster's team wins");
+                break;
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("no Phial ordering choice may be offered, got {other:?}"),
+        }
+    }
+    assert!(saw_optional_cost, "alternative cost must be offered");
+    assert_eq!(runner.life(P2), 5 - 6, "P2's gain became a 6-point loss");
+    assert_eq!(
+        runner.life(P3),
+        5 - 6,
+        "P3's gain became a 6-point loss, not 12"
+    );
+    // CR 810.9: the two losses land on the shared total, 10 - 6 - 6. (The
+    // eliminated team no longer reports a team total, so sum the heads.)
+    assert_eq!(runner.life(P2) + runner.life(P3), -2);
+    assert_eq!(runner.life(P0), p0_before, "the caster gains nothing");
+    assert!(!tapped(&runner, forest), "no mana spent");
 }
