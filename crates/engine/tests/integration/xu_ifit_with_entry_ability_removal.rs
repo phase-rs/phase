@@ -4016,10 +4016,12 @@ fn ever_after_save_at_the_mimics_choice_keeps_the_announced_members() {
     for trusted in [false, true] {
         let restored = restore_round_trip(runner.state(), trusted)
             .unwrap_or_else(|error| panic!("trusted {trusted}: {error}"));
+        // CR 101.4c + CR 616.1 (this PR's staged population): the paused group is
+        // the staged owner's, not a `ChangeZone` frame's. Owner-approved
+        // precondition-only edit.
         let group = &restored
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .expect("the paused ChangeZone frame survives the restore")
+            .active_batch_delivery()
+            .expect("the paused staged population survives the restore")
             .logical_zone_change_group;
         assert_eq!(
             group.announced_members(),
