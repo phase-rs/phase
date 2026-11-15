@@ -733,6 +733,7 @@ pub(crate) fn begin_variable_speed_payment(
     pending.activation_trigger_collection = activation_trigger_collection;
     state.pending_cast = Some(Box::new(pending));
     WaitingFor::NamedChoice {
+        decision_subject_id: None,
         player,
         options: (min..=max).map(|value| value.to_string()).collect(),
         choice_type: ChoiceType::NumberRange {

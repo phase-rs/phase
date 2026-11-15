@@ -599,6 +599,27 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 608.2d + CR 609.3: an open resolution-time player choice
+        // ("choose a different opponent") stored its options when it was raised.
+        // The departed player is no longer one that can be chosen: the prompt is
+        // re-offered without them, or, when none remains, the impossible choice
+        // does nothing and the resolution's remaining instructions run. Placed
+        // with the object-choice reconciliation above, for the same reasons.
+        let resolution_player_choice =
+            match super::engine_resolution_choices::settle_player_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution player choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution player choice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
@@ -746,6 +767,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     resolution_object_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    resolution_player_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state
@@ -3016,6 +3041,7 @@ mod tests {
         );
         let context = source_context(&state, source);
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: crate::types::ability::ChoiceType::Labeled {
@@ -3138,6 +3164,7 @@ mod tests {
     fn leaving_persisted_named_choice_player_abandons_the_whole_family() {
         let mut state = setup_three_player();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Labeled {

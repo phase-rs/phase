@@ -718,6 +718,7 @@ fn random_card_predicate_guess(
     use rand::seq::IndexedRandom;
 
     let WaitingFor::NamedChoice {
+        decision_subject_id: _,
         free_entry: _,
         player,
         choice_type,
@@ -14638,6 +14639,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
@@ -14738,6 +14740,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicate {
@@ -14776,6 +14779,7 @@ mod tests {
         );
         state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -14796,6 +14800,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = vec!["Forest".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: P0,
             choice_type: ChoiceType::card_name(),
@@ -14829,6 +14834,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -18548,6 +18554,7 @@ mod tests {
             Zone::Battlefield,
         );
         guess.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {

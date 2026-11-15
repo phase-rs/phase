@@ -54,6 +54,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::turns::{execute_cleanup, execute_untap, start_next_turn};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, ChoiceAssignmentSide, ChoiceType, ChosenAttribute, Duration, Effect,
@@ -1572,4 +1573,186 @@ fn dack_never_goads_prompts_iterates_or_hands_a_revealed_miss() {
         assert!(goad_tces(board.runner.state(), miss).is_empty());
     }
     assert!(board.runner.state().resolution_stack.is_empty());
+}
+
+/// The `decision_subject_id` `viewer` sees on the pending opponent prompt, read
+/// from that viewer's filtered state: the public projection a client renders,
+/// never the authoritative holder's private repeat state.
+fn published_subject(runner: &GameRunner, viewer: PlayerId) -> Option<ObjectId> {
+    match filter_state_for_viewer(runner.state(), viewer).waiting_for {
+        WaitingFor::NamedChoice {
+            decision_subject_id,
+            ..
+        } => decision_subject_id,
+        other => panic!("reach-guard: expected a NamedChoice, got {other:?}"),
+    }
+}
+
+fn sorted_ids(ids: &[ObjectId]) -> Vec<ObjectId> {
+    let mut ids = ids.to_vec();
+    ids.sort();
+    ids
+}
+
+/// F1: CR 608.2c + CR 608.2d — "For each of those permanents, choose a
+/// different opponent": each prompt must tell the chooser which permanent the
+/// answer assigns. Successive PUBLIC prompts (the choosing player's and an
+/// opponent's filtered views, not the private repeat state) name the member
+/// each answer is for, and the final handoff gives each permanent to exactly
+/// the opponent answered at the prompt that named it.
+#[test]
+fn dack_public_prompts_name_the_permanent_each_answer_assigns() {
+    let mut board = dack_board(4, DACK_LIBRARY);
+    board.runner.cast(board.dack).resolve();
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+    let c = board.card("Creature C");
+
+    let answers = [P2, P3, P1];
+    let mut displayed = Vec::new();
+    for (index, pick) in answers.iter().enumerate() {
+        expect_opponent_prompt(&board.runner, index + 1);
+        let subject = published_subject(&board.runner, P0)
+            .unwrap_or_else(|| panic!("prompt {} publishes its permanent", index + 1));
+        assert_eq!(
+            published_subject(&board.runner, P1),
+            Some(subject),
+            "the subject is public: an opponent's view names it too"
+        );
+        assert!(
+            !displayed.contains(&subject),
+            "each prompt names a different permanent"
+        );
+        displayed.push(subject);
+        answer(&mut board.runner, *pick);
+    }
+    assert!(prompt(&board.runner).is_none(), "exactly three prompts");
+    assert_eq!(
+        sorted_ids(&displayed),
+        sorted_ids(&[a, b, c]),
+        "the prompts named exactly the revealed permanents"
+    );
+    for (shown, recipient) in displayed.iter().zip(answers) {
+        assert_eq!(
+            controller(&board.runner, *shown),
+            recipient,
+            "the permanent a prompt displayed is the one its answer received"
+        );
+    }
+}
+
+/// F2 (CR 800.4a + CR 104.3a + CR 608.2d): a player who concedes while the
+/// opponent prompt is open is no longer a legal answer. The stored selection
+/// of that player is rejected while other opponents remain legal, the prompt
+/// re-offers only the survivors, and the assignment lands on a survivor.
+#[test]
+fn dack_open_prompt_rejects_an_opponent_who_conceded_while_others_remain() {
+    let mut board = dack_board(4, DACK_LIBRARY);
+    board.runner.cast(board.dack).resolve();
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+    let c = board.card("Creature C");
+    let first = expect_opponent_prompt(&board.runner, 1);
+    assert_eq!(first.options, option_set(&[P1, P2, P3]));
+    let subject = published_subject(&board.runner, P0).expect("first prompt names its permanent");
+
+    board
+        .runner
+        .act(GameAction::Concede { player_id: P3 })
+        .expect("P3 concedes while the prompt is open");
+
+    let reoffered = expect_opponent_prompt(&board.runner, 1);
+    assert_eq!(
+        reoffered.options,
+        option_set(&[P1, P2]),
+        "CR 608.2d: the conceded opponent is no longer offered"
+    );
+    assert_eq!(
+        published_subject(&board.runner, P0),
+        Some(subject),
+        "the re-offered prompt still names the same permanent"
+    );
+    assert!(
+        board
+            .runner
+            .act(GameAction::ChooseOption {
+                choice: P3.0.to_string(),
+            })
+            .is_err(),
+        "a stale selection of the conceded player is rejected"
+    );
+    answer(&mut board.runner, P1);
+    let second = expect_opponent_prompt(&board.runner, 2);
+    assert_eq!(second.options, option_set(&[P2]), "P1 is already chosen");
+    answer(&mut board.runner, P2);
+    assert!(
+        prompt(&board.runner).is_none(),
+        "the third permanent has no legal opponent left: no third prompt"
+    );
+    let recipients: Vec<PlayerId> = [a, b, c]
+        .iter()
+        .map(|id| controller(&board.runner, *id))
+        .collect();
+    assert_eq!(
+        recipients.iter().filter(|p| **p == P0).count(),
+        1,
+        "exactly one permanent stays with Dack's controller"
+    );
+    assert!(recipients.contains(&P1) && recipients.contains(&P2));
+}
+
+/// F2 (CR 800.4a + CR 609.3): P1 and P2 are assigned the first two
+/// permanents; P3, the only opponent left for the last prompt, concedes while
+/// it is open. The choice is impossible and does nothing: the concession
+/// completes the two valid handoffs once, records no answer for P3, and
+/// leaves the third permanent with its controller.
+#[test]
+fn dack_concession_exhausting_the_open_prompt_completes_the_valid_handoffs_once() {
+    let mut board = dack_board(4, DACK_LIBRARY);
+    board.runner.cast(board.dack).resolve();
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+    let c = board.card("Creature C");
+    expect_opponent_prompt(&board.runner, 1);
+    let population = iterated_population(&board.runner);
+    assert_eq!(population, vec![a, b, c], "observation: reveal order");
+    answer(&mut board.runner, P1);
+    expect_opponent_prompt(&board.runner, 2);
+    answer(&mut board.runner, P2);
+    let last = expect_opponent_prompt(&board.runner, 3);
+    assert_eq!(last.options, option_set(&[P3]));
+    assert_eq!(controller(&board.runner, c), P0);
+
+    let events = board
+        .runner
+        .act(GameAction::Concede { player_id: P3 })
+        .expect("P3 concedes at the last prompt")
+        .events;
+
+    assert!(
+        prompt(&board.runner).is_none(),
+        "no prompt is left to answer: {:?}",
+        board.runner.state().waiting_for
+    );
+    assert_eq!(controller(&board.runner, a), P1);
+    assert_eq!(controller(&board.runner, b), P2);
+    assert_eq!(
+        controller(&board.runner, c),
+        P0,
+        "CR 609.3: no opponent was chosen for the third permanent"
+    );
+    let handoffs: Vec<_> = control_changes(&events)
+        .into_iter()
+        .filter(|(id, _, _)| population.contains(id))
+        .collect();
+    assert_eq!(
+        handoffs,
+        vec![(a, P0, P1), (b, P0, P2)],
+        "each valid handoff happens exactly once"
+    );
+    assert_eq!(
+        handoff_resolutions(&events).len(),
+        1,
+        "the handoff instruction resolves once, after the choices"
+    );
 }

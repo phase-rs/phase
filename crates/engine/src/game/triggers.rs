@@ -47099,6 +47099,7 @@ pub mod tests {
                 triggers: Vec::new(),
             },
             WaitingFor::NamedChoice {
+                decision_subject_id: None,
                 player: PlayerId(0),
                 choice_type: crate::types::ability::ChoiceType::Player {
                     distinctness: Default::default(),

@@ -106,6 +106,7 @@ pub fn resolve(
     register_exact_named_choice_source(state, source.as_ref());
 
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         player: choosing_player,
         // CR 107.1a/b: publish the free-entry contract alongside the choice it
         // belongs to, so a client never has to re-derive it from `choice_type`.
@@ -1547,6 +1548,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 free_entry: _,
                 player,
                 choice_type,
@@ -1898,6 +1900,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 free_entry: _,
                 player,
                 choice_type,

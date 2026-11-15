@@ -15189,16 +15189,6 @@ mod tests {
                  fortune, you draw a card and create a Treasure token.",
             ),
             (
-                "Dack Fayden, Helping Hand",
-                "Creature",
-                "When Dack Fayden enters, reveal cards from the top of your library until you \
-                 reveal X creature cards, where X is the number of opponents you have. Put \
-                 those creature cards onto the battlefield, then shuffle. They're goaded for \
-                 the rest of the game. For each of those permanents, choose a different \
-                 opponent. Each opponent gains control of the permanent for which they were \
-                 chosen.",
-            ),
-            (
                 "Aminatou, the Fateshifter",
                 "Planeswalker",
                 "+1: Draw a card, then put a card from your hand on top of your library.\n\

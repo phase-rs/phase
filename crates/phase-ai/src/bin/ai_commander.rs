@@ -1346,6 +1346,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::card_name(),
