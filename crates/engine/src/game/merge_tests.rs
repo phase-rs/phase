@@ -1056,6 +1056,7 @@ fn graveyard_exile_replacement() -> crate::types::ability::ReplacementDefinition
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
@@ -1237,6 +1238,7 @@ fn graveyard_exile_replacement_card_scoped() -> crate::types::ability::Replaceme
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,

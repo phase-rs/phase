@@ -183,7 +183,7 @@ impl ChosenAttribute {
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
-            Self::CardName(_) => ChoiceType::CardName,
+            Self::CardName(_) => ChoiceType::card_name(),
             // CR 101.4: the secret and the published number came from the same
             // `NumberRange` prompt; revealing changes visibility, not category.
             // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
@@ -696,6 +696,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // an object out of it (an unrestricted or battlefield origin) and sends
         // it somewhere else.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -712,6 +713,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
             enters_modified_if: _,
         }
         | Effect::ChangeZoneAll {
+            actor: _,
             origin,
             destination,
             target,
@@ -954,6 +956,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -976,6 +979,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -2428,13 +2436,15 @@ impl CopyCountStatus {
 /// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
-    /// CR 401.5 (issue #1365): A `Dig` (or `RevealTop`) looked at an empty library. Consulted
-    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
-    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
-    /// cast/play operations avoid offering a nonexistent card regardless of
-    /// whether their driver is immediate or lingering.
-    /// Without the first guard, the Dig's own source (e.g. a reanimated
-    /// Thassa's Oracle) would move into the library it just found empty.
+    /// CR 609.3 + CR 608.2c (issue #1365): A `Dig` (or `RevealTop`) looked at an
+    /// empty library. Consulted by exact `ParentTarget` no-op guards: the
+    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) avoids the generic
+    /// self-fallback, and optional cast/play operations avoid offering a
+    /// nonexistent card regardless of whether their driver is immediate or
+    /// lingering.
+    /// The guard also protects previously parsed chains that still carry a
+    /// separate placement step. Thassa's Oracle now parses the placement
+    /// into `Dig` itself.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -4299,6 +4309,7 @@ impl ResolvedAbility {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6663,6 +6674,7 @@ mod tests {
     fn resolved_ability_duration_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7095,6 +7107,7 @@ mod tests {
         ) -> ResolvedAbility {
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,

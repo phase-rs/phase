@@ -3312,6 +3312,7 @@ mod tests {
             required_pick_count: 0,
             pick_selection_mode: PickSelectionMode::Direct,
             pool,
+            submitted_companion: None,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),

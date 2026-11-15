@@ -28956,6 +28956,7 @@ mod tests {
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         };
 
@@ -29129,6 +29130,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 vec![],
                 src,
@@ -33596,6 +33598,7 @@ mod tests {
     fn a_stack_entry_is_scanned_under_the_loop_firewall() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
