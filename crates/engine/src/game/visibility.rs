@@ -1440,6 +1440,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // is staged in exile for the casting pipeline while its "you may cast" prompt is
     // pending, but outside the game is not a zone — no viewer's exile list shows it.
     // The object itself stays in `objects`, so the prompt can still cast it.
+    // allow-raw-zone: viewer projection of a filtered copy; authoritative zone membership is unchanged (CR 400.11).
     filtered.exile.retain(|object_id| {
         !filtered
             .objects
