@@ -5917,6 +5917,21 @@ export interface LlmDecisionRequestResult {
   errorKind?: { kind: string };
 }
 
+/**
+ * Both platform clocks, read together, to time a seat's message thread by
+ * (`phase_llm::ClockReading`). A thread expires five idle minutes after its
+ * last request, in real time, and neither clock measures that alone:
+ * `Date.now()` counts a sleep, but a clock correction can step it, and
+ * `performance.now()` never steps, but can stop while the machine sleeps. The
+ * engine counts an idle time only where the two agree on it.
+ */
+export interface LlmClockReading {
+  /** `Date.now()`. */
+  wallMs: number;
+  /** `performance.now()`. */
+  monotonicMs: number;
+}
+
 /** Result of submitting an opaque AI proposal to its issuing authority. */
 export type AiProposalSubmission =
   | { status: "applied"; result: SubmitResult }
@@ -6010,23 +6025,26 @@ export interface EngineAdapter {
    * Optional capability: an adapter that omits it simply has no LLM seats, and
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
-   * rendering. `nowMs` is the controller's thread clock as the request is
-   * built: the wall clock, held from running slower than the monotonic clock.
-   * A message thread's idle expiry runs in real time from its last request,
-   * which goes out no earlier than this.
+   * rendering. `settingsRevision` numbers the seat's own provider settings: the
+   * controller advances it at every change the player makes to them, and the
+   * engine keeps a seat's message thread only under the revision it was
+   * opened under. `clock` is both clocks as the request is built; the request
+   * goes out no earlier, and a message thread's idle expiry runs from its last
+   * request.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
     playerId: number,
     endpointJson: string,
     historyJson: string,
-    nowMs: number,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
   /**
    * Binds an LLM response to an engine-issued proposal, or reports why it could
-   * not. `threadTurn` is the built request's `threadTurn`. `nowMs` is the
-   * same clock as the reply arrived: the engine judges a message thread the
-   * reply reports lost by how long it had idled by then.
+   * not. `threadTurn` is the built request's `threadTurn`. `clock` is both
+   * clocks as the reply arrived: the engine judges a message thread the reply
+   * reports lost by how long it had idled by then.
    */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
@@ -6035,7 +6053,7 @@ export interface EngineAdapter {
     provider: string,
     status: number,
     responseBody: string,
-    nowMs: number,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
   llmProviderCatalog?(): Promise<unknown>;

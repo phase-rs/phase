@@ -9,6 +9,7 @@ import type {
   AiLlmProposalResult,
   GameAction,
   GameState,
+  LlmClockReading,
   LlmDecisionRequestResult,
   WaitingFor,
 } from "../../../adapter/types";
@@ -59,7 +60,8 @@ interface TestAdapter {
     playerId: number,
     endpointJson: string,
     historyJson: string,
-    nowMs: number,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ) => Promise<LlmDecisionRequestResult | null>;
   getAiActionProposalFromLlmResponse?: (
     playerId: number,
@@ -68,7 +70,7 @@ interface TestAdapter {
     provider: string,
     status: number,
     responseBody: string,
-    nowMs: number,
+    clock: LlmClockReading,
   ) => Promise<AiLlmProposalResult | null>;
 }
 
@@ -103,6 +105,9 @@ const HTTP_SPEC = {
   headers: [],
   body: "{}",
 };
+
+/** Both clocks, as the controller hands them to either LLM entry point. */
+const ANY_CLOCK = { wallMs: expect.any(Number), monotonicMs: expect.any(Number) };
 
 async function runOnce(): Promise<void> {
   await vi.advanceTimersByTimeAsync(1_000);
@@ -227,7 +232,8 @@ describe("LLM-driven AI seats", () => {
         playerId: number,
         endpointJson: string,
         historyJson: string,
-        nowMs: number,
+        settingsRevision: number,
+        clock: LlmClockReading,
       ) => Promise<LlmDecisionRequestResult>
     >(async () => ({
       fingerprint: "fp-2", optionCount: 2, request: HTTP_SPEC,
@@ -406,7 +412,8 @@ describe("LLM-driven AI seats", () => {
         playerId: number,
         endpointJson: string,
         historyJson: string,
-        nowMs: number,
+        settingsRevision: number,
+        clock: LlmClockReading,
       ) => Promise<LlmDecisionRequestResult>
     >(async () => ({
       fingerprint: "default-fp", optionCount: 2, request: HTTP_SPEC,
@@ -426,13 +433,13 @@ describe("LLM-driven AI seats", () => {
     await runOnce();
 
     expect(buildLlmDecisionRequest).toHaveBeenCalledWith(
-      "Hard", 1, expect.any(String), "[]", expect.any(Number),
+      "Hard", 1, expect.any(String), "[]", 0, ANY_CLOCK,
     );
     const endpointJson = buildLlmDecisionRequest.mock.calls[0]?.[2] ?? "";
     expect(JSON.parse(endpointJson)).toMatchObject({ provider: "OpenAi", apiKey: "default-key" });
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
-      1, "default-fp", null, "OpenAi", 200, '{"choice":1}', expect.any(Number),
+      1, "default-fp", null, "OpenAi", 200, '{"choice":1}', ANY_CLOCK,
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -492,7 +499,7 @@ describe("LLM-driven AI seats", () => {
     // Difficulty reaches the engine so it can shape the persona and the amount
     // of the position the model is shown.
     expect(buildLlmDecisionRequest).toHaveBeenCalledWith(
-      "Hard", 1, expect.any(String), "[]", expect.any(Number),
+      "Hard", 1, expect.any(String), "[]", 0, ANY_CLOCK,
     );
     // Status travels with the body so the engine can refuse a non-2xx reply.
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
@@ -502,7 +509,7 @@ describe("LLM-driven AI seats", () => {
       "OpenAi",
       200,
       '{"choice":1}',
-      expect.any(Number),
+      ANY_CLOCK,
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -644,7 +651,8 @@ describe("LLM-driven AI seats", () => {
         playerId: number,
         endpointJson: string,
         historyJson: string,
-        nowMs: number,
+        settingsRevision: number,
+        clock: LlmClockReading,
       ) => Promise<LlmDecisionRequestResult>
     >(async () => ({
       fingerprint: "fp-1",
@@ -742,7 +750,7 @@ describe("LLM-driven AI seats", () => {
       "OpenAi",
       429,
       expect.any(String),
-      expect.any(Number),
+      ANY_CLOCK,
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
     controller.dispose();
@@ -890,9 +898,9 @@ describe("LLM seats on a message thread", () => {
 
     // The engine dropped the thread, so the second build is the fresh request.
     expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(2);
-    // The same decision: every argument but the clock is the first build's.
-    expect(adapter.buildLlmDecisionRequest.mock.calls[1]?.slice(0, 4)).toEqual(
-      adapter.buildLlmDecisionRequest.mock.calls[0]?.slice(0, 4),
+    // The same decision: every argument but the clocks is the first build's.
+    expect(adapter.buildLlmDecisionRequest.mock.calls[1]?.slice(0, 5)).toEqual(
+      adapter.buildLlmDecisionRequest.mock.calls[0]?.slice(0, 5),
     );
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(2);
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
@@ -923,19 +931,22 @@ describe("LLM seats on a message thread", () => {
       "OpenAi",
       200,
       "{}",
-      expect.any(Number),
+      ANY_CLOCK,
     );
     controller.dispose();
   });
 
-  it("hands the engine the wall clock, which runs on while the machine sleeps", async () => {
+  it("hands the engine both clocks as each request is built, unadjusted", async () => {
     bindSeatToProvider();
+    // The monotonic clock, which stops while the machine sleeps.
+    const monotonic = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonic);
     const replies = [THREAD_LOST, { proposal: proposal(CAST, "llm-after-sleep") }];
     const adapter = threadedAdapter(() => replies.shift() ?? THREAD_LOST);
-    // Each build's clock argument, beside the wall clock as the build ran.
-    const clocks: Array<{ passed: unknown; wall: number }> = [];
+    // Each build's clock argument, beside both clocks as the build ran.
+    const clocks: Array<{ passed: unknown; read: LlmClockReading }> = [];
     adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
-      clocks.push({ passed: args[4], wall: Date.now() });
+      clocks.push({ passed: args[5], read: { wallMs: Date.now(), monotonicMs: monotonic } });
       return {
         fingerprint: "fp-1",
         optionCount: 2,
@@ -945,7 +956,7 @@ describe("LLM seats on a message thread", () => {
       };
     });
     // The machine sleeps for ten minutes while the first request is out: the
-    // wall clock moves on, and no timer runs.
+    // wall clock moves on, the monotonic clock does not, and no timer runs.
     const sleepMs = 10 * 60 * 1000;
     llmMocks.executeLlmRequest.mockImplementationOnce(async () => {
       vi.setSystemTime(Date.now() + sleepMs);
@@ -961,21 +972,25 @@ describe("LLM seats on a message thread", () => {
     await runOnce();
 
     expect(clocks).toHaveLength(2);
-    for (const { passed, wall } of clocks) expect(passed).toBe(wall);
+    for (const { passed, read } of clocks) expect(passed).toEqual(read);
     const [first, resend] = clocks;
-    expect((resend?.wall ?? 0) - (first?.wall ?? 0)).toBeGreaterThanOrEqual(sleepMs);
+    expect((resend?.read.wallMs ?? 0) - (first?.read.wallMs ?? 0)).toBeGreaterThanOrEqual(sleepMs);
+    expect(resend?.read.monotonicMs).toBe(first?.read.monotonicMs);
     controller.dispose();
   });
 
-  it("hands the engine the wall clock as the reply arrives, after a sleep while the request was built", async () => {
+  it("hands the engine both clocks as the reply arrives, after a sleep and a clock step while the request was built", async () => {
     bindSeatToProvider();
+    let monotonic = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonic);
     const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-after-sleep") }));
-    // The machine sleeps for ten minutes while the request is being built.
-    const sleepMs = 10 * 60 * 1000;
+    // The machine sleeps for 310 seconds while the request is being built:
+    // the monotonic clock stops, and a correction steps the wall clock back
+    // twenty seconds within the sleep.
     const builtAt: unknown[] = [];
     adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
-      builtAt.push(args[4]);
-      vi.setSystemTime(Date.now() + sleepMs);
+      builtAt.push(args[5]);
+      vi.setSystemTime(Date.now() + 310_000 - 20_000);
       return {
         fingerprint: "fp-1",
         optionCount: 2,
@@ -984,10 +999,16 @@ describe("LLM seats on a message thread", () => {
         threadTurn: THREAD_TURN,
       };
     });
-    // The reply's clock argument, beside the wall clock as the engine reads it.
-    const repliedAt: Array<{ passed: unknown; wall: number }> = [];
+    // The request then takes two milliseconds by either clock.
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      monotonic += 2;
+      vi.setSystemTime(Date.now() + 2);
+      return { status: 200, body: "{}" };
+    });
+    // The reply's clock argument, beside both clocks as the engine reads it.
+    const repliedAt: Array<{ passed: unknown; read: LlmClockReading }> = [];
     adapter.getAiActionProposalFromLlmResponse.mockImplementation(async (...args: unknown[]) => {
-      repliedAt.push({ passed: args[6], wall: Date.now() });
+      repliedAt.push({ passed: args[6], read: { wallMs: Date.now(), monotonicMs: monotonic } });
       return { proposal: proposal(CAST, "llm-after-sleep") };
     });
     endGameOnDispatch();
@@ -1000,58 +1021,15 @@ describe("LLM seats on a message thread", () => {
 
     expect(builtAt).toHaveLength(1);
     expect(repliedAt).toHaveLength(1);
+    const built = builtAt[0] as LlmClockReading;
     const [reply] = repliedAt;
-    expect(reply?.passed).toBe(reply?.wall);
-    expect(Number(reply?.passed) - Number(builtAt[0])).toBeGreaterThanOrEqual(sleepMs);
-    controller.dispose();
-  });
-
-  it("times a thread on a clock a wall-clock step back cannot slow", async () => {
-    bindSeatToProvider();
-    // The monotonic clock, which never steps back.
-    let monotonic = 1_000;
-    vi.spyOn(performance, "now").mockImplementation(() => monotonic);
-    const adapter = threadedAdapter(() => THREAD_LOST);
-    const replies = [THREAD_LOST, { proposal: proposal(CAST, "llm-after-step") }];
-    // Every clock reading handed to the engine, builds and replies in order.
-    const readings: number[] = [];
-    adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
-      readings.push(Number(args[4]));
-      return {
-        fingerprint: "fp-1",
-        optionCount: 2,
-        promptChars: 100,
-        request: HTTP_SPEC,
-        threadTurn: THREAD_TURN,
-      };
+    expect(reply?.passed).toEqual(reply?.read);
+    // The two clocks disagree by the sleep, less the step: the engine reads
+    // that interval as one that may have outlasted the thread.
+    expect(reply?.read).toEqual({
+      wallMs: built.wallMs + 290_000 + 2,
+      monotonicMs: built.monotonicMs + 2,
     });
-    adapter.getAiActionProposalFromLlmResponse.mockImplementation(async (...args: unknown[]) => {
-      readings.push(Number(args[6]));
-      return replies.shift() ?? THREAD_LOST;
-    });
-    // A minute passes while the first request is out, and a clock correction
-    // steps the wall clock back twenty seconds within it.
-    llmMocks.executeLlmRequest.mockImplementationOnce(async () => {
-      monotonic += 60_000;
-      vi.setSystemTime(Date.now() + 60_000 - 20_000);
-      return { status: 404, body: "{}" };
-    });
-    endGameOnDispatch();
-
-    const controller = createAIController({
-      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
-    });
-    controller.start();
-    await runOnce();
-    await runOnce();
-
-    // The first build and reply, then the resend's build and reply.
-    expect(readings).toHaveLength(4);
-    const [builtAt, repliedAt] = readings;
-    expect(Number(repliedAt) - Number(builtAt)).toBeGreaterThanOrEqual(60_000);
-    for (let index = 1; index < readings.length; index += 1) {
-      expect(readings[index]).toBeGreaterThanOrEqual(Number(readings[index - 1]));
-    }
     controller.dispose();
   });
 
@@ -1230,6 +1208,151 @@ describe("LLM seats on a message thread", () => {
     controller.dispose();
   });
 
+  // An Anthropic profile on message threads, the only kind the engine threads.
+  const ANTHROPIC: LlmProviderCatalogEntry = {
+    provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null,
+    defaultModel: "claude-test", requiresApiKey: true, apiKeyUrl: "", models: [],
+    decisionContexts: ["selfContained", "messageThread"],
+  };
+
+  /** Make an Anthropic profile on message threads the default opponent. */
+  function threadedDefaultOpponent(): string {
+    catalogMock.loadProviderCatalog.mockResolvedValue([...CATALOG, ANTHROPIC]);
+    const id = useLlmStore.getState().addProfile({
+      name: "Threads",
+      provider: "Anthropic",
+      model: "claude-test",
+      apiKey: "k",
+      enabled: true,
+      decisionContext: "messageThread",
+    });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    return id;
+  }
+
+  it("sends nothing for a decision during whose build message threads are turned off and on again", async () => {
+    const profileId = threadedDefaultOpponent();
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-next") }));
+    // Each build's request names its build, so a send says which it was.
+    const builtAs = (body: string) => ({
+      fingerprint: "fp-1",
+      optionCount: 2,
+      promptChars: 100,
+      request: { ...HTTP_SPEC, body },
+      threadTurn: THREAD_TURN,
+    });
+    // The settings revision each build is asked under.
+    const revisions: unknown[] = [];
+    let releaseBuild: () => void = () => {};
+    adapter.buildLlmDecisionRequest
+      .mockImplementationOnce((...args: unknown[]) => {
+        revisions.push(args[4]);
+        return new Promise((resolve) => {
+          releaseBuild = () => resolve(builtAs("dropped"));
+        });
+      })
+      .mockImplementation(async (...args: unknown[]) => {
+        revisions.push(args[4]);
+        return builtAs("next");
+      });
+    // The dropped decision's heuristic move does not take; the next decision
+    // ends the game.
+    endGameOnDispatch();
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValueOnce({ status: "stale" });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(1);
+
+    // Off and on again while the request is being built: the endpoint the
+    // decision captured is the one in the store again, but its revision is not.
+    useLlmStore.getState().updateProfile(profileId, { decisionContext: "selfContained" });
+    useLlmStore.getState().updateProfile(profileId, { decisionContext: "messageThread" });
+    releaseBuild();
+    await runOnce();
+    await runOnce();
+
+    // The dropped decision went to the heuristic, and nothing it built was
+    // sent. The next decision is built under the revision both changes
+    // advanced to, which the engine opens a new thread under, and is sent.
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenNthCalledWith(1, adapter.heuristic);
+    expect(revisions).toEqual([0, 2]);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "next" }),
+      expect.anything(),
+    );
+    controller.dispose();
+  });
+
+  it("advances every seat's settings revision for a change no decision sees", async () => {
+    // Both seats are the default opponent, so they share one profile.
+    const profileId = threadedDefaultOpponent();
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm") }));
+    // Each build's seat and settings revision.
+    const builds: unknown[][] = [];
+    adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
+      builds.push([args[1], args[4]]);
+      return {
+        fingerprint: "fp-1",
+        optionCount: 2,
+        promptChars: 100,
+        request: HTTP_SPEC,
+        threadTurn: THREAD_TURN,
+      };
+    });
+    // Each reply answers the decision of the seat it was asked for.
+    adapter.getAiActionProposalFromLlmResponse.mockImplementation(async (...args: unknown[]) => {
+      const player = Number(args[0]);
+      return { proposal: { token: `llm-${player}`, semanticOwner: player, actor: player, action: CAST } };
+    });
+    const priorityFor = (player: number): GameState => ({
+      ...(storeState.gameState as GameState),
+      waiting_for: { type: "Priority", data: { player } } as WaitingFor,
+      priority_player: player,
+    });
+    let dispatched = 0;
+    dispatchMocks.dispatchAiActionProposal.mockImplementation(async () => {
+      dispatched += 1;
+      if (dispatched === 1) {
+        // Between P1's decision and P2's, threads go off (the profiles
+        // replaced wholesale, as a hydration does) and on again.
+        useLlmStore.setState((state) => ({
+          profiles: state.profiles.map((profile) => ({
+            ...profile,
+            decisionContext: "selfContained" as const,
+          })),
+        }));
+        useLlmStore.getState().updateProfile(profileId, { decisionContext: "messageThread" });
+        storeState.gameState = priorityFor(2);
+      } else if (dispatched === 2) {
+        storeState.gameState = priorityFor(1);
+      } else {
+        storeState.gameState = {
+          ...(storeState.gameState as GameState),
+          waiting_for: { type: "GameOver", data: { winner: 1 } } as unknown as WaitingFor,
+        };
+      }
+      storeState.waitingFor = storeState.gameState.waiting_for;
+      return { status: "applied" };
+    });
+
+    const controller = createAIController({
+      seats: [
+        { playerId: 1, difficulty: "Medium", llmSeatIndex: 0 },
+        { playerId: 2, difficulty: "Medium", llmSeatIndex: 1 },
+      ],
+    });
+    controller.start();
+    for (let decision = 0; decision < 3; decision += 1) await runOnce();
+
+    expect(builds).toEqual([[1, 0], [2, 2], [1, 2]]);
+    controller.dispose();
+  });
+
   it("asks a decision for a seat another seat controls as the controlling seat, with its profile", async () => {
     // CR 723.5: while P2 controls P1's turn, P2 makes P1's decisions, and the
     // engine names P2 as the seat that submits them (`priority_player`).
@@ -1268,7 +1391,8 @@ describe("LLM seats on a message thread", () => {
       2,
       expect.stringContaining('"apiKey":"controller-key"'),
       expect.any(String),
-      expect.any(Number),
+      0,
+      ANY_CLOCK,
     );
     expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       2,
@@ -1277,7 +1401,7 @@ describe("LLM seats on a message thread", () => {
       "OpenAi",
       200,
       "{}",
-      expect.any(Number),
+      ANY_CLOCK,
     );
     controller.dispose();
   });

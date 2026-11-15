@@ -1,11 +1,12 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import { profileForSeat, useLlmStore } from "../../stores/llmStore";
+import { profileForSeat, useLlmStore, type LlmState } from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
 import { loadProviderCatalog } from "../../services/llm/catalog";
 import { reportLlmFailure } from "../../services/llm/diagnostics";
 import { recordLlmUsage } from "../../services/llm/usage";
 import { resolvedEndpointOf } from "../../services/llm/endpoint";
+import { endpointOf } from "../../services/llm/types";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
@@ -146,30 +147,17 @@ const MAX_CONSECUTIVE_LLM_FAILURES = 3;
 const LLM_THREAD_RESENDS = 1;
 
 /**
- * A clock to time a seat's message threads on, in milliseconds.
- *
- * The API expires a thread five idle minutes after its last request, in real
- * time, and the engine tells that expiry apart from a conversation the API
- * cannot store by the idle time between two readings. Neither platform clock
- * measures real time alone: `Date.now()` keeps counting while the machine
- * sleeps, but a clock correction can step it back, and `performance.now()`
- * never steps back, but can stop while the machine sleeps. Each reading
- * therefore advances by whichever of the two advanced more since the last
- * one, so a sleep and a step back each leave a measured idle time no shorter
- * than the real one; only both within one interval can shorten it, by no more
- * than the step. The first reading is the wall clock.
+ * The provider settings an LLM seat's decisions are asked with, as one
+ * comparable value: the endpoint of the profile bound to the seat (the
+ * message-thread toggle included), or `null` when none is. Read without the
+ * provider catalog, which a store listener cannot wait for, so a change counts
+ * whether or not the profile is usable.
  */
-function createThreadClock(): () => number {
-  let last: { reading: number; wall: number; monotonic: number } | null = null;
-  return () => {
-    const wall = Date.now();
-    const monotonic = performance.now();
-    const reading = last === null
-      ? wall
-      : last.reading + Math.max(wall - last.wall, monotonic - last.monotonic);
-    last = { reading, wall, monotonic };
-    return reading;
-  };
+function seatProviderSettings(state: LlmState, seatIndex: number): string | null {
+  const choice = state.seatBindings[seatIndex];
+  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
+  const profile = id ? state.profiles.find((candidate) => candidate.id === id) : undefined;
+  return profile ? JSON.stringify(endpointOf(profile)) : null;
 }
 
 /**
@@ -187,8 +175,9 @@ function createThreadClock(): () => number {
  *
  * `setCharged` says whether the outcome is the provider's: set once the
  * provider is in play, and withdrawn when the player's own settings change
- * ends the decision instead. `threadClock` times the seat's message threads
- * ({@link createThreadClock}).
+ * ends the decision instead. `settingsRevision` reads the seat's settings
+ * revision, which the controller advances at every change to the seat's
+ * provider settings.
  */
 async function llmActionProposal(
   playerId: number,
@@ -197,13 +186,16 @@ async function llmActionProposal(
   signal: AbortSignal,
   isCurrent: () => boolean,
   setCharged: (charged: boolean) => void,
-  threadClock: () => number,
+  settingsRevision: () => number,
 ): Promise<AiActionProposal | null> {
   if (llmSeatIndex == null) return null;
   const catalog = await loadProviderCatalog();
   if (signal.aborted || !isCurrent()) return null;
   const profile = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
   if (!profile) return null;
+  // Read with the profile: the revision the engine keeps the seat's message
+  // thread under, and the one any change since is measured against.
+  const revision = settingsRevision();
 
   const { adapter, logHistory } = useGameStore.getState();
   if (!adapter?.buildLlmDecisionRequest || !adapter.getAiActionProposalFromLlmResponse) {
@@ -216,12 +208,20 @@ async function llmActionProposal(
   // The seat's settings can change during any await below: message threads
   // turned off, or another endpoint, model or key. A request is built and sent
   // only for the configuration `endpointJson` captured, so the settings are
-  // read again after each await that precedes a build or a send. When they
-  // changed, nothing more goes to the provider, and the decision ends as the
-  // player's choice rather than the provider's failure.
+  // read again after each await that precedes a build or a send. A change
+  // undone within one await, such as threads turned off and on again, still
+  // advanced the seat's revision. When they changed, nothing more goes to the
+  // provider, and the decision ends as the player's choice rather than the
+  // provider's failure.
   const endedBySettingsChange = (): boolean => {
     const current = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
-    if (current && JSON.stringify(resolvedEndpointOf(current)) === endpointJson) return false;
+    if (
+      settingsRevision() === revision
+      && current
+      && JSON.stringify(resolvedEndpointOf(current)) === endpointJson
+    ) {
+      return false;
+    }
     console.info(`[LLM] seat ${llmSeatIndex}: the provider settings changed; not asking`);
     setCharged(false);
     return true;
@@ -232,9 +232,10 @@ async function llmActionProposal(
       playerId,
       endpointJson,
       historyJson,
-      // The thread clock as the request is built. The request goes out no
-      // earlier, so an idle time measured from this reading errs long.
-      threadClock(),
+      revision,
+      // Both clocks as the request is built. The request goes out no earlier,
+      // so an idle time measured from this reading errs long.
+      { wallMs: Date.now(), monotonicMs: performance.now() },
     );
     if (signal.aborted || !isCurrent()) return null;
     // A decision this provider cannot be asked at all (a forced move has no
@@ -272,12 +273,12 @@ async function llmActionProposal(
       profile.provider,
       status,
       body,
-      // The thread clock as the reply arrived, no earlier than the API read the
+      // Both clocks as the reply arrived, no earlier than the API read the
       // request. A thread the reply reports lost is judged by its idle time up
-      // to now, so time the machine slept while the request was built or out
-      // counts toward the thread's expiry. `createThreadClock` names the one
-      // case that can still shorten it.
-      threadClock(),
+      // to now, so a sleep while the request was built or out is counted, or
+      // leaves the two clocks apart, which the engine reads as a thread that
+      // may have expired.
+      { wallMs: Date.now(), monotonicMs: performance.now() },
     );
     // The call was paid for whether or not its reply is usable.
     recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
@@ -347,10 +348,28 @@ export function createAIController(config: AIControllerConfig): AIController {
   /** Seats whose provider has failed enough to be given up on this session. */
   const llmDisabled = new Set<number>();
   /**
-   * One clock for every seat this controller drives, so the two readings an
-   * idle time is measured between always come from the same clock.
+   * Each LLM seat's settings revision, advanced at every change to the
+   * provider settings its decisions are asked with
+   * ({@link seatProviderSettings}). The engine keeps a seat's message thread
+   * only under the revision it was opened under, so a change no decision saw,
+   * such as message threads turned off and on again between two decisions,
+   * still starts the seat's next thread over.
    */
-  const threadClock = createThreadClock();
+  const llmSettingsRevisions = new Map<number, number>();
+  let unsubscribeLlmSettings: (() => void) | null = null;
+
+  function watchLlmSettings(): void {
+    unsubscribeLlmSettings?.();
+    unsubscribeLlmSettings = useLlmStore.subscribe((state, previous) => {
+      for (const [playerId, seatIndex] of llmSeatIndexByPlayerId) {
+        if (seatIndex == null) continue;
+        if (seatProviderSettings(state, seatIndex) === seatProviderSettings(previous, seatIndex)) {
+          continue;
+        }
+        llmSettingsRevisions.set(playerId, (llmSettingsRevisions.get(playerId) ?? 0) + 1);
+      }
+    });
+  }
 
   function recordLlmOutcome(playerId: number, succeeded: boolean): void {
     if (succeeded) {
@@ -598,7 +617,7 @@ export function createAIController(config: AIControllerConfig): AIController {
         abort.signal,
         () => isAttemptCurrent(attempt),
         (charged) => { chargedToProvider = charged; },
-        threadClock,
+        () => llmSettingsRevisions.get(playerId) ?? 0,
       )
         .catch((error) => {
           if (abort.signal.aborted || !isAttemptCurrent(attempt)) return null;
@@ -787,6 +806,7 @@ export function createAIController(config: AIControllerConfig): AIController {
       unsubscribe();
       unsubscribe = null;
     }
+    watchLlmSettings();
     debugLog(`AI controller started (configured seats: [${[...aiPlayerIds].join(",")}], dynamic for all non-human)`, "warn");
     // Event-driven design: subscribe to WaitingFor changes and let each
     // seat's turn naturally surface via the store. This means reconnect
@@ -844,6 +864,8 @@ export function createAIController(config: AIControllerConfig): AIController {
       unsubscribe();
       unsubscribe = null;
     }
+    unsubscribeLlmSettings?.();
+    unsubscribeLlmSettings = null;
   }
 
   return { start, stop, dispose };

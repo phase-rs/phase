@@ -60,7 +60,7 @@ pub use game_decision::{
     select_action_from_response, GameDecisionRequest, LlmActionSelection, LlmDecisionMemory,
 };
 pub use game_thread::{
-    DecisionHttpRequest, LlmThreadMemory, ThreadTurnId, THREAD_CONTEXT_BUDGET_TOKENS,
+    ClockReading, DecisionHttpRequest, LlmThreadMemory, ThreadTurnId, THREAD_CONTEXT_BUDGET_TOKENS,
 };
 pub use probe::{build_probe_request, connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};

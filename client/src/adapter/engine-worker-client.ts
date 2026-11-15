@@ -15,6 +15,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
@@ -536,10 +537,19 @@ export class EngineWorkerClient {
     playerId: number,
     endpointJson: string,
     historyJson: string,
-    nowMs: number,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     return this.request<LlmDecisionRequestResult | null>(
-      { type: "buildLlmDecisionRequest", difficulty, playerId, endpointJson, historyJson, nowMs },
+      {
+        type: "buildLlmDecisionRequest",
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+        settingsRevision,
+        clock,
+      },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -552,7 +562,7 @@ export class EngineWorkerClient {
     provider: string,
     status: number,
     responseBody: string,
-    nowMs: number,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
       {
@@ -563,7 +573,7 @@ export class EngineWorkerClient {
         provider,
         status,
         responseBody,
-        nowMs,
+        clock,
       },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
