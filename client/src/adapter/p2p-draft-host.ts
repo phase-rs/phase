@@ -328,6 +328,13 @@ function hostDraftSeed(): number {
   return values[0]!;
 }
 
+// The backup server accepts exactly six uppercase ASCII alphanumerics as a
+// `draft_code` (`is_valid_draft_code`, crates/phase-server/src/admin.rs) and
+// answers 400 to anything else. Reduced modulo 36^6 from one 32-bit draw; the
+// code is a public row key, so the slight modulo bias is not a secrecy concern.
+const DRAFT_CODE_LENGTH = 6;
+const DRAFT_CODE_SPACE = 36 ** DRAFT_CODE_LENGTH;
+
 /**
  * A public draft code, drawn from its OWN randomness.
  *
@@ -347,7 +354,7 @@ function hostDraftSeed(): number {
 function hostDraftCode(): string {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return `draft-${values[0]!.toString(16).padStart(8, "0")}`;
+  return (values[0]! % DRAFT_CODE_SPACE).toString(36).toUpperCase().padStart(DRAFT_CODE_LENGTH, "0");
 }
 
 /**

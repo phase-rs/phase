@@ -89,7 +89,9 @@ describe("P2PDraftHost server backup", () => {
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.host_peer_id).toBe("host-peer-abc");
-    expect(body.draft_code).toMatch(/^draft-[0-9a-f]{8}$/);
+    // The server's `is_valid_draft_code` (crates/phase-server/src/admin.rs):
+    // exactly six uppercase ASCII alphanumerics, else HTTP 400 before storage.
+    expect(body.draft_code).toMatch(/^[A-Z0-9]{6}$/);
   });
 
   // Synthetic ordering (no printed card): `initialize()` queues a lobby save
