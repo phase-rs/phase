@@ -10661,6 +10661,26 @@ pub(super) fn parse_shuffle_ast(
     }) {
         let (target, _) = parse_target(&target_phrase);
         if !matches!(target, TargetFilter::Any) {
+            // CR 701.24c + CR 400.6: a leading "each"/"all" quantifier names a
+            // mass population, not one target object. Route it through the
+            // ChangeZoneAll lowering so every eligible object moves and the
+            // tracked prospective-owner terminal settles each owner's library.
+            let all = preceded(
+                tag::<_, _, OracleError<'_>>("shuffle "),
+                alt((tag("all "), tag("each "))),
+            )
+            .parse(lower)
+            .is_ok();
+            // CR 701.24c + CR 400.6: a quantified typed phrase may leave an
+            // unbound remainder ("each card not put onto the battlefield this
+            // way" — Guess Who it Is!) or span owners whose population is not
+            // yet bound (Teferi, Temporal Pilgrim -12). Do not widen it to a
+            // battlefield-wide ChangeZoneAll; park the clause as unsupported.
+            if all {
+                return Some(ShuffleImperativeAst::Unimplemented {
+                    text: text.to_string(),
+                });
+            }
             return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
                 owner_library,
@@ -11226,6 +11246,20 @@ fn lower_target_referenced_search_library(
     clause
 }
 
+/// CR 400.3 + CR 701.24c: whether an owner-routed move's target set can name
+/// more than one owner. A bare parent-target anaphor, an untargeted any-filter,
+/// or a compound that explicitly includes the source/parent target spans owners;
+/// a pure `Or` of typed single-object alternatives (Cathartic Parting's
+/// "artifact or enchantment an opponent controls") is still one object with one
+/// owner.
+fn owner_move_spans_owners(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::Any | TargetFilter::And { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().any(owner_move_spans_owners),
+        _ => false,
+    }
+}
+
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
     let shuffle_target = match &effect {
@@ -11240,6 +11274,16 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             owner_library: true,
             ..
         } => TargetFilter::Owner,
+        // CR 608.2f + CR 701.24c: the single grouped self+target move spans the
+        // source's owner and the target's owner; settle both through the
+        // tracked-owner ScopedPlayer terminal.
+        Effect::ChangeZone {
+            owner_library: true,
+            target: TargetFilter::Or { filters },
+            ..
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) => {
+            TargetFilter::ScopedPlayer
+        }
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -11269,6 +11313,27 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
                     | ControllerRef::ScopedPlayer
             }
         ))
+    );
+    // CR 701.24c + CR 400.3: a typed single-object owner move has one exact
+    // owner (Chaos Warp/Oblation); the terminal ParentTargetOwner shuffle covers
+    // it. Parent-target cards, compound "source and target", and quantified
+    // wildcard filters can span owners; they use the tracked-owner population
+    // terminal. Quantified "each/all" moves are lowered to ChangeZoneAll above
+    // and use that class's tracked-owner path.
+    let scoped_owner_move = matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target: TargetFilter::Or { filters },
+            ..
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef))
+    ) || matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target,
+            ..
+        } if owner_move_spans_owners(target)
     );
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
@@ -11302,8 +11367,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             target: shuffle_target,
         },
     );
-    if tracks_owner_population {
+    if tracks_owner_population || scoped_owner_move {
         shuffle.player_scope = Some(owner_library_shuffle_scope());
+    }
+    if scoped_owner_move {
+        shuffle.effect = Box::new(Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        });
     }
     ParsedEffectClause {
         optional_targeting: false,
@@ -27817,6 +27887,34 @@ mod tests {
             }
         ));
         assert!(shuffle.sub_ability.is_none());
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle that card into its owner's library"
+    /// captures the parent target's owner before delivery and settles through
+    /// the tracked-owner terminal Shuffle.
+    #[test]
+    fn parse_shuffle_parent_target_into_owners_library_uses_owner_scope() {
+        let text = "shuffle that card into its owner's library";
+        let ast = parse_shuffle_ast(text, text, &mut ParseContext::default())
+            .expect("parent-target shuffle parses");
+        let clause = lower_shuffle_ast(ast);
+        match &clause.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            } => {}
+            other => panic!("expected terminal parent-target owner mass move, got {other:?}"),
+        }
+        let shuffle = clause.sub_ability.as_deref().expect("terminal shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ));
+        assert!(shuffle.player_scope.is_some());
     }
 
     /// CR 701.24c + CR 400.3: "shuffle ~ into its owner's library" — the
