@@ -154,7 +154,7 @@ fn cast_under(runner: &mut GameRunner, id: ObjectId, source: ObjectId) -> Object
                     .expect("choosing the artifact slot")
                     .waiting_for;
             }
-            // CR 601.2f: pay each Phyrexian shard with mana.
+            // CR 601.2b: choose mana for each Phyrexian symbol.
             WaitingFor::PhyrexianPayment { shards, .. } => {
                 waiting = runner
                     .act(GameAction::SubmitPhyrexianChoices {
@@ -176,6 +176,30 @@ fn cast_under(runner: &mut GameRunner, id: ObjectId, source: ObjectId) -> Object
         runner.state().waiting_for
     );
     selected_authority(runner, id)
+}
+
+/// The pending cast's announced graveyard permission source and the
+/// enters-tapped term its latch carries (CR 601.2a: fixed as casting begins).
+fn pending_permission(runner: &GameRunner) -> (Option<ObjectId>, Option<EtbTapState>) {
+    let pending = runner
+        .state()
+        .pending_cast
+        .as_ref()
+        .expect("a cast is pending");
+    let context = &pending.ability.context;
+    let source = match context.graveyard_permission_authority {
+        Some(CastingVariant::GraveyardPermission { source, .. }) => Some(source),
+        _ => None,
+    };
+    let latch = context.graveyard_permission_latch.as_ref().map(|latch| {
+        assert_eq!(
+            Some(latch.permission.source),
+            source,
+            "the latch belongs to the announced permission"
+        );
+        latch.enter_tapped
+    });
+    (source, latch)
 }
 
 /// The graveyard permission source the spell on the stack was cast under.
@@ -940,9 +964,9 @@ fn edgar_metamorph_enters_tapped_whether_or_not_it_copies() {
 
 /// Q1: CR 601.2a + Edgar's 2025-06-06 ruling. P0's Phyrexian Metamorph copies
 /// P1's Edgar, so P0 has Edgar's permission. P0 announces Myr Retriever under
-/// it, then sacrifices the copy to Ashnod's Altar while paying. In the
-/// graveyard the Metamorph has its own characteristics again (CR 707.2 copy
-/// effects end), so only the rider latched at announcement can make Retriever
+/// it, then sacrifices the copy to Ashnod's Altar while paying. CR 400.7: the
+/// graveyard object no longer retains the battlefield copy effect, so only the
+/// rider latched at announcement can make Retriever
 /// enter tapped. Control: the copy stays and the cast is paid from the pool.
 #[test]
 fn copied_edgar_sacrificed_mid_payment_still_enters_tapped() {
@@ -1005,6 +1029,12 @@ fn copied_edgar_sacrificed_mid_payment_still_enters_tapped() {
                 matches!(waiting, WaitingFor::ManaPayment { .. }),
                 "manual payment, got {waiting:?}"
             );
+            assert_eq!(
+                pending_permission(&r),
+                (Some(metamorph), Some(EtbTapState::Tapped)),
+                "before payment: the cast is announced under the copied Edgar and its \
+                 latch carries the rider"
+            );
             r.act(GameAction::ActivateAbility {
                 source_id: altar,
                 ability_index: 0,
@@ -1015,6 +1045,16 @@ fn copied_edgar_sacrificed_mid_payment_still_enters_tapped() {
                 cards: vec![metamorph],
             })
             .expect("sacrifice the copied source");
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::ManaPayment { .. }),
+                "still paying after the sacrifice, got {:?}",
+                r.state().waiting_for
+            );
+            assert_eq!(
+                pending_permission(&r),
+                (Some(metamorph), Some(EtbTapState::Tapped)),
+                "after the sacrifice: the announced authority and its latch are preserved"
+            );
             let departed = &r.state().objects[&metamorph];
             assert_eq!(departed.zone, Zone::Graveyard, "the source departed first");
             assert!(
