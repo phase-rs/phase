@@ -1534,7 +1534,11 @@ fn the_loyalty_placement_records_through_the_authority() {
             .count(),
         1
     );
-    assert_eq!(runner.state().pending_activations, vec![(walker, index)]);
+    // CR 602.2a: the pending entry is the announcement-bound usage key, not
+    // the `(source, index)` pair.
+    let expected = engine::game::restrictions::ability_usage_key(runner.state(), walker, index)
+        .expect("the loyalty ability resolves");
+    assert_eq!(runner.state().pending_activations, vec![expected]);
 }
 
 /// CR 601.2f "in any order": past eight reductions the election must still find

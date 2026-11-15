@@ -50,6 +50,8 @@ const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 const stateCodecDecodeJs = vi.hoisted(() => vi.fn());
+const buildLlmDecisionRequestJs = vi.hoisted(() => vi.fn());
+const getAiActionProposalFromLlmResponseJs = vi.hoisted(() => vi.fn());
 
 const ensureComboTable = vi.hoisted(() => vi.fn());
 
@@ -75,6 +77,8 @@ vi.mock("@wasm/engine", () => ({
   clear_game_state: clearGameStateJs,
   canonicalCardNames: canonicalCardNamesJs,
   state_codec_decode: stateCodecDecodeJs,
+  buildLlmDecisionRequest: buildLlmDecisionRequestJs,
+  getAiActionProposalFromLlmResponse: getAiActionProposalFromLlmResponseJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -121,6 +125,8 @@ const mockWorkerClient = {
   getAiActionProposalFromScoresWithDiagnostics: vi.fn(),
   getAiScoredCandidates: vi.fn(),
   submitAiActionProposal: vi.fn(),
+  buildLlmDecisionRequest: vi.fn(),
+  getAiActionProposalFromLlmResponse: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
     phase: "Untap",
@@ -1526,6 +1532,48 @@ describe("WasmAdapter.getViewerTransitionSnapshot", () => {
     expect(mockWorkerClient.getViewerTransitionSnapshot).not.toHaveBeenCalled();
     expect(result.events).toEqual(viewerTransitionEvents);
     expect(result.state).toMatchObject(rawState);
+  });
+});
+
+describe("WasmAdapter LLM decisions", () => {
+  const clock = { wallMs: 1_700_000_000_000, monotonicMs: 4_321 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("hands the worker the seat's settings revision and both clocks", async () => {
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    await adapter.buildLlmDecisionRequest("Medium", 1, "{}", "[]", 3, clock);
+    await adapter.getAiActionProposalFromLlmResponse(1, "fp", 7, "Anthropic", 200, "{}", clock);
+
+    expect(mockWorkerClient.buildLlmDecisionRequest).toHaveBeenCalledExactlyOnceWith(
+      "Medium", 1, "{}", "[]", 3, clock,
+    );
+    expect(mockWorkerClient.getAiActionProposalFromLlmResponse).toHaveBeenCalledExactlyOnceWith(
+      1, "fp", 7, "Anthropic", 200, "{}", clock,
+    );
+  });
+
+  it("main-thread fallback hands the engine the revision and each clock in order", async () => {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    buildLlmDecisionRequestJs.mockReturnValue({ fingerprint: "fp" });
+    getAiActionProposalFromLlmResponseJs.mockReturnValue({ proposal: null });
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    await adapter.buildLlmDecisionRequest("Medium", 1, "{}", "[]", 3, clock);
+    await adapter.getAiActionProposalFromLlmResponse(1, "fp", 7, "Anthropic", 200, "{}", clock);
+
+    expect(buildLlmDecisionRequestJs).toHaveBeenCalledExactlyOnceWith(
+      "Medium", 1, "{}", "[]", 3, clock.wallMs, clock.monotonicMs,
+    );
+    expect(getAiActionProposalFromLlmResponseJs).toHaveBeenCalledExactlyOnceWith(
+      1, "fp", 7, "Anthropic", 200, "{}", clock.wallMs, clock.monotonicMs,
+    );
+    expect(mockWorkerClient.buildLlmDecisionRequest).not.toHaveBeenCalled();
   });
 });
 

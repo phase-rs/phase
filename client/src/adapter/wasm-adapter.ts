@@ -19,6 +19,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ObjectId,
@@ -912,6 +913,8 @@ export class WasmAdapter
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     this.assertInitialized("buildLlmDecisionRequest");
     try {
@@ -921,6 +924,8 @@ export class WasmAdapter
           playerId,
           endpointJson,
           historyJson,
+          settingsRevision,
+          clock,
         );
       }
       return await this.fallback!.buildLlmDecisionRequest(
@@ -928,6 +933,8 @@ export class WasmAdapter
         playerId,
         endpointJson,
         historyJson,
+        settingsRevision,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -937,9 +944,11 @@ export class WasmAdapter
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     this.assertInitialized("getAiActionProposalFromLlmResponse");
     try {
@@ -947,17 +956,21 @@ export class WasmAdapter
         return await this.engine.getAiActionProposalFromLlmResponse(
           playerId,
           fingerprint,
+          threadTurn,
           provider,
           status,
           responseBody,
+          clock,
         );
       }
       return await this.fallback!.getAiActionProposalFromLlmResponse(
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -1757,13 +1770,17 @@ interface MainThreadFallback {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
   getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
@@ -1995,28 +2012,42 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerId: number,
       endpointJson: string,
       historyJson: string,
+      settingsRevision: number,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
-          (wasm.buildLlmDecisionRequest(difficulty, playerId, endpointJson, historyJson) ??
-            null) as LlmDecisionRequestResult | null,
+          (wasm.buildLlmDecisionRequest(
+            difficulty,
+            playerId,
+            endpointJson,
+            historyJson,
+            settingsRevision,
+            clock.wallMs,
+            clock.monotonicMs,
+          ) ?? null) as LlmDecisionRequestResult | null,
       ),
 
     getAiActionProposalFromLlmResponse: (
       playerId: number,
       fingerprint: string,
+      threadTurn: number | null,
       provider: string,
       status: number,
       responseBody: string,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
           (wasm.getAiActionProposalFromLlmResponse(
             playerId,
             fingerprint,
+            threadTurn,
             provider,
             status,
             responseBody,
+            clock.wallMs,
+            clock.monotonicMs,
           ) ?? null) as AiLlmProposalResult | null,
       ),
 

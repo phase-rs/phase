@@ -15,6 +15,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
@@ -540,9 +541,19 @@ export class EngineWorkerClient {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     return this.request<LlmDecisionRequestResult | null>(
-      { type: "buildLlmDecisionRequest", difficulty, playerId, endpointJson, historyJson },
+      {
+        type: "buildLlmDecisionRequest",
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+        settingsRevision,
+        clock,
+      },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -551,18 +562,22 @@ export class EngineWorkerClient {
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
       {
         type: "getAiActionProposalFromLlmResponse",
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
