@@ -64,19 +64,40 @@
 //! life: this creature gets +2/+2 until end of turn") — reports "no payoff" only
 //! as an absence of evidence, so it keeps the graduated branch. Its activation
 //! *timing* is a separate policy's job, not this one's.
+//!
+//! # The payment step
+//!
+//! At a spell's mana-payment step (CR 601.2g–h) the only question is whether a
+//! self-cost mana activation is needed at all. CR 605.3a lets a mana ability
+//! wait for any later priority, so once passing already pays the cost, another
+//! activation spends a self-resource for mana the cast doesn't use. Each one is
+//! an independent softmax trial at every payment decision — the repeatable
+//! shape the law above covers — so the arm `Reject`s, and only when the engine
+//! certifies the activation as surplus (`ai_support::surplus_mana_activation`:
+//! the pass finalizes, the payer then has priority and can still activate it,
+//! and the new unit can't change anything the cast records under any spend).
+//! Sources whose activation opens a choice (Blood Celebrant's colour, Ashnod's
+//! Altar's sacrifice), multi-mana and rider-bearing units, ability payments
+//! (CR 602.2b), and any spend permission (CR 609.4b) are not certified and stay
+//! neutral.
 
+use engine::ai_support::{surplus_mana_activation, SurplusManaActivation};
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
-use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::registry::{
+    DecisionKind, PolicyId, PolicyReason, PolicyRegistry, PolicyVerdict, TacticalPolicy,
+};
 use super::self_cost::{
     appraise_benefit, cost_is_material, real_self_cost, self_cost_in_scope,
     self_counter_cost_preview, synergy_justifies_self_cost, BenefitAppraisal,
     SelfCounterCostPreview,
 };
+use crate::cast_facts::mana_activation_ability;
+use crate::decision_kind::classify as classify_decision;
 use crate::features::DeckFeatures;
 
 /// At or above this priced self-cost, a trivial-benefit activation is a real
@@ -93,7 +114,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn decision_kinds(&self) -> &'static [DecisionKind] {
-        &[DecisionKind::ActivateAbility]
+        &[DecisionKind::ActivateAbility, DecisionKind::ManaPayment]
     }
 
     fn activation(
@@ -107,6 +128,14 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        // CR 601.2g: at a spell's payment step only the surplus arm runs, so an
+        // activation the payment needs stays exactly neutral.
+        if classify_decision(&ctx.decision.waiting_for, &ctx.candidate.action)
+            == DecisionKind::ManaPayment
+        {
+            return payment_surplus_verdict(ctx, PolicyRegistry::shared());
+        }
+
         let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
@@ -252,6 +281,87 @@ impl TacticalPolicy for SelfCostValuePolicy {
             }
         }
     }
+}
+
+/// The payment-step arm: a self-cost mana activation the engine certifies as
+/// surplus (`ai_support::surplus_mana_activation`) is rejected, provided the
+/// decision's pass — the finisher the certificate relies on — is itself an
+/// admissible (finite) row under `registry`. Everything else is neutral.
+///
+/// Each surplus activation is an independent softmax trial at every payment
+/// step, so this is the repeatable-candidate shape the module docs' law covers:
+/// only a `Reject` bounds it.
+pub(crate) fn payment_surplus_verdict(
+    ctx: &PolicyContext<'_>,
+    registry: &PolicyRegistry,
+) -> PolicyVerdict {
+    let neutral = |reason| PolicyVerdict::neutral(PolicyReason::new(reason));
+    // Lookahead nodes price the life in the leaf eval; the certificate's
+    // simulations run only for the committed decision.
+    if !ctx.at_root() {
+        return neutral("self_cost_payment_surplus_na");
+    }
+    let Some((source_id, ability)) = mana_activation_ability(ctx.state, &ctx.candidate.action)
+    else {
+        return neutral("self_cost_payment_surplus_na");
+    };
+    let Some(cost) = ability
+        .cost
+        .as_ref()
+        .filter(|cost| self_cost_in_scope(cost))
+    else {
+        return neutral("self_cost_payment_surplus_na");
+    };
+    let features = ctx
+        .context
+        .session
+        .features
+        .get(&ctx.ai_player)
+        .cloned()
+        .unwrap_or_default();
+    if synergy_justifies_self_cost(&features, &ability) {
+        return neutral("self_cost_synergy_justified");
+    }
+    match surplus_mana_activation(ctx.state, &ctx.candidate.action) {
+        SurplusManaActivation::NotCertified(_) => neutral("self_cost_payment_surplus_na"),
+        SurplusManaActivation::Surplus if !finisher_admissible(ctx, registry) => {
+            neutral("self_cost_payment_surplus_na")
+        }
+        SurplusManaActivation::Surplus => {
+            let cost_value =
+                real_self_cost(ctx.state, ctx.ai_player, source_id, cost, ctx.penalties());
+            PolicyVerdict::reject(
+                PolicyReason::new("self_cost_payment_surplus")
+                    .with_fact("cost_milli", (cost_value * 1000.0) as i64),
+            )
+        }
+    }
+}
+
+/// Whether the decision's pass — the action that finalizes the payment — is a
+/// finite row under `registry`, so a surplus `Reject` always leaves the AI an
+/// admissible way to finish the cast.
+pub(crate) fn finisher_admissible(ctx: &PolicyContext<'_>, registry: &PolicyRegistry) -> bool {
+    let Some(pass) = ctx
+        .decision
+        .candidates
+        .iter()
+        .find(|candidate| candidate.action == GameAction::PassPriority)
+    else {
+        return false;
+    };
+    registry
+        .score(&PolicyContext {
+            state: ctx.state,
+            decision: ctx.decision,
+            candidate: pass,
+            ai_player: ctx.ai_player,
+            config: ctx.config,
+            context: ctx.context,
+            cast_facts: None,
+            search_depth: ctx.search_depth,
+        })
+        .is_finite()
 }
 
 /// Conservatively prices the exact self-counter-replenishment preview.
@@ -3515,5 +3625,260 @@ mod tests {
         let verdict = verdict_for(&state, source, plain_features());
         assert_neutral(&verdict, "self_cost_benefit_covers_cost");
         assert_facts(&verdict, 500, 1500);
+    }
+    // --- the payment-step surplus arm (phase-rs/phase#10922) ------------------
+
+    const TREASONOUS_OGRE: &str = "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.";
+
+    /// The production-built Unsubstantiate decision with passing already able
+    /// to pay: the Island paid {U}, one Ogre activation paid {R}.
+    fn saturated_payment_decision() -> (GameState, AiDecisionContext, CandidateAction) {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::{GameScenario, P1};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let bears = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let island = sc.add_basic_land(AI, ManaColor::Blue);
+        let ogre = sc
+            .add_creature(AI, "Treasonous Ogre", 2, 3)
+            .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
+            .id();
+        let spell = sc
+            .add_spell_to_hand_from_oracle(
+                AI,
+                "Unsubstantiate",
+                true,
+                "Return target spell or creature to its owner's hand.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            })
+            .id();
+        let mut state = sc.build().state().clone();
+        let card_id = state.objects[&spell].card_id;
+        let ogre_activation = GameAction::ActivateAbility {
+            source_id: ogre,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+        for action in [
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(bears)),
+            },
+        ] {
+            engine::game::engine::apply_as_current_for_simulation(&mut state, action)
+                .expect("the cast reaches its payment step");
+        }
+        let tap_island = activatable_mana_actions_for_player(&state, AI)
+            .into_iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == island)
+            })
+            .expect("the Island taps for {U}");
+        for action in [tap_island, ogre_activation.clone()] {
+            engine::game::engine::apply_as_current_for_simulation(&mut state, action)
+                .expect("payment step action");
+        }
+        let decision = engine::ai_support::build_decision_context(&state);
+        assert!(matches!(
+            decision.waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        let candidate = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == ogre_activation)
+            .cloned()
+            .expect("reach: the Ogre activation is a payment-step candidate");
+        (state, decision, candidate)
+    }
+
+    /// A test-only policy that rejects the pass at a payment step.
+    struct RejectsPass;
+
+    impl TacticalPolicy for RejectsPass {
+        fn id(&self) -> PolicyId {
+            PolicyId::SelfCostValue
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ManaPayment]
+        }
+
+        fn activation(&self, _: &DeckFeatures, _: &GameState, _: PlayerId) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            match ctx.candidate.action {
+                GameAction::PassPriority => {
+                    PolicyVerdict::reject(PolicyReason::new("test_rejects_pass"))
+                }
+                _ => PolicyVerdict::neutral(PolicyReason::new("test_rejects_pass_na")),
+            }
+        }
+    }
+
+    /// SM4-2: the arm's finisher-admissibility gate, run inside the one
+    /// production implementation. Case A (the production registry): the pass is
+    /// admissible and the certified surplus activation is rejected. Case B (the
+    /// production policies plus a pass-rejecting test policy): the pass is not
+    /// admissible, so the arm stays neutral rather than leave no finite row.
+    #[test]
+    fn payment_surplus_arm_requires_an_admissible_pass() {
+        let (state, decision, candidate) = saturated_payment_decision();
+        assert_eq!(
+            engine::ai_support::surplus_mana_activation(&state, &candidate.action),
+            engine::ai_support::SurplusManaActivation::Surplus,
+            "reach: the engine certifies the surplus"
+        );
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        let production = PolicyRegistry::shared();
+        assert!(finisher_admissible(&ctx, production));
+        assert_reject(
+            &payment_surplus_verdict(&ctx, production),
+            "self_cost_payment_surplus",
+        );
+        assert_reject(
+            &SelfCostValuePolicy.verdict(&ctx),
+            "self_cost_payment_surplus",
+        );
+
+        let rejects_pass = PolicyRegistry::default_with_for_tests(Box::new(RejectsPass));
+        assert!(!finisher_admissible(&ctx, &rejects_pass));
+        assert_neutral(
+            &payment_surplus_verdict(&ctx, &rejects_pass),
+            "self_cost_payment_surplus_na",
+        );
+    }
+
+    /// Lookahead nodes leave the payment-step activation to the leaf eval.
+    #[test]
+    fn payment_surplus_arm_is_root_only() {
+        let (state, decision, candidate) = saturated_payment_decision();
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        assert_neutral(
+            &payment_surplus_verdict(&ctx, PolicyRegistry::shared()),
+            "self_cost_payment_surplus_na",
+        );
+    }
+    /// T7: a costed land's indexed mana ability (`TapLandForMana`, Fiery
+    /// Islet) reaches the arm: the second Islet's pinned {R} is a surplus once
+    /// the Island and the first Islet's {R} pay Words of Wisdom.
+    #[test]
+    fn payment_surplus_arm_reaches_a_costed_land() {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let island = sc.add_basic_land(AI, ManaColor::Blue);
+        let islets: Vec<_> = (0..2)
+            .map(|_| {
+                sc.add_land_from_oracle(
+                    AI,
+                    "Fiery Islet",
+                    "{T}, Pay 1 life: Add {U} or {R}.\n{1}, {T}, Sacrifice this land: Draw a card.",
+                )
+                .id()
+            })
+            .collect();
+        let spell = sc
+            .add_spell_to_hand_from_oracle(
+                AI,
+                "Words of Wisdom",
+                true,
+                "You draw two cards, then each other player draws a card.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            })
+            .id();
+        let mut state = sc.build().state().clone();
+        let card_id = state.objects[&spell].card_id;
+        engine::game::engine::apply_as_current_for_simulation(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            },
+        )
+        .expect("the cast reaches its payment step");
+        let tap = |state: &GameState, source: ObjectId, color: ManaType| {
+            activatable_mana_actions_for_player(state, AI)
+                .into_iter()
+                .find(|action| {
+                    matches!(action, GameAction::TapLandForMana { selection }
+                        if selection.source.object_id == source && selection.mana_type == color)
+                })
+                .expect("the land taps for that colour")
+        };
+        for action in [
+            tap(&state, island, ManaType::Blue),
+            tap(&state, islets[0], ManaType::Red),
+        ] {
+            engine::game::engine::apply_as_current_for_simulation(&mut state, action)
+                .expect("payment step action");
+        }
+        let second = tap(&state, islets[1], ManaType::Red);
+        let decision = engine::ai_support::build_decision_context(&state);
+        let candidate = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == second)
+            .cloned()
+            .expect("reach: the second Islet's {R} is a payment-step candidate");
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_reject(
+            &SelfCostValuePolicy.verdict(&ctx),
+            "self_cost_payment_surplus",
+        );
     }
 }

@@ -216,6 +216,23 @@ pub fn witness_payment_continuation(
     batch.successors.into_iter().next().flatten()
 }
 
+/// CR 601.2h–i / CR 602.2b: apply `action` once to a copy of `state` and return
+/// the successor when that single reducer step finalizes the affiliated root
+/// in progress — the same finalization predicate the witness's root step uses,
+/// without its continuation search. `None` when `state` is not an affiliated
+/// payment, the action is rejected, or the root is not finalized by this step.
+pub fn finalizes_in_one_step(state: &GameState, action: &GameAction) -> Option<GameState> {
+    let PaymentContinuationState::Affiliated(root) = classify_payment_continuation(state) else {
+        return None;
+    };
+    let baseline = WitnessBaseline::capture(state, &root)?;
+    let mut successor = state.clone();
+    let result = apply_as_current_for_simulation(&mut successor, action.clone()).ok()?;
+    (!root_present(&successor, &root)
+        && finalized_root_matches(&successor, &root, &baseline, &result.events))
+    .then_some(successor)
+}
+
 /// Witness all raw actions for one exact payment decision with a shared bounded
 /// reducer search. The output has one entry for every input position; callers
 /// must retain that position rather than re-associating equivalent actions.

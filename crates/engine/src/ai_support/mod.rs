@@ -5,6 +5,7 @@ mod copy;
 mod evoke;
 pub mod filter;
 mod payment_continuation;
+mod payment_surplus;
 mod prospective_mana;
 mod shortcut_efficacy;
 mod swarm;
@@ -72,17 +73,21 @@ pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
 pub use payment_continuation::{
-    classify_payment_continuation, witness_payment_continuation, witness_payment_continuations,
-    witness_targeted_cast_offer, AcceptedPaymentSuccessor, PaymentContinuationBatch,
-    PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
-    PaymentContinuationState, PaymentContinuationStep, PaymentContinuationUnsupported,
-    TargetedCastVerdict, TargetedCastWitness, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
-    PAYMENT_CONTINUATION_MAX_ROOTS, TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
+    classify_payment_continuation, finalizes_in_one_step, witness_payment_continuation,
+    witness_payment_continuations, witness_targeted_cast_offer, AcceptedPaymentSuccessor,
+    PaymentContinuationBatch, PaymentContinuationBatchStatus, PaymentContinuationIndeterminate,
+    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationStep,
+    PaymentContinuationUnsupported, TargetedCastVerdict, TargetedCastWitness,
+    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS, PAYMENT_CONTINUATION_MAX_ROOTS,
+    TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
 };
 #[cfg(feature = "test-support")]
 pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
+pub use payment_surplus::{surplus_mana_activation, SurplusManaActivation, SurplusNotCertified};
+#[cfg(feature = "test-support")]
+pub use payment_surplus::{surplus_mana_activation_with_counters, SurplusCertificateCounters};
 pub use prospective_mana::{
     certify_fetch_then_cast, certify_pact_plan, controls_exact_fetchland, is_pact_payment_ability,
     is_pact_payment_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan,
