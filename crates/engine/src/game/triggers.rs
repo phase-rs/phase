@@ -940,6 +940,17 @@ impl PendingActivationTriggerCollection {
         }
     }
 
+    /// Creates a collector for an action's own event batch that must be
+    /// admitted or refused whole before any of it reaches the live game: an
+    /// Un-card touch is bounded by the size of the batch it would add.
+    pub(crate) fn for_player_action() -> Self {
+        Self {
+            overlay: TriggerCollectionOverlay::default(),
+            operation_journal: Vec::new(),
+            pending_contexts: Vec::new(),
+        }
+    }
+
     /// Creates an activation-local collector with the complete in-flight
     /// ability available to source-filtered trigger predicates.
     pub(crate) fn for_prepared_activated_ability(
