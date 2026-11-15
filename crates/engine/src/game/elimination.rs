@@ -2845,6 +2845,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
@@ -2940,6 +2941,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -3009,6 +3011,7 @@ mod tests {
             },
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: None,
@@ -3171,6 +3174,7 @@ mod tests {
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: Some(paused),
@@ -3248,6 +3252,7 @@ mod tests {
             .expect("child group latches");
         let paused = paused_zone_change_delivery(&state, original, ObjectId(901));
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: owner_group,
             paused_current: Some(paused.clone()),
@@ -3265,6 +3270,7 @@ mod tests {
             deferred_events: Vec::new(),
         });
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: Some(PendingComponentDeliveryParent {
                 parent_group_id: owner_group_id,
                 member: paused.member,
@@ -3355,6 +3361,7 @@ mod tests {
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: parent_group,
             paused_current: Some(paused.clone()),
@@ -3375,6 +3382,7 @@ mod tests {
             deferred_events: Vec::new(),
         });
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: Some(PendingComponentDeliveryParent {
                 parent_group_id,
                 member: paused.member,

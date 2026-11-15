@@ -115,9 +115,10 @@ fn exile_tracking_parked_resume_preserves_source_link() {
     }));
 }
 
-/// W-R1 (red first): a Dig rest pile sent to the library bottom is an
-/// effect-owned batch. Competing Library-destination `Moved` replacements must
-/// pause before the kept tracked set is published, then re-pause safely while
+/// W-R1 (red first): a Dig rest pile sent to a zone other than the library
+/// (a card already in the library reordered within it is not a zone change,
+/// CR 701.20b) is an effect-owned batch. Competing hand-destination `Moved`
+/// replacements must pause before the kept tracked set is published, then re-pause safely while
 /// the rest pile drains.
 #[test]
 fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
@@ -139,12 +140,12 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -159,7 +160,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -244,8 +245,8 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("first attempted rest card is outside the parked suffix");
-    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
-    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Hand);
 }
 
 /// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
@@ -266,12 +267,12 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         scenario
             .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -286,7 +287,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             keep_count_expr: None,
             up_to: true,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -342,14 +343,14 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         .expect("one rest-pile card must take the configured redirect");
     let returned_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| runner.state().objects[id].zone == Zone::Library)
-        .expect("the other rest-pile card must complete its library placement");
+        .find(|id| runner.state().objects[id].zone == Zone::Hand)
+        .expect("the other rest-pile card must complete its hand placement");
     assert_ne!(redirected_rest, returned_rest);
     assert!(
         runner.state().players[P0.0 as usize]
-            .library
+            .hand
             .contains(&returned_rest),
-        "the unredirected rest-pile card must be present in P0's library"
+        "the unredirected rest-pile card must be present in P0's hand"
     );
 
     let tracked = runner
@@ -703,12 +704,12 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -723,7 +724,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,

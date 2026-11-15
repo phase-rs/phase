@@ -2035,7 +2035,10 @@ mod post_load_creators {
         assert!(runner.state().stack.is_empty());
         assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
         // Positive reveal control for the hidden-information test: the fetch revealed it.
-        assert!(runner.state().revealed_cards.contains(&fetched));
+        // CR 701.20a: the transient reveal ends with the resolution, before the resolved
+        // view is published; the table keeps the card's public identity in hand.
+        assert!(!runner.state().revealed_cards.contains(&fetched));
+        assert!(runner.state().public_revealed_cards.contains(&fetched));
         assert!(first_events.iter().any(|event| matches!(
             event,
             GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&fetched)
@@ -2184,7 +2187,7 @@ mod post_load_creators {
         } = companion_and_fetch();
         let state = runner.state();
 
-        // The transient reveal ended: later actions from `Priority` clear `revealed_cards`.
+        // The transient reveal ended with the fetch's resolution (CR 701.20a).
         // (The positive control, that it WAS revealed, is in `companion_and_fetch`.) The
         // fetched card stays publicly identified through retained public identity knowledge
         // under the engine's information policy: `CardsRevealed` publishes

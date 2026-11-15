@@ -7593,6 +7593,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
@@ -7638,6 +7639,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
         let batch = |group, paused_current, relation| PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: relation,
             logical_zone_change_group: group,
             paused_current,
@@ -8127,6 +8129,7 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                library_reorder: None,
                 pending_return_result_producer: None,
                 logical_zone_change_group,
                 paused_current: None,
@@ -9922,6 +9925,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         let pending = PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,

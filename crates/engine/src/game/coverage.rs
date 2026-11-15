@@ -2607,7 +2607,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
                 "restricted card type"
             }
         }
-        ChoiceType::CardName => "card name",
+        ChoiceType::CardName { options, .. } => {
+            if options.is_empty() {
+                "card name"
+            } else {
+                "restricted card name"
+            }
+        }
         // CR 107.1a/b: an unbounded range has no ceiling to print.
         ChoiceType::NumberRange { min, max, .. } => {
             return match max {
@@ -4628,6 +4634,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::DraftFromSpellbook { .. }
