@@ -417,8 +417,9 @@ fn run_clone_marath_modal_redirect(halo_name: &str) -> (i32, i32) {
             .act(GameAction::PassPriority)
             .expect("pass toward the Monolith source choice");
     }
-    let WaitingFor::DamageSourceChoice { player, options, .. } =
-        runner.state().waiting_for.clone()
+    let WaitingFor::DamageSourceChoice {
+        player, options, ..
+    } = runner.state().waiting_for.clone()
     else {
         panic!(
             "the Monolith must prompt for its source, got {}",
@@ -550,7 +551,8 @@ fn run_clone_marath_modal_redirect(halo_name: &str) -> (i32, i32) {
         "the Bears must survive: the Monolith redirected the hit away"
     );
     assert_eq!(
-        runner.state().objects[&bears].damage_marked, 0,
+        runner.state().objects[&bears].damage_marked,
+        0,
         "the Bears must take no damage: the full X=2 rerouted to P0"
     );
     (
@@ -578,8 +580,5 @@ fn clone_copy_marath_modal_redirect_prevents_via_exit_lki() {
 /// redirect path was live and prevention did the work in the main row.
 #[test]
 fn marath_modal_redirect_unprotected_control_takes_two() {
-    assert_eq!(
-        run_clone_marath_modal_redirect("Grizzly Bears"),
-        (18, 20)
-    );
+    assert_eq!(run_clone_marath_modal_redirect("Grizzly Bears"), (18, 20));
 }

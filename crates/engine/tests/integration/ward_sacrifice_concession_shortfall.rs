@@ -131,8 +131,7 @@ fn drive_bolt_to_ward_prompt(fixture: &mut Fixture) {
         .target_objects(&[fixture.ulamog])
         .commit();
     fixture.runner.advance_until_stack_empty();
-    let WaitingFor::UnlessPayment { player, cost, .. } =
-        fixture.runner.state().waiting_for.clone()
+    let WaitingFor::UnlessPayment { player, cost, .. } = fixture.runner.state().waiting_for.clone()
     else {
         panic!(
             "Ward must prompt the targeting player to pay, got {:?}",
@@ -215,7 +214,11 @@ fn conceded_mountain_shortfall_settles_ward_unpaid() {
         .act(GameAction::Concede { player_id: P2 })
         .expect("P2 concedes");
     assert!(
-        !fixture.runner.state().battlefield.contains(&fixture.mountain),
+        !fixture
+            .runner
+            .state()
+            .battlefield
+            .contains(&fixture.mountain),
         "reach-guard: the P2-owned Mountain must leave with P2 (CR 800.4a)"
     );
     assert!(
@@ -249,19 +252,21 @@ fn conceded_mountain_shortfall_settles_ward_unpaid() {
         "the Agent must survive: no surviving permanent is sacrificed"
     );
     assert!(
-        !fixture.runner.state().battlefield.contains(&fixture.mountain),
+        !fixture
+            .runner
+            .state()
+            .battlefield
+            .contains(&fixture.mountain),
         "the Mountain stays gone (concession, not sacrifice)"
     );
     assert!(
-        !events.iter().any(|e| matches!(
-            e,
-            GameEvent::PermanentSacrificed { .. }
-        )),
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PermanentSacrificed { .. })),
         "no sacrifice may be recorded when the Ward goes unpaid, got {events:?}"
     );
     assert_eq!(
-        fixture.runner.state().objects[&fixture.ulamog]
-            .damage_marked,
+        fixture.runner.state().objects[&fixture.ulamog].damage_marked,
         0,
         "Ulamog must take no damage from the countered Bolt"
     );
@@ -269,11 +274,7 @@ fn conceded_mountain_shortfall_settles_ward_unpaid() {
         fixture.runner.state().battlefield.contains(&fixture.ulamog),
         "Ulamog must still be on the battlefield"
     );
-    assert_eq!(
-        fixture.runner.life(P1),
-        20,
-        "P1's life must be untouched"
-    );
+    assert_eq!(fixture.runner.life(P1), 20, "P1's life must be untouched");
     assert!(
         fixture.runner.state().stack.is_empty(),
         "stack is empty at the end"
@@ -338,8 +339,7 @@ fn payable_ward_sacrifices_both_and_bolt_resolves() {
         "the Mountain must be sacrificed to the Ward"
     );
     assert_eq!(
-        fixture.runner.state().objects[&fixture.ulamog]
-            .damage_marked,
+        fixture.runner.state().objects[&fixture.ulamog].damage_marked,
         3,
         "Bolt must resolve for 3 to Ulamog once the Ward is paid"
     );
