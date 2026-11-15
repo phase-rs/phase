@@ -3938,6 +3938,7 @@ struct LogicalZoneChangeGroupWire {
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
     #[serde(default)]
     announced_members: Vec<ObjectIncarnationRef>,
+    #[serde(default)]
     departed_owner_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     #[serde(default)]
     departed_owner_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
