@@ -124,21 +124,40 @@ fn nahiri_storm_of_stone_does_not_grant_equip_keyword_to_creatures() {
     );
 }
 
-/// CR 604.1: "During your turn" scopes the discount too. Leonin Shikari lets P0 equip
-/// during P1's turn, where P0's Nahiri gives no discount.
+/// CR 604.1 + CR 109.5: "During your turn" scopes both conjuncts to Nahiri's
+/// controller's turn. On one board, P0's Nahiri first gives first strike and a {2}
+/// equip on P0's turn; after the turn passes to P1, Leonin Shikari lets P0 equip at
+/// instant speed (CR 117.1a), and both effects are gone.
 #[test]
-fn nahiri_storm_of_stone_discount_is_off_during_opponents_turn() {
-    let (mut runner, _, side) = p0_board(true);
+fn nahiri_storm_of_stone_effects_end_when_the_turn_changes() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_planeswalker_from_oracle(P0, "Nahiri, Storm of Stone", "Nahiri", 6, NAHIRI);
+    let side = add_side(&mut s, P0, true);
+    let second_bear = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = s.build();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    assert!(
+        runner.state().objects[&side.bear].has_keyword(&Keyword::FirstStrike),
+        "reach: on P0's turn, Nahiri gives P0's creatures first strike"
+    );
+    assert_eq!(
+        equip_cost(&mut runner, P0, &side, side.bear),
+        2,
+        "reach: on P0's turn, Nahiri discounts P0's Equip {{3}} to {{2}}"
+    );
+
     give_priority(&mut runner, P1, P0);
     engine::game::layers::evaluate_layers(runner.state_mut());
     assert!(
         !runner.state().objects[&side.bear].has_keyword(&Keyword::FirstStrike),
-        "first strike is also off during the opponent's turn"
+        "first strike ends when the turn passes to P1"
     );
     assert_eq!(
-        equip_cost(&mut runner, P0, &side, side.bear),
+        equip_cost(&mut runner, P0, &side, second_bear),
         3,
-        "Equip {{3}} must cost the full {{3}} during the opponent's turn"
+        "Equip {{3}} costs the full {{3}} once the turn passes to P1"
     );
 }
 
