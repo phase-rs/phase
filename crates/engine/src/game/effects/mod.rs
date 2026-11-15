@@ -3085,6 +3085,10 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // (DistinctCounterKindsAmong loop) applies to this iteration.
             let member = tracked_members.get(iteration).copied();
             let kind = iterated_counter_kinds.get(iteration).cloned();
+            // Every resumed occurrence follows one that completed.
+            if member.is_none() && kind.is_none() {
+                settle_entries_before_repeat_occurrence(state, events, &ability);
+            }
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
@@ -5220,6 +5224,15 @@ pub(crate) fn apply_parent_chain_context(
     if child.ability_index.is_none() {
         child.ability_index = parent.ability_index;
     }
+    // CR 608.2c: a sub-ability is part of the same printed ability instance
+    // as its parent — the announced usage key is their shared identity, so a
+    // resolution-time tally on a chained sub-node (e.g. a Dragon Whelp rider)
+    // reads the same acquisition budget as the root. Mirrors the index block
+    // above, including its no-clobber guard: an explicitly keyed node keeps
+    // its own.
+    if child.announced_usage_key.is_none() {
+        child.announced_usage_key = parent.announced_usage_key.clone();
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -5581,15 +5594,104 @@ fn settle_entries_before_instruction(
     {
         return;
     }
+    settle_entries_at_boundary(
+        state,
+        events,
+        next,
+        completed,
+        crate::game::triggers::CompletedEntryCollection::HeldInstruction,
+    );
+}
+
+/// The instruction boundary proper (everything after B0): `next` begins an instruction, or the
+/// next occurrence of a repeated one, so the entries recorded so far are a completed entry event.
+fn settle_entries_at_boundary(
+    state: &mut GameState,
+    events: &[GameEvent],
+    next: &ResolvedAbility,
+    completed: Option<&ResolvedAbility>,
+    collection: crate::game::triggers::CompletedEntryCollection,
+) {
     // CR 614.12a: an entry may still be in progress while a resolution choice or a parked
     // replacement is pending (G1).
     if waits_for_resolution_choice(&state.waiting_for) || state.pending_replacement.is_some() {
         return;
     }
+    // CR 608.2c + CR 603.6a: every instruction before `next` has completed, so every entry
+    // recorded so far is a completed entry event, whether or not its observation is deferred.
+    // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
+    // or post-replacement rider) has boundaries of its own, and the instruction that put its
+    // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
+    // a paused player-scope clause resuming under its scope sidecar
+    // (`resolving_player_scope_tail`): its seats' actions are one simultaneous event
+    // (CR 101.4), completed at its `after_scope` boundary.
+    let completed_through = state.completed_instruction_ledger_len();
+    let mut instruction_completed = false;
+    // CR 101.4: nor before a node an instruction bound to a player. The remaining seats of a
+    // paused player-scope clause resume as such nodes whether or not a sidecar was installed
+    // (a clause with no tail that reads its result has none), and their entries are one
+    // simultaneous event with the seats that already acted.
+    if !crate::game::triggers::battlefield_entry_in_progress(state)
+        && state.resolving_player_scope_tail.is_none()
+        && !bound_to_a_player_by_an_instruction(next)
+    {
+        let ledger_len = state.zone_changes_this_turn.len();
+        if ledger_len > completed_through {
+            state.instruction_boundary_marks.push(ledger_len);
+            instruction_completed = true;
+        }
+    }
     if entry_observation_deferred(state, next, completed) {
         return;
     }
     crate::game::zones::settle_battlefield_entry_observations(state, events);
+    // CR 603.6a + CR 603.6b + CR 611.3c: an entering instruction that was held across answers
+    // has completed and its entrants are observed, so its entry event is matched now, against
+    // the board it left, before `next` can change which permanents observe or suppress it. A
+    // completed performance of a repeated keyword action is matched now even when it was never
+    // held, so the action's scan does not batch it with the next performance (CR 608.2c).
+    if instruction_completed {
+        crate::game::triggers::collect_completed_entry_instruction(
+            state,
+            events,
+            completed_through,
+            collection,
+        );
+    }
+}
+
+/// CR 608.2c + CR 603.6a: a repeated keyword action ("Populate X times", "Investigate twice",
+/// "Incubate 2 twice") is performed that many times in succession, each performance its own
+/// entry event, so the next occurrence is an instruction boundary: the entries of the one before
+/// it are observed and collected before it runs. Every other repeated entering effect is a
+/// quantity expansion of one instruction ("For each nonland card discarded this way, create a
+/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split.
+fn settle_entries_before_repeat_occurrence(
+    state: &mut GameState,
+    events: &[GameEvent],
+    occurrence: &ResolvedAbility,
+) {
+    if matches!(
+        occurrence.effect,
+        // CR 701.36a (populate), CR 701.16a (investigate), CR 701.53a (incubate),
+        // CR 701.62a (manifest dread), CR 701.40a (manifest), CR 701.58a (cloak),
+        // CR 701.47a (amass): each is one action that puts a permanent onto the battlefield.
+        Effect::Populate
+            | Effect::Investigate
+            | Effect::Incubate { .. }
+            | Effect::ManifestDread
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+            | Effect::Amass { .. }
+    ) {
+        settle_entries_at_boundary(
+            state,
+            events,
+            occurrence,
+            None,
+            crate::game::triggers::CompletedEntryCollection::Occurrence,
+        );
+    }
 }
 
 /// CR 603.6a: is `effect` one of the battlefield-entering instruction kinds that the generated
@@ -6108,8 +6210,11 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 ///   defer: the boundary before it observes the entrant as it entered.
 /// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
 ///   following no known completed instruction.
-/// - **D3 (CR 603.6a + CR 101.4):** `next` is a `player_scope` seat leg; the seats may form one
-///   simultaneous entry event.
+/// - **D3 (CR 603.6a + CR 101.4):** `next` is bound to a player by an instruction — a
+///   `player_scope` seat leg; the seats may form one simultaneous entry event. A phase
+///   trigger's binding to its turn player (CR 603.2b + CR 102.1, `SpellContext::phase_turn_player`)
+///   is not a seat leg: the trigger's own instructions complete one after another, so they are
+///   boundaries like a spell's.
 ///
 /// Carriers held only in chain-driver locals are measured over the generated card data, not
 /// walked (every `WithEntry` stamp site lowers to an instruction of a kind that measurement
@@ -6118,20 +6223,21 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
 /// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
 /// candidate outside its iterated subtree.
-///
-/// Known gap, older than the onset: a phase trigger ("at the beginning of …", CR 603.2b) has
-/// `scoped_player` stamped on every node of its chain (`set_scoped_player_recursive`), so D3
-/// holds at every boundary of its resolution, optional or not. No entry observation is recorded,
-/// and enter observers read the entrant after the whole resolution, "gains"/"gets" riders
-/// included. An accepted "you may …" instruction is not the cause: the optional-effect choice
-/// handler hands priority back before the chain resumes, so the pending-choice guard does not hold.
+/// CR 101.4 + CR 603.2b: is `node` bound to a player by an instruction (a `player_scope` seat
+/// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
+/// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
+/// rewrote without clearing the phase's.
+pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+    node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
+}
+
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
     completed: Option<&ResolvedAbility>,
 ) -> bool {
     // D3 — CR 603.6a + CR 101.4.
-    if next.scoped_player.is_some() {
+    if bound_to_a_player_by_an_instruction(next) {
         return true;
     }
     // D2 — CR 303.4f.
@@ -7592,6 +7698,10 @@ fn resolve_optional_effect_decision_step(
                 // silently skip the branch's effect. Strip the consumed gate so the
                 // branch resolves on its own optional decision.
                 strip_consumed_decline_performed_gate(&mut resolved);
+                // CR 608.2c + CR 101.4: the declined instruction is complete, so the entries
+                // held for it (the tokens earlier seats accepted) are one entry event, observed
+                // before the surviving branch runs, as at the boundary of an accepted one.
+                settle_entries_before_instruction(state, events, &resolved, Some(&ability));
                 return resolve_ability_chain_step(state, &resolved, events, depth);
             }
         }
@@ -9248,6 +9358,7 @@ fn instruction_outlives_declined_gate(
         reads_chosen_group,
         declares_return_result,
         reads_return_result,
+        announced_usage_key: _,
         // Printed gates, branches, repetition, choosers and "you may": each reads
         // or asks about what happened earlier in the resolution, so each must be
         // absent. A surviving "you may" instruction is not audited (its pause
@@ -13916,6 +14027,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _, // activation-time provenance
         activation_record: _,  // activation-time provenance
+        announced_usage_key: _,
         control_change_instruction: _, // the carrier this classification stamps
     } = head;
     let Effect::GainControlAll { target } = effect else {
@@ -26058,6 +26170,9 @@ fn resolve_chain_body(
                     progress = ResolutionProgress::Waiting;
                     break;
                 }
+                if iteration > 0 && !member_driven && !kind_driven {
+                    settle_entries_before_repeat_occurrence(state, events, effective);
+                }
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
                 // member-driven card has exactly ONE parent-ref object slot. Second
@@ -30703,8 +30818,9 @@ pub(crate) fn evaluate_condition(
         } => state.day_night == Some(DayNight::Night),
         // CR 608.2c: an ordinary resolution-time condition on how many times
         // THIS printed ability has been used this turn, not an intervening-if
-        // condition under CR 603.4. Both tallies are keyed by the same
-        // `(source_id, ability_index)` pair, so one lookup serves both:
+        // condition under CR 603.4. The `Resolved` tally is keyed by the
+        // `(source_id, ability_index)` pair; the `Activated` tally re-derives
+        // the per-acquisition [`AbilityUsageKey`] (CR 602.5c):
         //
         // - `Resolved` ("if this is the [Nth] time this ability has resolved
         //   this turn") reads a counter bumped at the top of
@@ -30727,11 +30843,72 @@ pub(crate) fn evaluate_condition(
             n,
         } => {
             if let Some(idx) = ability.ability_index {
-                let ledger = match tally {
-                    AbilityUseTally::Resolved => &state.ability_resolutions_this_turn,
-                    AbilityUseTally::Activated => &state.activated_abilities_this_turn,
+                let count = match tally {
+                    AbilityUseTally::Resolved => state
+                        .ability_resolutions_this_turn
+                        .get(&(ability.source_id, idx))
+                        .copied()
+                        .unwrap_or(0),
+                    // CR 602.5c + CR 608.2b: the activation budget is per
+                    // acquisition, read off the ANNOUNCED carrier — the live
+                    // board may have moved since (a cost exiled the source,
+                    // Dress Down removed the text) while resolution proceeds
+                    // on the announced identity. Falls back to a live
+                    // re-derivation for carriers that predate announcement
+                    // capture; an unresolvable slot reads a missing entry
+                    // as count 0.
+                    //
+                    // CR 400.7 + CR 608.2h: the announced incarnation selects
+                    // the table. When the source never left, the live journal
+                    // is authoritative (the Dress Down case keeps its live
+                    // entry). When the source left after announcing (a blink
+                    // above the resolving ability), the live journal was
+                    // migrated at the exit boundary and now holds the
+                    // successor's independent history — so the resolving
+                    // ability reads the departed turn tally tagged with its
+                    // announced incarnation, never the live entry. A reader
+                    // with no announcement capture (spell, copy, old save)
+                    // names only the live population. A missing entry reads
+                    // 0 either way.
+                    AbilityUseTally::Activated => {
+                        let key = ability.announced_usage_key.as_deref().cloned().or_else(|| {
+                            crate::game::restrictions::ability_usage_key(
+                                state,
+                                ability.source_id,
+                                idx,
+                            )
+                        });
+                        match key {
+                            None => 0,
+                            Some(key) => match ability.announced_source_incarnation {
+                                None => state
+                                    .activated_abilities_this_turn
+                                    .get(&key)
+                                    .copied()
+                                    .unwrap_or(0),
+                                Some(announced) => {
+                                    let current = state
+                                        .objects
+                                        .get(&ability.source_id)
+                                        .map(|obj| obj.incarnation);
+                                    if current == Some(announced) {
+                                        state
+                                            .activated_abilities_this_turn
+                                            .get(&key)
+                                            .copied()
+                                            .unwrap_or(0)
+                                    } else {
+                                        state
+                                            .departed_activated_abilities_this_turn
+                                            .get(&(key, announced))
+                                            .copied()
+                                            .unwrap_or(0)
+                                    }
+                                }
+                            },
+                        }
+                    }
                 };
-                let count = ledger.get(&(ability.source_id, idx)).copied().unwrap_or(0);
                 comparator.evaluate(
                     crate::game::arithmetic::u32_to_i32_saturating(count),
                     crate::game::arithmetic::u32_to_i32_saturating(*n),
@@ -35751,7 +35928,7 @@ mod tests {
             declined_search_test_search().effect,
             serde_json::from_value(serde_json::json!({"type":"ChooseFromZone", "zone":"Hand"})).unwrap(),
             Effect::RevealTop { player: TargetFilter::ParentTarget, count: 1 },
-            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true },
+            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true, cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE },
             Effect::ExileFromTopUntil { player: TargetFilter::ParentTarget, until: UntilCondition::NextMatches { filter: TargetFilter::Any, count: QuantityExpr::Fixed { value: 1 } } },
             Effect::Reveal { target: TargetFilter::SpecificObject { id: ObjectId(7) } },
             serde_json::from_value(serde_json::json!({"type":"Token", "name":"Independent token", "power":{"type":"Fixed","value":1}, "toughness":{"type":"Fixed","value":1}})).unwrap(),
@@ -53197,6 +53374,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 ObjectId(1),
@@ -56584,6 +56762,7 @@ mod tests {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
             reveal,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
         };
         let mut reveal_pass = ResolvedAbility::new(
             reveal_hand(TargetFilter::None, true),
@@ -56680,6 +56859,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 ObjectId(1),
@@ -61212,7 +61392,31 @@ mod tests {
     #[test]
     fn activation_tally_gates_on_the_printed_threshold() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -61234,7 +61438,7 @@ mod tests {
         for activations in 0..4 {
             state
                 .activated_abilities_this_turn
-                .insert((source_id, 0), activations);
+                .insert(key.clone(), activations);
             assert!(
                 !evaluate_condition(&condition, &state, &ability),
                 "must not fire at {activations} activations — the printed \
@@ -61242,17 +61446,13 @@ mod tests {
             );
         }
 
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        state.activated_abilities_this_turn.insert(key.clone(), 4);
         assert!(
             evaluate_condition(&condition, &state, &ability),
             "must fire once the fourth activation is recorded"
         );
         // "four OR MORE" — the gate stays satisfied past the boundary.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 7);
+        state.activated_abilities_this_turn.insert(key, 7);
         assert!(evaluate_condition(&condition, &state, &ability));
     }
 
@@ -61263,7 +61463,29 @@ mod tests {
     #[test]
     fn activation_and_resolution_tallies_read_separate_ledgers() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -61276,9 +61498,9 @@ mod tests {
         ability.ability_index = Some(0);
 
         // Four activations recorded, none of them resolved.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(key, 4);
 
         assert!(
             evaluate_condition(
@@ -67917,6 +68139,60 @@ mod entry_observation_settlement_tests {
             state.battlefield_entry_observations.len(),
             1,
             "G1 positive pair"
+        );
+    }
+
+    /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger before a node bound
+    /// to its phase trigger's turn player, but not between the seat legs of a player-scope
+    /// clause still in progress, whose seats' actions are one simultaneous event: neither
+    /// before a seat leg resumed without a sidecar (Grismold, the Dreadsower reaches it; see the
+    /// integration suite) nor under a sidecar. Synthetic: the nodes and the sidecar are built
+    /// by hand.
+    #[test]
+    fn boundary_marks_the_instruction_outside_seat_legs() {
+        let mut seat_scoped = node(put_counter());
+        seat_scoped.scoped_player = Some(PlayerId(0));
+
+        // A node bound to its phase trigger's turn player is an ordinary instruction.
+        let mut phase_bound = node(put_counter());
+        phase_bound.set_phase_turn_player_recursive(PlayerId(0));
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(
+            state.instruction_boundary_marks,
+            vec![state.zone_changes_this_turn.len()],
+            "the completed instruction's entry is below the mark"
+        );
+        // A second boundary with no new ledger row marks nothing.
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(state.instruction_boundary_marks.len(), 1);
+
+        // A seat leg resumed without a sidecar: no observation (D3) and no mark.
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "reach guard: D3 defers the observation"
+        );
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
+            "the next seat leg is part of the same clause, sidecar or not"
+        );
+
+        let mut state = GameState::new_two_player(3);
+        let (source, events) = entered(&mut state, 1);
+        state.resolving_player_scope_tail = Some(PendingPlayerScopeTail {
+            source_id: source,
+            after_scope: Box::new(node(put_counter())),
+            linked_exile_batch: Vec::new(),
+            created_tokens: None,
+        });
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
+            "the next seat leg is part of the same clause"
         );
     }
 

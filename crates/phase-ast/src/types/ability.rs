@@ -252,7 +252,64 @@ pub enum ZoneChoiceGatherRole {
 /// fewer eligible objects exist and is therefore suitable for optional actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectSelectionCardinality {
-    Exactly { count: u32 },
+    Exactly {
+        count: u32,
+    },
+    /// CR 107.1c: "any number" — the player may choose any positive number of
+    /// the eligible objects, or zero.
+    AnyNumber,
+}
+
+impl ObjectSelectionCardinality {
+    /// A post-reveal choice of one card uses the printed instruction's
+    /// cardinality and is made during resolution (CR 608.2d).
+    pub const SINGLE: Self = Self::Exactly { count: 1 };
+
+    /// Serde default for fields whose historical shape was a single pick.
+    pub fn single() -> Self {
+        Self::SINGLE
+    }
+
+    /// Serde skip predicate pairing [`Self::single`]: the historical default
+    /// is omitted so pre-existing serialized data keeps its exact shape.
+    pub fn is_single(&self) -> bool {
+        *self == Self::SINGLE
+    }
+
+    /// CR 608.2d: whether a submitted selection of `chosen` objects satisfies
+    /// this cardinality.
+    pub fn admits(&self, chosen: usize) -> bool {
+        match self {
+            Self::Exactly { count } => usize::try_from(*count).is_ok_and(|count| chosen == count),
+            Self::AnyNumber => true,
+        }
+    }
+
+    /// CR 608.2d + CR 107.1c: whether `eligible` objects admit at least two
+    /// distinct legal selections. An exact count `k` has `C(eligible, k)`
+    /// selections (two or more exactly when `0 < k < eligible`); "any number"
+    /// always has the empty selection plus one per non-empty subset, so a
+    /// single eligible object already offers two answers (none, or it).
+    pub fn has_multiple_selections(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                usize::try_from(*count).is_ok_and(|count| 0 < count && count < eligible)
+            }
+            Self::AnyNumber => eligible >= 1,
+        }
+    }
+
+    /// CR 608.2d: the selection that is the only legal answer — every eligible
+    /// object when an exact count equals the number eligible. "Any number" is
+    /// never forced: the empty selection is always legal (CR 107.1c).
+    pub fn forces_all_eligible(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                eligible > 0 && usize::try_from(*count).is_ok_and(|count| count == eligible)
+            }
+            Self::AnyNumber => false,
+        }
+    }
 }
 
 /// CR 608.2d + CR 101.2: Additional eligibility required before an object may
@@ -24580,6 +24637,18 @@ pub enum Effect {
         /// looked at (private to the ability controller).
         #[serde(default = "default_reveal_public")]
         reveal: bool,
+        /// CR 608.2d: how many `card_filter` cards the choosing player selects.
+        /// `Exactly { count: 1 }` (the default) is the historical post-reveal
+        /// choice of one card from the revealed/looked-at hand. CR 107.1c +
+        /// CR 701.20a: `AnyNumber` ("reveal any number of artifact cards in your
+        /// hand" — Metalworker) makes the selection itself the reveal: only the
+        /// chosen cards are revealed, and zero is a legal choice. Orthogonal to
+        /// `selection` (chosen vs. random) and to `choice_optional` (a "may").
+        #[serde(
+            default = "ObjectSelectionCardinality::single",
+            skip_serializing_if = "ObjectSelectionCardinality::is_single"
+        )]
+        cardinality: ObjectSelectionCardinality,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
@@ -26984,8 +27053,9 @@ pub fn reveal_hand_parks_card_choice(card_filter: &TargetFilter, choice_optional
 pub fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+        Effect::RevealHand { card_filter, choice_optional, cardinality, .. }
+            if *cardinality == ObjectSelectionCardinality::AnyNumber
+                || reveal_hand_parks_card_choice(card_filter, *choice_optional)
     )
 }
 
@@ -36805,6 +36875,13 @@ pub struct AbilityDefinition {
     pub face_down_in_exile: ExileConcealment,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 113.2c + CR 602.5c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. A grant that overwrites an existing
+    /// `granting_object` stamp pushes the overwritten stamp here so a
+    /// re-donated copy stays distinct from a directly granted one.
+    /// Serialized through `AbilityDefinitionRepr` (empty chains omitted)
+    /// and backfilled by `AbilityDefinitionDe` (missing chains default).
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
@@ -36858,7 +36935,42 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
     .is_break()
 }
 
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
+/// CR 605.1a + CR 605.3b + CR 608.2c: the leading instructions of an activated
+/// mana ability whose mana production follows other instructions, split from the
+/// production node. Returns the `Effect::Mana` node, only when every preceding link is unconditional, non-targeting
+/// (CR 115.6) and resolves without a player decision (a counter or life-total
+/// change), so the immediate resolver can run the whole chain in written order
+/// before producing mana. Empowered Autogenerator ("Put a charge counter on this
+/// artifact. Add X mana of any one color, where X is the number of charge
+/// counters on this artifact.") is the canonical shape.
+pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    let mut node = ability_def;
+    let mut preceding = false;
+    loop {
+        if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
+            return preceding.then_some(node);
+        }
+        let choice_free = matches!(
+            node.effect.as_ref(),
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        );
+        if !choice_free
+            || node.condition.is_some()
+            || node.optional
+            || node.multi_target.is_some()
+            || extract_target_filter_from_effect(&node.effect).is_some()
+        {
+            return None;
+        }
+        node = node.sub_ability.as_deref()?;
+        preceding = true;
+    }
+}
+
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the ability adds
 /// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
 /// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
 /// (CR 606.2). Deliberately EXCLUDES the
@@ -36889,23 +37001,61 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
+    //
+    // CR 605.1a: "it could add mana to a player's mana pool when it resolves".
+    // The production is the root `Effect::Mana`, or — CR 107.1c + CR 701.20a —
+    // the `Effect::Mana` immediately after a root "reveal any number of
+    // [filter] cards in your hand" (Metalworker, Sacellum Godspeaker), whose
+    // resolution-time selection the immediate resolver pauses for and resumes
+    // into production. An ability whose production follows any other non-Mana
+    // clause (Empowered Autogenerator: "Put a charge counter on this artifact.
+    // Add X mana ...") also meets CR 605.1a. CR 608.2c: its instructions run in
+    // written order, so the immediate resolver performs that leading chain
+    // (`inline_mana_preamble`) before it produces mana.
     let target_attached = match &*ability_def.effect {
         Effect::Mana { target, .. } => target
             .as_ref()
             .and_then(|r| r.declared_filters().next())
-            .map(|(_, filter)| filter),
+            .is_some(),
+        Effect::RevealHand {
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            ..
+        } => match ability_def.sub_ability.as_deref().map(|sub| &*sub.effect) {
+            Some(Effect::Mana { target, .. }) => {
+                extract_target_filter_from_effect(&ability_def.effect).is_some()
+                    || target
+                        .as_ref()
+                        .and_then(|r| r.declared_filters().next())
+                        .is_some()
+            }
+            _ => return false,
+        },
         // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
         // target only when the shared target-slot authority surfaces one ("you" is a
         // context reference — Doubling Cube).
-        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
-        _ => return false,
+        effect if effect.adds_mana_on_resolution() => {
+            extract_target_filter_from_effect(effect).is_some()
+        }
+        // CR 605.1a + CR 608.2c: a chain of non-targeting, choice-free instructions
+        // that ends in mana production (Empowered Autogenerator); the leading
+        // links were already checked target-free by `inline_mana_preamble`.
+        _ => match inline_mana_preamble(ability_def) {
+            Some(mana) => match &*mana.effect {
+                Effect::Mana { target, .. } => target
+                    .as_ref()
+                    .and_then(|r| r.declared_filters().next())
+                    .is_some(),
+                _ => return false,
+            },
+            None => return false,
+        },
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
     // Reject both the explicit `multi_target` mechanism and the embedded
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
+    if ability_def.multi_target.is_some() || target_attached {
         return false;
     }
     // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
@@ -37116,6 +37266,8 @@ struct AbilityDefinitionRepr<'a> {
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
     granting_object: &'a Option<ObjectIncarnationRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grant_chain: &'a Vec<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -37173,6 +37325,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile,
             granting_object,
+            grant_chain,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -37225,6 +37378,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
+            grant_chain,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -37359,6 +37513,8 @@ struct AbilityDefinitionDe {
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
+    #[serde(default)]
+    grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -37421,6 +37577,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
+            grant_chain: de.grant_chain,
         })
     }
 }
@@ -37775,6 +37932,7 @@ impl AbilityDefinition {
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
+            grant_chain: Vec::new(),
         }
     }
 
@@ -38064,11 +38222,13 @@ pub enum EffectOutcomeSignal {
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
 /// [`AbilityCondition::AbilityUseCountThisTurn`] reads.
 ///
-/// Both tallies are keyed `(source_id, ability_index)` and cleared together at
-/// end-of-turn cleanup; they differ only in which point of an ability's life
-/// increments them. The distinction is rules-visible: an activation that is
-/// countered before it resolves still counts as an activation (CR 602.2a puts
-/// the ability on the stack at announcement) but never counts as a resolution.
+/// The `Resolved` tally is keyed `(source_id, ability_index)` while the
+/// `Activated` tally is keyed by the per-acquisition `AbilityUsageKey`
+/// (CR 602.5c); both clear together at end-of-turn cleanup. They differ only
+/// in which point of an ability's life increments them. The distinction is
+/// rules-visible: an activation that is countered before it resolves still
+/// counts as an activation (CR 602.2a puts the ability on the stack at
+/// announcement) but never counts as a resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AbilityUseTally {
     /// CR 608.2c: times this ability has RESOLVED this turn.
@@ -49974,6 +50134,7 @@ mod tests {
             selection: CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         };
         let json = serde_json::to_string(&effect).unwrap();
         assert!(
