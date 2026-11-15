@@ -1847,7 +1847,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Conductive Current
 - Conundrum Sphinx
 - Convenient Target
-- Corpse Appraiser
 - Corruption of Towashi
 - Cosmic Horror
 - Covenant of Minds
