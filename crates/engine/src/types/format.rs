@@ -1580,7 +1580,8 @@ pub enum DeckSizeOrigin {
     #[default]
     Registry,
     /// The draft session's configured minimum deck size. Admitted only for
-    /// `GameFormat::Limited` with a `Minimum(n)` rule, `n >= 1`.
+    /// a format with a [`GameFormat::draft_session_minimum_floor`] (Limited,
+    /// Commander Draft) on a `Minimum(n)` rule, `n` at or above that floor.
     DraftSession,
 }
 
@@ -1609,7 +1610,7 @@ pub struct FormatConfig {
     /// every payload that predates this field) means the format registry's own
     /// rule, so the built-in gate holds it to the registry's value or option
     /// list. `DraftSession` means a draft session resolved it at configuration
-    /// time; only Limited admits that (see [`DeckSizeOrigin`]).
+    /// time; only Limited and Commander Draft admit that (see [`DeckSizeOrigin`]).
     #[serde(default, skip_serializing_if = "DeckSizeOrigin::is_registry")]
     pub deck_size_origin: DeckSizeOrigin,
     pub singleton: bool,
@@ -1995,8 +1996,10 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
                     .options()
                     .contains(&declared)
                 || (config.deck_size_origin == DeckSizeOrigin::DraftSession
-                    && config.format == GameFormat::Limited
-                    && declared >= 1)
+                    && config
+                        .format
+                        .draft_session_minimum_floor()
+                        .is_some_and(|floor| declared >= floor))
         }
         // Different discriminant: refused outright, never consulted against
         // the option list. This is the arm that makes the magnitude set safe.
@@ -2021,11 +2024,11 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
 
     // deck_size_origin: only Limited may claim a draft session's authority.
     if config.deck_size_origin == DeckSizeOrigin::DraftSession
-        && config.format != GameFormat::Limited
+        && config.format.draft_session_minimum_floor().is_none()
     {
         return Err(format!(
             "FormatConfig.deck_size_origin is DraftSession, but {} is not a draft format — only \
-             Limited deck sizes are configured by a draft session",
+             Limited and Commander Draft deck sizes are configured by a draft session",
             config.format,
         ));
     }
@@ -2844,6 +2847,20 @@ impl GameFormat {
             // rules were never consulted. Phase 1b migrates real callers to
             // read FormatConfig's resolved field instead of this method.
             GameFormat::Custom(_) => DeckCopyLimit::UpTo(1),
+        }
+    }
+
+    /// CR 100.2b: the smallest minimum deck size a draft session may configure
+    /// for this format, or `None` when the format's deck size is never a draft
+    /// session's decision. Limited's minimum is the session's to set (a Cube
+    /// may configure 20 or 50). CR 903.13f(1): Commander Draft decks "must
+    /// contain at least 60 cards", so a Commander Cube may raise its minimum
+    /// but never lower it below the registry's.
+    pub fn draft_session_minimum_floor(self) -> Option<u16> {
+        match self {
+            GameFormat::Limited => Some(1),
+            GameFormat::CommanderDraft => Some(60),
+            _ => None,
         }
     }
 
@@ -4900,16 +4917,16 @@ impl FormatConfig {
     /// [`FormatConfig::validate_for_player_count`] refuses any config that
     /// already claims the session's authority.
     pub fn with_draft_session_minimum(mut self, minimum: u16) -> Result<Self, String> {
-        if self.format != GameFormat::Limited {
+        let Some(floor) = self.format.draft_session_minimum_floor() else {
             return Err(format!(
-                "a draft session configures only Limited deck sizes, not {}",
+                "a draft session configures only Limited and Commander Draft deck sizes, not {}",
                 self.format
             ));
-        }
-        if !matches!(self.deck_size, DeckSizeRule::Minimum(_)) || minimum == 0 {
+        };
+        if !matches!(self.deck_size, DeckSizeRule::Minimum(_)) || minimum < floor {
             return Err(format!(
-                "a draft session's minimum deck size must be at least 1 on Limited's Minimum                  rule, got {minimum} on {:?}",
-                self.deck_size
+                "a draft session's minimum deck size must be at least {floor} on {}'s Minimum                  rule, got {minimum} on {:?}",
+                self.format, self.deck_size
             ));
         }
         self.deck_size = DeckSizeRule::Minimum(minimum);
@@ -8256,8 +8273,8 @@ mod tests {
 
     /// CR 100.2b: the draft session's deck-size authority is conferred only by
     /// `with_draft_session_minimum`; a payload that arrives already claiming it
-    /// is refused by the ingress authority, and the constructor admits Limited
-    /// alone.
+    /// is refused by the ingress authority, and the constructor admits the draft
+    /// formats alone.
     #[test]
     fn draft_session_authority_is_conferred_never_declared() {
         let conferred = FormatConfig::limited()
@@ -8278,6 +8295,19 @@ mod tests {
             .is_err());
         assert!(FormatConfig::limited()
             .with_draft_session_minimum(0)
+            .is_err());
+        // CR 903.13f(1): Commander Draft's session minimum may rise, never
+        // fall below the 60-card floor.
+        let cube = FormatConfig::commander_draft()
+            .with_draft_session_minimum(65)
+            .unwrap();
+        assert_eq!(cube.deck_size, DeckSizeRule::Minimum(65));
+        let round_tripped: FormatConfig =
+            serde_json::from_value(serde_json::to_value(&cube).unwrap()).unwrap();
+        assert_eq!(round_tripped, cube);
+        assert!(cube.validate_for_player_count(4).is_err());
+        assert!(FormatConfig::commander_draft()
+            .with_draft_session_minimum(59)
             .is_err());
     }
 }

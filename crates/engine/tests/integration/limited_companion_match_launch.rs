@@ -1976,3 +1976,318 @@ fn living_wish_cannot_find_a_companion_already_put_into_hand() {
         })
         .is_err());
 }
+
+/// A Commander game 1 taken through the real reveal window with Gyruda revealed as P0's
+/// dedicated companion (even mana values: Plains and a two-mana commander).
+fn commander_state_with_revealed_gyruda() -> GameState {
+    let commander = DeckEntry {
+        card: CardFace {
+            name: "Plain Commander".to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            card_type: CardType {
+                supertypes: vec![engine::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string()],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: vec![land("Plains", 99)],
+            commander: vec![commander.clone()],
+            companion: vec![gyruda_companion()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: vec![land("Plains", 99)],
+            commander: vec![commander],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+    load_deck_into_state(&mut state, &payload);
+    let start = start_game_with_starting_player(&mut state, P0);
+    state.waiting_for = start.waiting_for;
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Reveal(CompanionRevealChoice {
+                name: "Gyruda, Doom of Depths".to_string(),
+                source: CompanionChoiceSource::Dedicated,
+            }),
+        },
+    )
+    .expect("Gyruda is revealed in Commander");
+    state
+}
+
+/// CR 903.11 + CR 702.139d: Commander admits a card from outside the game only through
+/// rules, special actions and effects that specifically bring cards in. Living Wish merely
+/// finds "a card you own from outside the game", which does not function in Commander, so the
+/// revealed Gyruda is not offered to it. The companion special action is the way it enters and
+/// still works there. Paired with `living_wish_finds_the_revealed_limited_companion_and_uses_it_up`,
+/// where the same Wish does find the companion in Limited.
+#[test]
+fn living_wish_does_not_offer_the_revealed_companion_in_commander() {
+    let prepared = commander_state_with_revealed_gyruda();
+    assert!(
+        prepared.players[P0.0 as usize]
+            .companion
+            .as_ref()
+            .is_some_and(
+                |companion| !companion.used && companion.card.card.name == "Gyruda, Doom of Depths"
+            ),
+        "reach guard: Gyruda was revealed and is not yet in hand"
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wish = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Wish", false, LIVING_WISH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config = FormatConfig::commander();
+    runner.state_mut().deck_pools = prepared.deck_pools.clone();
+    runner.state_mut().players[P0.0 as usize].companion =
+        prepared.players[P0.0 as usize].companion.clone();
+
+    let card_id = runner.state().objects[&wish].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: wish,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Living Wish is castable");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("reveal from outside the game");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OutsideGameChoice { .. }
+        ),
+        "Living Wish offers nothing from outside the game in Commander: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: Living Wish resolved"
+    );
+    assert!(
+        !runner.state().objects.values().any(|obj| {
+            obj.owner == P0 && obj.zone == Zone::Hand && obj.name == "Gyruda, Doom of Depths"
+        }),
+        "the wish did not bring the companion into the game"
+    );
+    assert!(runner.state().players[P0.0 as usize]
+        .companion
+        .as_ref()
+        .is_some_and(|companion| !companion.used));
+
+    // CR 702.139d: the special action still brings it in.
+    add_white_mana(&mut runner, 3);
+    assert!(can_activate_companion(runner.state(), P0));
+    runner
+        .act(GameAction::CompanionToHand)
+        .expect("the companion special action works in Commander");
+    assert!(runner.state().objects.values().any(|obj| {
+        obj.owner == P0 && obj.zone == Zone::Hand && obj.name == "Gyruda, Doom of Depths"
+    }));
+}
+
+/// CR 100.2b + CR 702.139b + CR 903.13f(1): a Commander Cube configured for 65 launches its
+/// match under that minimum, so the pregame reveal offers Yorion at 85 cards (twenty over) and
+/// not at 84 or at the registry's 80. A launch under the registry minimum keeps the 80 threshold
+/// (paired control), so the single configured minimum is what moves it.
+#[test]
+fn commander_cube_pregame_offers_yorion_at_the_session_configured_minimum() {
+    let commander = DeckEntry {
+        card: CardFace {
+            name: "Draft Commander".to_string(),
+            card_type: CardType {
+                supertypes: vec![engine::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string()],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let offered_at = |config: FormatConfig, deck_size: u32| {
+        let main_deck = vec![commander.clone(), land("Plains", deck_size - 1)];
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: main_deck.clone(),
+                commander: vec![commander.clone()],
+                companion: vec![yorion_from_oracle()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck,
+                commander: vec![commander.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(config, 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        matches!(
+            &start.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0
+                    && eligible_companions.iter().any(|c| c.name == "Yorion, Sky Nomad")
+        )
+    };
+    let cube = || {
+        FormatConfig::commander_draft()
+            .with_draft_session_minimum(65)
+            .expect("a Commander Cube may configure a minimum above 60")
+    };
+    for (deck_size, offered) in [(85u32, true), (84, false), (80, false)] {
+        assert_eq!(
+            offered_at(cube(), deck_size),
+            offered,
+            "Cube minimum 65, {deck_size}-card deck"
+        );
+    }
+    for (deck_size, offered) in [(80u32, true), (79, false)] {
+        assert_eq!(
+            offered_at(FormatConfig::commander_draft(), deck_size),
+            offered,
+            "registry minimum 60, {deck_size}-card deck"
+        );
+    }
+}
+
+/// CR 702.139a: Limited admission refuses a printed companion whose condition the starting deck
+/// does not fulfil. Jegantha ("no card repeats a mana symbol") counts hybrid symbols, so Boros
+/// Reckoner's {R/W}{R/W}{R/W} fails it; Zirda ("each permanent card has an activated ability")
+/// covers land cards, so Glacial Chasm (no activated ability) fails it. Each has a legal control:
+/// non-repeating hybrid symbols, and a deck of basic lands (CR 305.6 intrinsic mana ability).
+#[test]
+fn limited_admission_checks_jegantha_hybrid_symbols_and_zirda_land_cards() {
+    use engine::types::mana::ManaCostShard;
+    let companion = |name: &str, condition| DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            keywords: vec![Keyword::Companion(condition)],
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let spell_with = |name: &str, shards: Vec<ManaCostShard>| DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::Cost { shards, generic: 0 },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let utility_land = DeckEntry {
+        card: CardFace {
+            name: "Glacial Chasm".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Land],
+                subtypes: vec![],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let entries = [
+        companion(
+            "Jegantha, the Wellspring",
+            CompanionCondition::NoRepeatedManaSymbols,
+        ),
+        companion(
+            "Zirda, the Dawnwaker",
+            CompanionCondition::PermanentsHaveActivatedAbilities,
+        ),
+        spell_with(
+            "Boros Reckoner",
+            vec![
+                ManaCostShard::RedWhite,
+                ManaCostShard::RedWhite,
+                ManaCostShard::RedWhite,
+            ],
+        ),
+        spell_with(
+            "Distinct Hybrids",
+            vec![ManaCostShard::RedWhite, ManaCostShard::GreenWhite],
+        ),
+        utility_land,
+        land("Plains", 1),
+    ];
+    let export: serde_json::Map<String, serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.card.name.to_lowercase(),
+                serde_json::to_value(&entry.card).expect("CardFace serializes"),
+            )
+        })
+        .collect();
+    let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("synthetic export parses");
+
+    let cases: [(&str, &str, bool); 4] = [
+        ("Jegantha, the Wellspring", "Boros Reckoner", false),
+        ("Jegantha, the Wellspring", "Distinct Hybrids", true),
+        ("Zirda, the Dawnwaker", "Glacial Chasm", false),
+        ("Zirda, the Dawnwaker", "Plains", true),
+    ];
+    for (companion_name, odd_card, compatible) in cases {
+        let mut main_deck = vec![odd_card.to_string()];
+        main_deck.extend(vec!["Plains".to_string(); 39]);
+        let request: DeckCompatibilityRequest = serde_json::from_value(serde_json::json!({
+            "main_deck": main_deck,
+            "companion": [companion_name],
+            "selected_format": "Limited",
+        }))
+        .expect("request deserializes");
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(result.unknown_cards.is_empty(), "every card resolves");
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(compatible),
+            "{companion_name} with {odd_card}: {:?}",
+            result.selected_format_reasons
+        );
+        assert_eq!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("not a legal companion")),
+            !compatible,
+            "{companion_name} with {odd_card}: {:?}",
+            result.selected_format_reasons
+        );
+    }
+}

@@ -6,7 +6,7 @@ import type { FormatConfig } from "../adapter/types";
  * "minimum deck size" rule, notably Yorion's companion condition.
  *
  * The minimum is NEVER a field of the format payload and never a plain
- * parameter an ordinary launch can pass. `limitedFormatConfigForSession` (called
+ * parameter an ordinary launch can pass. `draftSessionFormatConfig` (called
  * only by the accepted draft's own match launch, with that draft's resolved
  * `min_deck_size`) registers the minimum against the exact config object it
  * returns; the adapter reads it back with `draftSessionAuthorityOf` and starts
@@ -16,7 +16,7 @@ import type { FormatConfig } from "../adapter/types";
  */
 const sessionMinimums = new WeakMap<FormatConfig, number>();
 
-export function limitedFormatConfigForSession(
+export function draftSessionFormatConfig(
   base: FormatConfig,
   sessionMinDeckSize: number | null | undefined,
 ): FormatConfig {

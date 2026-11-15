@@ -66,7 +66,7 @@ import {
   loadGameStrict,
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
-import { limitedFormatConfigForSession } from "../services/draftFormatConfig";
+import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import {
@@ -1788,7 +1788,7 @@ export function GameProvider({
       // minimum deck size, recorded on the run at launch.
       const draftMatchFormatConfig = (run: DraftRunState | null) =>
         formatConfig && run
-          ? limitedFormatConfigForSession(formatConfig, run.min_deck_size)
+          ? draftSessionFormatConfig(formatConfig, run.min_deck_size)
           : formatConfig;
       const startDraftDeck = async (raw: string) => {
         try {

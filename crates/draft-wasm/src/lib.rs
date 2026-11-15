@@ -6140,50 +6140,64 @@ mod create_multiplayer_draft_tests {
 
     /// CR 702.139a + CR 903.5a: a Commander Draft pod submits the commander
     /// INSIDE its main list and again as the designation, so the starting deck
-    /// holds that one card once. At the 60-card minimum Yorion needs 80 cards:
-    /// a 79-card deck (commander included) is refused, an 80-card deck admitted.
+    /// holds that one card once. Yorion needs twenty cards over the pod's
+    /// minimum: 80 at the registry's 60, and 85 in a Commander Cube configured
+    /// for 65 (CR 903.13f(1) lets a Cube raise the minimum). One card short is
+    /// refused and the threshold itself admitted, at each minimum.
     #[test]
     fn commander_draft_submission_counts_the_commander_once_for_yorion() {
         use engine::types::card::CardFace;
         use engine::types::keywords::{CompanionCondition, Keyword};
-        clear_state();
-        let mut faces: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
-        let mut add = |face: CardFace| {
-            faces.insert(
-                face.name.to_lowercase(),
-                serde_json::to_value(&face).unwrap(),
-            );
-        };
-        for i in 0..80 {
+        for minimum in [60usize, 65] {
+            clear_state();
+            let mut faces: std::collections::BTreeMap<String, serde_json::Value> =
+                Default::default();
+            let mut add = |face: CardFace| {
+                faces.insert(
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).unwrap(),
+                );
+            };
+            let threshold = minimum + 20;
+            for i in 0..threshold {
+                add(CardFace {
+                    name: format!("Seat 0 Card {i}"),
+                    ..CardFace::default()
+                });
+            }
+            let yorion = format!("Seat 0 Card {threshold}");
             add(CardFace {
-                name: format!("Seat 0 Card {i}"),
+                name: yorion.clone(),
+                keywords: vec![Keyword::Companion(CompanionCondition::MinDeckSizeOver(20))],
                 ..CardFace::default()
             });
+            let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+            CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+            granting_commander_pod(0, threshold + 1);
+            session_cell::with_installed_mut(|session| session.config.min_deck_size = minimum);
+            let commanders = json(&["Seat 0 Card 0".to_string()]);
+
+            let error = submit_deck_inner(
+                &json(&seat_deck(0, threshold - 1)),
+                &commanders,
+                Some(&yorion),
+            )
+            .expect_err("one card short of twenty over the minimum");
+            assert!(
+                error.contains("not a legal companion"),
+                "minimum {minimum}: {error}"
+            );
+            assert_eq!(
+                submitted_companion(0),
+                None,
+                "a refused deck is not recorded"
+            );
+
+            submit_deck_inner(&json(&seat_deck(0, threshold)), &commanders, Some(&yorion))
+                .unwrap_or_else(|e| panic!("minimum {minimum}: twenty over is admitted: {e}"));
+            assert_eq!(submitted_companion(0), Some(Some(yorion.clone())));
+            clear_state();
         }
-        add(CardFace {
-            name: "Seat 0 Card 80".to_string(),
-            keywords: vec![Keyword::Companion(CompanionCondition::MinDeckSizeOver(20))],
-            ..CardFace::default()
-        });
-        let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
-        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
-        granting_commander_pod(0, 81);
-        let commanders = json(&["Seat 0 Card 0".to_string()]);
-        let yorion = "Seat 0 Card 80";
-
-        let error = submit_deck_inner(&json(&seat_deck(0, 79)), &commanders, Some(yorion))
-            .expect_err("79 cards is nineteen over the 60-card minimum");
-        assert!(error.contains("not a legal companion"), "{error}");
-        assert_eq!(
-            submitted_companion(0),
-            None,
-            "a refused deck is not recorded"
-        );
-
-        submit_deck_inner(&json(&seat_deck(0, 80)), &commanders, Some(yorion))
-            .expect("80 cards is twenty over the 60-card minimum");
-        assert_eq!(submitted_companion(0), Some(Some(yorion.to_string())));
-        clear_state();
     }
 
     /// CR 702.139a/b: the generic `apply_draft_action` export records a deck too, so an

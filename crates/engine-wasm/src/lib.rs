@@ -2090,11 +2090,11 @@ pub fn initialize_game(
 }
 
 /// Initialize the match of an ACCEPTED draft (CR 100.2b): the only entry that
-/// confers a draft session's minimum deck size on a Limited game. The generic
+/// confers a draft session's minimum deck size on a Limited or Commander Draft game. The generic
 /// initializers take no minimum at all, so an ordinary launch cannot grant
 /// itself the session's deck-size authority; the declared format config must
 /// still validate as an ordinary game, and `FormatConfig::
-/// with_draft_session_minimum` admits Limited only.
+/// with_draft_session_minimum` admits Limited and Commander Draft only.
 #[wasm_bindgen]
 pub fn initialize_draft_match_game(
     deck_data: JsValue,
@@ -10246,6 +10246,51 @@ mod deck_list_seat_validation_tests {
         assert!(init_format_config(&FormatConfig::standard(), Some(20)).is_err());
         assert!(draft_match_config(0).is_err());
         assert!(draft_match_config(u32::from(u16::MAX) + 1).is_err());
+    }
+
+    /// CR 100.2b + CR 903.13f(1): a Commander Cube's configured minimum is
+    /// conferred by the draft-match initializer on Commander Draft, never below
+    /// the format's 60-card floor, and never by a generic payload. The conferred
+    /// minimum is the one admission's companion check reads, so it agrees with
+    /// the session's submission check.
+    #[test]
+    fn commander_cube_session_minimum_is_conferred_above_the_registry_floor() {
+        let launch = |minimum| {
+            resolve_initialize_format_config(
+                Some(FormatConfig::commander_draft()),
+                4,
+                Some(minimum),
+            )
+        };
+        let config = launch(65).expect("a Commander Cube may raise the minimum");
+        assert_eq!(
+            config.deck_size,
+            engine::types::format::DeckSizeRule::Minimum(65)
+        );
+        assert_eq!(
+            engine::game::deck_validation::DeckCompatibilityRequest::default()
+                .companion_min_deck_size(&config),
+            65,
+            "admission measures the session's minimum, not the registry's 60"
+        );
+        let restored: FormatConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored, config, "engine-produced state round-trips");
+        assert!(launch(60).is_ok());
+        assert!(
+            launch(59).is_err(),
+            "a Cube cannot lower Commander Draft below CR 903.13f(1)'s 60"
+        );
+        assert!(
+            init_format_config(&config, None).is_err(),
+            "a generic payload cannot claim the session's authority"
+        );
+        let mut hand_edited = FormatConfig::commander_draft();
+        hand_edited.deck_size = engine::types::format::DeckSizeRule::Minimum(65);
+        assert!(
+            init_format_config(&hand_edited, None).is_err(),
+            "an undeclared Commander Draft minimum is refused"
+        );
     }
 
     #[test]

@@ -2398,7 +2398,7 @@ pub fn is_tiny_leader_eligible(face: &CardFace) -> bool {
         || (is_legendary && (is_creature || is_vehicle || is_spacecraft_with_pt || is_planeswalker))
 }
 
-fn basic_land_type_colors(face: &CardFace) -> Vec<ManaColor> {
+pub(crate) fn basic_land_type_colors(face: &CardFace) -> Vec<ManaColor> {
     let mut colors = Vec::new();
     for subtype in &face.card_type.subtypes {
         let color = match subtype.as_str() {

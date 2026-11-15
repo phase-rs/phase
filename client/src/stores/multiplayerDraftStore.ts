@@ -110,7 +110,7 @@ import type {
 } from "./draftStore";
 import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
-import { limitedFormatConfigForSession } from "../services/draftFormatConfig";
+import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -2670,7 +2670,11 @@ export const useMultiplayerDraftStore = create<
         host.peer,
         host.onGuestConnected,
         launchView.seats.length,
-        FORMAT_DEFAULTS.CommanderDraft,
+        // CR 100.2b + CR 702.139b + CR 903.13f(1): the pod's own resolved minimum
+        // (a Commander Cube may raise it above 60), the same one submission
+        // validated the deck against, so admission and the pregame companion
+        // reveal measure Yorion against it too.
+        draftSessionFormatConfig(FORMAT_DEFAULTS.CommanderDraft, launchView.min_deck_size),
         // ENGINE-OWNED: read the view's config, never construct one. A frontend
         // inventing a `MatchConfig` is what the superseded `&match=bo1` URL did
         // wrong.
@@ -3086,7 +3090,7 @@ export const useMultiplayerDraftStore = create<
     // CR 100.2b + CR 702.139b: the match runs under the pod's own resolved
     // minimum deck size (a Cube may configure other than 40), which the
     // engine's "minimum deck size" companion condition reads.
-    const matchFormatConfig = limitedFormatConfigForSession(
+    const matchFormatConfig = draftSessionFormatConfig(
       DRAFT_MATCH_FORMAT_CONFIG,
       get().view?.min_deck_size,
     );

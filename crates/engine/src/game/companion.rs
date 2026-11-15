@@ -155,8 +155,12 @@ pub fn validate_companion_condition_with_min_deck_size(
             total >= (min_deck_size as u32) + over
         }
 
+        // CR 702.139a: "each permanent card in your starting deck has an activated
+        // ability" covers land cards too. A land qualifies through a printed
+        // activated ability or the intrinsic mana ability of a basic land type
+        // (CR 305.6); a land with neither (Glacial Chasm) fails the condition.
         CompanionCondition::PermanentsHaveActivatedAbilities => main_deck.iter().all(|entry| {
-            if !is_permanent(&entry.card) || is_land(&entry.card) {
+            if !is_permanent(&entry.card) {
                 return true;
             }
             entry
@@ -164,31 +168,24 @@ pub fn validate_companion_condition_with_min_deck_size(
                 .abilities
                 .iter()
                 .any(|a| a.kind == crate::types::ability::AbilityKind::Activated)
+                || (is_land(&entry.card)
+                    && !super::deck_validation::basic_land_type_colors(&entry.card).is_empty())
         }),
     }
 }
 
-/// CR 702.139 (Jegantha): Check if a card has more than one of the same mana symbol.
+/// CR 702.139a (Jegantha): whether a card's mana cost repeats a mana symbol.
+/// Every symbol counts, not only the five colors: a hybrid symbol is one symbol,
+/// so {R/W}{R/W}{R/W} (Boros Reckoner) repeats it, as do {X}{X}, {C}{C}, and
+/// repeated Phyrexian or snow symbols (Wizards' Ikoria release notes). The
+/// generic number is a single symbol per cost and cannot repeat.
 fn has_repeated_mana_symbols(face: &CardFace) -> bool {
     let shards = match &face.mana_cost {
         crate::types::mana::ManaCost::Cost { shards, .. } => shards,
         _ => return false,
     };
-    let colored: Vec<&ManaCostShard> = shards
-        .iter()
-        .filter(|s| {
-            matches!(
-                s,
-                ManaCostShard::White
-                    | ManaCostShard::Blue
-                    | ManaCostShard::Black
-                    | ManaCostShard::Red
-                    | ManaCostShard::Green
-            )
-        })
-        .collect();
-    let unique: HashSet<&&ManaCostShard> = colored.iter().collect();
-    colored.len() != unique.len()
+    let unique: HashSet<&ManaCostShard> = shards.iter().collect();
+    shards.len() != unique.len()
 }
 
 // ── Pre-game Reveal Flow ────────────────────────────────────────────────
@@ -625,10 +622,22 @@ pub(super) fn advance_companion_reveal(
 /// the game ([`bring_revealed_companion_into_game`]); both set `used`. The
 /// single authority for what a player's companion contributes to "outside the
 /// game".
+///
+/// CR 903.11 + CR 702.139d: a Commander-family game admits a card from outside
+/// the game only through rules, special actions, and effects that specifically
+/// bring cards in, and the companion special action is the sole way this card
+/// enters. An effect that merely finds "a card you own from outside the game"
+/// (Living Wish) does not function there (Commander rule 10), so in that slot
+/// the companion contributes nothing to such effects. The special action never
+/// reads this function (`validate_companion_to_hand_action`), so it is
+/// unaffected.
 pub(crate) fn outside_game_companion(
     state: &GameState,
     player: PlayerId,
 ) -> Option<&CompanionInfo> {
+    if state.format_config.companion_slot() == CompanionSlot::CommanderFamily {
+        return None;
+    }
     state
         .players
         .iter()
@@ -1225,6 +1234,87 @@ mod tests {
             &CompanionCondition::NoRepeatedManaSymbols,
             &deck
         ));
+    }
+
+    fn costed(name: &str, shards: Vec<crate::types::mana::ManaCostShard>) -> DeckEntry {
+        DeckEntry {
+            card: CardFace {
+                name: name.to_string(),
+                mana_cost: ManaCost::Cost { shards, generic: 0 },
+                card_type: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 1,
+        }
+    }
+
+    /// CR 702.139a (Jegantha): every mana symbol counts, so a repeated hybrid,
+    /// {X} or {C} symbol fails the condition, while two distinct hybrid symbols
+    /// and a hybrid beside its own colour (different symbols) pass.
+    #[test]
+    fn no_repeated_mana_symbols_counts_hybrid_x_and_colorless_symbols() {
+        use crate::types::mana::ManaCostShard::{Colorless, Red, RedWhite, X};
+        let passes = |shards| {
+            validate_companion_condition(
+                &CompanionCondition::NoRepeatedManaSymbols,
+                &[costed("Probe", shards)],
+            )
+        };
+        assert!(
+            !passes(vec![RedWhite, RedWhite, RedWhite]),
+            "Boros Reckoner"
+        );
+        assert!(!passes(vec![X, X, Red]), "{{X}}{{X}}{{R}}");
+        assert!(!passes(vec![Colorless, Colorless]));
+        assert!(
+            passes(vec![RedWhite, Red]),
+            "a hybrid is not its own colour"
+        );
+        assert!(passes(vec![
+            RedWhite,
+            crate::types::mana::ManaCostShard::GreenWhite
+        ]));
+        assert!(passes(vec![X, Red]));
+    }
+
+    /// CR 702.139a + CR 305.6 (Zirda): a land card is a permanent card, so it
+    /// needs an activated ability: a basic land type's intrinsic mana ability
+    /// or a printed one. A utility land with neither fails.
+    #[test]
+    fn permanents_have_activated_abilities_covers_land_cards() {
+        let land_with = |name: &str, subtypes: Vec<&str>| DeckEntry {
+            card: CardFace {
+                name: name.to_string(),
+                card_type: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: subtypes.into_iter().map(str::to_string).collect(),
+                },
+                ..Default::default()
+            },
+            count: 1,
+        };
+        let verdict = |land| {
+            validate_companion_condition(
+                &CompanionCondition::PermanentsHaveActivatedAbilities,
+                &[land],
+            )
+        };
+        assert!(verdict(land_with("Plains", vec!["Plains"])), "CR 305.6");
+        assert!(!verdict(land_with("Glacial Chasm", vec![])));
+        let mut tapland = land_with("Evolving Wilds", vec![]);
+        tapland
+            .card
+            .abilities
+            .push(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::unimplemented("probe", "probe"),
+            ));
+        assert!(verdict(tapland), "a printed activated ability qualifies");
     }
 
     #[test]
