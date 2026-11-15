@@ -877,6 +877,101 @@ pub(crate) fn finalize_copied_token(
     resolve_predefined_token_display(state, copy_source_id, token_id);
 }
 
+/// CR 614.6 + CR 111.1 + CR 707.2: deliver a copy batch whose entry an applied
+/// replacement sent to `zone` instead of the battlefield (Hallowed Moonlight:
+/// "exile it instead"). Each token is created in `zone` from its copied values
+/// and its creation is published exactly as a battlefield creation is (the
+/// first-creation set, the created-token ledger, `TokenCreated`,
+/// `last_created_token_ids`), but nothing of the battlefield entry happens:
+/// no entry counters, abilities, attacking, attachment or delayed sacrifice. The
+/// token ceases to exist at the next state-based action check (CR 111.7,
+/// CR 704.5d).
+///
+/// Copy exceptions that cannot be stamped before entry (entry counters, dynamic
+/// power or toughness) describe the permanent on the battlefield, so the token
+/// created in `zone` is built from the copied values and the stampable
+/// exceptions only, and its CR 733 birth record says so.
+#[allow(clippy::too_many_arguments)]
+fn apply_redirected_copy_batch(
+    state: &mut GameState,
+    token_owner: crate::types::player::PlayerId,
+    copy: CopyTokenSpec,
+    enter_tapped: EtbTapState,
+    zone: Zone,
+    final_count: u32,
+    initial_created_ids: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> CopyTokenApplyStatus {
+    let mut created_ids = initial_created_ids;
+    created_ids.reserve(final_count as usize);
+    let name = copy.values.name.clone();
+    let body_modifications = if copy.additional_modifications.is_empty()
+        || !copy_token_modifications_are_liminal_immediate(&copy.additional_modifications)
+    {
+        ResolvedCopyBodyModifications::NoExceptions
+    } else {
+        ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: state.all_creature_types.clone(),
+        }
+    };
+    for _ in 0..final_count {
+        let token_id = zones::create_object(state, CardId(0), token_owner, name.clone(), zone);
+        let entry_timestamp = state.next_timestamp();
+        let resulting_tapped = enter_tapped.resolve(copy.tapped);
+        let turn_number = state.turn_number;
+        let created_reference = state.objects.get_mut(&token_id).map(|token| {
+            super::token::materialize_token_copy_body(
+                token,
+                &copy,
+                &body_modifications,
+                turn_number,
+                entry_timestamp,
+                resulting_tapped,
+            );
+            ObjectIncarnationRef::from_object(token)
+        });
+        if let Some(object) = created_reference {
+            let cause = state.current_or_begin_rules_execution_node();
+            let command = ResolvedTokenCreationCommand {
+                object,
+                owner: token_owner,
+                entry_timestamp,
+                entry_turn: turn_number,
+                body: ResolvedTokenBody::Copy {
+                    copy: Box::new(copy.clone()),
+                    modifications: body_modifications.clone(),
+                },
+                resulting_tapped,
+                entry_choices: Vec::new(),
+                resulting_next_object_id: state.next_object_id,
+                entry_zone: Some(zone),
+                cause,
+            };
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved copy-token creation must have a live journal cause");
+        }
+        super::token::publish_redirected_token_creation(
+            state,
+            token_id,
+            zone,
+            name.clone(),
+            copy.source_id,
+            events,
+        );
+        created_ids.push(token_id);
+        state.last_created_token_ids = created_ids.clone();
+    }
+    state.last_created_token_ids = created_ids.clone();
+    CopyTokenApplyStatus {
+        created_ids,
+        completion: CopyTokenApplyCompletion::Completed,
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement(
     state: &mut GameState,
@@ -895,6 +990,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         enter_with_counters,
         final_count,
         Vec::new(),
+        None,
         events,
     )
 }
@@ -908,6 +1004,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
     final_count: u32,
     initial_created_ids: Vec<ObjectId>,
+    redirected_to: Option<Zone>,
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
     // CR 800.4b + CR 707.2: a token copy is a created token like any other; when
@@ -920,6 +1017,21 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             created_ids: initial_created_ids,
             completion: CopyTokenApplyCompletion::Completed,
         };
+    }
+    // CR 614.6 + CR 111.1: an applied replacement sent this batch's entry
+    // elsewhere (a non-liminal batch: a liminal one is asked at each entrant's
+    // `TokenEntry`). The tokens are created in that zone and never enter.
+    if let Some(zone) = redirected_to {
+        return apply_redirected_copy_batch(
+            state,
+            token_owner,
+            copy,
+            enter_tapped,
+            zone,
+            final_count,
+            initial_created_ids,
+            events,
+        );
     }
     let CopyTokenSpec {
         mut values,
@@ -984,22 +1096,14 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     )
     .map(|(def, counter_type, count)| (def.clone(), counter_type, count))
     .collect();
-    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> = intrinsic
-        .iter()
-        .cloned()
-        .chain(
-            own_entries
-                .iter()
-                .map(|(_, counter_type, count)| (counter_type.clone(), *count)),
-        )
-        .chain(enter_with_counters.iter().cloned())
-        .collect();
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
-    let liminal_immediate =
-        copy_token_modifications_are_liminal_immediate(&additional_modifications)
-            && etb_counters.is_empty();
+    let liminal_immediate = copy_batch_enters_through_liminal_entry(
+        &values,
+        &additional_modifications,
+        &enter_with_counters,
+    );
     // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
     // resolve against. Loop-invariant, and cloned once so the per-token CR
     // 303.4f/g projection below can be built while `state` is borrowed.
@@ -2024,6 +2128,7 @@ pub(crate) fn resume_copy_token_batch_remainder(
         enter_with_counters,
         remaining_count,
         initial_created_ids,
+        None,
         events,
     );
     // The owner neither appears nor drains inside this continuation (the
@@ -2473,6 +2578,35 @@ fn apply_token_modifications(
         }
     }
     true
+}
+
+/// CR 614.12 + CR 614.1c: whether every token of a copy batch enters through its
+/// own liminal `TokenEntry` — the seam where the entrant's own as-enters
+/// replacements (Phyrexian Metamorph's "enter as a copy") are discovered and
+/// where every other battlefield-entry replacement is consulted for that entrant
+/// (CR 616.1c orders an as-enters copy before them). The single authority both
+/// `apply_copy_token_after_replacement_with_created_ids` (which builds the
+/// liminal entrant) and the batch-level replacement matcher read: a batch that
+/// enters this way is not asked the entry question a second time at its
+/// `CreateToken` proposal, which has no entrant to be a copy yet.
+///
+/// Every copy exception must be stampable before entry (CR 707.9b) and the copy
+/// must enter with no counters (the intrinsic loyalty, its own "enters with"
+/// replacements, and the creating effect's).
+pub(crate) fn copy_batch_enters_through_liminal_entry(
+    values: &CopiableValues,
+    additional_modifications: &[ContinuousModification],
+    enter_with_counters: &[(crate::types::counter::CounterType, u32)],
+) -> bool {
+    let loyalty = copy_starting_loyalty_override(additional_modifications).or(values.loyalty);
+    copy_token_modifications_are_liminal_immediate(additional_modifications)
+        && enter_with_counters.is_empty()
+        && crate::game::printed_cards::intrinsic_face_counters(loyalty, None).is_empty()
+        && crate::game::printed_cards::self_etb_counter_replacement_entries(
+            &values.replacement_definitions,
+        )
+        .next()
+        .is_none()
 }
 
 /// CR 707.2 + CR 707.9: classify copy exceptions that can be stamped into a
@@ -7074,6 +7208,7 @@ mod tests {
             Vec::new(),
             1,
             Vec::new(),
+            None,
             &mut events,
         );
         assert!(matches!(

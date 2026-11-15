@@ -2450,8 +2450,21 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
         ProposedEvent::CreateToken {
             count,
             redirected_to: None,
+            copy,
+            spec,
             ..
         } if *count > 0
+            // CR 614.12 + CR 616.1c: a copy batch whose tokens enter through their
+            // own liminal `TokenEntry` is asked the entry question there, once the
+            // entrant exists and its own as-enters copy has been chosen; at this
+            // batch-level proposal the entrant is not yet what it will enter as.
+            && !copy.as_deref().is_some_and(|copy| {
+                crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
+                    &copy.values,
+                    &copy.additional_modifications,
+                    &spec.enter_with_counters,
+                )
+            })
     )
 }
 

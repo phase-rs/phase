@@ -30,16 +30,20 @@ use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateR
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     AbilityCost, AbilityKind, ContinuousModification, Duration, Effect, FilterProp, TargetFilter,
+    TargetRef,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::{DebugCardCreationKind, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
@@ -1215,4 +1219,236 @@ fn hallowed_moonlight_redirects_a_debug_created_creature_token() {
         1,
         "the raw placement still puts the token on the battlefield"
     );
+}
+
+/// F1 (CR 733 journal + save/reopen). The redirected creation journals its birth in the
+/// zone it was created in, replays against the captured predecessor to the same
+/// zone-change record the live creation made, and a saved-and-reopened game continues:
+/// the next token creation works and is observed.
+#[test]
+fn redirected_token_creation_replays_and_survives_save_reopen() {
+    let mut scenario = base_scenario();
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let soldier = add_instant(&mut scenario, P0, "Make Soldier", MAKE_SOLDIER);
+    let treasure = add_instant(&mut scenario, P0, "Make Treasure", MAKE_TREASURE);
+    let mut runner = scenario.build();
+    cast_hallowed(&mut runner, hallowed);
+
+    let committed = runner.cast(soldier).commit();
+    let pre_state = committed.state().clone();
+    let window = pre_state.resolved_rules_journal.entries().len();
+    let outcome = committed.resolve();
+    let state = outcome.state().clone();
+    let token_id = created_tokens_named(outcome.events(), "Soldier")[0];
+
+    let commands: Vec<ResolvedRulesCommand> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(window)
+        .filter_map(|entry| entry.command.clone())
+        .collect();
+    let births: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::TokenCreation(birth) if birth.object.object_id == token_id => {
+                Some(birth.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births.len(), 1, "one journaled birth");
+    assert_eq!(births[0].entry_zone, Some(Zone::Exile), "born in exile");
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            ResolvedRulesCommand::ObjectCease(cease) if cease.object.object_id == token_id
+                && cease.expected_zone == Zone::Exile
+        )),
+        "the exiled token's cease-to-exist is journaled from exile"
+    );
+
+    // Replay the birth and the cease against the captured predecessor.
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &births[0])
+        .expect("the redirected birth replays");
+    assert_eq!(replay.objects[&token_id].zone, Zone::Exile);
+    assert!(
+        !replay.battlefield.contains(&token_id),
+        "replay never puts the redirected token on the battlefield"
+    );
+    let live_record = state
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == token_id)
+        .expect("the live creation recorded its zone change");
+    assert_eq!(live_record.to_zone, Zone::Exile);
+    let replayed_record = replay
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == token_id)
+        .expect("replay records the birth");
+    assert_eq!(
+        replayed_record, live_record,
+        "the replayed record equals the live one"
+    );
+    for command in &commands {
+        if let ResolvedRulesCommand::ObjectCease(cease) = command {
+            if cease.object.object_id == token_id {
+                engine::game::zones::apply_resolved_object_cease(&mut replay, cease)
+                    .expect("the cease replays from exile");
+            }
+        }
+    }
+    assert!(
+        !replay.objects.contains_key(&token_id),
+        "replayed token ceased"
+    );
+
+    // Save, reopen and take the next action.
+    let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
+        .expect("state serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("restored state is publishable");
+    let mut reopened = GameRunner::from_state(restored);
+    let outcome = reopened.cast(treasure).resolve();
+    assert_settled(outcome.state(), "after save/reopen");
+    assert_eq!(
+        battlefield_tokens_named(outcome.state(), "Treasure").len(),
+        1,
+        "the reopened game keeps resolving token creations"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F2 — a copy batch's entrant gets its own as-enters copy choice before the redirect.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text of Phyrexian Metamorph (Scryfall), minus its reminder text.
+const PHYREXIAN_METAMORPH: &str = "You may have this creature enter as a copy of any artifact \
+or creature on the battlefield, except it's an artifact in addition to its other types.";
+
+/// What a Metamorph-token creation went through: prompts in order, then the final state.
+struct VatRun {
+    prompts: Vec<String>,
+    runner: GameRunner,
+}
+
+/// DECLARED SYNTHETIC stand-in for Mimic Vat ("Create a token that's a copy of a card
+/// exiled with this artifact"; its exile-link plumbing is not what is under test): a
+/// spell that creates a token that's a copy of target artifact, aimed at P0's Phyrexian
+/// Metamorph (an artifact creature carrying the printed enter-as-a-copy replacement).
+/// P0 has, when `moonlight`, resolved Hallowed Moonlight; an Ornate Trinket (noncreature
+/// artifact) and Grizzly Bears (creature) are the copy models. The Metamorph token's
+/// as-enters copy choice is answered with `model` (`None` declines the copy).
+fn run_vat(moonlight: bool, model: Option<&str>) -> VatRun {
+    let mut scenario = base_scenario();
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let copy_artifact = add_instant(&mut scenario, P0, "Copy Artifact", COPY_ARTIFACT);
+    let trinket = scenario.add_artifact_from_oracle(P0, TRINKET, "").id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let metamorph = scenario
+        .add_creature_from_oracle(P0, "Phyrexian Metamorph", 2, 2, PHYREXIAN_METAMORPH)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+        .id();
+    let mut runner = scenario.build();
+    if moonlight {
+        cast_hallowed(&mut runner, hallowed);
+    }
+    let mut prompts = Vec::new();
+    runner
+        .cast(copy_artifact)
+        .target_object(metamorph)
+        .resolve();
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                prompts.push("CopyTargetChoice".to_string());
+                let target = model.map(|name| match name {
+                    "trinket" => trinket,
+                    _ => bears,
+                });
+                if let Some(target) = target {
+                    assert!(valid_targets.contains(&target), "the model is offered");
+                }
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: target.map(TargetRef::Object),
+                    })
+                    .expect("answer the copy choice");
+            }
+            WaitingFor::ReplacementChoice {
+                candidates, kind, ..
+            } => {
+                prompts.push(format!(
+                    "ReplacementChoice({kind:?}: {:?})",
+                    candidates
+                        .iter()
+                        .map(|c| format!("{}: {}", c.source_name, c.description))
+                        .collect::<Vec<_>>()
+                ));
+                let index = candidates
+                    .iter()
+                    .position(|c| {
+                        c.source_name == "Phyrexian Metamorph" && model.is_some()
+                            || c.source_name != "Phyrexian Metamorph" && model.is_none()
+                    })
+                    .unwrap_or(0);
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("answer the replacement choice");
+            }
+            other => panic!("unexpected prompt {other:?} after {prompts:?}"),
+        }
+    }
+    VatRun { prompts, runner }
+}
+
+/// F2 (controls). CR 614.12 + CR 616.1c: a Metamorph copy token's own as-enters copy is
+/// offered at the token's liminal entry — the batch-level creation consult no longer
+/// asks the entry question for it — and without Hallowed Moonlight a copy of a
+/// noncreature artifact simply enters.
+#[test]
+fn metamorph_copy_token_gets_its_own_copy_choice_and_enters_without_moonlight() {
+    let run = run_vat(false, Some("trinket"));
+    assert_eq!(
+        run.prompts.len(),
+        2,
+        "optional copy, then the model: {:?}",
+        run.prompts
+    );
+    assert!(
+        run.prompts[0].contains("You may have ~ enter as a copy"),
+        "the entrant's own as-enters copy is offered, got {:?}",
+        run.prompts
+    );
+    let on_battlefield = battlefield_tokens_named(run.runner.state(), TRINKET);
+    assert_eq!(on_battlefield.len(), 1, "the Trinket-copy token entered");
+}
+
+/// F2 (control, positive witness only). Under Hallowed Moonlight a Metamorph token that
+/// copies a creature is a creature entering: it is created and exiled, not entered.
+#[test]
+fn metamorph_copy_token_copying_a_creature_is_exiled_under_moonlight() {
+    let run = run_vat(true, Some("bears"));
+    assert!(
+        run.prompts[0].contains("You may have ~ enter as a copy"),
+        "the entrant's own as-enters copy is offered first, got {:?}",
+        run.prompts
+    );
+    assert!(
+        battlefield_tokens_named(run.runner.state(), "Grizzly Bears").is_empty()
+            && battlefield_tokens_named(run.runner.state(), "Phyrexian Metamorph").is_empty(),
+        "no copy token entered the battlefield"
+    );
+    assert_settled(run.runner.state(), "F2 creature copy");
 }

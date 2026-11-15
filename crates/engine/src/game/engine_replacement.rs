@@ -3423,6 +3423,7 @@ fn apply_copy_target_choice(
                     enter_with_counters,
                     remaining_count,
                     initial_created_ids,
+                    None,
                     events,
                 );
             match status.completion {

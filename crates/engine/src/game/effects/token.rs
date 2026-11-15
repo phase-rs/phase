@@ -1349,6 +1349,7 @@ fn deliver_token_event_positions(
                     batch.spec.enter_with_counters,
                     batch.count,
                     initial.clone(),
+                    batch.redirected_to,
                     events,
                 );
                 let held: HashSet<ObjectId> = initial.iter().copied().collect();
@@ -1556,13 +1557,15 @@ fn apply_create_token_batch(
         // adoption (`OfferedBatchCustody`), not through this re-park.
         let held = detach_active_copy_token_frame(state);
         let status = deliver_with_held_copy_owner(state, held.as_ref(), |state| {
-            super::token_copy::apply_copy_token_after_replacement(
+            super::token_copy::apply_copy_token_after_replacement_with_created_ids(
                 state,
                 owner,
                 *copy,
                 enter_tapped,
                 spec.enter_with_counters.clone(),
                 final_count,
+                Vec::new(),
+                redirected_to,
                 events,
             )
         });
@@ -2374,6 +2377,7 @@ fn continue_liminal_copy_token_batch(
             continuation.enter_with_counters,
             continuation.remaining_count,
             initial_created_ids,
+            None,
             events,
         );
         state.last_created_token_ids = status.created_ids;
