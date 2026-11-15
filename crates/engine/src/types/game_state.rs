@@ -431,10 +431,43 @@ mod tuple_key_map {
 /// where `{provenance}` is `-` for a printed ability or `{object_id}.{incarnation}`
 /// for an acquired one and `{has_description}` is `0`/`1`. The description rides
 /// in the final segment, so free text (including `#`) decodes intact; every
-/// other segment is strictly parsed. A legacy `"objectId_index"` key has no `#`
-/// and is refused — old-save wire compat is impossible (provenance is
-/// unrecoverable from an index), so decoding fails closed instead of guessing.
-mod ability_usage_key_map {
+/// other segment is strictly parsed. A legacy `"objectId_index"` key (main's
+/// `tuple_key_map` encoding, which has no `#`) decodes to a migration-marker
+/// key whose fingerprint is [`LEGACY_TUPLE_JOURNAL_FINGERPRINT_PREFIX`] plus
+/// the index; the stateless decoder cannot resolve it further (provenance
+/// lives on the definition), so `prepare_for_restore` remaps markers through
+/// the production writer against the save's own object store. Anything that is
+/// neither a six-part key nor a legacy tuple key still fails closed.
+///
+/// Fingerprint prefix marking a migration-marker usage key: the full
+/// fingerprint is this prefix plus the legacy ability index
+/// (`"legacy:0"`). Unproducible by [`ability_fingerprint`], which always
+/// `Debug`-formats a JSON `Value` (leading `[`, `{`, `"`, digit, or letter
+/// words like `true` — never the bare `legacy:` shape), so the marker is
+/// unambiguous. [`migrate_legacy_tuple_usage_keys`] drains every marker at
+/// restore; none survives into live play.
+///
+/// [`ability_fingerprint`]: crate::game::restrictions::ability_fingerprint
+/// [`migrate_legacy_tuple_usage_keys`]: crate::game::restrictions::migrate_legacy_tuple_usage_keys
+pub(crate) const LEGACY_TUPLE_JOURNAL_FINGERPRINT_PREFIX: &str = "legacy:";
+
+/// Migration-marker usage key for one legacy `"objectId_index"` journal
+/// entry: the fingerprint the stateless decoders cannot resolve further (see
+/// [`LEGACY_TUPLE_JOURNAL_FINGERPRINT_PREFIX`]). Shared by the journal-map
+/// decoder and the ledger-command wire compat so both mint the identical
+/// marker [`migrate_legacy_tuple_usage_keys`] drains.
+///
+/// [`migrate_legacy_tuple_usage_keys`]: crate::game::restrictions::migrate_legacy_tuple_usage_keys
+pub(crate) fn legacy_tuple_usage_marker(source: ObjectId, index: usize) -> AbilityUsageKey {
+    AbilityUsageKey {
+        source,
+        provenance: None,
+        description: None,
+        fingerprint: format!("{LEGACY_TUPLE_JOURNAL_FINGERPRINT_PREFIX}{index}"),
+        grant_chain: Vec::new(),
+    }
+}
+pub(crate) mod ability_usage_key_map {
     use super::*;
     use serde::de::{self, MapAccess, Visitor};
     use serde::ser::SerializeMap;
@@ -470,7 +503,7 @@ mod ability_usage_key_map {
         Ok(out)
     }
 
-    pub(super) fn encode_key(key: &AbilityUsageKey) -> String {
+    pub(crate) fn encode_key(key: &AbilityUsageKey) -> String {
         let provenance = match key.provenance {
             None => "-".to_string(),
             Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
@@ -517,6 +550,14 @@ mod ability_usage_key_map {
             parts.next(),
         )
         else {
+            // Not a six-part key: accept main's legacy `"objectId_index"`
+            // journal encoding (parsed exactly like `tuple_key_map`) as a
+            // migration-marker key. Anything else still fails closed.
+            if let Some((oid_str, idx_str)) = raw.split_once('_') {
+                if let (Ok(oid), Ok(idx)) = (oid_str.parse::<u64>(), idx_str.parse::<usize>()) {
+                    return Ok(legacy_tuple_usage_marker(ObjectId(oid), idx));
+                }
+            }
             return Err(format!("invalid ability usage key: {raw}"));
         };
         let source = source
@@ -700,24 +741,42 @@ mod departed_activation_tally_map {
 mod ability_usage_key_map_tests {
     use super::*;
 
-    /// A legacy `"objectId_index"` map key has no `#` segments and is
-    /// refused: provenance is unrecoverable from an index, so decoding
-    /// fails closed instead of guessing (reach-guard: the current
-    /// encoding still decodes).
+    /// A legacy `"objectId_index"` map key has no `#` segments and decodes
+    /// as a migration-marker key: the stateless decoder cannot recover
+    /// provenance from an index, so `migrate_legacy_tuple_usage_keys`
+    /// resolves the marker through the production writer at the restore
+    /// boundary. Anything that is neither a six-part key nor a legacy tuple
+    /// key still fails closed (reach-guard: the current encoding decodes).
     #[test]
-    fn legacy_tuple_key_fails_closed() {
+    fn legacy_tuple_key_decodes_as_migration_marker() {
         #[derive(Debug, serde::Deserialize)]
         struct Probe {
             #[serde(with = "super::ability_usage_key_map")]
             map: std::collections::HashMap<AbilityUsageKey, u32>,
         }
 
-        let err = serde_json::from_str::<Probe>(r#"{"map":{"42_0":1}}"#)
-            .expect_err("legacy tuple key must fail closed");
-        assert!(
-            err.to_string().contains("invalid ability usage key"),
-            "unexpected error: {err}"
+        let marker: Probe =
+            serde_json::from_str(r#"{"map":{"42_0":1}}"#).expect("legacy tuple key decodes");
+        let (key, count) = marker.map.into_iter().next().expect("one entry");
+        assert_eq!(key.source, ObjectId(42));
+        assert_eq!(key.provenance, None);
+        assert_eq!(key.description, None);
+        assert_eq!(
+            key.fingerprint,
+            format!("{LEGACY_TUPLE_JOURNAL_FINGERPRINT_PREFIX}0")
         );
+        assert_eq!(key.grant_chain, Vec::new());
+        assert_eq!(count, 1);
+
+        // A near-miss of the legacy shape is not a key at all.
+        for raw in ["42_x", "x_0", "42_", "_0", "4_2_0"] {
+            let err = serde_json::from_str::<Probe>(&format!(r#"{{"map":{{"{raw}":1}}}}"#))
+                .expect_err("a malformed tuple key must fail closed");
+            assert!(
+                err.to_string().contains("invalid ability usage key"),
+                "unexpected error for {raw}: {err}"
+            );
+        }
 
         // CR 602.2a: the pre-fingerprint three-component encoding (`source`,
         // provenance, description only) is refused too — the fingerprint is
@@ -18030,6 +18089,11 @@ impl PersistedGameState {
         // flush's refresh would take a fresh snapshot under the new key, and
         // the migration would then keep the fresh one.
         crate::game::effects::attach::migrate_legacy_protection_start_snapshots(&mut state);
+        // CR 602.2a: an older save's `"objectId_index"` activation journals
+        // decode as migration markers; they resolve through the production
+        // writer here, before anything reads a budget or applies the inverse
+        // (whose journal paths are rewritten to match).
+        crate::game::restrictions::migrate_legacy_tuple_usage_keys(&mut state);
         state
             .format_config
             .reject_unimplemented_range_of_influence()
