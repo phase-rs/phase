@@ -19539,6 +19539,35 @@ impl<'de> serde::Deserialize<'de> for SacrificeCost {
     }
 }
 
+/// CR 118.3 + CR 115.10a: typed view of an effect-as-cost whose instruction acts on
+/// a player the payer chooses during payment. Single recognizer
+/// ([`AbilityCost::player_recipient_cost`]); consumers match exhaustively.
+///
+/// A borrowed, unserialized projection over `AbilityCost::EffectCost` — not a new
+/// cost variant, so ability scanners and the wire format are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerRecipientCost<'a> {
+    /// CR 119.3: "have an opponent gain N life" (Invigorate) or "have each other
+    /// player gain N life" (Reverent Silence, Skyshroud Cutter).
+    GainLife {
+        amount: &'a QuantityExpr,
+        recipient: &'a TargetFilter,
+        selection: CostRecipientSelection,
+    },
+}
+
+/// CR 118.3 + CR 115.10a: how many of the players matching a recipient
+/// effect-cost's filter the instruction reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostRecipientSelection {
+    /// "have an opponent ...": the payer chooses one matching player while paying
+    /// (CR 115.10a: a choice, not a target).
+    ChosenOne,
+    /// "have each other player ...": every matching player. CR 601.2h: partial
+    /// payments are not allowed, so every one of them must be able to perform it.
+    Each,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20562,6 +20591,12 @@ impl AbilityCost {
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
     ///
+    /// The recipient effect-cost shape ([`Self::player_recipient_cost`], e.g.
+    /// "have an opponent gain 3 life") is deliberately excluded: the activation,
+    /// resolution and unless payers have no recipient-choice surface, so they keep
+    /// refusing it. Only the spell payer
+    /// (`casting_costs::pay_additional_cost_with_source`) performs it.
+    ///
     /// CR 118.1 + CR 121.1: the deterministic effect-as-cost forms are source
     /// counters, fixed mana, and a draw by the cost's context-ref player (the
     /// controller, or the original controller for "has you draw a card").
@@ -20611,6 +20646,42 @@ impl AbilityCost {
             }
             leaf => leaf.supports_effect_cost_payment(),
         }
+    }
+
+    /// CR 118.3 + CR 115.10a: Single recognizer for an effect-as-cost whose
+    /// instruction acts on a player the payer chooses during payment. Consumers
+    /// (payability, the spell payer) match the returned view exhaustively, so a
+    /// new recipient shape is a compile error at each of them.
+    pub fn player_recipient_cost(&self) -> Option<PlayerRecipientCost<'_>> {
+        let AbilityCost::EffectCost { effect } = self else {
+            return None;
+        };
+        let Effect::GainLife {
+            amount,
+            player: recipient,
+        } = effect.as_ref()
+        else {
+            return None;
+        };
+        let selection = match recipient {
+            // "an opponent": one opponent, chosen by the payer.
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }) if type_filters.is_empty() && properties.is_empty() => {
+                CostRecipientSelection::ChosenOne
+            }
+            // "each <players>": every player the predicate names ("each other
+            // player" = `AllExcept { exclude: Controller }`).
+            TargetFilter::PlayerMatching { .. } => CostRecipientSelection::Each,
+            _ => return None,
+        };
+        Some(PlayerRecipientCost::GainLife {
+            amount,
+            recipient,
+            selection,
+        })
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -36920,6 +36991,13 @@ pub struct AbilityDefinition {
     pub face_down_in_exile: ExileConcealment,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 113.2c + CR 602.5c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. A grant that overwrites an existing
+    /// `granting_object` stamp pushes the overwritten stamp here so a
+    /// re-donated copy stays distinct from a directly granted one.
+    /// Serialized through `AbilityDefinitionRepr` (empty chains omitted)
+    /// and backfilled by `AbilityDefinitionDe` (missing chains default).
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
@@ -37304,6 +37382,8 @@ struct AbilityDefinitionRepr<'a> {
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
     granting_object: &'a Option<ObjectIncarnationRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grant_chain: &'a Vec<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -37361,6 +37441,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile,
             granting_object,
+            grant_chain,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -37413,6 +37494,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
+            grant_chain,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -37547,6 +37629,8 @@ struct AbilityDefinitionDe {
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
+    #[serde(default)]
+    grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -37609,6 +37693,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
+            grant_chain: de.grant_chain,
         })
     }
 }
@@ -37963,6 +38048,7 @@ impl AbilityDefinition {
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
+            grant_chain: Vec::new(),
         }
     }
 
@@ -38252,11 +38338,13 @@ pub enum EffectOutcomeSignal {
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
 /// [`AbilityCondition::AbilityUseCountThisTurn`] reads.
 ///
-/// Both tallies are keyed `(source_id, ability_index)` and cleared together at
-/// end-of-turn cleanup; they differ only in which point of an ability's life
-/// increments them. The distinction is rules-visible: an activation that is
-/// countered before it resolves still counts as an activation (CR 602.2a puts
-/// the ability on the stack at announcement) but never counts as a resolution.
+/// The `Resolved` tally is keyed `(source_id, ability_index)` while the
+/// `Activated` tally is keyed by the per-acquisition `AbilityUsageKey`
+/// (CR 602.5c); both clear together at end-of-turn cleanup. They differ only
+/// in which point of an ability's life increments them. The distinction is
+/// rules-visible: an activation that is countered before it resolves still
+/// counts as an activation (CR 602.2a puts the ability on the stack at
+/// announcement) but never counts as a resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AbilityUseTally {
     /// CR 608.2c: times this ability has RESOLVED this turn.

@@ -329,6 +329,25 @@ pub fn handle_game_over_transition(state: &mut GameState) {
     state.waiting_for = between_games_sideboard_prompt(state, PlayerId(0));
 }
 
+/// The game of the match whose position `state` holds: the game in progress,
+/// or, between games, the game that just ended.
+///
+/// `handle_game_over_transition` numbers the next game as soon as one ends,
+/// while the board and the log still hold the game that ended, and the
+/// decisions taken before the restart (the sideboarding, CR 100.4, and the
+/// loser's play/draw choice, CR 103.1) are made on that position. A match a
+/// game's end completes keeps that game's number. One a trusted forfeit
+/// completes between games
+/// (`apply_trusted_match_forfeit`) keeps the number of a game that never
+/// began, but no caller logs its events and a completed match asks no
+/// decision.
+pub fn game_on_board(state: &GameState) -> u8 {
+    match state.match_phase {
+        MatchPhase::InGame | MatchPhase::Completed => state.game_number,
+        MatchPhase::BetweenGames => state.game_number.saturating_sub(1),
+    }
+}
+
 /// Completes an unfinished two-seat best-of-three through a transport-trusted
 /// match forfeit. This is intentionally not a `GameAction`: callers must bind
 /// the forfeiting seat to authenticated transport identity before selecting the
@@ -1791,6 +1810,14 @@ mod tests {
         assert!(
             result.log_entries.iter().all(|entry| entry.turn <= 1),
             "a fresh game must not inherit the previous game's turn 73 context"
+        );
+        assert!(
+            !result.log_entries.is_empty()
+                && result
+                    .log_entries
+                    .iter()
+                    .all(|entry| entry.game_number == 2),
+            "the action that starts game two logs it in game two"
         );
     }
 }

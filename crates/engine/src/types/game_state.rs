@@ -158,8 +158,17 @@ impl GameRng {
     }
 }
 
-fn default_game_number() -> u8 {
+/// The first game of a match: what a state or a log entry without a game
+/// number reads as.
+pub(super) fn default_game_number() -> u8 {
     1
+}
+
+/// Whether `game_number` is the first game's. A log entry leaves it off the
+/// wire then, so a single game and the first game of a match serialize as
+/// they did before entries named their game.
+pub(super) fn is_first_game(game_number: &u8) -> bool {
+    *game_number == default_game_number()
 }
 
 fn initial_delayed_trigger_instance_id() -> u64 {
@@ -423,6 +432,371 @@ mod tuple_key_map {
         }
 
         deserializer.deserialize_map(TupleKeyVisitor(std::marker::PhantomData))
+    }
+}
+
+/// Serde module for an `AbilityUsageKey -> u32` map — JSON requires string keys,
+/// so each key encodes as `{source}#{provenance}#{has_description}#{description}`
+/// where `{provenance}` is `-` for a printed ability or `{object_id}.{incarnation}`
+/// for an acquired one and `{has_description}` is `0`/`1`. The description rides
+/// in the final segment, so free text (including `#`) decodes intact; every
+/// other segment is strictly parsed. A legacy `"objectId_index"` key has no `#`
+/// and is refused — old-save wire compat is impossible (provenance is
+/// unrecoverable from an index), so decoding fails closed instead of guessing.
+mod ability_usage_key_map {
+    use super::*;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    /// CR 602.2a: the fingerprint rides between provenance and description so
+    /// the description — the one component that may itself contain `#` —
+    /// stays the unbounded tail (parsed with `splitn(5, …)`). The fingerprint
+    /// is percent-escaped (`%` then `#`) for the same reason: its `{:?}`
+    /// encoding can carry `#` inside quoted string payloads.
+    pub(super) fn escape_component(raw: &str) -> String {
+        raw.replace('%', "%25").replace('#', "%23")
+    }
+
+    pub(super) fn unescape_component(raw: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(char) = chars.next() {
+            if char != '%' {
+                out.push(char);
+                continue;
+            }
+            let (Some(high), Some(low)) = (chars.next(), chars.next()) else {
+                return Err(format!("invalid escape in ability usage key: {raw}"));
+            };
+            match (high, low) {
+                ('2', '5') => out.push('%'),
+                ('2', '3') => out.push('#'),
+                _ => return Err(format!("invalid escape in ability usage key: {raw}")),
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn encode_key(key: &AbilityUsageKey) -> String {
+        let provenance = match key.provenance {
+            None => "-".to_string(),
+            Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
+        };
+        let fingerprint = escape_component(&key.fingerprint);
+        // CR 602.5c + CR 113.2c: re-donation lineage rides its own segment
+        // (never escaped: stamps are `object_id.incarnation` pairs, which
+        // carry no `#`); the `#`-bearing description stays the unbounded
+        // tail. A pre-chain five-segment encoding no longer decodes — the
+        // chain is total, so a key without one names no live budget.
+        let chain = key
+            .grant_chain
+            .iter()
+            .map(|stamp| format!("{}.{}", stamp.object_id.0, stamp.incarnation))
+            .collect::<Vec<_>>()
+            .join(",");
+        match &key.description {
+            None => format!(
+                "{}#{}#0#{}#{}#",
+                key.source.0, provenance, fingerprint, chain
+            ),
+            Some(text) => format!(
+                "{}#{}#1#{}#{}#{}",
+                key.source.0, provenance, fingerprint, chain, text
+            ),
+        }
+    }
+
+    pub(super) fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
+        let mut parts = raw.splitn(6, '#');
+        let (
+            Some(source),
+            Some(provenance),
+            Some(has_description),
+            Some(fingerprint),
+            Some(chain),
+            Some(description),
+        ) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        )
+        else {
+            return Err(format!("invalid ability usage key: {raw}"));
+        };
+        let source = source
+            .parse::<u64>()
+            .map(ObjectId)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let provenance = match provenance {
+            "-" => None,
+            stamped => {
+                let (oid, incarnation) = stamped
+                    .split_once('.')
+                    .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                let oid = oid
+                    .parse::<u64>()
+                    .map(ObjectId)
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                let incarnation = incarnation
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                Some(ObjectIncarnationRef::of(oid, incarnation))
+            }
+        };
+        let fingerprint = unescape_component(fingerprint)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let description = match has_description {
+            "0" if description.is_empty() => None,
+            "1" => Some(description.to_string()),
+            _ => return Err(format!("invalid ability usage key: {raw}")),
+        };
+        let grant_chain = if chain.is_empty() {
+            Vec::new()
+        } else {
+            chain
+                .split(',')
+                .map(|segment| {
+                    let (oid, incarnation) = segment
+                        .split_once('.')
+                        .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                    let oid = oid
+                        .parse::<u64>()
+                        .map(ObjectId)
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    let incarnation = incarnation
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    Ok(ObjectIncarnationRef::of(oid, incarnation))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
+        Ok(AbilityUsageKey {
+            source,
+            provenance,
+            description,
+            fingerprint,
+            grant_chain,
+        })
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a AbilityUsageKey, &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<(AbilityUsageKey, u32)>,
+    {
+        struct AbilityUsageKeyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<(AbilityUsageKey, u32)>> Visitor<'de> for AbilityUsageKeyVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded ability usage key strings")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(AbilityUsageKeyVisitor(std::marker::PhantomData))
+    }
+}
+
+/// CR 400.7: string codec for the departed-incarnation tally maps
+/// (`departed_activated_abilities_this_turn` /
+/// `departed_activated_abilities_this_game`). The departing incarnation rides
+/// its own `#`-free numeric segment ahead of the standard usage-key
+/// encoding, so decoding splits once on the first `#` and reuses
+/// [`ability_usage_key_map`] untouched.
+mod departed_activation_tally_map {
+    use super::ability_usage_key_map;
+    use super::AbilityUsageKey;
+    use serde::{de, ser::SerializeMap, Deserializer, Serializer};
+    use std::fmt;
+
+    pub(super) fn encode_key(key: &(AbilityUsageKey, u64)) -> String {
+        format!("{}#{}", key.1, ability_usage_key_map::encode_key(&key.0))
+    }
+
+    fn decode_key(raw: &str) -> Result<(AbilityUsageKey, u64), String> {
+        let (incarnation, rest) = raw
+            .split_once('#')
+            .ok_or_else(|| format!("invalid departed activation tally key: {raw}"))?;
+        let incarnation = incarnation
+            .parse::<u64>()
+            .map_err(|_| format!("invalid departed activation tally key: {raw}"))?;
+        let key = ability_usage_key_map::decode_key(rest)?;
+        Ok((key, incarnation))
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a (AbilityUsageKey, u64), &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<((AbilityUsageKey, u64), u32)>,
+    {
+        struct DepartedTallyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<((AbilityUsageKey, u64), u32)>> de::Visitor<'de>
+            for DepartedTallyVisitor<T>
+        {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded departed activation tally keys")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(DepartedTallyVisitor(std::marker::PhantomData))
+    }
+}
+
+#[cfg(test)]
+mod ability_usage_key_map_tests {
+    use super::*;
+
+    /// A legacy `"objectId_index"` map key has no `#` segments and is
+    /// refused: provenance is unrecoverable from an index, so decoding
+    /// fails closed instead of guessing (reach-guard: the current
+    /// encoding still decodes).
+    #[test]
+    fn legacy_tuple_key_fails_closed() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Probe {
+            #[serde(with = "super::ability_usage_key_map")]
+            map: std::collections::HashMap<AbilityUsageKey, u32>,
+        }
+
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42_0":1}}"#)
+            .expect_err("legacy tuple key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.2a: the pre-fingerprint three-component encoding (`source`,
+        // provenance, description only) is refused too — the fingerprint is
+        // total, so a key without one names no live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#":1}}"#)
+            .expect_err("fingerprint-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.5c + CR 113.2c: the pre-chain five-segment encoding is
+        // refused too — the chain is total, so a key without one names no
+        // live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#fp#":1}}"#)
+            .expect_err("chain-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        let ok: Probe =
+            serde_json::from_str(r#"{"map":{"42#-#0#fp##":1}}"#).expect("new encoding decodes");
+        assert_eq!(ok.map.len(), 1);
+        let (key, count) = ok.map.into_iter().next().expect("one entry");
+        assert_eq!(key.source, ObjectId(42));
+        assert_eq!(key.provenance, None);
+        assert_eq!(key.description, None);
+        assert_eq!(key.fingerprint, "fp");
+        assert_eq!(key.grant_chain, Vec::new());
+        assert_eq!(count, 1);
+
+        // A chained key round-trips its lineage oldest-first.
+        let chained: Probe = serde_json::from_str(r#"{"map":{"7#9.3#1#fp#11.1,13.2#{T}: Tap":1}}"#)
+            .expect("chained encoding decodes");
+        let (key, _) = chained.map.into_iter().next().expect("one entry");
+        assert_eq!(
+            key.grant_chain,
+            vec![
+                ObjectIncarnationRef::of(ObjectId(11), 1),
+                ObjectIncarnationRef::of(ObjectId(13), 2),
+            ],
+            "chain order is oldest-first"
+        );
+        assert_eq!(key.description.as_deref(), Some("{T}: Tap"));
+    }
+
+    /// The fingerprint rides escaped between two `#` separators while a
+    /// `#`-bearing description stays the unbounded tail: the encoding
+    /// round-trips both, and a malformed escape fails closed.
+    #[test]
+    fn usage_key_escapes_fingerprint_and_description() {
+        let key = AbilityUsageKey {
+            source: ObjectId(7),
+            provenance: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            description: Some("{T}: Add #1.".to_string()),
+            fingerprint: "a#b%{c}".to_string(),
+            grant_chain: vec![ObjectIncarnationRef::of(ObjectId(11), 1)],
+        };
+        let encoded = super::ability_usage_key_map::encode_key(&key);
+        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#11.1#{T}: Add #1.");
+        let decoded =
+            super::ability_usage_key_map::decode_key(&encoded).expect("escaped key decodes");
+        assert_eq!(decoded, key);
+
+        let bad = super::ability_usage_key_map::decode_key("7#-#0#a%zz#");
+        assert!(
+            bad.is_err(),
+            "a malformed escape must fail closed, got {bad:?}"
+        );
     }
 }
 
@@ -1440,6 +1814,42 @@ pub struct AbilityActivationRecord {
     /// untargeted ability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ActivationTargetFact>,
+}
+
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage budget of one
+/// activated ability. A printed ability (`provenance: None`) and each
+/// acquisition of that same text from another object (`provenance: the
+/// immediate-provider stamp`) are distinct instances with distinct budgets;
+/// two textually-identical printed abilities on one source share one budget
+/// (indistinguishable instances). The index is not in the key: layer
+/// recomputes shift indices while the acquisition stays the same.
+///
+/// CR 602.2a: `fingerprint` is the stable identity of the announced
+/// definition's `(cost, effect, ability_tag)` triple
+/// (`restrictions::ability_fingerprint`). Three-part keys alone collide on
+/// undescribed same-acquisition abilities that differ only in body — two
+/// equip costs on one object, or reconfigure's attach vs unattach modes (all
+/// `description: None`) — so the fingerprint discriminates them. It is a
+/// plain `String`, never absent: every definition has a cost/effect shape.
+/// It never participates in Tier-2 definition equality or layer stamps; it is
+/// a usage-budget discriminator only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AbilityUsageKey {
+    /// The object holding the ability.
+    pub source: ObjectId,
+    /// The immediate provider's incarnation stamp (`None` for printed).
+    pub provenance: Option<ObjectIncarnationRef>,
+    /// The ability's rules text (`None` for an undescribed/token ability).
+    /// Stable across recomputes and index shifts; never unwrapped.
+    pub description: Option<String>,
+    /// Stable encoding of the announced def's `(cost, effect, ability_tag)`.
+    pub fingerprint: String,
+    /// CR 602.5c + CR 113.2c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. Carried from the announced definition's
+    /// `grant_chain` so twins re-donated through one carrier hold distinct
+    /// budgets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 fn battlefield_zone() -> Zone {
@@ -9307,6 +9717,11 @@ pub struct PendingCast {
     /// commit decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepaid_finalization: Option<Box<PrepaidSpellFinalization>>,
+    /// CR 601.2g + CR 601.2h: a life-gain cost owed by other players (Invigorate,
+    /// Reverent Silence), paid at the payment commit after mana abilities; see
+    /// `DeferredLifeGainCost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_life_gain_cost: Option<DeferredLifeGainCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -9502,15 +9917,21 @@ fn default_origin_zone() -> Zone {
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Exact outer cost action suspended after a
-/// life payment committed but its replacement's interactive post-effect did
-/// not finish. The replacement continuation remains the immediate child; this
-/// owner resumes only after that child drains.
+/// life payment (CR 119.4) or a life-gain cost event (CR 119.3) committed but
+/// its replacement's interactive post-effect did not finish. The replacement
+/// continuation remains the immediate child; this owner resumes only after that
+/// child drains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredLifeCostResume {
     /// Continue a spell cast or activated-ability payment without replaying the
     /// life payment. Mana-payment callers set `cost` to `NoCost` and preserve
     /// the amount already spent in `prepaid_actual_mana_spent`.
+    ///
+    /// `player` is always the payer whose cast resumes. The prompt that parked
+    /// the root may belong to a different player: for a life-gain cost, CR 616.1
+    /// gives the replacement choice to the recipient. Consumers must key on the
+    /// resolution depth and `Priority` window, never on the answering player.
     Cast {
         player: PlayerId,
         /// The announcing caller attaches its complete cast/activation root
@@ -10362,6 +10783,74 @@ impl DeferredHandDiscardCost {
     }
 }
 
+/// CR 601.2g + CR 601.2h + CR 118.3: a spell cost that has other players gain life
+/// ("have an opponent gain 3 life", "have each other player gain 6 life"). Mana
+/// abilities are activated before costs are paid (CR 601.2g), and a "can't gain
+/// life" lock decides payability when the cost is paid (CR 119.7), so the cost
+/// waits for the payment commit; its recipients are determined there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DeferredLifeGainCost {
+    /// Accepted with the alternative cost, not yet paid. `cost` is the
+    /// `AbilityCost::EffectCost` whose `player_recipient_cost` view the commit pays.
+    Unpaid { cost: Box<AbilityCost> },
+    /// Being paid: `recipients` (APNAP order, CR 101.4) still owe the `amount`
+    /// gain — after the payer's CR 115.10a choice, or after an earlier
+    /// recipient's gain paused for a CR 616.1 replacement choice. Every
+    /// recipient's gain is staged through the replacement pipeline before any is
+    /// applied, so the gains happen simultaneously (CR 101.4 + CR 119.3).
+    Owed {
+        recipients: Vec<PlayerId>,
+        amount: u32,
+        /// Outcomes that already went through replacement, waiting to be settled
+        /// together once every recipient is staged.
+        #[serde(default, skip_serializing_if = "StagedLifeGains::is_empty")]
+        staged: StagedLifeGains,
+        /// The recipient whose gain is parked on a CR 616.1 replacement choice;
+        /// the answer's surviving event is staged for them rather than applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused_on: Option<PlayerId>,
+    },
+}
+
+/// CR 101.4 + CR 119.3 + CR 614.6: the outcomes of one simultaneous life gain
+/// whose recipients are still being run through the replacement pipeline. Each
+/// recipient's replacements read the life totals as they stood before the
+/// instruction, so nothing here is applied until every recipient is staged; the
+/// whole batch is then settled together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGains {
+    /// Gains that survived replacement, `(recipient, final amount)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gains: Vec<(PlayerId, u32)>,
+    /// Gains a cross-event substitute replaced outright (Tainted Remedy), in
+    /// staging order. Each keeps its own continuation: the continuation slot
+    /// holds one entry, so two substitutes in one batch cannot share it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutes: Vec<StagedLifeGainSubstitute>,
+}
+
+impl StagedLifeGains {
+    pub fn is_empty(&self) -> bool {
+        self.gains.is_empty() && self.substitutes.is_empty()
+    }
+}
+
+/// CR 614.6: a life gain replaced by a different event, captured at staging so
+/// its substitute runs with the rest of the batch rather than while later
+/// recipients are still being staged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLifeGainSubstitute {
+    /// The substitute's continuation with its event context (the affected
+    /// player, the replacing source, its controller).
+    pub drain: PostReplacementDrain,
+    /// CR 614.6: the modified event occurs instead of the replaced gain, so it
+    /// reads that gain's amount ("that much life"), which the continuation takes
+    /// from `last_effect_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
+}
+
 impl PendingCast {
     pub fn new(
         object_id: ObjectId,
@@ -10384,6 +10873,7 @@ impl PendingCast {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -11688,6 +12178,14 @@ pub struct PendingManaAbility {
     /// and resume; never restamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced_source_incarnation: Option<u64>,
+    /// CR 602.2a + CR 602.5c: this mana ability's own usage key, announced
+    /// before any cost is paid (`mana_abilities::activate_mana_ability`) and
+    /// consumed when the inline completion records
+    /// (`complete_mana_ability_activation`) — never re-derived there, so a
+    /// self-sacrifice cost cannot unresolve the slot. An existing capture is
+    /// never overwritten; carried through every payment pause and resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<AbilityUsageKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -18463,6 +18961,30 @@ pub struct PendingAttackExert {
     pub permission: TriggerDefinitionRef,
 }
 
+/// CR 601.2 + CR 115.10a: Why the caster is choosing an opponent mid-cast in
+/// `WaitingFor::ChooseGiftRecipient`. The choice is a CHOICE, not a target; the
+/// purpose decides how `handle_choose_gift_recipient` consumes the answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastOpponentChoicePurpose {
+    /// CR 702.174a: the promised gift's recipient (latched into
+    /// `SpellContext::gift_recipient`). Default so pre-existing serialized Gift
+    /// prompts (which carry no `purpose`) read back unchanged.
+    #[default]
+    Gift,
+    /// CR 601.2h + CR 118.3: the player an effect-as-cost acts on ("have an
+    /// opponent gain 3 life"), chosen at the payment commit. `cost` is the spell
+    /// cost being paid; the answer pays it for the chosen player and resumes the
+    /// commit (`casting_costs::handle_choose_gift_recipient`).
+    EffectCost { cost: Box<AbilityCost> },
+}
+
+impl CastOpponentChoicePurpose {
+    fn is_gift(&self) -> bool {
+        matches!(self, Self::Gift)
+    }
+}
+
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
 // `GameState`; the stack budget that matters is the `GameState` ceiling in
 // `types/game_state_size.rs`, and this enum's inline size is already inside
@@ -19842,14 +20364,19 @@ pub enum WaitingFor {
         gift_kind: Option<crate::types::keywords::GiftKind>,
         pending_cast: Box<PendingCast>,
     },
-    /// CR 702.174a: After promising a Gift with ≥2 opponents, choose which
-    /// opponent receives the gift. Distinct from `ChooseAnnouncingOpponent`
-    /// (CR 115.1 target-chooser).
+    /// CR 601.2 + CR 115.10a: the caster chooses one opponent from `candidates`
+    /// while casting. `purpose` says why: CR 702.174a Gift recipient (default),
+    /// or CR 601.2h + CR 118.3 the player an effect-as-cost acts on. Distinct
+    /// from `ChooseAnnouncingOpponent` (CR 115.1 target-chooser).
     ChooseGiftRecipient {
         player: PlayerId,
         candidates: Vec<PlayerId>,
+        /// CR 702.174: the gift kind for UI labels. `Some` only when `purpose`
+        /// is `Gift` (kept top-level so the Gift wire shape is unchanged).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gift_kind: Option<crate::types::keywords::GiftKind>,
+        #[serde(default, skip_serializing_if = "CastOpponentChoicePurpose::is_gift")]
+        purpose: CastOpponentChoicePurpose,
         pending_cast: Box<PendingCast>,
     },
     /// CR 702.47a–e: As an Arcane (or other matching-subtype) spell is cast, its
@@ -25785,18 +26312,25 @@ declare_game_state! {
     #[serde(default)]
     pub cancelled_casts: Vec<ObjectId>,
 
-    /// (source_id, ability_index) pairs for activated abilities pushed to the
-    /// stack during the current priority window. Transient AI-guard that
-    /// prevents the AI's softmax policy from re-choosing the same activated
-    /// ability while its prior activation is still unresolved on the stack —
-    /// a pathological scoring outcome when the effect is redundant (e.g.
-    /// self-exile with delayed return, or gain indestructible UEOT when the
-    /// buff is already active). CR 117.1b permits unbounded activation at
-    /// priority, and absent a CR 602.5b restriction there is no per-turn cap,
-    /// so this is a pure AI-pathology mitigation, not a rules concern.
+    /// [`AbilityUsageKey`]s for activated abilities pushed to the stack during
+    /// the current priority window. Transient AI-guard that prevents the AI's
+    /// softmax policy from re-choosing the same activated ability while its
+    /// prior activation is still unresolved on the stack — a pathological
+    /// scoring outcome when the effect is redundant (e.g. self-exile with
+    /// delayed return, or gain indestructible UEOT when the buff is already
+    /// active). CR 117.1b permits unbounded activation at priority, and
+    /// absent a CR 602.5b restriction there is no per-turn cap, so this is a
+    /// pure AI-pathology mitigation, not a rules concern.
     /// Cleared on PassPriority (when the stack will begin resolving).
+    ///
+    /// CR 602.2a: the entry is the announcement-bound usage key read off the
+    /// placed stack entry — never a `(source_id, ability_index)` pair. Layer
+    /// recomputes shift indices while the acquisition stays the same, so an
+    /// index-keyed entry goes stale when a grant is withdrawn (a cost exiles
+    /// its provider) and would then suppress the innocent ability that
+    /// shifted into the recorded slot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_activations: Vec<(ObjectId, usize)>,
+    pub pending_activations: Vec<AbilityUsageKey>,
 
     // Triggered ability targeting
     #[serde(default)]
@@ -26467,20 +27001,42 @@ declare_game_state! {
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_turn: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_turn: im::HashMap<AbilityUsageKey, u32>,
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_game: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_game: im::HashMap<AbilityUsageKey, u32>,
+    /// CR 400.7 + CR 608.2c: the per-turn activation tallies that belonged
+    /// to a departed incarnation, keyed by `(usage key, departing
+    /// incarnation)`. `apply_zone_exit_cleanup` migrates the erased live
+    /// entries here (not copies) so an ability announced by the old object
+    /// still reads its count while the returned object's live journals start
+    /// at zero. Cleared at the turn boundary beside the live per-turn
+    /// journal; trusted save/restore retains it, projection clears it.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_turn: im::HashMap<(AbilityUsageKey, u64), u32>,
+    /// CR 400.7: the per-game twin of the departed per-turn table. Migrated
+    /// symmetrically at zone exit and never cleared at the turn boundary,
+    /// mirroring the live per-game journal.
+    #[serde(
+        default,
+        skip_serializing_if = "im::HashMap::is_empty",
+        with = "departed_activation_tally_map"
+    )]
+    pub departed_activated_abilities_this_game: im::HashMap<(AbilityUsageKey, u64), u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
     /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
-    /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
+    /// (keyed by [`AbilityUsageKey`]). Cleared at turn start.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
@@ -30190,7 +30746,7 @@ pub struct PendingConniveReentry {
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
 /// `Ready(work)` → `Dispatching` → `Paused` → popped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
     /// carries targets captured at shield-install time.
@@ -30224,7 +30780,7 @@ pub struct PostReplacementDrainDispatch {
     depth: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
@@ -30516,6 +31072,16 @@ impl PostReplacementDrainStack {
                 true
             }
         }
+    }
+
+    /// CR 101.4 + CR 614.6: remove the resident drain when its continuation has
+    /// not run yet, so a caller can hold it until a whole simultaneous
+    /// instruction has been staged. `None` when there is nothing ready.
+    pub(crate) fn take_ready_resident(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Ready(_)) {
+            return self.drains.pop();
+        }
+        None
     }
 
     /// CR 615.5: take the resident continuation and mark the drain `Dispatching`,
@@ -33472,6 +34038,18 @@ impl GameState {
         }
     }
 
+    /// CR 101.4 + CR 614.6: take the active resident drain while its
+    /// continuation is still ready, retiring the frame it leaves empty. The
+    /// caller owns the drain and re-installs it with
+    /// [`Self::install_post_replacement_drain`] when it is due.
+    pub(crate) fn take_ready_post_replacement_drain(&mut self) -> Option<PostReplacementDrain> {
+        let taken = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::take_ready_resident)?;
+        self.remove_empty_active_post_replacement_frame();
+        Some(taken)
+    }
+
     /// Removes an exhausted general-drain frame only when it is the active top.
     /// A paired parent becomes eligible only after its MultiDraw child has been
     /// popped; no parent is searched for or removed through an active child.
@@ -35797,6 +36375,8 @@ impl GameState {
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
             activated_abilities_this_game: im::HashMap::new(),
+            departed_activated_abilities_this_turn: im::HashMap::new(),
+            departed_activated_abilities_this_game: im::HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
@@ -39522,6 +40102,11 @@ impl GameState {
             sideboard_submitted: _,
             activated_abilities_this_turn: _,
             activated_abilities_this_game: _,
+            // NOT THIS CLASS either: the same activation-budget ledger class
+            // keyed one step further out (departing incarnation) — unbounded
+            // per blink, so ranked like the live journals (not ranked at all).
+            departed_activated_abilities_this_turn: _,
+            departed_activated_abilities_this_game: _,
             loyalty_abilities_activated_this_turn: _,
             extra_loyalty_activations_this_turn: _,
             exerted_this_turn: _,
@@ -41387,6 +41972,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
+        // COMPARED alongside the live journals: the same activation-budget
+        // class, so two positions that differ only in a departed tally are
+        // different positions (fail-closed, like the live journals).
+        departed_activated_abilities_this_turn: _,
+        departed_activated_abilities_this_game: _,
         crew_activated_this_turn: _,
         crew_resolved_this_turn: _,
         crew_history_this_turn: _,
@@ -42079,6 +42669,10 @@ impl PartialEq for GameState {
                 == other.triggered_abilities_added_mana_this_turn
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.departed_activated_abilities_this_turn
+                == other.departed_activated_abilities_this_turn
+            && self.departed_activated_abilities_this_game
+                == other.departed_activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.crew_history_this_turn == other.crew_history_this_turn
@@ -51090,6 +51684,7 @@ mod tests {
                         rules_execution_node: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
+                        announced_usage_key: None,
                         color_override: None,
                         resume: ManaAbilityResume::Priority,
                         cost_move_resume: None,
@@ -51207,6 +51802,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -51407,6 +52003,37 @@ mod tests {
                     "paused trigger continuation has no active resolving trigger carrier"
                 ),
                 "expected orphaned-continuation rejection, got {error}"
+            );
+        }
+    }
+
+    /// CR 602.5c: a released-writer save whose activation journals still use
+    /// the pre-occurrence `objectId_index` encoding is explicitly rejected in
+    /// both envelopes — provenance is unrecoverable from an index, so no
+    /// guessed identity is admitted (a granted Ranger use can neither restore
+    /// spent under the wrong key nor silently unspend: the load fails closed).
+    #[test]
+    fn persisted_restore_rejects_legacy_usage_keys_in_both_envelopes() {
+        let state = GameState::new_two_player(42);
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+
+        for mut persisted in [raw, trusted] {
+            let state = if persisted.get("state").is_some() {
+                persisted
+                    .get_mut("state")
+                    .expect("trusted fixture has an inner state")
+            } else {
+                &mut persisted
+            };
+            state["activated_abilities_this_turn"]["7_0"] = serde_json::json!(1);
+            let error = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect_err("persisted restore must reject legacy usage keys");
+            assert!(
+                error.to_string().contains("invalid ability usage key"),
+                "expected legacy-key rejection, got {error}"
             );
         }
     }
@@ -57590,6 +58217,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
@@ -60381,6 +61009,7 @@ mod tests {
                 activation_cost_paused_on_draw: false,
                 deferred_hand_discard_cost: None,
                 prepaid_finalization: None,
+                deferred_life_gain_cost: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -60680,6 +61309,19 @@ mod tests {
             player: PlayerId(0),
             candidates: vec![PlayerId(1)],
             gift_kind: Some(crate::types::keywords::GiftKind::Card),
+            purpose: CastOpponentChoicePurpose::Gift,
+            pending_cast: dummy_pending(),
+        }));
+        // CR 601.2h + CR 118.3: the same prompt asking for an effect-as-cost's player.
+        variants.push(Box::new(WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind: None,
+            purpose: CastOpponentChoicePurpose::EffectCost {
+                cost: Box::new(crate::parser::oracle_cost::parse_oracle_cost(
+                    "have an opponent gain 3 life",
+                )),
+            },
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -60838,7 +61480,7 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 42);
+        assert_eq!(variants.len(), 43);
     }
 
     #[test]
@@ -60905,6 +61547,86 @@ mod tests {
         assert_eq!(back, MulliganChoice::FreeReveal);
     }
 
+    fn cast_opponent_prompt(purpose: CastOpponentChoicePurpose) -> WaitingFor {
+        let ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Unimplemented {
+                name: "Dummy".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let gift_kind = matches!(purpose, CastOpponentChoicePurpose::Gift)
+            .then_some(crate::types::keywords::GiftKind::Card);
+        WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind,
+            purpose,
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ability,
+                ManaCost::NoCost,
+            )),
+        }
+    }
+
+    /// W1 — CR 702.174a: a Gift prompt serializes exactly as before the `purpose`
+    /// field existed (no `purpose` key). The protocol bump versions the new
+    /// EffectCost purpose, which an older reader would show as a gift.
+    #[test]
+    fn choose_gift_recipient_gift_purpose_wire_shape_unchanged() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert_eq!(json["type"], "ChooseGiftRecipient");
+        let keys: BTreeSet<&str> = json["data"]
+            .as_object()
+            .expect("adjacently tagged data object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["player", "candidates", "gift_kind", "pending_cast"])
+        );
+    }
+
+    /// W2 — a legacy Gift frame (no `purpose` key) reads back as `Gift`.
+    #[test]
+    fn choose_gift_recipient_legacy_frame_defaults_to_gift_purpose() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert!(json["data"].get("purpose").is_none(), "legacy shape");
+        let back: WaitingFor = serde_json::from_value(json).expect("legacy frame deserializes");
+        let WaitingFor::ChooseGiftRecipient { purpose, .. } = back else {
+            panic!("round-trip changed the variant: {back:?}");
+        };
+        assert_eq!(purpose, CastOpponentChoicePurpose::Gift);
+    }
+
+    /// W3 — CR 601.2h + CR 118.3: the effect-cost purpose round-trips, carrying the
+    /// cost being paid under an internal `type` tag that doesn't collide with the
+    /// cost's own tag.
+    #[test]
+    fn choose_gift_recipient_effect_cost_purpose_round_trips() {
+        let cost = crate::parser::oracle_cost::parse_oracle_cost("have an opponent gain 3 life");
+        assert!(
+            cost.player_recipient_cost().is_some(),
+            "fixture is a recipient effect-cost: {cost:?}"
+        );
+        let prompt = cast_opponent_prompt(CastOpponentChoicePurpose::EffectCost {
+            cost: Box::new(cost),
+        });
+        let json = serde_json::to_value(&prompt).expect("serialize effect-cost prompt");
+        assert_eq!(json["data"]["purpose"]["type"], "EffectCost");
+        assert_eq!(json["data"]["purpose"]["cost"]["type"], "EffectCost");
+        assert!(json["data"].get("gift_kind").is_none());
+        let back: WaitingFor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, prompt);
+    }
+
     #[test]
     fn pending_cast_ref_is_single_source_of_truth_for_inline_variants() {
         // CR 601.2f: Every WaitingFor variant that carries `pending_cast: Box<PendingCast>`
@@ -60937,6 +61659,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
@@ -61048,6 +61771,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -61312,6 +62036,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -66586,6 +67311,7 @@ mod restored_exact_attack_authority_tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume,
             cost_move_resume: None,
