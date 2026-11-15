@@ -88,10 +88,19 @@ function sanitizePublicBackup(
   const publicSnapshot = JSON.parse(JSON.stringify(snapshot)) as PersistedDraftHostSession;
   const rawPublicSnapshot = publicSnapshot as unknown as Record<string, unknown>;
   delete rawPublicSnapshot.booster_pack_pool;
+  // DECK COPIES. Another seat's submitted deck is private until its match
+  // launches it, and the backup row is readable by any pod guest who can derive
+  // the host peer id. `payloadFingerprint` is the submitted card-name/count JSON
+  // itself, not a one-way hash, and a workspace snapshot is the seat's
+  // main/sideboard partition. IndexedDB keeps both for recovery. Mirrors
+  // `P2P_BACKUP_SECRET_KEYS` in `server-core::p2p_backup_guard`.
+  delete rawPublicSnapshot.deckSubmissionReceipts;
+  delete rawPublicSnapshot.perSeatWorkspaceSnapshots;
 
   redactPoolInputCubeList(publicSnapshot.poolInput);
   redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
   redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
+  redactBo3StateDecks(rawPublicSnapshot.bo3State);
   redactDraftSessionPoolAndChaos(rawPublicSnapshot);
   return publicSnapshot;
 }
@@ -101,23 +110,42 @@ function redactPoolInputCubeList(poolInput: unknown): void {
   delete poolInput.data.cube_list_text;
 }
 
+/** A launch descriptor's decks (`deckPayload` for host/bot launches,
+ * `localDeck` for a guest launch) are another seat's private contents. The whole
+ * payload goes, which also removes the booster pool it carries. */
+function redactLaunchDecks(launch: Record<string, unknown>): void {
+  delete launch.deckPayload;
+  delete launch.localDeck;
+}
+
 function redactMatchLaunchPools(matchLaunches: unknown): void {
   if (!Array.isArray(matchLaunches)) return;
   for (const matchLaunch of matchLaunches) {
     if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
-    if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
-    delete matchLaunch.launch.deckPayload.booster_pack_pool;
+    redactLaunchDecks(matchLaunch.launch);
   }
 }
 
-/** Held Bo3 commands retain their original launch payload for recovery. That
- * payload is just as public in an HTTP backup as an ordinary match launch. */
+/** Bo3 phase data keeps its phase but not each seat's main/sideboard partition. */
+function redactBo3StateDecks(bo3State: unknown): void {
+  if (!Array.isArray(bo3State)) return;
+  for (const match of bo3State) {
+    if (isJsonRecord(match)) delete match.decks;
+  }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery, and a
+ * `SubmitSideboard` command carries the submitted partition itself. Both are
+ * just as public in an HTTP backup as an ordinary match launch. */
 function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
   if (!Array.isArray(intergameCommands)) return;
   for (const command of intergameCommands) {
-    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
-    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
-    delete command.launchPayload.deckPayload.booster_pack_pool;
+    if (!isJsonRecord(command)) continue;
+    if (isJsonRecord(command.launchPayload)) redactLaunchDecks(command.launchPayload);
+    if (isJsonRecord(command.payload)) {
+      delete command.payload.main;
+      delete command.payload.sideboard;
+    }
   }
 }
 
@@ -164,6 +192,9 @@ function redactDraftSessionObject(session: Record<string, unknown>): void {
   // knowing every card still to come. Listed last but redacted on the same
   // terms: the mirror above is only true if it is complete.
   delete session.packs_by_seat;
+  // EVERY SEAT'S ACCEPTED DECK. Private until the match launches it to the
+  // opponent. Mirrors `submitted_decks` in `NESTED_DRAFT_SECRET_KEYS`.
+  delete session.submitted_decks;
   if (isJsonRecord(session.config)) {
     // THE SEED IS THE DRAW ORDER. `main_stack`'s order "is the `rng_seed`'s
     // secret" (`draft_core::types`), so shipping the seed while stripping the
