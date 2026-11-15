@@ -10059,12 +10059,22 @@ pub enum DeferredLifeGainCost {
     /// Accepted with the alternative cost, not yet paid. `cost` is the
     /// `AbilityCost::EffectCost` whose `player_recipient_cost` view the commit pays.
     Unpaid { cost: Box<AbilityCost> },
-    /// Being paid: `recipients` still owe the `amount` gain — after the payer's
-    /// CR 115.10a choice, or after an earlier recipient's gain paused for a
-    /// CR 616.1 replacement choice.
+    /// Being paid: `recipients` (APNAP order, CR 101.4) still owe the `amount`
+    /// gain — after the payer's CR 115.10a choice, or after an earlier
+    /// recipient's gain paused for a CR 616.1 replacement choice. Every
+    /// recipient's gain is staged through the replacement pipeline before any is
+    /// applied, so the gains happen simultaneously (CR 101.4 + CR 119.3).
     Owed {
         recipients: Vec<PlayerId>,
         amount: u32,
+        /// Gains that already survived replacement, `(recipient, final amount)`,
+        /// waiting to be applied together once every recipient is staged.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        staged: Vec<(PlayerId, u32)>,
+        /// The recipient whose gain is parked on a CR 616.1 replacement choice;
+        /// the answer's surviving event is staged for them rather than applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused_on: Option<PlayerId>,
     },
 }
 

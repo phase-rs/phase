@@ -434,6 +434,115 @@ pub fn try_apply_life_gain(
     run_ingress_life_change(state, proposed, settle_life_gain, events)
 }
 
+/// Where staging a batch of simultaneous life gains stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedLifeGainOutcome {
+    /// Every recipient's gain has been through the replacement pipeline and is
+    /// staged, ready for [`settle_staged_life_gains`].
+    Staged,
+    /// A recipient's gain paused (a CR 616.1 replacement choice, or a
+    /// substitute's continuation). `state.waiting_for` owns the prompt and
+    /// `paused_on` names the recipient whose choice is pending, if any.
+    Deferred,
+}
+
+/// CR 101.4 + CR 119.3: the recipients of one simultaneous life gain in APNAP
+/// order. Players outside `recipients` are dropped; players the active player's
+/// turn order does not reach (eliminated seats) are kept last in their given order.
+pub fn order_life_gain_recipients(state: &GameState, recipients: &[PlayerId]) -> Vec<PlayerId> {
+    let mut ordered: Vec<PlayerId> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| recipients.contains(player))
+        .collect();
+    let unreached: Vec<PlayerId> = recipients
+        .iter()
+        .copied()
+        .filter(|player| !ordered.contains(player))
+        .collect();
+    ordered.extend(unreached);
+    ordered
+}
+
+/// CR 101.4 + CR 119.3 + CR 616.1: stage a simultaneous life gain of `amount` for
+/// every player in `recipients` (already in APNAP order) by running each gain
+/// through the replacement pipeline WITHOUT applying it. A replacement condition
+/// (Phial of Galadriel: "while you have 5 or less life") therefore reads the life
+/// totals as they stood before any of the gains happened, and competing
+/// replacements surface their CR 616.1 choices in APNAP order. The staged gains
+/// are applied together by [`settle_staged_life_gains`].
+///
+/// On a pause the recipients not yet reached stay in `recipients`; the caller
+/// parks them and resumes this function after the prompt is answered, staging the
+/// answered recipient's surviving event itself (it is recorded in `paused_on`).
+pub fn stage_life_gains(
+    state: &mut GameState,
+    recipients: &mut Vec<PlayerId>,
+    amount: u32,
+    staged: &mut Vec<(PlayerId, u32)>,
+    paused_on: &mut Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> StagedLifeGainOutcome {
+    while !recipients.is_empty() {
+        let recipient = recipients.remove(0);
+        let Some(proposed) = proposed_life_gain(state, recipient, amount) else {
+            continue;
+        };
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::LifeGain {
+                player_id, amount, ..
+            }) => staged.push((player_id, amount)),
+            ReplacementResult::Execute(other) => {
+                debug_assert!(false, "a life-gain proposal replaced into {other:?}");
+            }
+            // CR 614.6: a cross-event substitute (Lich) replaces the gain outright.
+            ReplacementResult::Prevented => {
+                if matches!(
+                    drain_substitution_continuation(state, events),
+                    SubstitutionDrainOutcome::Deferred
+                ) {
+                    return StagedLifeGainOutcome::Deferred;
+                }
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                *paused_on = Some(recipient);
+                return StagedLifeGainOutcome::Deferred;
+            }
+        }
+    }
+    StagedLifeGainOutcome::Staged
+}
+
+/// CR 101.4 + CR 119.3: apply every staged gain together, in the order staged,
+/// then drain any same-event continuation the replacements left (CR 614.6).
+/// Returns the total life actually gained, or the deferral when that
+/// continuation paused for player input.
+pub fn settle_staged_life_gains(
+    state: &mut GameState,
+    staged: Vec<(PlayerId, u32)>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    let mut total = 0;
+    for (player_id, amount) in staged {
+        total += apply_life_gain_after_replacement(
+            state,
+            ProposedEvent::LifeGain {
+                player_id,
+                amount,
+                applied: HashSet::new(),
+            },
+            events,
+        );
+    }
+    match drain_substitution_continuation(state, events) {
+        SubstitutionDrainOutcome::Completed => Ok(total),
+        SubstitutionDrainOutcome::Deferred => {
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: total })
+        }
+    }
+}
+
 /// CR 614.1a + CR 614.6 — Issue #317: Drain a `post_replacement_continuation`
 /// stashed by cross-event-type substitution in a life-gain or life-loss
 /// replacement. Mirrors the drain points in `engine.rs` (land plays) and

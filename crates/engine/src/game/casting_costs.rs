@@ -55,7 +55,8 @@ use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
     declared_targets_in_chain, random_select_targets_for_ability, target_constraints_from_modal,
 };
-use super::life_costs::{GiveLifeCostResult, LifeGainCostRecipients, PayLifeCostResult};
+use super::effects::life::StagedLifeGainOutcome;
+use super::life_costs::{LifeGainCostRecipients, PayLifeCostResult};
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 /// CR 601.6: terminal sentinel for a fully announced spell that a casting
@@ -881,6 +882,15 @@ pub(crate) fn handle_decide_additional_cost(
                             recompute_choice_cost = true;
                             None
                         }
+                        // CR 118.9d + CR 601.2f: a life-gain alternative cost replaces the
+                        // spell's mana cost with no mana of its own, so the total is
+                        // {0} plus every cost increase and minus every reduction that
+                        // affects the spell (Sphere of Resistance's {1}).
+                        _ if preferred.player_recipient_cost().is_some() => {
+                            alternative_base_override = Some(ManaCost::NoCost);
+                            recompute_choice_cost = true;
+                            Some(preferred.clone())
+                        }
                         _ => Some(preferred.clone()),
                     }
                 } else {
@@ -1117,6 +1127,8 @@ pub(crate) fn handle_choose_gift_recipient(
             pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
                 recipients: vec![opponent],
                 amount,
+                staged: Vec::new(),
+                paused_on: None,
             });
             pay_deferred_life_gain_cost_at_commit(state, player, pending, *finalization, events)
         }
@@ -1130,9 +1142,11 @@ pub(crate) fn handle_choose_gift_recipient(
 /// The recipients are determined now (CR 119.7 reads the "can't gain life" locks
 /// as the cost is paid): no legal payment rejects the cast (CR 601.2h: unpayable
 /// costs can't be paid; CR 733.1 reverses it), several choosable opponents ask the
-/// payer (CR 115.10a), and each recipient then gains the life in seat order. A
-/// gain that pauses for a CR 616.1 replacement choice parks the cast on the
-/// `DeferredLifeCostResume` carrier with the unpaid recipients still owed.
+/// payer (CR 115.10a), and the recipients' gains are then staged through the
+/// replacement pipeline in APNAP order and applied together (CR 101.4). A gain
+/// that pauses for a CR 616.1 replacement choice parks the cast on the
+/// `DeferredLifeCostResume` carrier with the unstaged recipients still owed and
+/// the staged gains kept; [`stage_answered_life_gain_cost`] stages the answer.
 fn pay_deferred_life_gain_cost_at_commit(
     state: &mut GameState,
     player: PlayerId,
@@ -1140,7 +1154,7 @@ fn pay_deferred_life_gain_cost_at_commit(
     finalization: PrepaidSpellFinalization,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (mut recipients, amount) = match pending.deferred_life_gain_cost.take() {
+    let (mut recipients, amount, mut staged) = match pending.deferred_life_gain_cost.take() {
         None => {
             return resume_prepaid_spell_finalization(
                 state,
@@ -1151,7 +1165,12 @@ fn pay_deferred_life_gain_cost_at_commit(
                 events,
             );
         }
-        Some(DeferredLifeGainCost::Owed { recipients, amount }) => (recipients, amount),
+        Some(DeferredLifeGainCost::Owed {
+            recipients,
+            amount,
+            staged,
+            ..
+        }) => (recipients, amount, staged),
         Some(DeferredLifeGainCost::Unpaid { cost }) => {
             let Some(PlayerRecipientCost::GainLife {
                 amount,
@@ -1188,34 +1207,61 @@ fn pay_deferred_life_gain_cost_at_commit(
                         pending_cast: Box::new(pending),
                     });
                 }
-                LifeGainCostRecipients::All(recipients) => (recipients, amount),
+                // CR 101.4: simultaneous gains are staged in APNAP order.
+                LifeGainCostRecipients::All(recipients) => (
+                    super::effects::life::order_life_gain_recipients(state, &recipients),
+                    amount,
+                    Vec::new(),
+                ),
             }
         }
     };
-    while !recipients.is_empty() {
-        let recipient = recipients.remove(0);
-        let resume_at_resolution_depth = state.resolution_stack.len();
-        match super::life_costs::give_life_as_cost(state, recipient, amount, events) {
-            GiveLifeCostResult::Paid { .. } => {}
-            GiveLifeCostResult::Deferred => {
-                // CR 616.1: the recipient (not the payer) may own the pending prompt;
-                // the carrier resumes the payer's commit afterwards (see
-                // `DeferredLifeCostResume` docs), which pays the recipients still owed.
-                if !recipients.is_empty() {
-                    pending.deferred_life_gain_cost =
-                        Some(DeferredLifeGainCost::Owed { recipients, amount });
-                }
-                pending.prepaid_finalization = Some(Box::new(finalization));
-                state.pending_deferred_life_cost_resume =
-                    Some(crate::types::game_state::DeferredLifeCostResume::Cast {
-                        player,
-                        pending: Some(Box::new(pending)),
-                        remaining_life_payments: Vec::new(),
-                        resume_at_resolution_depth,
-                    });
-                return Ok(state.waiting_for.clone());
-            }
+    // CR 101.4 + CR 119.3 + CR 616.1: stage every recipient's gain through the
+    // replacement pipeline before any is applied, then apply them together.
+    let resume_at_resolution_depth = state.resolution_stack.len();
+    let mut paused_on = None;
+    let paused = match super::effects::life::stage_life_gains(
+        state,
+        &mut recipients,
+        amount,
+        &mut staged,
+        &mut paused_on,
+        events,
+    ) {
+        StagedLifeGainOutcome::Staged => {
+            // CR 614.6: a substitute the batch left paused for input owes nothing
+            // further; the carrier resumes once it drains.
+            super::effects::life::settle_staged_life_gains(
+                state,
+                std::mem::take(&mut staged),
+                events,
+            )
+            .is_err()
         }
+        StagedLifeGainOutcome::Deferred => {
+            // CR 616.1: the recipient (not the payer) may own the pending prompt;
+            // the carrier resumes the payer's commit afterwards (see
+            // `DeferredLifeCostResume` docs), which stages the recipients still
+            // owed and applies the batch.
+            pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
+                recipients,
+                amount,
+                staged,
+                paused_on,
+            });
+            true
+        }
+    };
+    if paused {
+        pending.prepaid_finalization = Some(Box::new(finalization));
+        state.pending_deferred_life_cost_resume =
+            Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                player,
+                pending: Some(Box::new(pending)),
+                remaining_life_payments: Vec::new(),
+                resume_at_resolution_depth,
+            });
+        return Ok(state.waiting_for.clone());
     }
     resume_prepaid_spell_finalization(
         state,
@@ -1484,17 +1530,18 @@ fn spell_alternative_cost_is_payable(
 }
 
 /// CR 601.2f + CR 601.2g: whether a spell cast for an alternative cost with no
-/// mana component still has a mana payment in its total cost (a cost increase
-/// such as Sphere of Resistance's, or commander tax), and therefore a
-/// mana-ability window before its costs are paid.
+/// mana component still owes mana in its total cost (a cost increase such as
+/// Sphere of Resistance's, or commander tax, net of reductions), and therefore
+/// has a mana-ability window before its costs are paid.
 fn alternative_cost_total_includes_mana(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
     super::casting::apply_cost_modifiers_to_base(state, player, object_id, ManaCost::NoCost)
-        // CR 107.4d + CR 118.5 + CR 601.2g: concrete {0} still includes a mana payment.
-        .is_some_and(|total| matches!(total, ManaCost::Cost { .. }))
+        // CR 107.4d + CR 118.5 + CR 601.2g: a total reduced to {0} is acknowledged, not
+        // paid with mana, so it opens no mana-ability window.
+        .is_some_and(|total| total.mana_value() > 0)
 }
 
 pub(crate) fn eligible_behold_choices(
@@ -2157,9 +2204,47 @@ pub(crate) fn finish_pending_cost_or_cast(
     }
     // CR 601.2g + CR 601.2h: a deferred commit-time cost needs the payment commit,
     // which only the payment step reaches.
-    if pending.deferred_hand_discard_cost.is_some() || pending.deferred_life_gain_cost.is_some() {
+    if pending.deferred_hand_discard_cost.is_some() {
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
+    }
+    // CR 118.9d + CR 601.2f: a life-gain alternative cost goes through the same total-cost
+    // lock as every other alternative cost, so the increases and reductions that
+    // affect the spell apply to its zero-mana base before anything is paid.
+    if pending.deferred_life_gain_cost.is_some() {
+        match lock_in_total_cost_for_pending(
+            state,
+            player,
+            &pending,
+            &pending.accepted_cost_reductions,
+            pending.cost_reduction_election.as_ref(),
+        ) {
+            super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
+            super::casting::CostLockOutcome::Election {
+                reductions,
+                hybrid_symbols,
+                outcomes,
+            } => {
+                return Ok(WaitingFor::OrderCostReductions {
+                    player,
+                    reductions,
+                    hybrid_symbols,
+                    outcomes,
+                    pending_cast: Box::new(pending),
+                });
+            }
+        }
+        // CR 601.2g: the mana-ability window exists only when the total cost includes a
+        // mana payment. A locked {0} (CR 107.4d + CR 118.5) or no mana component
+        // leaves nothing to pay, so no window opens and the life is paid at the
+        // commit (CR 601.2h).
+        let owes_mana = pending.cost.mana_value() > 0;
+        state.pending_cast = Some(Box::new(pending));
+        return if owes_mana {
+            enter_payment_step(state, player, None, events)
+        } else {
+            finalize_automatic_mana_payment(state, player, events)
+        };
     }
     // CR 601.2f: carry this cast's declared additional mana costs and any
     // reduction the caster already accepted into the lock seam — the seam
@@ -2743,6 +2828,42 @@ fn settled_public_discard_referent(
                 .is_some_and(|obj| obj.zone.is_public())
         })
         .cloned()
+}
+
+/// CR 101.4 + CR 616.1: a replacement-ordering answer produced the surviving life
+/// gain event for a recipient of a life-gain cost that is mid-staging. Record it
+/// in the cost's staged batch instead of applying it, so the remaining
+/// recipients' gains and this one are applied together. Returns `false` when no
+/// such cost is waiting on that recipient and the caller applies the gain itself.
+pub(crate) fn stage_answered_life_gain_cost(
+    state: &mut GameState,
+    gain: &crate::types::proposed_event::ProposedEvent,
+) -> bool {
+    let crate::types::proposed_event::ProposedEvent::LifeGain {
+        player_id, amount, ..
+    } = gain
+    else {
+        return false;
+    };
+    let Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+        pending: Some(pending),
+        ..
+    }) = state.pending_deferred_life_cost_resume.as_mut()
+    else {
+        return false;
+    };
+    let Some(DeferredLifeGainCost::Owed {
+        staged, paused_on, ..
+    }) = pending.deferred_life_gain_cost.as_mut()
+    else {
+        return false;
+    };
+    if *paused_on != Some(*player_id) {
+        return false;
+    }
+    *paused_on = None;
+    staged.push((*player_id, *amount));
+    true
 }
 
 /// CR 601.2h + CR 616.1: resume a cast parked by a replacement choice during its
@@ -11261,7 +11382,11 @@ pub(crate) fn handle_order_cost_reductions(
     // CR 601.2f: a cast whose Emerge or Offering sacrifice was chosen before a
     // deferred target declaration resumes through the payment step that makes
     // that sacrifice, and the lock there honours this election.
-    if !pending.deferred_sacrificed_permanents.is_empty() {
+    // CR 118.9d: a cast carrying a deferred life-gain alternative cost resumes the
+    // same way, so its life instruction survives the election.
+    if !pending.deferred_sacrificed_permanents.is_empty()
+        || pending.deferred_life_gain_cost.is_some()
+    {
         let mut pending = pending;
         pending.cost_reduction_election = Some(election);
         return finish_pending_cost_or_cast(state, player, pending, events);

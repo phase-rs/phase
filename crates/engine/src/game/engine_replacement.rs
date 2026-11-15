@@ -1059,13 +1059,20 @@ fn handle_replacement_choice_inner(
                     // parked prompt like the Mill arm above, so the
                     // unconditional `waiting_for = Priority` reset below does
                     // not clobber it.
-                    match settle_life_gain_after_choice(state, gain, parked_life_policy, events) {
-                        Ok(_) => {}
-                        Err(LifeChangeError::Deferred(_)) => {
-                            return Ok(state.waiting_for.clone());
-                        }
-                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
-                            return Err(unrepresentable.into());
+                    // CR 101.4: a life-gain cost's recipient answering mid-staging
+                    // joins the batch applied together instead of applying alone.
+                    if super::casting_costs::stage_answered_life_gain_cost(state, &gain) {
+                        // Staged; the cost resumes and settles the batch.
+                    } else {
+                        match settle_life_gain_after_choice(state, gain, parked_life_policy, events)
+                        {
+                            Ok(_) => {}
+                            Err(LifeChangeError::Deferred(_)) => {
+                                return Ok(state.waiting_for.clone());
+                            }
+                            Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                                return Err(unrepresentable.into());
+                            }
                         }
                     }
                 }

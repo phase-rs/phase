@@ -27,8 +27,9 @@
 //! "have an opponent gain 3 life", whose recipient the payer chooses during
 //! payment per CR 115.10a, and Reverent Silence's "have each other player gain 6
 //! life") live here too: [`life_gain_cost_recipients`] answers who the payment
-//! reaches and [`give_life_as_cost`] performs each gain. The spell payer settles
-//! them at the CR 601.2h payment, after the CR 601.2g mana-ability window.
+//! reaches; the gains themselves are staged and applied together through
+//! [`effects::life::stage_life_gains`] (CR 101.4). The spell payer settles them at
+//! the CR 601.2h payment, after the CR 601.2g mana-ability window.
 //!
 //! - **CR 119.7** — "a cost that involves having that player gain life can't be
 //!   paid", so a player under a can't-gain-life lock is not a recipient.
@@ -36,9 +37,7 @@
 //!   cost that includes that event. A gain that a replacement reduces to zero CAN
 //!   still happen and stays payable (Invigorate's 2020-08-07 ruling).
 
-use crate::game::effects::life::{
-    apply_life_gain, try_apply_life_loss, LifeChangeError, ReplacementDeferred,
-};
+use crate::game::effects::life::{try_apply_life_loss, LifeChangeError, ReplacementDeferred};
 use crate::game::static_abilities::{
     player_cant_pay_life_as_cost, player_has_cant_gain_life, player_has_cant_lose_life,
 };
@@ -333,34 +332,6 @@ pub fn life_gain_cost_has_unlocked_reach(
         }
         // Every population is reachable: an empty one is paid vacuously.
         CostRecipientSelection::Each => true,
-    }
-}
-
-/// Outcome of performing a life-gain cost for a chosen recipient.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GiveLifeCostResult {
-    /// The gain event finished; `gained` is the amount actually gained after
-    /// replacements (possibly 0).
-    Paid { gained: u32 },
-    /// The gain event paused for player input (a replacement ordering choice or a
-    /// substitute's continuation); `state.waiting_for` owns the continuation.
-    Deferred,
-}
-
-/// CR 118.3 + CR 119.3 + CR 614.1a: Perform a life-gain cost — `recipient` gains
-/// `amount` life. The cost's instruction is the ordinary life-gain event, so CR
-/// 119.7 and replacement effects apply. On `Deferred`, `state.waiting_for` owns the
-/// continuation (a `ReplacementChoice` or a substitute), answered by the recipient
-/// (CR 616.1: the affected player orders competing replacements).
-pub fn give_life_as_cost(
-    state: &mut GameState,
-    recipient: PlayerId,
-    amount: u32,
-    events: &mut Vec<GameEvent>,
-) -> GiveLifeCostResult {
-    match apply_life_gain(state, recipient, amount, events) {
-        Ok(gained) => GiveLifeCostResult::Paid { gained },
-        Err(_) => GiveLifeCostResult::Deferred,
     }
 }
 
@@ -879,18 +850,5 @@ mod tests {
             &opponent_recipient(),
             CostRecipientSelection::ChosenOne,
         ));
-    }
-
-    /// CR 119.3 + CR 119.7: the cost's gain is the ordinary gain event.
-    #[test]
-    fn give_life_as_cost_gains_through_the_life_gain_authority() {
-        let mut state = GameState::new_two_player(42);
-        let before = state.players[1].life;
-        let mut events = Vec::new();
-        assert_eq!(
-            give_life_as_cost(&mut state, PlayerId(1), 3, &mut events),
-            GiveLifeCostResult::Paid { gained: 3 }
-        );
-        assert_eq!(state.players[1].life, before + 3);
     }
 }

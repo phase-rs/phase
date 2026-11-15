@@ -1288,12 +1288,13 @@ fn v13_v14_prompt_legal_actions_and_authority() {
 
 const SPHERE_OF_RESISTANCE: &str = "Spells cost {1} more to cast.";
 const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const EMERALD_MEDALLION: &str = "Green spells you cast cost {1} less to cast.";
 
 /// P0 controls a Forest, Ashnod's Altar and Archfiend of Despair (P1 can't gain
 /// life); Sphere of Resistance makes Invigorate's total cost through the
-/// alternative cost {1}, reduced to {0} by Emerald Medallion. CR 601.2g: the
-/// deferred life-gain cost still leaves a mana-ability window before payment.
-fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+/// alternative cost {1} (CR 118.9d). `with_medallion` adds Emerald Medallion,
+/// which reduces that {1} to {0}.
+fn archfiend_board(with_medallion: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let Setup {
         mut scenario,
         inv,
@@ -1307,17 +1308,21 @@ fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectI
         .add_creature_from_oracle(P0, "Archfiend of Despair", 6, 6, ARCHFIEND_OF_DESPAIR)
         .id();
     scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
-    scenario.add_artifact_from_oracle(
-        P0,
-        "Emerald Medallion",
-        "Green spells you cast cost {1} less to cast.",
-    );
+    if with_medallion {
+        scenario.add_artifact_from_oracle(P0, "Emerald Medallion", EMERALD_MEDALLION);
+    }
     (scenario.build(), inv, bear, altar, archfiend)
 }
 
-/// Cast Invigorate paying manually, accept the alternative cost, and stop at the
-/// mana-payment window. Panics if the alternative cost is not offered.
-fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId) {
+/// Start casting Invigorate paying manually and answer targets and the
+/// alternative-cost offer (`accept_alt`), stopping at the first prompt that is
+/// none of those. Returns whether the alternative cost was offered.
+fn manual_cast_to_next_prompt(
+    runner: &mut GameRunner,
+    inv: ObjectId,
+    bear: ObjectId,
+    accept_alt: bool,
+) -> bool {
     let card_id = runner.state().objects[&inv].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -1340,42 +1345,57 @@ fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId)
             WaitingFor::OptionalCostChoice { .. } => {
                 offered = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
-                    .expect("accept the alternative cost");
+                    .act(GameAction::DecideOptionalCost { pay: accept_alt })
+                    .expect("answer the alternative cost");
             }
-            WaitingFor::ManaPayment { .. } => {
-                assert!(offered, "alternative cost must be offered");
-                return;
-            }
-            other => panic!("unexpected prompt before the mana window: {other:?}"),
+            _ => return offered,
         }
     }
-    panic!("mana-payment window never opened");
+    panic!("cast never reached a settled prompt");
 }
 
-/// V19 — CR 601.2g + CR 601.2h + CR 119.7: a cast with a deferred life-gain cost has a
-/// mana-ability window (even with no mana to pay) before the life-gain cost is paid, so Archfiend's lock on
-/// P1 does not hide the alternative cost. Sacrificing Archfiend to Ashnod's Altar
-/// in that window removes the lock; the commit then pays the cost and P1 gains 3. The
-/// gain is not made before the window. Control on the same board: passing
-/// priority in the window with Archfiend still out leaves P1 unable to gain life, so the commit is
-/// refused and nothing is paid.
+/// Cast Invigorate paying manually, accept the alternative cost, and stop at the
+/// mana-payment window. Panics if the alternative cost is not offered or no
+/// window opens.
+fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId) {
+    let offered = manual_cast_to_next_prompt(runner, inv, bear, true);
+    assert!(offered, "alternative cost must be offered");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "a mana-payment window must open, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// The `{1}` Sphere of Resistance adds to the zero-mana alternative cost: a
+/// concrete one-generic cost, distinct from both `NoCost` and a concrete `{0}`.
+fn one_generic() -> ManaCost {
+    ManaCost::Cost {
+        generic: 1,
+        shards: vec![],
+    }
+}
+
+/// V19 — CR 118.9d + CR 601.2g + CR 601.2h + CR 119.7: with Sphere alone the
+/// alternative cost's total is {1}, so the cast has a mana payment and therefore
+/// a mana-ability window before the life-gain cost is paid. Archfiend's lock on
+/// P1 does not hide the alternative cost: sacrificing Archfiend to Ashnod's Altar
+/// in that window removes the lock, one of the {C}{C} pays the {1}, and the commit
+/// pays the cost so P1 gains 3. The gain is not made before the window.
 #[test]
 fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
-    let (mut runner, inv, bear, altar, archfiend) = taxed_archfiend_board();
+    let (mut runner, inv, bear, altar, archfiend) = archfiend_board(false);
     let p1_before = runner.life(P1);
 
     to_manual_mana_window(&mut runner, inv, bear);
-    // CR 601.2f + CR 601.2g: the alternative cost has no mana component, so the
-    // pending mana obligation is `NoCost`; the manual window opens because the
-    // life-gain cost is deferred to the payment commit, not because of a
-    // concrete {0}. The gain is still owed, unpaid.
     let pending = runner
         .state()
         .pending_cast
         .as_ref()
         .expect("pending manual cast");
-    assert!(pending.cost.is_without_paying_mana());
+    // CR 601.2f: the locked obligation is exactly Sphere's {1} on the zero-mana
+    // base — neither `NoCost` nor a concrete {0}.
+    assert_eq!(pending.cost, one_generic());
     assert!(matches!(
         pending.deferred_life_gain_cost,
         Some(DeferredLifeGainCost::Unpaid { .. })
@@ -1399,9 +1419,16 @@ fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
         })
         .expect("sacrificing Archfiend for mana is legal");
     assert_eq!(runner.state().objects[&archfiend].zone, Zone::Graveyard);
+    let pool_before = runner.state().players[0].mana_pool.total();
+    assert_eq!(pool_before, 2, "the Altar produced {{C}}{{C}}");
     runner
         .act(GameAction::PassPriority)
         .expect("the payment commits once the lock is gone");
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        1,
+        "exactly one of the two mana paid Sphere's {{1}}"
+    );
     assert_eq!(runner.life(P1), p1_before + 3, "P1 gains 3 at payment");
     assert_eq!(runner.state().stack.len(), 1);
     assert!(runner.state().stack.iter().any(|e| e.id == inv));
@@ -1413,29 +1440,45 @@ fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-
-    // Control: Archfiend stays; {0} needs no resources, but P1 still can't gain
-    // life when the cost is paid, so the commit is refused.
-    let (mut runner, inv, bear, _altar, archfiend) = taxed_archfiend_board();
-    assert_eq!(runner.state().objects[&archfiend].zone, Zone::Battlefield);
-    let p1_before = runner.life(P1);
-    to_manual_mana_window(&mut runner, inv, bear);
-    assert!(
-        runner.act(GameAction::PassPriority).is_err(),
-        "CR 119.7: the life-gain cost can't be paid while P1 can't gain life"
-    );
-    assert_eq!(runner.life(P1), p1_before);
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ManaPayment { .. }
-    ));
 }
 
-/// V20 — CR 601.2g + CR 601.2h: a cost increase alone (no lock) opens the mana
-/// window, and the gain is paid at the commit, not when the alternative cost is
-/// accepted.
+/// V19 negative control — CR 107.4d + CR 118.5 + CR 601.2g + CR 601.2h + CR 118.3:
+/// Sphere and Emerald Medallion bring the alternative cost's total to {0}, which
+/// needs no mana payment, so no mana-ability window opens and the life-gain cost
+/// is paid at the commit. With Archfiend still out P1 can't gain life, so the cost
+/// can't be paid and the alternative cost is not available: Ashnod's Altar can't
+/// be used to remove the lock, and nothing is paid. Positive control on the same
+/// board without Archfiend: the {0} alternative completes without any window.
 #[test]
-fn v20_taxed_cast_pays_the_gain_at_the_commit() {
+fn v19_zero_obligation_opens_no_mana_window() {
+    let (mut runner, inv, bear, _altar, archfiend) = archfiend_board(true);
+    let p1_before = runner.life(P1);
+
+    let offered = manual_cast_to_next_prompt(&mut runner, inv, bear, true);
+    assert!(
+        !offered,
+        "CR 118.3: a cost that can't be paid can't be chosen as the alternative"
+    );
+    assert!(
+        !matches!(
+            runner
+                .state()
+                .pending_cast
+                .as_ref()
+                .map(|p| &p.deferred_life_gain_cost),
+            Some(Some(_))
+        ),
+        "no life-gain cost was accepted"
+    );
+    assert_eq!(runner.life(P1), p1_before, "nothing is paid");
+    assert_eq!(
+        runner.state().objects[&archfiend].zone,
+        Zone::Battlefield,
+        "Archfiend was not sacrificed for mana"
+    );
+
+    // Positive control: without Archfiend the same {0} total completes the cast
+    // with no mana-payment window at any point.
     let Setup {
         mut scenario,
         inv,
@@ -1443,18 +1486,97 @@ fn v20_taxed_cast_pays_the_gain_at_the_commit() {
     } = setup(GameScenario::new());
     scenario.add_basic_land(P0, ManaColor::Green);
     scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
+    scenario.add_artifact_from_oracle(P0, "Emerald Medallion", EMERALD_MEDALLION);
     let mut runner = scenario.build();
-    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
-        ManaType::Colorless,
-        inv,
-        false,
-        vec![],
-    ));
     let p1_before = runner.life(P1);
-    to_manual_mana_window(&mut runner, inv, bear);
-    assert_eq!(runner.life(P1), p1_before, "not paid before the window");
-    runner.act(GameAction::PassPriority).expect("commit");
+    let offered = manual_cast_to_next_prompt(&mut runner, inv, bear, true);
+    assert!(offered, "the alternative cost is offered");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no mana-payment window opens at a {{0}} total: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.iter().any(|e| e.id == inv));
     assert_eq!(runner.life(P1), p1_before + 3, "paid at the commit");
+}
+
+/// V20 / F1 — CR 118.9d + CR 601.2f + CR 601.2g + CR 601.2h: Sphere of Resistance's
+/// {1} applies to the life-gain alternative cost, so with only Sphere on the board
+/// {1} is owed. Completing the payment with an empty pool is refused and nothing is
+/// paid; after the Forest is tapped for exactly one mana the commit spends it and
+/// the opponent gains 3 before Invigorate resolves.
+#[test]
+fn v20_alternative_cast_owes_spheres_tax() {
+    let Setup {
+        mut scenario,
+        inv,
+        bear,
+    } = setup(GameScenario::new());
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
+    let mut runner = scenario.build();
+    let p1_before = runner.life(P1);
+
+    to_manual_mana_window(&mut runner, inv, bear);
+    assert_eq!(
+        runner.state().pending_cast.as_ref().map(|p| &p.cost),
+        Some(&one_generic()),
+        "{{1}} is owed"
+    );
+    // With no mana source left and an empty pool the {1} can't be paid: the
+    // commit is refused and nothing is paid. (The Forest is tapped as fixture
+    // setup so the manual window has no source to draw on.)
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&forest)
+        .expect("Forest")
+        .tapped = true;
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(
+        runner.act(GameAction::PassPriority).is_err(),
+        "an empty pool can't pay the {{1}}"
+    );
+    assert_eq!(runner.life(P1), p1_before, "nothing is paid when refused");
+    assert!(
+        runner.state().pending_cast.is_some(),
+        "the cast is still being paid"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&forest)
+        .expect("Forest")
+        .tapped = false;
+
+    let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
+    let selection = grouped
+        .get(&forest)
+        .into_iter()
+        .flatten()
+        .find_map(|action| match action {
+            GameAction::TapLandForMana { selection } => Some(selection.clone()),
+            _ => None,
+        })
+        .expect("the engine authors the Forest's mana selection");
+    runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("tap the Forest for mana");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    assert_eq!(runner.life(P1), p1_before, "not paid before the commit");
+    runner.act(GameAction::PassPriority).expect("commit");
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the mana was actually spent on Sphere's {{1}}"
+    );
+    assert_eq!(runner.life(P1), p1_before + 3, "paid at the commit");
+    assert!(runner.state().stack.iter().any(|e| e.id == inv));
+    assert_eq!(power(&runner, bear), Some(2), "not resolved yet");
     finish_resolution(&mut runner);
     assert_eq!(power(&runner, bear), Some(6));
 }
@@ -1604,4 +1726,118 @@ fn v24_skyshroud_cutter_each_other_player_gains_five() {
     assert_eq!(runner.life(P0), p0_before);
     assert!(!tapped(&runner, forest), "no mana spent");
     assert_eq!(runner.state().objects[&cutter].zone, Zone::Battlefield);
+}
+
+const PHIAL_OF_GALADRIEL: &str = "If you would draw a card while you have no cards in hand, draw two cards instead.\nIf you would gain life while you have 5 or less life, you gain twice that much life instead.\n{T}: Add one mana of any color.";
+
+/// F3 — CR 101.4 + CR 119.3 + CR 810.9a: "each other player gain 6 life" gains are
+/// simultaneous. In Two-Headed Giant each Phial of Galadriel reads the opposing
+/// team's life total (5 = 3 + 2) before either gain happens, so both gains double:
+/// 5 + 12 + 12 = 29, not the 23 a gain-by-gain settlement yields. Each recipient is
+/// paid once, and the caster's teammate gains the plain 6.
+#[test]
+fn v25_each_other_player_gains_settle_together_under_team_life_replacements() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    let (silence, forest, _anthem) = reverent_silence_board(&mut scenario);
+    scenario.add_artifact_from_oracle(P2, "Phial of Galadriel", PHIAL_OF_GALADRIEL);
+    scenario.add_artifact_from_oracle(P3, "Phial of Galadriel", PHIAL_OF_GALADRIEL);
+    scenario.with_life(P2, 3);
+    scenario.with_life(P3, 2);
+    let mut runner = scenario.build();
+    assert_eq!(team_life_total(runner.state(), P2), 5);
+    let (p0_before, p1_before) = (runner.life(P0), runner.life(P1));
+
+    let trace = drive_cast(&mut runner, silence, silence, true, None, None);
+    assert!(trace.saw_optional_cost, "alternative cost must be offered");
+    assert_eq!(trace.replacement_prompt_player, None, "no ordering choice");
+    assert_eq!(runner.life(P2), 3 + 12, "P2's gain doubled once");
+    assert_eq!(runner.life(P3), 2 + 12, "P3's gain doubled once");
+    assert_eq!(team_life_total(runner.state(), P2), 29);
+    assert_eq!(runner.life(P1), p1_before + 6, "the teammate gains 6");
+    assert_eq!(runner.life(P0), p0_before, "the caster gains nothing");
+    assert!(!tapped(&runner, forest), "no mana spent");
+}
+
+/// F3 — CR 101.4 + CR 616.1: competing life-gain replacements on several
+/// recipients surface their ordering choices in APNAP order, not seat order. P2
+/// is the active player and P0 casts Reverent Silence at instant speed, so the
+/// recipients P1, P2, P3 are asked as P2, P3, P1. Doctor Strange doubles and Pest
+/// Rescuer adds one, so every recipient has an ordering to make; each gain is
+/// applied once, with the order each recipient chose (doubler first: 6 doubled to 12, plus 1 = 13).
+#[test]
+fn v26_recipient_replacement_choices_follow_apnap_order() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Reverent Silence", true, REVERENT_SILENCE);
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    });
+    let silence = builder.id();
+    let mut strange = Vec::new();
+    for owner in [P1, P2, P3] {
+        strange.push(
+            scenario
+                .add_creature_from_oracle(owner, "Doctor Strange, Surgeon", 2, 2, DOCTOR_STRANGE)
+                .id(),
+        );
+        scenario.add_creature_from_oracle(owner, "Pest Rescuer", 1, 1, PEST_RESCUER);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P2;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    let before: Vec<i32> = [P1, P2, P3].iter().map(|&p| runner.life(p)).collect();
+
+    let card_id = runner.state().objects[&silence].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: silence,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast should start");
+    let mut prompt_order = Vec::new();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("accept the alternative cost");
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                prompt_order.push(player);
+                let index = candidates
+                    .iter()
+                    .position(|c| strange.contains(&c.source_id))
+                    .expect("Doctor Strange is a candidate");
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("replacement choice should succeed");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("finalize");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert_eq!(
+        prompt_order,
+        vec![P2, P3, P1],
+        "CR 101.4 + CR 616.1: choices are made in APNAP order, not seat order"
+    );
+    assert!(runner.state().stack.iter().any(|e| e.id == silence));
+    for (index, player) in [P1, P2, P3].into_iter().enumerate() {
+        assert_eq!(
+            runner.life(player),
+            before[index] + 13,
+            "{player:?}: 6 doubled to 12, plus 1"
+        );
+    }
 }
