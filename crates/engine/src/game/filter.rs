@@ -9041,8 +9041,21 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
-        FilterProp::InZone { zone: required } => zone == *required,
-        FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        // CR 601.2a + CR 400.11: a cast from outside the game (CR 707.13) is from no
+        // zone, so no zone constraint holds — and its negation does.
+        FilterProp::InZone { zone: required } => !record.from_outside_game && zone == *required,
+        FilterProp::InAnyZone { zones } => !record.from_outside_game && zones.contains(&zone),
+        // CR 608.2c + CR 601.2a + CR 400.11: logical negation must recurse through THIS
+        // zone-aware evaluator, not the history arm below, which reads the record's
+        // `from_zone` (the spell's current zone, the stack) instead of the cast origin
+        // `zone`. "Cast from anywhere other than your hand" lowers to
+        // `Not(InZone(Hand))`, so a cast from outside the game (no zone) satisfies it.
+        FilterProp::Not { prop: inner } => {
+            !spell_object_matches_property(record, zone, inner, all_creature_types, context)
+        }
+        FilterProp::AnyOf { props } => props.iter().any(|inner| {
+            spell_object_matches_property(record, zone, inner, all_creature_types, context)
+        }),
         FilterProp::Cmc { comparator, value } => {
             let threshold = match value {
                 QuantityExpr::Fixed { value } => *value,
@@ -9309,13 +9322,18 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // closed rather than treating every cast spell as card-represented.
         FilterProp::RepresentedByCard => false,
         FilterProp::WasPlayed => true,
-        FilterProp::InZone { zone: required } => record.from_zone == *required,
+        // CR 601.2a + CR 400.11: see the live-spell arm; outside the game is no zone.
+        FilterProp::InZone { zone: required } => {
+            !record.from_outside_game && record.from_zone == *required
+        }
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
         // from_zone (populated when the spell was put on the stack from where it
         // was, CR 601.2a) is one of the listed cast-capable zones. Mirrors the
         // InZone arm; used by "spell you've cast this turn from anywhere other
         // than your hand" (the Paradox cycle).
-        FilterProp::InAnyZone { zones } => zones.contains(&record.from_zone),
+        FilterProp::InAnyZone { zones } => {
+            !record.from_outside_game && zones.contains(&record.from_zone)
+        }
         // CR 201.2: Exact name match against the cast-time snapshot — case-
         // insensitive per the same convention used by the live-object path.
         // Approach of the Second Sun's "you've cast another spell named
@@ -17033,6 +17051,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let filter = TargetFilter::Typed(
@@ -17150,6 +17169,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let non_x_record = SpellCastRecord {
@@ -17328,6 +17348,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let exile_record = SpellCastRecord {
@@ -24917,6 +24938,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         };
@@ -25477,6 +25499,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
@@ -26014,26 +26037,25 @@ mod tests {
         );
     }
 
-    // CR 400.1 + CR 601.2a: a spell-cast record's captured `from_zone` must be
-    // honored by `FilterProp::InAnyZone` so "spell you've cast this turn from
-    // anywhere other than your hand" counts non-hand casts (the Paradox cycle).
+    // CR 400.1 + CR 601.2a + CR 400.11: "spell you've cast this turn from anywhere other
+    // than your hand" (the Paradox cycle) is `Not(InZone(Hand))` over the record's
+    // captured origin — a non-hand cast satisfies it, a hand cast does not, and a cast
+    // from OUTSIDE the game (CR 707.13: not a zone) does.
     #[test]
-    fn spell_record_in_any_zone_cast_origin() {
-        let zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
-        let filter =
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
-                zones: zones.clone(),
-            }]));
+    fn spell_record_not_in_zone_cast_origin() {
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+        }]));
         let controller = PlayerId(0);
 
-        // A graveyard cast (e.g. flashback) is in the "anywhere other than hand" set.
+        // A graveyard cast (e.g. flashback) is "anywhere other than hand".
         let from_graveyard = SpellCastRecord {
             from_zone: Zone::Graveyard,
             ..Default::default()
         };
         assert!(
             spell_record_matches_filter(&from_graveyard, &filter, controller, &[]),
-            "a spell cast from the graveyard must satisfy InAnyZone[everything except hand]"
+            "a spell cast from the graveyard must satisfy Not(InZone(Hand))"
         );
 
         // A normal hand cast is excluded.
@@ -26043,8 +26065,33 @@ mod tests {
         };
         assert!(
             !spell_record_matches_filter(&from_hand, &filter, controller, &[]),
-            "a spell cast from hand must NOT satisfy InAnyZone[everything except hand]"
+            "a spell cast from hand must NOT satisfy Not(InZone(Hand))"
         );
+
+        // CR 707.13 + CR 400.11: an outside-the-game cast carries its staging zone as
+        // `from_zone`, but is from no zone — so it is "not from hand" even when the
+        // staging zone is the hand, and it is NOT "from exile" even when it is staged
+        // in exile.
+        let outside_staged_in_exile = SpellCastRecord {
+            from_zone: Zone::Exile,
+            from_outside_game: true,
+            ..Default::default()
+        };
+        assert!(spell_record_matches_filter(
+            &outside_staged_in_exile,
+            &filter,
+            controller,
+            &[]
+        ));
+        let from_exile = TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+        );
+        assert!(!spell_record_matches_filter(
+            &outside_staged_in_exile,
+            &from_exile,
+            controller,
+            &[]
+        ));
     }
 
     /// CR 109.4 + CR 608.2i (Admiral Beckett Brass #4735): the object-side
@@ -28193,7 +28240,7 @@ mod entry_projection_tests {
             choose(true, TargetSelectionMode::Chosen).sub_ability(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::card_name(),
                     chooser: ControllerRef::You,
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
