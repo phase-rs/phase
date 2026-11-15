@@ -18,7 +18,9 @@ use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::{lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain};
+use super::oracle_effect::{
+    lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain_with_provenance,
+};
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::effect_chain::{
@@ -193,7 +195,11 @@ pub(crate) fn parse_class_oracle_text(
                     // is not overwritten with `source_text`.
                     items.push((
                         line_index,
-                        OracleNodeIr::Trigger(TriggerNodeIr::from_definition(line, trigger)),
+                        OracleNodeIr::Trigger(TriggerNodeIr::from_definition_with_history(
+                            line,
+                            trigger.value,
+                            trigger.history,
+                        )),
                     ));
                     continue;
                 }
@@ -399,7 +405,10 @@ pub(crate) fn parse_class_oracle_text(
             // authority free to diverge from this one.
             if is_effect_sentence_candidate(&lower) {
                 let ir = parse_ability_ir_standalone(line, AbilityKind::Spell);
-                if !has_unimplemented(&lower_ability_ir(&ir)) {
+                // Classification only: the retained IR is lowered with provenance at emission.
+                let probe = super::oracle_effect::lower_ability_ir_with_provenance(&ir);
+                drop(probe.history); // Only the trial definition is inspected; the retained IR owns the records.
+                if !has_unimplemented(&probe.value) {
                     items.push((line_index, OracleNodeIr::Spell(ir)));
                     continue;
                 }
@@ -460,7 +469,11 @@ pub(crate) fn is_class_level_trigger(lower: &str, card_name: &str) -> bool {
 }
 
 /// Parse a "When this Class becomes level N, {effect}" trigger.
-fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<TriggerDefinition> {
+fn parse_class_level_trigger(
+    line: &str,
+    card_name: &str,
+    level: u8,
+) -> Option<super::oracle_ir::history_provenance::Lowered<TriggerDefinition>> {
     // Find "becomes level N" and extract the effect after the comma (case-insensitive)
     let lower = line.to_lowercase();
     let tp = TextPair::new(line, &lower);
@@ -481,18 +494,19 @@ fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<T
     let effect_start = line.len() - effect_text.len();
     let original_effect = line[effect_start..].trim();
 
-    let execute = parse_effect_chain(original_effect, AbilityKind::Spell);
+    let execute = parse_effect_chain_with_provenance(original_effect, AbilityKind::Spell);
 
     let _ = card_name; // used in is_class_level_trigger, not needed here
 
-    Some(
-        TriggerDefinition::new(TriggerMode::ClassLevelGained)
+    Some(super::oracle_ir::history_provenance::Lowered {
+        value: TriggerDefinition::new(TriggerMode::ClassLevelGained)
             .valid_card(TargetFilter::SelfRef)
-            .execute(execute)
+            .execute(execute.value)
             .trigger_zones(vec![Zone::Battlefield])
             .constraint(TriggerConstraint::AtClassLevel { level })
             .description(format!("When ~ becomes level {level}")),
-    )
+        history: execute.history,
+    })
 }
 
 /// CR 716.2a: Gate a Class-level trigger's intervening-if on the source Class

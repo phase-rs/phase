@@ -3905,11 +3905,11 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
 
 /// CR 701.24a + CR 732.2a: beside Soul Warden on either seat, the period the play trace names
 /// holds no shuffle while its replay shuffles P0's library, so the period is offered, never
-/// declared, and every player accepting it draws the game; Off runs on. The ring drain's
-/// delimiter fires in the replay beside P1's Soul Warden, so a count is taken, and fires nowhere
-/// beside P0's, so no count above zero is taken.
+/// declared, and every player accepting it draws the game; Off runs on. The period is whole on
+/// both seats, so a count is taken beside either Soul Warden (CR 603.6a: P0's Warden returns beside
+/// Wood Elves each cycle and triggers twice per period).
 fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
-    for (seat, refused) in [(P1, None), (P0, Some(UnperformableCause::UndelimitedCover))] {
+    for seat in [P1, P0] {
         let board = Board {
             soul_warden: Some(seat),
             ..WOOD_ELVES
@@ -3929,12 +3929,7 @@ fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
             offered.state().rng.get_word_pos() > 0,
             "{leg}: reach: the shuffles drew randomness"
         );
-        match refused {
-            None => assert_counted_take_performs(offered.state(), &leg),
-            Some(cause) => {
-                assert_no_counted_take(offered.state(), CountedTake::Unperformable(cause), &leg)
-            }
-        }
+        assert_counted_take_performs(offered.state(), &leg);
         offer_accepted_is_a_draw(offered);
         run_off(board, drive, 60);
     }
