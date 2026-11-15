@@ -12259,9 +12259,9 @@ fn parse_zone_phrase_entry(
 /// different players' zones.
 ///
 /// "Each player has their own library, hand, and graveyard. The other zones are
-/// shared by all players" — so a SHARED zone is never written with a possessor,
-/// and the `ZoneQual::Plain` it is therefore forced to carry says nothing about
-/// whose cards the list names. Reducing a list absorbs those, which is what
+/// shared by all players." An unqualified shared-zone entry ("in exile") names
+/// no possessor, so the `ZoneQual::Plain` it carries says nothing about whose
+/// cards the list names. Reducing a list absorbs those, which is what
 /// makes the printed possessive asymmetry parse: Huskburster Swarm's "in exile
 /// and in your graveyard" reduces to `You`, Firemane Angel's "in your graveyard
 /// or on the battlefield" likewise, and Aven Interrupter's all-`Plain` "from

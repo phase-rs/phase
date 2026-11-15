@@ -18,8 +18,9 @@
 //! is the mana cost or alternative cost ..., plus all additional costs and cost
 //! increases, and minus all cost reductions"). CR 400.1 authorizes both halves
 //! of the parse fix: "Each player has their own library, hand, and graveyard.
-//! The other zones are shared by all players" — so exile can never carry a
-//! possessor (hence the printed asymmetry "in exile and in YOUR graveyard"), and
+//! The other zones are shared by all players" — so Huskburster's unqualified
+//! "in exile" leg names no possessor while its graveyard leg says "your" (the
+//! printed asymmetry "in exile and in YOUR graveyard"), and
 //! an object occupies one zone at a time (CR 400.7: it "becomes a new object"
 //! when it moves), so a zone list in a population is a union however English
 //! joins it.
