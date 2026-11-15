@@ -250,6 +250,7 @@ fn park_prompt(
     library_position: Option<LibraryPosition>,
 ) {
     runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: P0,
         cards,
         count: 1,
@@ -267,6 +268,7 @@ fn park_prompt(
         track_exiled_by_source: false,
         face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,

@@ -1240,7 +1240,11 @@ fn latch_chosen_text_words(
         .collect()
 }
 
-fn snapshot_transient_modifications(
+/// CR 608.2h + CR 611.2d: the modifications a resolution-created transient effect
+/// installs, with resolution-time values fixed. The single authority shared by
+/// `register_transient_effect` and the CR 611.2e with-entry carrier
+/// (`effects::with_entry_effect`).
+pub(crate) fn snapshot_transient_modifications(
     state: &GameState,
     ability: &ResolvedAbility,
     modifications: &[ContinuousModification],

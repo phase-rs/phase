@@ -11,11 +11,11 @@
 //! is implemented. A replacement that consumes itself would be consumed on the
 //! view, so if one is added, its consumption must be handed to the live game.
 
-use crate::game::game_object::{PhaseOutCause, PhaseStatus};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+#[cfg(test)]
 use crate::types::zones::Zone;
 
 /// CR 603.6d + CR 614.12a + CR 611.3b + CR 113.6: the live board with every
@@ -44,26 +44,10 @@ impl PreEntryRulesView {
         if !entrants.contains(&roller) {
             entrants.push(roller);
         }
-        entrants.retain(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|object| object.zone == Zone::Battlefield && object.is_phased_in())
-        });
-        if entrants.is_empty() {
-            return None;
-        }
-        let mut board = state.clone();
-        for id in entrants {
-            if let Some(object) = board.objects.get_mut(&id) {
-                // CR 702.26b: treated as though it does not exist.
-                object.phase_status = PhaseStatus::PhasedOut {
-                    cause: PhaseOutCause::Directly,
-                };
-            }
-        }
-        board.layers_dirty.mark_full();
-        crate::game::layers::flush_layers(&mut board);
+        let board = match crate::game::filter::pre_entry_board(state, &entrants) {
+            std::borrow::Cow::Borrowed(_) => return None,
+            std::borrow::Cow::Owned(board) => board,
+        };
         // The observer collection's journal is replayed on the live game, so a
         // timestamp it allocates on the view must be the one live allocates.
         debug_assert_eq!(

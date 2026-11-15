@@ -1673,7 +1673,7 @@ fn is_card_name_choice(state: &GameState) -> bool {
     matches!(
         state.waiting_for,
         WaitingFor::NamedChoice {
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::CardName { .. },
             ..
         }
     )
@@ -10338,9 +10338,30 @@ fn an_as_enters_roll_does_not_apply_under_a_resident_humility_on_any_entry() {
     }
 }
 
-// BL (disclosed, not gated). A liminal token copy of Hammer Jammer (Stolen
-// Identity, Twinflame, Second Harvest) under a resident Humility still rolls and
-// gets its counters: the entrant projection cannot place a token that does not
-// exist yet (`BattlefieldEntrantProjection::new` refuses liminal entrants). The
-// CR 614.12 view of a liminal entrant is the liminal half of the resident-view
-// follow-up (PR-B), which lands first.
+/// CR 614.12 + CR 707.5: the copy retains its printed roll only if resident
+/// continuous effects leave that ability on the entering creature.
+#[test]
+fn a_stolen_identity_copy_under_humility_enters_without_rolling() {
+    let mut scenario = board(7);
+    scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+    let resident = resident_jammer(&mut scenario, P0);
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    let token = the_token_copy(state, "Hammer Jammer");
+    assert_eq!(zone(state, token), Zone::Battlefield);
+    assert!(!state.objects[&token]
+        .base_replacement_definitions
+        .is_empty());
+    assert!(die_results(&events).is_empty());
+    assert_eq!(plus_counters(state, token), 0);
+    assert_eq!(
+        (state.objects[&token].power, state.objects[&token].toughness),
+        (Some(1), Some(1))
+    );
+    assert!(recorded_unsupported(state).is_empty());
+    assert_finished(state, &[resident], "Stolen Identity under Humility");
+}

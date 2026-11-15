@@ -2604,6 +2604,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -2672,6 +2673,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -2688,6 +2690,7 @@ mod tests {
                 .collect(),
             source_id,
             controller,
+            performed_by: controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,
@@ -2697,6 +2700,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -2743,6 +2747,7 @@ mod tests {
             },
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -2767,6 +2772,7 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
                     library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
@@ -2788,6 +2794,7 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
                     library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
@@ -2907,6 +2914,7 @@ mod tests {
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: group,
             paused_current: Some(paused),
             remaining: vec![surviving],

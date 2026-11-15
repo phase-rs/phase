@@ -1023,6 +1023,7 @@ fn move_definition(
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,
@@ -1869,6 +1870,7 @@ fn nothic_departed_source_draws_and_loses_life_for_its_trigger_controller() {
 
 fn self_move(origin: Zone, destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(origin),
         destination,

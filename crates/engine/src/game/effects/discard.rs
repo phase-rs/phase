@@ -71,16 +71,19 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
-        enter_with_grants: Vec::new(),
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
         library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
@@ -1876,6 +1879,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -1908,6 +1912,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -2084,6 +2089,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
@@ -2219,6 +2225,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,

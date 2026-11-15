@@ -26,13 +26,14 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_source_blocked_history_clause, parse_target,
+    parse_bare_was_dealt_damage_suffix, parse_block_history_clause, parse_target,
     parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
     parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
 };
+use super::gap_diagnosis::clause_gap_unimplemented;
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -40,10 +41,10 @@ use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, E
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
-    CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
-    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    CastPermissionConstraint, CastingPermission, ChoiceType, CoinFlipRun, CombatHistoryScope,
+    Comparator, ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef,
+    CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
     NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
     PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
     RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
@@ -1031,6 +1032,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             destination: Zone::Hand,
             origin: None,
@@ -1570,9 +1572,15 @@ pub(super) fn fold_search_choose_type_conditional_destination(def: &mut AbilityD
 /// is returned only if every difference from the unseeded one is confined to the
 /// positions the bindings may occupy (`accepting_bindings_confined`).
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    lower_effect_chain_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_effect_chain_ir_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
     let unseeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "unseeded").entered();
-        super::assembly::assemble_effect_chain(ir)
+        super::assembly::assemble_effect_chain_with_provenance(ir)
     };
     if ir
         .clauses
@@ -1589,9 +1597,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         .for_each(transplant_accepting_player_bindings);
     let seeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "seeded").entered();
-        super::assembly::assemble_effect_chain(&seeded_ir)
+        super::assembly::assemble_effect_chain_with_provenance(&seeded_ir)
     };
-    let confined = accepting_bindings_confined(&unseeded, &seeded);
+    let confined = accepting_bindings_confined(&unseeded.value, &seeded.value);
     tracing::debug!(target: "engine::parser::binding", confined, selected_pass = if confined { "seeded" } else { "unseeded" }, "assembly selected");
     if confined {
         seeded
@@ -3184,6 +3192,62 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
 }
 
+/// CR 608.2c: rebind a bare "it" body that names the single card a preceding
+/// library→zone move just changed. The body lowered to
+/// `TargetFilter::ParentTarget`, which a `Mill` head cannot resolve — it
+/// declares no object target — so the sentinel becomes the moved-card referent
+/// (`LastZoneChanged`).
+fn rebind_parent_target_to_moved_card(def: &mut AbilityDefinition) {
+    if let Effect::ChangeZone { target, .. } = def.effect.as_mut() {
+        if *target == TargetFilter::ParentTarget {
+            *target = TargetFilter::LastZoneChanged;
+        }
+    }
+}
+
+/// CR 608.2c: A leading "If it's a [type] card, …" rider on a single-card
+/// library-edge move names the card that move just took. The clause parser lowers the body's bare
+/// "it" to the generic `TargetFilter::ParentTarget` fallback, but `Mill`
+/// declares no object target, so `ParentTarget` names nothing and the body
+/// silently no-ops. Rebind it to `TargetFilter::LastZoneChanged` — the same
+/// referent `RevealedHasCardType` itself reads after a move — so "…, put it onto
+/// the battlefield" (Grenzo, Dungeon Warden) acts on the moved card.
+///
+/// Gated on `Fixed(1)`: with any other count the condition still checks the
+/// first moved card while "it" would name a population, so a multi-card move
+/// remains an honest gap instead of moving an arbitrary member.
+pub(super) fn rebind_revealed_card_type_pronoun_to_moved_object(def: &mut AbilityDefinition) {
+    let parent_mills_one_card = matches!(
+        &*def.effect,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    );
+    if parent_mills_one_card {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if matches!(
+                sub.condition.as_ref(),
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ) {
+                rebind_parent_target_to_moved_card(sub);
+                // CR 608.2c: the gate's "Otherwise" branch names the same
+                // just-moved card ("Otherwise, put it into your hand"), and a
+                // `Mill` head declares no object target for its bare "it".
+                if let Some(otherwise) = sub.else_ability.as_deref_mut() {
+                    rebind_parent_target_to_moved_card(otherwise);
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_revealed_card_type_pronoun_to_moved_object(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        rebind_revealed_card_type_pronoun_to_moved_object(els);
+    }
+}
+
 /// Which reflexive-gate-producing verb (if any) `def.effect` is, for
 /// `rebind_zone_changed_this_way_pronoun_to_moved_object`'s parent/gate
 /// pairing check. Discard and Sacrifice are cause-bound — CR 701.9a makes the
@@ -3444,6 +3508,7 @@ impl ReflexiveGateParent {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -3779,6 +3844,52 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2c: a typed "those <type>" anaphor names its nearest antecedent. When
+/// the previous instruction reads the chain set restricted to one "this way"
+/// action ("Each Wolf tapped this way deals damage ..."), a following "those
+/// Wolves" names those same members, so it reads the same action. A mass tap
+/// selects members it leaves unchanged too (CR 701.26a), so the bare set is
+/// wider than its "tapped this way" members (Master of the Wild Hunt).
+pub(super) fn inherit_this_way_cause_from_antecedent(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let Some((antecedent_id, cause)) = this_way_operand(&defs[i - 1].effect) else {
+            continue;
+        };
+        if let Some(TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: caused_by @ None,
+            ..
+        }) = defs[i].effect.target_filter_mut()
+        {
+            if *id == antecedent_id {
+                *caused_by = Some(cause);
+            }
+        }
+    }
+}
+
+/// The chain-set operand an instruction acts on or from, when it is restricted
+/// to one "this way" action.
+fn this_way_operand(
+    effect: &Effect,
+) -> Option<(
+    crate::types::identifiers::TrackedSetId,
+    crate::types::ability::ThisWayCause,
+)> {
+    let operand = match effect {
+        Effect::EachSourceDealsDamage { sources, .. } => sources,
+        other => other.target_filter()?,
+    };
+    match operand {
+        TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: Some(cause),
+            ..
+        } => Some((*id, *cause)),
+        _ => None,
+    }
+}
+
 /// CR 701.60a + CR 608.2c: Resolve the plural population anaphor in
 /// "[mass P/T modification to a population]. ... they're no longer suspected"
 /// (Eliminate the Impossible: "Creatures your opponents control get -2/-0 ...
@@ -4096,6 +4207,95 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
 /// [`Effect::publishes_created_referent`]; this name is kept for the parser's callers.
 pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
     effect.publishes_created_referent()
+}
+
+/// The Oracle sentence the card-copy fold hands back to the gap authority when
+/// no card-name choice reaches it — the same clause the parser would otherwise
+/// have left unparsed.
+const CARD_COPY_BY_NAME_CLAUSE: &str = "Create a copy of the card with the chosen name";
+
+/// CR 201.4 + coverage honesty: a "create a copy of the card with the chosen
+/// name" clause whose chain never made a card-name CHOICE has no name to read, so
+/// it would resolve as a silent no-op — and its clause would count as parsed and
+/// could flip the whole card to `supported` in `cargo coverage` while doing
+/// nothing.
+///
+/// Measured over the corpus: Svega, the Unconventional names its domain by
+/// planeswalker type ("Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk
+/// planeswalker card name with mana value X"), which no card-name phrase-table
+/// arm claims. Its copy clause is therefore returned to `Unimplemented`, keeping
+/// the card honestly unsupported until that domain has a parse of its own.
+fn unimplement_card_copy_without_a_name_choice(defs: &mut [AbilityDefinition]) {
+    let mut chain_chose_a_name = false;
+    for def in defs.iter_mut() {
+        let orphan_copy = match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::CardName { .. },
+                ..
+            } => {
+                chain_chose_a_name = true;
+                false
+            }
+            Effect::CreateCardCopyByName { name: None, .. } => !chain_chose_a_name,
+            _ => false,
+        };
+        if orphan_copy {
+            // Through the single gap authority, never a hand-built literal: it is
+            // what names the verdict on the wire (`gap_diagnosis`), and Gate A
+            // forbids the literal precisely so this stays one seam.
+            *def.effect = clause_gap_unimplemented(CARD_COPY_BY_NAME_CLAUSE);
+        }
+    }
+}
+
+/// CR 707.12 + CR 608.2g: bind "You may cast the copy." to the copy the chain
+/// just created (CR 707.13), and cast it WHILE the ability is still resolving.
+///
+/// Two rewrites, both forced by the same fact — the copy exists only inside this
+/// resolution.
+///
+/// The target: `try_parse_cast_effect` lowers every anaphoric cast object — "the
+/// copy" included — to `TargetFilter::ParentTarget`, which resolves against the
+/// resolving ability's DECLARED targets. Garth One-Eye's activated ability
+/// declares none, so the permission would bind to nothing.
+/// `TargetFilter::LastCreated` is the referent the creating resolver actually
+/// publishes (`state.last_created_token_ids`).
+///
+/// The driver: the parser's default is `LingeringPermission` — grant the
+/// permission and let the controller cast at a later priority window. There is no
+/// later window for this object: CR 704.5e removes the uncast copy at the very
+/// next state-based check, the first thing that happens after the resolution
+/// ends. `DuringResolution` is CR 608.2g — cast the card as the granting ability
+/// resolves — which is also what the printed reminder means by "You still pay
+/// its costs": a real, paid cast, not a free recast.
+///
+/// Keyed on `CreateCardCopyByName` specifically, not on the broader
+/// `publishes_chain_created_referent`: `CopySpell` + `CastFromZone{ParentTarget}`
+/// is the pair `fold_cast_copy_of_card_defs` fuses into `Effect::CastCopyOfCard`
+/// (Mizzix's Mastery), and rewriting either field would take the fold's input
+/// away. Only the new effect is touched, so no existing card can change shape.
+pub(super) fn bind_cast_of_created_card_copy(defs: &mut [AbilityDefinition]) {
+    unimplement_card_copy_without_a_name_choice(defs);
+    // The most recent referent publisher before the current clause decides what
+    // a "the copy" anaphor names.
+    let mut creator_is_card_copy = false;
+    for def in defs.iter_mut() {
+        if creator_is_card_copy {
+            // Only a cast of "the copy" (the anaphor lowered to `ParentTarget`) is
+            // rebound; a cast clause naming anything else keeps its own shape.
+            if let Effect::CastFromZone { target, driver, .. } = &mut *def.effect {
+                if matches!(target, TargetFilter::ParentTarget) {
+                    *target = TargetFilter::LastCreated;
+                    if matches!(driver, CastFromZoneDriver::LingeringPermission) {
+                        *driver = CastFromZoneDriver::DuringResolution;
+                    }
+                }
+            }
+        }
+        if publishes_chain_created_referent(&def.effect) {
+            creator_is_card_copy = matches!(*def.effect, Effect::CreateCardCopyByName { .. });
+        }
+    }
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
@@ -6790,6 +6990,13 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         | Effect::Mill { target, .. }
         | Effect::DealDamage { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
+        // CR 608.2c: "that player exiles …" in the body is the scoped opponent's
+        // own move, so its performer follows the same rebind.
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+            if let Some(performer) = actor.player_filter_mut() {
+                rebind(performer);
+            }
+        }
         _ => {}
     }
 }
@@ -7689,7 +7896,13 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
                     .parse(seg)
                     .is_ok()
             }) && quantity_clause_owns_this_turn_suffix(&lower[..this_turn_end]);
-        if !before.is_empty() && !quantity_owns_suffix {
+        // CR 608.2c + CR 608.2i: a "this turn" that closes a block-history clause
+        // ("tap all creatures ~ blocked this turn, or draw a card") is that
+        // clause's window, not the effect's duration, as at the end of the text.
+        let history_owns_suffix = lower
+            .get(..this_turn_end)
+            .is_some_and(combat_history_relative_clause_owns_suffix);
+        if !before.is_empty() && !quantity_owns_suffix && !history_owns_suffix {
             return (duration_text[..before.len()].trim_end(), Some(duration));
         }
     }
@@ -7938,19 +8151,23 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
 }
 
 /// CR 608.2i + CR 611.2a: a combat-history relative clause ("each creature it
-/// blocked this combat", "all creatures it blocked this turn") owns its trailing
-/// window; it is a look-back restriction, not an effect duration (#9179:
-/// Cathedral Membrane, Defiant Vanguard). Context-free on purpose: when the
-/// target parser declines to bind a bare "it" (no `SelfRef` antecedent), the
-/// window still belongs to the clause, so no spurious duration appears and the
-/// swallow audit reports the unrepresented clause. Recognition is delegated to
-/// `parse_source_blocked_history_clause`, the clause's single authority, and the
-/// clause must run to end of input, so a genuine OUTER duration after it leaves
-/// a non-empty remainder and still strips.
+/// blocked this combat", "all creatures that blocked or were blocked by it this
+/// turn") owns its trailing window; it is a look-back restriction, not an effect
+/// duration (#9179: Cathedral Membrane, Defiant Vanguard). Context-free on
+/// purpose: when the target parser declines to bind the clause's partner (a bare
+/// "it" with no antecedent, or a partner no subject word covers, such as Triton
+/// Tactics' "one of those creatures"), the window still belongs to the clause,
+/// so no spurious duration appears and the instruction fails closed instead
+/// (`instruction_drops_block_partner`). The same holds for a partner that is an
+/// indefinite filter phrase ("a Zombie": Time to Reflect), which no relation
+/// represents yet.
+/// Recognition is delegated to `parse_block_history_clause`, the clause's single
+/// authority, and the clause must run to end of input, so a genuine OUTER
+/// duration after it leaves a non-empty remainder and still strips.
 fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(input, |i| {
         terminated(
-            parse_source_blocked_history_clause,
+            parse_block_history_clause,
             (
                 multispace0,
                 opt(alt((tag("."), tag(",")))),
@@ -8373,14 +8590,21 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of that combat, "),
             ),
-            // CR 511.2 + CR 603.7a: "At this turn's next end of combat, …"
-            // fires at the end-of-combat step of the current turn.
-            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon,
-            // Venomous Breath, and the full class of spells that schedule
-            // an end-of-combat effect during resolution.
+            // CR 511.2 + CR 603.7b: "At this turn's next end of combat" is bounded to its
+            // turn, so a delayed ability created after the turn's last end of combat lapses
+            // at cleanup unfired. It waits for a later combat this turn (CR 500.8).
+            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon and
+            // Venomous Breath.
             value(
-                DelayedTriggerCondition::AtNextPhase {
-                    phase: Phase::EndCombat,
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(
+                        crate::types::ability::TriggerDefinition::new(
+                            crate::types::triggers::TriggerMode::Phase,
+                        )
+                        .phase(Phase::EndCombat),
+                    ),
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 tag("at this turn's next end of combat, "),
             ),
@@ -10186,6 +10410,8 @@ pub(super) fn try_parse_distribute_damage(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DealDamage {
@@ -10274,6 +10500,8 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PutCounter {
@@ -10336,6 +10564,8 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
@@ -10463,6 +10693,8 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: to_effect,
@@ -14999,6 +15231,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
         )));
 
@@ -15028,6 +15261,7 @@ mod tests {
                 counter_type: Some(CounterType::Time),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
         );
         patch_choose_from_zone_counter_continuation_target(&mut def);
@@ -15205,6 +15439,7 @@ mod tests {
                 counter_type,
                 count,
                 target,
+                scope: crate::types::ability::EffectScope::Single,
             } => {
                 assert_eq!(*counter_type, Some(CounterType::Time));
                 assert!(
@@ -16333,14 +16568,32 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
-    /// CR 511.2 + CR 603.7a: "At this turn's next end of combat, …" prefix-form
-    /// delayed trigger fires at the end-of-combat step of the current turn.
-    /// Covers Triton Tactics, Glyph of Doom.
+    /// CR 511.2 + CR 603.7b: "At this turn's next end of combat, …" prefix-form
+    /// delayed trigger waits for the next end-of-combat step of the current turn
+    /// and lapses at cleanup unfired (`DelayedTriggerLifetime::ThisTurn`).
+    /// Covers Triton Tactics, Glyph of Doom. Bare "at end of combat, " has no
+    /// turn bound and stays `AtNextPhase`.
     #[test]
     fn strip_temporal_prefix_at_this_turns_next_end_of_combat() {
         let (text, cond) =
             strip_temporal_prefix("at this turn's next end of combat, untap that creature");
         assert_eq!(text, "untap that creature");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(
+                    crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::Phase,
+                    )
+                    .phase(Phase::EndCombat),
+                ),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+            })
+        );
+
+        let (text, cond) = strip_temporal_prefix("at end of combat, exile it");
+        assert_eq!(text, "exile it");
         assert_eq!(
             cond,
             Some(DelayedTriggerCondition::AtNextPhase {
