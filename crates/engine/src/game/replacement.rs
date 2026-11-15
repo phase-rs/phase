@@ -5524,7 +5524,30 @@ fn create_token_applier(
                 // instruction's tapped entry, so a batch appended after this
                 // substitution inherits it too.
                 substitute_spec.tapped |= spec.tapped;
+                // CR 614.6 + the same ruling: "tapped and attacking" and a
+                // delayed disposal ("sacrifice it at end of combat") are
+                // specified by the creating instruction, not by the replaced
+                // token, so they apply to the substitute. A copy batch carries
+                // its own attack destination and disposal; its probe spec only
+                // seeds `enters_attacking`.
+                substitute_spec.enters_attacking |= spec.enters_attacking;
+                match copy.as_deref() {
+                    Some(batch_copy) => {
+                        substitute_spec.attack_request = batch_copy.attack_request.clone();
+                        substitute_spec.sacrifice_at = batch_copy.sacrifice_at.clone();
+                    }
+                    None => {
+                        substitute_spec.attack_request = spec.attack_request.clone();
+                        substitute_spec.sacrifice_at = spec.sacrifice_at.clone();
+                    }
+                }
                 spec = Box::new(substitute_spec);
+                // CR 614.1a + CR 707.9b: the substitute's characteristics are
+                // the created token's (Divine Visitation: "that many 4/4 white
+                // Angel creature tokens ... are created instead"); the replaced
+                // copy's body — and the exception that made it a creature —
+                // must not be delivered in their place.
+                copy = None;
             }
         }
 

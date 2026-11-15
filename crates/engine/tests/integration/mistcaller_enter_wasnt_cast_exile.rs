@@ -39,6 +39,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{
     GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
 };
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -60,6 +61,10 @@ cast, exile it instead.\nDraw a card.";
 /// Verbatim Oracle text of Mirkwood Bats (Scryfall): the token-creation observer.
 const MIRKWOOD_BATS: &str =
     "Flying\nWhenever you create or sacrifice a token, each opponent loses 1 life.";
+
+/// Verbatim Oracle text of Divine Visitation (Scryfall).
+const DIVINE_VISITATION: &str = "If one or more creature tokens would be created under your \
+control, that many 4/4 white Angel creature tokens with flying and vigilance are created instead.";
 
 const CONTAINMENT_PRIEST: &str =
     "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.";
@@ -1451,4 +1456,78 @@ fn metamorph_copy_token_copying_a_creature_is_exiled_under_moonlight() {
         "no copy token entered the battlefield"
     );
     assert_settled(run.runner.state(), "F2 creature copy");
+}
+
+// ---------------------------------------------------------------------------
+// F4 — a substituted creation delivers the substitute, not the replaced copy body.
+// ---------------------------------------------------------------------------
+
+/// DECLARED SYNTHETIC: a tapped copy maker, the nearest printed analogue being any
+/// "create a tapped token that's a copy of ..." effect.
+const COPY_CREATURE_TAPPED: &str =
+    "Create a tapped token that's a copy of target creature you control.";
+
+/// DECLARED SYNTHETIC: a tapped plain-token maker.
+const MAKE_TAPPED_SOLDIER: &str = "Create a tapped 1/1 white Soldier creature token.";
+
+/// F4. CR 614.1a + CR 707.9b: Urza copies a noncreature artifact "except it's a 1/1
+/// Soldier creature in addition to its other types", which makes the copy a creature
+/// token, so Divine Visitation substitutes its 4/4 Angels for it. The Angel is what is
+/// created: no Soldier artifact copy is delivered beside it, and the replacement is not
+/// consumed for a body that is then delivered anyway.
+#[test]
+fn divine_visitation_substitutes_urza_copy_of_a_noncreature_artifact() {
+    let (mut scenario, urza, trinket) = urza_scenario();
+    scenario.add_enchantment_from_oracle(P0, "Divine Visitation", DIVINE_VISITATION);
+    let mut runner = scenario.build();
+
+    let outcome = runner.activate(urza, 0).target_object(trinket).resolve();
+    assert_settled(outcome.state(), "F4 urza");
+    assert!(
+        battlefield_tokens_named(outcome.state(), TRINKET).is_empty(),
+        "the replaced copy body is not delivered"
+    );
+    let angels = battlefield_tokens_named(outcome.state(), "Angel");
+    assert_eq!(angels.len(), 1, "exactly one Angel is created instead");
+    let angel = &outcome.state().objects[&angels[0]];
+    assert_eq!((angel.power, angel.toughness), (Some(4), Some(4)));
+    assert!(angel.has_keyword(&Keyword::Flying) && angel.has_keyword(&Keyword::Vigilance));
+}
+
+/// F4 retained-instruction control, plain batch. The Divine Visitation ruling: anything
+/// else the creating effect specifies, such as tapped, still applies to the substitute.
+#[test]
+fn divine_visitation_substitute_keeps_a_plain_batchs_tapped_state() {
+    let mut scenario = base_scenario();
+    scenario.add_enchantment_from_oracle(P0, "Divine Visitation", DIVINE_VISITATION);
+    let soldier = add_instant(&mut scenario, P0, "Tapped Soldier", MAKE_TAPPED_SOLDIER);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(soldier).resolve();
+    assert_settled(outcome.state(), "F4 tapped soldier");
+    let angels = battlefield_tokens_named(outcome.state(), "Angel");
+    assert_eq!(angels.len(), 1, "one Angel");
+    assert!(outcome.state().objects[&angels[0]].tapped, "tapped");
+}
+
+/// F4 retained-instruction control, copy batch: a tapped copy of a creature is replaced
+/// by a tapped Angel, and the copy-token resolution still completes at priority.
+#[test]
+fn divine_visitation_substitute_keeps_a_copy_batchs_tapped_state() {
+    let mut scenario = base_scenario();
+    scenario.add_enchantment_from_oracle(P0, "Divine Visitation", DIVINE_VISITATION);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let copy = add_instant(&mut scenario, P0, "Tapped Copy", COPY_CREATURE_TAPPED);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(copy).target_object(bears).resolve();
+    assert_settled(outcome.state(), "F4 tapped copy");
+    assert_eq!(
+        battlefield_tokens_named(outcome.state(), "Grizzly Bears").len(),
+        0,
+        "the replaced copy is not delivered"
+    );
+    let angels = battlefield_tokens_named(outcome.state(), "Angel");
+    assert_eq!(angels.len(), 1, "one Angel");
+    assert!(outcome.state().objects[&angels[0]].tapped, "tapped");
 }
