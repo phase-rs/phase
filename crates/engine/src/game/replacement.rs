@@ -2454,18 +2454,33 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
             spec,
             ..
         } if *count > 0
-            // CR 614.12 + CR 616.1c: a copy batch whose tokens enter through their
-            // own liminal `TokenEntry` is asked the entry question there, once the
-            // entrant exists and its own as-enters copy has been chosen; at this
-            // batch-level proposal the entrant is not yet what it will enter as.
+            // CR 614.12 + CR 616.1c: a copy batch whose entrant carries its own
+            // as-enters copy (Phyrexian Metamorph) and enters through its liminal
+            // `TokenEntry` is asked the entry question there, where that copy is
+            // offered first; at this batch-level proposal no entrant exists yet to
+            // be a copy. Every other copy batch keeps this batch-level consult,
+            // which is what lets a one-shot "one or more ... enter as copies"
+            // (Mystic Reflection) reach the whole batch.
             && !copy.as_deref().is_some_and(|copy| {
-                crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
-                    &copy.values,
-                    &copy.additional_modifications,
-                    &spec.enter_with_counters,
-                )
+                copy_entrant_has_own_entry_copy(&copy.values)
+                    && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
+                        &copy.values,
+                        &copy.additional_modifications,
+                        &spec.enter_with_counters,
+                    )
             })
     )
+}
+
+/// CR 614.12 + CR 616.1c: whether a copied token's own copiable replacements include an
+/// as-enters "enter as a copy of ..." (Phyrexian Metamorph, Clone): the entrant's own
+/// copy candidate, which only exists once the entrant does.
+fn copy_entrant_has_own_entry_copy(values: &crate::types::ability::CopiableValues) -> bool {
+    values.replacement_definitions.iter().any(|def| {
+        def.event == ReplacementEvent::Moved
+            && def.destination_zone == Some(Zone::Battlefield)
+            && def.execute.as_deref().is_some_and(ability_becomes_copy)
+    })
 }
 
 fn change_zone_applier(
@@ -28960,8 +28975,11 @@ mod tests {
 
     /// Install `def` as a floating (pending) replacement and run a proposed
     /// one-token `CreateToken` of `spec` through `replace_event`, returning the
-    /// surviving count.
-    fn floating_redirect_token_count(def: ReplacementDefinition, spec: TokenSpec) -> u32 {
+    /// surviving count and the entry destination the replacement chose.
+    fn floating_redirect_token_batch(
+        def: ReplacementDefinition,
+        spec: TokenSpec,
+    ) -> (u32, Option<Zone>) {
         let mut state = GameState::new_two_player(42);
         state.pending_damage_replacements.push(def);
         let proposed = ProposedEvent::CreateToken {
@@ -28976,49 +28994,53 @@ mod tests {
         };
         let mut events = Vec::new();
         match replace_event(&mut state, proposed, &mut events) {
-            ReplacementResult::Execute(ProposedEvent::CreateToken { count, .. }) => count,
+            ReplacementResult::Execute(ProposedEvent::CreateToken {
+                count,
+                redirected_to,
+                ..
+            }) => (count, redirected_to),
             other => panic!("expected Execute(CreateToken), got {other:?}"),
         }
     }
 
-    /// CR 614.6 + CR 701.7a + CR 111.7: creating a creature token under a
-    /// floating "exile it instead" entry redirect puts nothing onto the
-    /// battlefield — the batch's count is zeroed. Before the CreateToken arm of
-    /// the redirect block the event came back unchanged with `count == 1`.
+    /// CR 614.6 + CR 701.7a + CR 111.1: creating a creature token under a
+    /// floating "exile it instead" entry redirect still creates it (the batch keeps
+    /// its count) but sends its entry to exile. Before the redirect arm for
+    /// `CreateToken` the event came back unchanged, with no destination.
     #[test]
-    fn enter_exile_redirect_zeroes_creature_token_batch() {
+    fn enter_exile_redirect_sends_creature_token_batch_to_exile() {
         let creature = token_spec_of("Soldier", CoreType::Creature, "Soldier");
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 enter_wasnt_cast_exile_global_replacement(Vec::new()),
                 creature
             ),
-            0,
-            "a creature token that would enter is exiled instead and never created"
+            (1, Some(Zone::Exile)),
+            "a creature token that would enter is created in exile instead"
         );
     }
 
     /// The redirect's `valid_card` creature gate still filters token batches: a
-    /// noncreature token is created normally. Paired with the creature positive.
+    /// noncreature token enters normally. Paired with the creature positive.
     #[test]
     fn enter_exile_redirect_keeps_noncreature_token_batch() {
         let positive = token_spec_of("Soldier", CoreType::Creature, "Soldier");
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 enter_wasnt_cast_exile_global_replacement(Vec::new()),
                 positive
             ),
-            0,
-            "reach-guard: the same definition zeroes a creature batch"
+            (1, Some(Zone::Exile)),
+            "reach-guard: the same definition redirects a creature batch"
         );
         let treasure = token_spec_of("Treasure", CoreType::Artifact, "Treasure");
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 enter_wasnt_cast_exile_global_replacement(Vec::new()),
                 treasure
             ),
-            1,
-            "a noncreature token is not a creature entering: count kept"
+            (1, None),
+            "a noncreature token is not a creature entering: no destination"
         );
     }
 
@@ -29029,32 +29051,32 @@ mod tests {
     #[test]
     fn nontoken_and_from_zone_redirects_keep_creature_token_batch() {
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 enter_wasnt_cast_exile_global_replacement(Vec::new()),
                 token_spec_of("Soldier", CoreType::Creature, "Soldier")
             ),
-            0,
-            "reach-guard: the unfiltered redirect zeroes the creature batch"
+            (1, Some(Zone::Exile)),
+            "reach-guard: the unfiltered redirect applies to the creature batch"
         );
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 enter_wasnt_cast_exile_global_replacement(vec![FilterProp::NonToken]),
                 token_spec_of("Soldier", CoreType::Creature, "Soldier")
             ),
-            1,
+            (1, None),
             "a NonToken-gated redirect must not apply to a token"
         );
         assert_eq!(
-            floating_redirect_token_count(
+            floating_redirect_token_batch(
                 dont_blink_global_replacement(),
                 token_spec_of("Soldier", CoreType::Creature, "Soldier")
             ),
-            1,
+            (1, None),
             "an EnteredFromZone redirect must not apply to a newly created token"
         );
     }
 
-    /// CR 616.1f: a token batch zeroed by an applied redirect draws no candidate
+    /// CR 616.1f: a token batch zeroed by an applied substitution (Jinnie Fay) draws no candidate
     /// (`change_zone_matcher` and `create_token_matcher` are gated on
     /// `count > 0`), so the accounted partition must refuse it rather than treat
     /// a candidate-free zero batch as accounted. Paired with the `count == 1`
