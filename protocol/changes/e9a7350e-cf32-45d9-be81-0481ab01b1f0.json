@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Owner printings on post-load creators: PlayerDeckPool gains an optional display-only printings record (the seat's normalized printing rows plus a face-identity to lookup-name correspondence) and CompanionInfo gains an optional display-only printing (CR 203.1/206.1). An older server or peer silently drops both, so a declared companion put into hand, or a sideboard card brought in by a Wish or Learn effect, loses the owner's chosen printing while the viewer's toggle says it is shown (silent capability loss; defaults alone do not establish compatibility)."
+}

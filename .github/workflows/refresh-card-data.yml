@@ -1,9 +1,9 @@
 name: Refresh Card Data Catalogs
 
 # The engine embeds three git-tracked data files at compile time —
-#   crates/engine/data/known-tokens.toml     (named-token catalog; build.rs -> include_bytes!)
-#   crates/engine/data/oracle-subtypes.json  (creature-subtype vocabulary; include_str!)
-#   crates/engine/data/mtgjson-vintage       (vintage write-gate date stamp)
+#   crates/phase-ast/data/known-tokens.toml     (named-token catalog; build.rs -> include_bytes!)
+#   crates/phase-ast/data/oracle-subtypes.json  (creature-subtype vocabulary; include_str!)
+#   crates/phase-ast/data/mtgjson-vintage       (vintage write-gate date stamp)
 # — that are generated from MTGJSON but committed by hand. When MTGJSON
 # publishes new cards/tokens/subtypes (weekly, ~Monday) these drift until
 # someone regenerates and commits them, which periodically turned CI red and
@@ -19,7 +19,7 @@ name: Refresh Card Data Catalogs
 # and no PR opens. So it is safe to fire on any of the triggers below.
 #
 # Triggers:
-#   - schedule: weekly on Monday, after MTGJSON's weekly publish.
+#   - schedule: daily, after MTGJSON's publish window.
 #   - workflow_dispatch: manual run from the Actions tab.
 #   - workflow_run on "Clear Caches": clearing the mtgjson/scryfall caches only
 #     DELETES them; this workflow is the thing that re-fetches, re-processes,
@@ -27,9 +27,20 @@ name: Refresh Card Data Catalogs
 
 on:
   schedule:
-    # Monday 15:00 UTC — after the ISO-week cache key rolls (Mon 00:00) and
-    # MTGJSON has published the week's data.
-    - cron: "0 15 * * 1"
+    # Daily at 15:00 UTC, after MTGJSON's publish window.
+    #
+    # Was weekly (Mondays), which under-served the actual publish cadence:
+    # MTGJSON ships roughly daily (5.3.0+20260723 -> +20260724 on consecutive
+    # days), so for six days out of seven the committed known-tokens.toml was
+    # stale. That is not cosmetic — build.rs embeds that file, so when
+    # gen-card-data.sh regenerates it mid-run the deploy has to recompile the
+    # engine a SECOND time to embed the new catalog. Measured at 5m35s on top
+    # of the first 5m39s compile (run 30114030288), on a job that was timing
+    # out at 30m. Keeping the committed catalog fresh is what removes it.
+    #
+    # Firing daily is safe by construction: the vintage write-gate above means
+    # a run against unchanged MTGJSON rewrites nothing and opens no PR.
+    - cron: "0 15 * * *"
   workflow_dispatch:
   workflow_run:
     workflows: ["Clear Caches"]
@@ -45,16 +56,23 @@ jobs:
     # Forks inherit the schedule but not CI_PAT, so a fork run would only fail
     # and spam the owner — keep it on the canonical repo. On a workflow_run
     # trigger, only proceed if the cache clear actually succeeded (a failed or
-    # cancelled clear left the caches as-is, so there is nothing new to fetch).
+    # cancelled clear left the caches as-is, so there is nothing new to fetch)
+    # and it ran in this repo, not a fork — same provenance requirement as
+    # deploy.yml's deploy-gate, since this job holds CI_PAT and `contents:
+    # write`. No head_branch pin here: unlike a deploy, Clear Caches is
+    # workflow_dispatch-only and is legitimately dispatched from any branch.
     if: >-
       github.repository == 'phase-rs/phase' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      ))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           # Share the tool-binary build cache with deploy.yml's card-data job.
           cache-shared-key: rust-tool
@@ -64,7 +82,7 @@ jobs:
         # input (AtomicCards, Meta, CardTypes, SetList, token sets, decks) so the
         # vintage gate sees the latest published date. gen-card-data.sh is the
         # single source of truth: it runs tokens-gen + oracle-gen behind the
-        # vintage write-gate and bumps crates/engine/data/mtgjson-vintage when
+        # vintage write-gate and bumps crates/phase-ast/data/mtgjson-vintage when
         # the input date advances. It needs only cargo + jq (preinstalled) — no
         # node/scryfall — so nothing but MTGJSON is on the critical path.
         env:
@@ -109,9 +127,9 @@ jobs:
         # commit below) to exactly them.
         run: |
           if git diff --quiet -- \
-            crates/engine/data/known-tokens.toml \
-            crates/engine/data/oracle-subtypes.json \
-            crates/engine/data/mtgjson-vintage; then
+            crates/phase-ast/data/known-tokens.toml \
+            crates/phase-ast/data/oracle-subtypes.json \
+            crates/phase-ast/data/mtgjson-vintage; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Catalogs unchanged — MTGJSON input is not newer than the committed vintage; no PR needed."
           else
@@ -124,17 +142,17 @@ jobs:
         with:
           token: ${{ secrets.CI_PAT }}
           add-paths: |
-            crates/engine/data/known-tokens.toml
-            crates/engine/data/oracle-subtypes.json
-            crates/engine/data/mtgjson-vintage
+            crates/phase-ast/data/known-tokens.toml
+            crates/phase-ast/data/oracle-subtypes.json
+            crates/phase-ast/data/mtgjson-vintage
           commit-message: "chore(card-data): refresh MTGJSON token & subtype catalogs"
           branch: chore/refresh-card-data-catalogs
           title: "chore(card-data): refresh MTGJSON token & subtype catalogs"
           body: |
             Automated refresh of the engine-embedded card-data catalogs from the latest MTGJSON publish.
 
-            - `crates/engine/data/known-tokens.toml` — named-token catalog (`tokens-gen`)
-            - `crates/engine/data/oracle-subtypes.json` — creature-subtype vocabulary (`oracle-gen --write-subtypes`)
-            - `crates/engine/data/mtgjson-vintage` — vintage write-gate stamp
+            - `crates/phase-ast/data/known-tokens.toml` — named-token catalog (`tokens-gen`)
+            - `crates/phase-ast/data/oracle-subtypes.json` — creature-subtype vocabulary (`oracle-gen --write-subtypes`)
+            - `crates/phase-ast/data/mtgjson-vintage` — vintage write-gate stamp
 
             Generated by `PHASE_REFRESH_MTGJSON=1 scripts/gen-card-data.sh`; the vintage gate only promotes catalogs when the MTGJSON input date advances, so this diff reflects a genuine upstream data change. Review, then let it auto-merge once CI is green.

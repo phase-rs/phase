@@ -52,6 +52,15 @@
 //! (`--refresh-baseline`), which prints the baseline-vs-current diff before
 //! overwriting — never a blind widen.
 //!
+//! That stamp covers **only the card-data entries [`default_scenarios`]'s decks
+//! actually name**, not the whole file (`ai_perf_gate::gate_card_data_hash`).
+//! `card-data.json` is derived from both MTGJSON and the Oracle parser, so a
+//! whole-file hash moved on every set release and every parser change while this
+//! gate's frozen decks saw none of it — leaving the diagnostic true on nearly
+//! every run, and therefore unable to make the distinction above. The workload is
+//! fixed by construction (inline builders + pinned snapshots), so the narrow
+//! stamp is the one that tracks this gate's real input.
+//!
 //! Wall-clock is recorded (`wall_clock_ms`) for human triage only; it is never
 //! compared.
 
@@ -65,6 +74,7 @@ use engine::game::perf_counters::{self, PerfCounterSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AiDifficulty;
+use crate::duel_suite::refusal_markdown;
 
 use super::find_matchup;
 use super::run::{drive_game, resolve_matchup};
@@ -73,7 +83,7 @@ use super::run::{drive_game, resolve_matchup};
 /// the report shape or the counter field set changes (a changed field set is
 /// self-flagged by [`PerfCounters::from_snapshot`]'s struct destructure — the
 /// `Removed`/`New` classifications also warn to bump this).
-pub const PERF_SCHEMA_VERSION: u32 = 3; // was 2: added SBA snapshot counters
+pub const PERF_SCHEMA_VERSION: u32 = 6; // was 5: added activation-verdict counters
 
 /// Number of INDEPENDENT cold-process trajectory samples the gate aggregates by
 /// per-counter median. Independence is why each sample must be its own process
@@ -143,6 +153,19 @@ impl PerfCounters {
     pub fn from_snapshot(snapshot: &PerfCounterSnapshot) -> Self {
         let PerfCounterSnapshot {
             state_clone_for_legality,
+            generation_state_clones,
+            strict_fast_path_state_clones,
+            strict_fast_path_mana_readiness_state_clones,
+            raw_validation_state_clones,
+            grouped_mana_readiness_state_clones,
+            post_apply_auto_payment_core_state_clones,
+            priority_cast_probe_state_clones,
+            auto_payment_borrowed_wrapper_calls,
+            auto_payment_owned_state_clones,
+            generation_auto_payment_wrapper_calls,
+            strict_fast_path_auto_payment_wrapper_calls,
+            post_apply_auto_payment_core_calls,
+            post_apply_uncached_source_collections,
             static_full_scans,
             spell_keyword_grant_scans,
             layers_full_eval,
@@ -171,12 +194,67 @@ impl PerfCounters {
             legend_rule_mode_gate_scans,
             sba_battlefield_snapshot_builds,
             sba_empty_battlefield_short_circuits,
+            activation_verdict_passes,
+            activation_block_display_abilities_examined,
+            activation_verdict_flush_clones,
         } = *snapshot;
 
         let mut map = BTreeMap::new();
         map.insert(
             "state_clone_for_legality".to_string(),
             state_clone_for_legality,
+        );
+        map.insert(
+            "generation_state_clones".to_string(),
+            generation_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_state_clones".to_string(),
+            strict_fast_path_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_mana_readiness_state_clones".to_string(),
+            strict_fast_path_mana_readiness_state_clones,
+        );
+        map.insert(
+            "raw_validation_state_clones".to_string(),
+            raw_validation_state_clones,
+        );
+        map.insert(
+            "grouped_mana_readiness_state_clones".to_string(),
+            grouped_mana_readiness_state_clones,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_state_clones".to_string(),
+            post_apply_auto_payment_core_state_clones,
+        );
+        map.insert(
+            "priority_cast_probe_state_clones".to_string(),
+            priority_cast_probe_state_clones,
+        );
+        map.insert(
+            "auto_payment_borrowed_wrapper_calls".to_string(),
+            auto_payment_borrowed_wrapper_calls,
+        );
+        map.insert(
+            "auto_payment_owned_state_clones".to_string(),
+            auto_payment_owned_state_clones,
+        );
+        map.insert(
+            "generation_auto_payment_wrapper_calls".to_string(),
+            generation_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "strict_fast_path_auto_payment_wrapper_calls".to_string(),
+            strict_fast_path_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_calls".to_string(),
+            post_apply_auto_payment_core_calls,
+        );
+        map.insert(
+            "post_apply_uncached_source_collections".to_string(),
+            post_apply_uncached_source_collections,
         );
         map.insert("static_full_scans".to_string(), static_full_scans);
         map.insert(
@@ -263,6 +341,18 @@ impl PerfCounters {
             "sba_empty_battlefield_short_circuits".to_string(),
             sba_empty_battlefield_short_circuits,
         );
+        map.insert(
+            "activation_verdict_passes".to_string(),
+            activation_verdict_passes,
+        );
+        map.insert(
+            "activation_block_display_abilities_examined".to_string(),
+            activation_block_display_abilities_examined,
+        );
+        map.insert(
+            "activation_verdict_flush_clones".to_string(),
+            activation_verdict_flush_clones,
+        );
         Self(map)
     }
 
@@ -303,12 +393,13 @@ pub struct PerfReport {
 /// game on the *same thread*, and snapshot the counters. The reset/snapshot pair
 /// is only meaningful because the counted paths never leave the calling thread.
 pub fn run_perf_scenario(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     action_cap: usize,
 ) -> PerfCounterSnapshot {
     perf_counters::reset();
-    let _ = drive_game(payload, seed, AiDifficulty::Medium, action_cap);
+    let _ = drive_game(Some(db), payload, seed, AiDifficulty::Medium, action_cap);
     perf_counters::snapshot()
 }
 
@@ -325,13 +416,35 @@ pub fn run_perf_suite(
 ) -> PerfReport {
     let start = Instant::now();
     let mut counters = PerfCounters::default();
-    for id in scenarios {
+    for (n, id) in scenarios.iter().enumerate() {
         let spec = find_matchup(id)
             .unwrap_or_else(|| panic!("perf scenario id '{id}' does not resolve via find_matchup"));
         let (payload, _p0, _p1) = resolve_matchup(db, spec)
             .unwrap_or_else(|err| panic!("perf scenario '{id}' failed to resolve decks: {err}"));
-        let snapshot = run_perf_scenario(&payload, seed, action_cap);
-        counters.merge_add(&PerfCounters::from_snapshot(&snapshot));
+        // Progress goes to STDERR only: the parent gate runs its children with
+        // `Stdio::null()` on stdout precisely so its own markdown table stays clean
+        // (`bin/ai_perf_gate.rs:185`), and stderr is inherited so these lines reach
+        // the CI log. Without them a killed sample leaves no evidence at all — the
+        // report is written once, after every scenario has finished.
+        let scenario_start = Instant::now();
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' start (seed={seed} action_cap={action_cap})",
+            n = n + 1,
+            total = scenarios.len(),
+        );
+        let snapshot = run_perf_scenario(db, &payload, seed, action_cap);
+        let scenario_counters = PerfCounters::from_snapshot(&snapshot);
+        // One JSON line per scenario: a killed child still leaves a machine-readable
+        // partial payload for every scenario that did finish.
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' done {ms}ms counters={json}",
+            n = n + 1,
+            total = scenarios.len(),
+            ms = scenario_start.elapsed().as_millis(),
+            json = serde_json::to_string(&scenario_counters)
+                .unwrap_or_else(|e| format!("<unserializable: {e}>")),
+        );
+        counters.merge_add(&scenario_counters);
     }
     let wall_clock_ms = start.elapsed().as_millis();
 
@@ -354,9 +467,9 @@ pub fn run_perf_suite(
 /// real trajectory — this gate compares aggregate COST LEVELS, not a replayed game.
 ///
 /// Panics (internal invariant, not a runtime input path) if `samples` is empty or
-/// the samples disagree on schema_version / base_seed / action_cap — every sample
-/// is produced by the same binary at the same const workload, so disagreement is a
-/// bug. Provenance (git_sha, card_data_hash) is left None for the caller to stamp.
+/// the samples disagree on any workload field — every sample is produced by the
+/// same binary at the same const workload, so disagreement is a bug. Provenance
+/// (git_sha, card_data_hash) is left None for the caller to stamp.
 pub fn median_report(samples: &[PerfReport]) -> PerfReport {
     assert!(
         !samples.is_empty(),
@@ -370,6 +483,9 @@ pub fn median_report(samples: &[PerfReport]) -> PerfReport {
         );
         assert_eq!(s.base_seed, first.base_seed, "sample seed mismatch");
         assert_eq!(s.action_cap, first.action_cap, "sample action_cap mismatch");
+        // Order-sensitive: samples come from the same const `default_scenarios()`, so this is
+        // an internal invariant rather than a runtime input path.
+        assert_eq!(s.scenarios, first.scenarios, "sample scenario mismatch");
     }
     // All samples share an identical key set (from_snapshot is a total destructure).
     let mut counters = BTreeMap::new();
@@ -457,8 +573,8 @@ impl PerfCompareReport {
 }
 
 /// Comparison error. Parallels the win-rate gate's `compare::CompareError` but
-/// is defined locally (that type lives in the out-of-bounds `compare.rs` and
-/// lacks the workload-mismatch variant this gate needs).
+/// is defined locally: the two gates carry different payloads and render their
+/// refusals separately.
 #[derive(Debug)]
 pub enum PerfCompareError {
     Io(std::io::Error),
@@ -468,8 +584,8 @@ pub enum PerfCompareError {
         baseline: u32,
         current: u32,
     },
-    /// The workload (seed or action_cap) differs — the counter payloads describe
-    /// different runs, so any comparison would be a false PASS/FAIL (exit 2).
+    /// A workload field differs — the counter payloads describe different runs, so
+    /// any comparison would be a false PASS/FAIL (exit 2).
     WorkloadMismatch {
         field: &'static str,
         baseline: String,
@@ -520,6 +636,13 @@ pub fn load_report(path: &Path) -> Result<PerfReport, PerfCompareError> {
     Ok(report)
 }
 
+/// The scenario list as a sorted multiset, for comparison.
+fn sorted_scenarios(scenarios: &[String]) -> Vec<&str> {
+    let mut sorted: Vec<&str> = scenarios.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted
+}
+
 /// FAIL threshold for a counter: `baseline * ratio + floor`, rounded via f64
 /// (the counters are far below f64's 2^53 exact-integer ceiling).
 fn fail_threshold(baseline: u64) -> u64 {
@@ -532,8 +655,8 @@ fn counter_fails(baseline: u64, current: u64) -> bool {
     (current as f64) > (baseline as f64) * PERF_TOLERANCE_RATIO + PERF_ABSOLUTE_FLOOR as f64
 }
 
-/// Compare a current report against a baseline. Guards run in order: (1) schema
-/// version, (2) workload (seed/action_cap). Only then are counters classified
+/// Compare a current report against a baseline. Guards run in order: schema
+/// version first, then every workload field. Only then are counters classified
 /// per key across the union of baseline and current keys.
 pub fn compare(
     baseline: &PerfReport,
@@ -566,6 +689,20 @@ pub fn compare(
             field: "sample_count",
             baseline: baseline.sample_count.to_string(),
             current: current.sample_count.to_string(),
+        });
+    }
+
+    // Counters are summed field-wise across scenarios, so the aggregate does not say which
+    // scenarios produced it. The sum is order-invariant, which makes a reorder the same
+    // workload — but a repeat is not, because that scenario's cost is counted twice. Hence a
+    // sorted multiset, and the message renders the same sorted form that was compared.
+    let baseline_scenarios = sorted_scenarios(&baseline.scenarios);
+    let current_scenarios = sorted_scenarios(&current.scenarios);
+    if baseline_scenarios != current_scenarios {
+        return Err(PerfCompareError::WorkloadMismatch {
+            field: "scenarios",
+            baseline: baseline_scenarios.join(", "),
+            current: current_scenarios.join(", "),
         });
     }
 
@@ -613,6 +750,40 @@ fn verdict_str(v: CounterVerdict) -> &'static str {
         CounterVerdict::New => "NEW",
         CounterVerdict::Removed => "REMOVED",
     }
+}
+
+/// The report body for a perf comparison that could not be made at all.
+///
+/// This gate has the failure the duel-suite gate only looked like it had. Nothing in
+/// `bin/ai_perf_gate.rs` writes to stdout before `compare` — every diagnostic on the way
+/// there is `eprintln!` — so a refusal that reached only stderr left
+/// `target/ai-perf-gate-report.md` at zero bytes, and `.github/workflows/ai-gate.yml`
+/// answers an empty report by aborting with "Decision-cost perf gate failed without a
+/// drift report" and posting no issue at all. The refusal was produced and then thrown
+/// away. Sharing `refusal_markdown` with the duel-suite gate so the two cannot drift.
+pub fn render_error_markdown(err: &PerfCompareError) -> String {
+    let remedy = match err {
+        PerfCompareError::WorkloadMismatch {
+            field,
+            baseline,
+            current,
+        } => format!(
+            "The samples were taken under different `{field}` (`{baseline}` vs `{current}`), so \
+             their counters describe different runs and any comparison would be a false verdict. \
+             Either re-record the baseline under the current workload \
+             (`cargo ai-perf-gate --refresh-baseline`) — checking first that every other \
+             invocation reading this baseline uses that workload too — or run the gate under the \
+             baseline's workload. Nothing was measured, so this is not a perf regression."
+        ),
+        PerfCompareError::SchemaMismatch { .. } => "The baseline predates the current report \
+             format. Bump `schema_version` and re-record it with \
+             `cargo ai-perf-gate --refresh-baseline`."
+            .to_string(),
+        PerfCompareError::Io(_) | PerfCompareError::Parse(_) => "The baseline could not be read. \
+             Check the path, and that the file is the JSON a previous `--refresh-baseline` wrote."
+            .to_string(),
+    };
+    refusal_markdown(err, &remedy)
 }
 
 /// Render the comparison as a markdown table to stdout; diagnostics (hash-delta
@@ -761,7 +932,67 @@ pub fn print_repro_margin(report: &ReproMarginReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::duel_suite::DeckRef;
     use std::collections::BTreeSet;
+
+    /// The narrowed `card_data_hash` (`ai_perf_gate::gate_card_data_hash`) is only
+    /// meaningful because every gate scenario draws from a deck fixed at compile
+    /// time — an inline builder or a pinned snapshot. A scenario whose deck were
+    /// derived from the card pool would make the narrow stamp silently wrong: the
+    /// workload would move with the pool while the stamp reported "unchanged",
+    /// which is strictly worse than the whole-file hash it replaced.
+    ///
+    /// This guards that premise at the point it can break — adding a scenario —
+    /// rather than at the hash, which cannot tell where its names came from.
+    #[test]
+    fn gate_scenarios_draw_only_from_decks_fixed_at_compile_time() {
+        let mut names = BTreeSet::new();
+        for id in default_scenarios() {
+            let matchup = crate::duel_suite::find_matchup(id)
+                .unwrap_or_else(|| panic!("gate scenario {id:?} must resolve to a matchup"));
+            for deck in [&matchup.p0, &matchup.p1] {
+                // Exhaustive and wildcard-free ON PURPOSE: the compiler is the
+                // census here, not the card count below. Both current variants
+                // are fixed at compile time — `Inline` is a Rust builder,
+                // `Snapshot` a committed, `frozen_date`-stamped file — and a
+                // future pool-derived variant would resolve perfectly well and
+                // land inside the band, so no runtime assertion can catch it.
+                // Adding a `DeckRef` variant must break THIS match, because
+                // `gate_card_data_hash`'s narrowing is unsound for any deck the
+                // card pool can move.
+                match deck {
+                    DeckRef::Inline { .. } | DeckRef::Snapshot { .. } => {}
+                }
+                let cards = crate::duel_suite::resolve_deck_ref(deck).unwrap_or_else(|err| {
+                    panic!("gate scenario {id:?} deck {deck:?} must resolve without a card pool: {err}")
+                });
+                assert!(
+                    !cards.is_empty(),
+                    "gate scenario {id:?} deck {deck:?} resolved to an EMPTY deck — the perf \
+                     workload would be vacuous and the narrowed provenance stamp would cover \
+                     nothing"
+                );
+                names.extend(cards.into_iter().map(|c| c.to_lowercase()));
+            }
+        }
+
+        // Non-vacuity: the stamp must actually cover cards. The upper bound is the
+        // load-bearing half — it is what fails if a scenario starts pulling a
+        // pool-sized deck, at which point narrowing the hash stops being sound.
+        // Measured at 46 distinct names for the three mirrors on 2026-08-04.
+        //
+        // The band is a const so the panic message cannot drift from the
+        // assertion — printing a hardcoded range here was wrong once already.
+        const BAND: std::ops::RangeInclusive<usize> = 20..=400;
+        assert!(
+            BAND.contains(&names.len()),
+            "gate scenarios name {} distinct cards, outside the {BAND:?} band this narrowing \
+             assumes. Too few means a scenario stopped resolving; too many means a deck is no \
+             longer a fixed list, and `gate_card_data_hash` must be re-justified before the \
+             band is widened",
+            names.len()
+        );
+    }
 
     fn mk_report(counters: &[(&str, u64)]) -> PerfReport {
         PerfReport {
@@ -888,6 +1119,59 @@ mod tests {
         ));
     }
 
+    /// Every refusal this gate can produce must carry a non-empty report body naming what
+    /// happened, because the workflow posts stdout and aborts on an empty file — so a refusal
+    /// that reaches only stderr posts nothing at all. Asserted over EVERY variant by
+    /// construction rather than over the one that is easiest to build: a variant added later
+    /// with no remedy would otherwise ship silently.
+    ///
+    /// The `assert_ne!` against the bare `Display` is the discriminating half. Without it a
+    /// `render_error_markdown` that just forwarded the error string would pass every other
+    /// assertion here, and that implementation is precisely the one that loses the remedy.
+    #[test]
+    fn every_refusal_renders_a_body_that_says_more_than_the_error_line() {
+        let io = PerfCompareError::Io(std::io::Error::other("disk"));
+        let parse = PerfCompareError::Parse(serde_json::from_str::<PerfReport>("{").unwrap_err());
+        let schema = PerfCompareError::SchemaMismatch {
+            baseline: 1,
+            current: 2,
+        };
+        let workload = PerfCompareError::WorkloadMismatch {
+            field: "action_cap",
+            baseline: "10".to_string(),
+            current: "20".to_string(),
+        };
+
+        for err in [&io, &parse, &schema, &workload] {
+            let body = render_error_markdown(err);
+            assert!(!body.trim().is_empty(), "empty body for {err:?}");
+            assert!(
+                body.contains("## Gate: comparison refused"),
+                "missing heading for {err:?}: {body}"
+            );
+            assert!(
+                body.contains(&err.to_string()),
+                "body must carry the error itself for {err:?}: {body}"
+            );
+            assert_ne!(
+                body.trim(),
+                err.to_string().trim(),
+                "body must add a remedy, not echo the error, for {err:?}"
+            );
+        }
+
+        // The workload arm is the reachable one in CI, so its two values and both directions
+        // of remedy are pinned rather than left to the loop's generic assertions.
+        let body = render_error_markdown(&workload);
+        assert!(body.contains("action_cap"), "{body}");
+        assert!(body.contains("`10`") && body.contains("`20`"), "{body}");
+        assert!(body.contains("--refresh-baseline"), "{body}");
+        assert!(
+            body.contains("run the gate under the baseline's workload"),
+            "{body}"
+        );
+    }
+
     // Matrix 7: adapter totality — a distinct non-zero value per field yields one
     // map entry per field, values round-trip, WITHOUT hardcoding the field count.
     // Assigning 1..=N in the struct literal is self-flagging: adding/removing a
@@ -896,6 +1180,19 @@ mod tests {
     fn from_snapshot_maps_every_field_distinctly() {
         let snapshot = PerfCounterSnapshot {
             state_clone_for_legality: 1,
+            generation_state_clones: 30,
+            strict_fast_path_state_clones: 31,
+            strict_fast_path_mana_readiness_state_clones: 32,
+            raw_validation_state_clones: 33,
+            grouped_mana_readiness_state_clones: 34,
+            post_apply_auto_payment_core_state_clones: 35,
+            priority_cast_probe_state_clones: 36,
+            auto_payment_borrowed_wrapper_calls: 37,
+            auto_payment_owned_state_clones: 38,
+            generation_auto_payment_wrapper_calls: 39,
+            strict_fast_path_auto_payment_wrapper_calls: 40,
+            post_apply_auto_payment_core_calls: 41,
+            post_apply_uncached_source_collections: 42,
             static_full_scans: 2,
             spell_keyword_grant_scans: 29,
             layers_full_eval: 3,
@@ -924,6 +1221,9 @@ mod tests {
             legend_rule_mode_gate_scans: 26,
             sba_battlefield_snapshot_builds: 27,
             sba_empty_battlefield_short_circuits: 28,
+            activation_verdict_passes: 43,
+            activation_block_display_abilities_examined: 44,
+            activation_verdict_flush_clones: 45,
         };
         let counters = PerfCounters::from_snapshot(&snapshot);
 
@@ -1010,6 +1310,7 @@ mod tests {
         // and the counter snapshot for each run.
         perf_counters::reset();
         let wt_1 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1019,6 +1320,7 @@ mod tests {
 
         perf_counters::reset();
         let wt_2 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1147,6 +1449,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // Matrix 15: the counter aggregate does not say which scenarios produced it, so a
+    // differing scenario list is a differing workload. Three arms, three wrong
+    // implementations: `Vec` equality fails the reorder arm, `HashSet` fails the repeat arm,
+    // no guard at all fails the length arm.
+    #[test]
+    fn a_different_scenario_list_is_refused_rather_than_compared() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let err = compare(&baseline, &current).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerfCompareError::WorkloadMismatch {
+                    field: "scenarios",
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_reordered_scenario_list_still_compares() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["b".to_string(), "a".to_string()];
+
+        compare(&baseline, &current).expect("a field-wise sum is order-invariant");
+    }
+
+    #[test]
+    fn a_repeated_scenario_is_refused() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["a".to_string(), "b".to_string()];
+
+        let err = compare(&baseline, &current).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerfCompareError::WorkloadMismatch {
+                    field: "scenarios",
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    // Matrix 13 (hostile): `scenarios` is the member the sample-agreement loop omitted, so a
+    // median over mixed scenario lists was stamped with the first sample's and read as clean.
+    #[test]
+    #[should_panic(expected = "sample scenario mismatch")]
+    fn median_report_rejects_samples_that_disagree_on_scenarios() {
+        let mut odd = mk_report(&[("c", 1)]);
+        odd.scenarios = vec!["a-scenario-the-other-sample-did-not-run".to_string()];
+        let samples = [mk_report(&[("c", 1)]), odd];
+        let _ = median_report(&samples);
     }
 
     // Matrix M-even: median totality for even K — deterministic upper-middle at

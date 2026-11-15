@@ -1,26 +1,49 @@
-import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "../adapter/types";
-import { publicName, toCardProps } from "./cardProps";
+import type {
+  AttackerInfo,
+  CombatState,
+  GameObject,
+  ObjectCounterDisplay,
+  ObjectId,
+  PlayerId,
+} from "../adapter/types";
+import { isMeldedPermanent, publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
+import { cardImageLookup, ownerPrintedRefOf } from "../services/cardImageLookup";
 
 function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolean {
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
   // non-bearer representative in a collapsed/stacked group display — render
   // them solo so the ring-bearer badge in PermanentCard is always visible.
-  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id);
+  // A melded permanent renders oversized, so it never shares a group's
+  // normal-sized representative slot either.
+  return (
+    obj.attachments.length === 0
+    && !ringBearerIds.has(obj.id)
+    && !obj.face_down
+    && !isMeldedPermanent(obj)
+  );
 }
 
-function groupKey(obj: GameObject): string {
+function groupKey(
+  obj: GameObject,
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
+): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
-  // counters is a known-shape Partial<Record<CounterType, number>>. Build the
-  // key from sorted entries rather than JSON.stringify — cheaper (no serialize
-  // allocation per permanent on every board rebuild) and order-independent, so
-  // two identical permanents always land in the same group regardless of the
-  // order their counters were applied (the old stringify could split them by
-  // insertion order; this matches the sorted keyword key above).
-  const counters = Object.entries(obj.counters ?? {})
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .map(([type, n]) => `${type}:${n}`)
+  // CR 122.1 + CR 732.2a: the group identity for counters is the engine's RENDERED rows, not the
+  // raw map — two permanents that render different pills must not collapse into one representative,
+  // and an `∞`-marked member must never hide behind an unmarked one. The engine already orders the
+  // rows deterministically (`∞` first, then CounterType order), so this is a straight join, never a
+  // sort. Zero-count entries are absent from the engine's rows (CR 122.1), so two permanents
+  // differing only by a `{charge: 0}` entry now group TOGETHER; they render identically, which is
+  // what this key is for.
+  const display = counterDisplay?.[String(obj.id)];
+  const counters = [
+    ...(display?.pills ?? []),
+    ...(display?.loyalty ? [display.loyalty] : []),
+  ]
+    .map((r) => `${r.counter}:${r.count}:${r.magnitude ?? "Finite"}`)
     .join(",");
   // Tokens that share a display name (e.g. SOS vs BLC Pest) differ by rules text
   // and/or preset art — include both so visually distinct tokens never stack.
@@ -28,7 +51,13 @@ function groupKey(obj: GameObject): string {
   const tokenPreset = obj.token_image_ref?.preset_id ?? "";
   const isToken = obj.is_token ?? false;
   const isCommander = obj.is_commander ?? false;
-  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
+  const legacyKey = `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
+  if (!showOwnerPrintings) return legacyKey;
+  const lookup = cardImageLookup(obj);
+  const p = lookup.ownerPrinting;
+  const ref = ownerPrintedRefOf(lookup);
+  const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+  return JSON.stringify([legacyKey, ownerArtKey]);
 }
 
 export interface BattlefieldPartition {
@@ -93,10 +122,18 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
 const NO_RING_BEARERS: ReadonlySet<ObjectId> = new Set();
 const NO_UNBOUNDED_PILE: ReadonlySet<ObjectId> = new Set();
 
+/**
+ * `counterDisplay` and `showOwnerPrintings` are correctness inputs to display identity:
+ * callers must supply both explicitly. With owner printings disabled, the legacy key is
+ * unchanged; with them enabled, the delivered pair joins it by value (absence is a value).
+ * `ringBearerIds` and `unboundedPileIds` remain optional badge-enrichment inputs.
+ */
 export function groupByName(
   objects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = NO_RING_BEARERS,
   unboundedPileIds: ReadonlySet<ObjectId> = NO_UNBOUNDED_PILE,
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
 ): GroupedPermanent[] {
   const groups = new Map<string, GameObject[]>();
 
@@ -107,7 +144,7 @@ export function groupByName(
       continue;
     }
 
-    const key = groupKey(obj);
+    const key = groupKey(obj, counterDisplay, showOwnerPrintings);
     const existing = groups.get(key);
     if (existing) {
       existing.push(obj);

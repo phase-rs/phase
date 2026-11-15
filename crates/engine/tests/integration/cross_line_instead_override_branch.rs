@@ -246,8 +246,12 @@ fn gather_the_pack_binds_the_partial_override_as_an_alternative_dig() {
 ///
 /// Without this, a regression that degraded the branch back to an honest-red
 /// sibling would still pass the runtime assertion.
+///
+/// The dispatch loop only emits the two printed items; this branch can now be
+/// assembled only when the document relation for this real CR 614.15 printing
+/// is recorded and applied during lowering.
 #[test]
-fn anoint_with_affliction_binds_the_cross_line_override_as_a_branch() {
+fn anoint_with_affliction_relation_binds_the_cross_line_override_as_a_branch() {
     let parsed = parse_oracle_text(
         ANOINT,
         "Anoint with Affliction",

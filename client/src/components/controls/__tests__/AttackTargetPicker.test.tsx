@@ -1,11 +1,14 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import i18n from "i18next";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AttackTarget, ObjectId } from "../../../adapter/types.ts";
+import type { AttackTarget, ObjectId, UnblockedAttackPreview } from "../../../adapter/types.ts";
+import polish from "../../../i18n/locales/pl/game.json";
 import { AttackTargetPicker } from "../AttackTargetPicker.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import {
   buildGameObjectWithCoreTypes,
   buildObjectMap,
@@ -72,14 +75,27 @@ function enterDistribute() {
   fireEvent.click(screen.getByRole("button", { name: "Distribute" }));
 }
 
+/** The engine's per-attacker unblocked projection, the same value for each of `ATTACKERS`. */
+function previewsFor(preview: UnblockedAttackPreview): Record<string, UnblockedAttackPreview> {
+  return Object.fromEntries(ATTACKERS.map((id) => [String(id), preview]));
+}
+
+function attackTotals() {
+  return within(screen.getByRole("list", { name: "Attack totals" }));
+}
+
 describe("AttackTargetPicker", () => {
   beforeEach(() => {
     // Opponents fall back to "Opp N" labels with an empty name map.
     useMultiplayerStore.setState({ activePlayerId: 0, playerNames: new Map() });
     useGameStore.setState({ gameState: makeState() });
+    usePreferencesStore.setState({ showOwnerPrintings: true });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    usePreferencesStore.setState(usePreferencesStore.getInitialState());
+  });
 
   it("keeps Attack All mode working (one click sends every attacker to a target)", () => {
     const { onConfirm } = renderPicker();
@@ -205,6 +221,105 @@ describe("AttackTargetPicker", () => {
     expect(screen.getAllByText("×2").length).toBeGreaterThan(0);
   });
 
+  it("renders counter chips from the engine projection, never the raw counters map (CR 122.1)", () => {
+    // The raw map and the projection DISAGREE on every axis: a differing count, a row the map
+    // does not carry at all, and a map entry the projection dropped. Only a StackLabel reading
+    // `derived.counter_display` can satisfy all three, so any reintroduced `obj.counters` read
+    // (or a join back to it) fails here.
+    const goblin = makeCreature(101, "Goblin");
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, 1, 2]),
+        seat_order: [0, 1, 2],
+        objects: buildObjectMap({ ...goblin, counters: { charge: 99, stun: 2 } }),
+        derived: {
+          counter_display: {
+            "101": {
+              // Row order is the engine's, not this file's: `counter_display_views` runs the
+              // `Unbounded` pass first, then the `Finite` one through a `BTreeMap`, so
+              // `Unbounded` rows lead and each class is ordered by `CounterType`'s DECLARATION
+              // `Ord` — where `Lore` precedes `Generic(_)`. No assertion below depends on it
+              // (order is pinned engine-side), but a fixture in a different order than the
+              // engine can ever emit is a false picture of the frame this site receives.
+              pills: [
+                // CR 122.1: a zero-count UNBOUNDED row IS a shape the engine emits — the
+                // unbounded pass publishes its live count with no zero filter, so this is the
+                // `0 → 1` case. It must still render (as ∞), which is what fails if this site
+                // ever reintroduces a `count > 0` filter over the projected rows.
+                { counter: "quest", count: 0, magnitude: "Unbounded" },
+                // CR 122.1: engine-supplied row with NO entry in the raw map, so it is
+                // unreachable by any client-side derivation from `obj.counters`. Count is
+                // nonzero on purpose: the FINITE pass of `counter_display_views` runs
+                // `positive_counter_entries`, so a zero-count Finite row is a shape the engine
+                // provably never emits.
+                { counter: "lore", count: 3 },
+                { counter: "charge", count: 4 },
+              ],
+            },
+          },
+        },
+      }),
+    });
+    render(
+      <AttackTargetPicker
+        validTargets={TARGETS}
+        selectedAttackers={[101]}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    enterDistribute();
+
+    // Projection count wins over the raw map's disagreeing count.
+    expect(screen.getAllByText("charge x4").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("charge x99")).toHaveLength(0);
+    // Projection-only row renders even though the raw map has no such key.
+    expect(screen.getAllByText("lore x3").length).toBeGreaterThan(0);
+    // Zero-count unbounded row survives to the screen as ∞ — a `count > 0` filter deletes it.
+    expect(screen.getAllByText("quest ∞").length).toBeGreaterThan(0);
+    // Raw-map-only entry the projection dropped must NOT render.
+    expect(screen.queryAllByText("stun x2")).toHaveLength(0);
+  });
+
+  it("visibly distinguishes two same-named stacks that differ only in counter magnitude (CR 732.2a)", () => {
+    // The MED regression: `groupKey` splits these two attackers because their engine counter
+    // rows differ, but with a raw-map-fed StackLabel both stacks render an IDENTICAL name and
+    // an IDENTICAL `charge x1` chip — a split with no visible cause. The counters maps are
+    // byte-identical, so the ONLY channel that can tell them apart is the projection's
+    // `magnitude`.
+    const a = makeCreature(101, "Goblin");
+    const b = makeCreature(102, "Goblin");
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, 1, 2]),
+        seat_order: [0, 1, 2],
+        objects: buildObjectMap(
+          { ...a, counters: { charge: 1 } },
+          { ...b, counters: { charge: 1 } },
+        ),
+        derived: {
+          counter_display: {
+            "101": { pills: [{ counter: "charge", count: 1, magnitude: "Unbounded" }] },
+            "102": { pills: [{ counter: "charge", count: 1 }] },
+          },
+        },
+      }),
+    });
+    render(
+      <AttackTargetPicker
+        validTargets={TARGETS}
+        selectedAttackers={[101, 102]}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    enterDistribute();
+
+    // Two separate stacks, each rendering its own chip, and the two chips DIFFER.
+    expect(screen.getAllByText("charge ∞").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("charge x1").length).toBeGreaterThan(0);
+  });
+
   it("steppers claim the lowest-id unassigned member deterministically", () => {
     const { onConfirm } = renderPicker();
     enterDistribute();
@@ -226,7 +341,12 @@ describe("AttackTargetPicker", () => {
     state.players = state.players.map((player) =>
       player.id === 1 ? { ...player, life: 2 } : player,
     );
-    useGameStore.setState({ gameState: state });
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        derived: { unblocked_attack_previews: previewsFor({ damage: 1, life_loss: 1 }) },
+      },
+    });
     renderPicker();
     enterDistribute();
 
@@ -235,6 +355,134 @@ describe("AttackTargetPicker", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
     expect(screen.getAllByText("Opp 2 (Player — 2 → 0 · Lethal)").length).toBeGreaterThan(0);
+  });
+
+  it("shows the engine's unbounded life as ∞ with no projection or lethal state", () => {
+    const state = makeState();
+    state.players = state.players.map((player) =>
+      player.id === 1 ? { ...player, life: 2 } : player,
+    );
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        derived: {
+          life_magnitude: { 1: "Unbounded" },
+          unblocked_attack_previews: previewsFor({ damage: 1, life_loss: 1 }),
+        },
+      },
+    });
+    renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+
+    expect(screen.getAllByText("Opp 2 (Player — ∞ life)").length).toBeGreaterThan(0);
+    // The totals still show without a life projection.
+    expect(attackTotals().getByText("2 attackers · 2 damage")).toBeInTheDocument();
+    expect(screen.queryAllByText(/Lethal/)).toHaveLength(0);
+    expect(screen.getAllByText("Opp 3 (Player — 20 life)").length).toBeGreaterThan(0);
+  });
+
+  it("totals each target's assigned attackers and engine-projected damage", () => {
+    const state = makeState();
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        derived: { unblocked_attack_previews: previewsFor({ damage: 3, life_loss: 3 }) },
+      },
+    });
+    renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+
+    const totals = attackTotals().getAllByRole("listitem");
+    expect(totals).toHaveLength(2);
+    expect(within(totals[0]).getByText("Opp 2 (Player — 20 → 14)")).toBeInTheDocument();
+    expect(within(totals[0]).getByText("2 attackers · 6 damage")).toBeInTheDocument();
+    expect(within(totals[1]).getByText("Opp 3 (Player — 20 life)")).toBeInTheDocument();
+    expect(within(totals[1]).getByText("0 attackers · 0 damage")).toBeInTheDocument();
+  });
+
+  it("projects life from the engine's life loss, not from damage or power (CR 120.3b)", () => {
+    // Infect-shaped preview: the attacker deals damage but causes no life loss.
+    const state = makeState();
+    state.players = state.players.map((player) =>
+      player.id === 1 ? { ...player, life: 2 } : player,
+    );
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        derived: { unblocked_attack_previews: previewsFor({ damage: 1, life_loss: 0 }) },
+      },
+    });
+    renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+
+    // Reach guard: the attacker is counted toward Opp 2 with its damage.
+    expect(attackTotals().getByText("1 attacker · 1 damage")).toBeInTheDocument();
+    expect(attackTotals().getByText("Opp 2 (Player — 2 life)")).toBeInTheDocument();
+    expect(screen.queryAllByText(/→/)).toHaveLength(0);
+  });
+
+  it("totals planeswalker targets without a life projection", () => {
+    const planeswalker = buildGameObjectWithCoreTypes(["Planeswalker"], {
+      id: 201,
+      name: "Jace Beleren",
+      controller: 1,
+      owner: 1,
+      card_types: { supertypes: [], core_types: ["Planeswalker"], subtypes: [] },
+    });
+    const state = makeState();
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        objects: { ...state.objects, 201: planeswalker },
+        derived: { unblocked_attack_previews: previewsFor({ damage: 3, life_loss: 3 }) },
+      },
+    });
+    render(
+      <AttackTargetPicker
+        validTargets={[P1, { type: "Planeswalker", data: 201 }]}
+        selectedAttackers={ATTACKERS}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Jace Beleren/ }));
+
+    const jace = attackTotals().getByText("Jace Beleren (Planeswalker)").closest("li");
+    expect(jace).not.toBeNull();
+    expect(within(jace as HTMLElement).getByText("1 attacker · 3 damage")).toBeInTheDocument();
+    // The player's projection is untouched by an attack on its planeswalker.
+    expect(attackTotals().getByText("Opp 2 (Player — 20 life)")).toBeInTheDocument();
+  });
+
+  it("keeps the desktop column header unprojected and moves the projection to the totals", () => {
+    const state = makeState();
+    state.players = state.players.map((player) =>
+      player.id === 1 ? { ...player, life: 2 } : player,
+    );
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        derived: { unblocked_attack_previews: previewsFor({ damage: 1, life_loss: 1 }) },
+      },
+    });
+    renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+
+    const header = screen.getByRole("columnheader", { name: /Opp 2/ });
+    expect(within(header).getByText("Opp 2 (Player — 2 life)")).toBeInTheDocument();
+    expect(attackTotals().getByText("Opp 2 (Player — 2 → 1)")).toBeInTheDocument();
   });
 
   it("'-1' releases the highest-id member back to Unassigned", () => {
@@ -266,6 +514,32 @@ describe("AttackTargetPicker", () => {
       [102, P1],
       [103, P1],
     ]);
+  });
+
+  it("regroups live printing rows without losing per-object assignments on unchanged state", () => {
+    const state = makeState();
+    for (const id of ATTACKERS) {
+      state.objects[id].printing = { set_code: "own", collector_number: id === 103 ? "2" : "1" };
+      state.objects[id].printed_ref = { oracle_id: "oracle-a", face_name: state.objects[id].name };
+    }
+    useGameStore.setState({ gameState: state });
+    const { onConfirm } = renderPicker();
+    enterDistribute();
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(2);
+    // First A member (101) goes to P1; B (103) goes to P2 before regrouping.
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 2/ })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 3/ })[1]);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(1);
+    expect(screen.getAllByText("×3")).toHaveLength(2);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(true));
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(2);
+    expect(screen.getAllByText("×2")).toHaveLength(2);
+    // The remaining A member (102) goes to P2; all three original IDs must survive.
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 3/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /Declare 3 Attackers/ }));
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith([[101, P1], [102, P2], [103, P2]]);
+    expect(useGameStore.getState().gameState).toBe(state);
   });
 });
 
@@ -367,5 +641,22 @@ describe("AttackTargetPicker — per-attacker legal targets", () => {
     );
     expect(screen.getByRole("button", { name: /Attack Opp 2 \(Player — 20 life\) with 2 creatures/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Attack Opp 3 \(Player — 20 life\) with 2 creatures/ })).toBeInTheDocument();
+  });
+});
+
+describe("AttackTargetPicker — Polish target totals", () => {
+  it("resolves every Polish plural form without falling back to English", () => {
+    // i18next resolves Polish counts to `_one` (1), `_few` (2–4) and `_many` (0, 5+); a missing
+    // form falls back to `fallbackLng: "en"`, not to `_other`.
+    i18n.addResourceBundle("pl", "game", polish, true, true);
+    const t = i18n.getFixedT("pl", "game");
+    const total = (count: number) => t("attackTargetPicker.targetTotal", { count, damage: 3 });
+
+    expect([0, 1, 2, 5].map(total)).toEqual([
+      "0 atakujących · obrażenia: 3",
+      "1 atakujący · obrażenia: 3",
+      "2 atakujących · obrażenia: 3",
+      "5 atakujących · obrażenia: 3",
+    ]);
   });
 });

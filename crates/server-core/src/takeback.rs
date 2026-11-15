@@ -3,75 +3,76 @@
 //! Single-player/local undo (`engine-wasm::restore_game_state`) replaces the
 //! client's own state wholesale and is refused outright in multiplayer
 //! sessions, because no client may unilaterally rewrite the authoritative
-//! server state another player is relying on. This module gives multiplayer
-//! sessions an equivalent escape hatch for misclicks and UI confusion,
-//! without ever letting one player rewrite history unilaterally: a player
-//! may request to roll the *authoritative* session state back to the
-//! snapshot taken just before their most recent action, but the rollback
-//! only takes effect once every human seat at the table (the requester
-//! included) has approved it. Any single human decline cancels the request
-//! and the authoritative state is left untouched.
+//! server state another player is relying on. Takeback gives multiplayer
+//! sessions an equivalent escape hatch for misclicks and UI confusion; its
+//! rules live in `engine::game::takeback::TakebackLedger`. This module keeps
+//! only what is server-specific: the turn-rewind policy, the AI-driver fault
+//! guard, interaction rebinding and the AI rebuild after an approved rollback,
+//! and the display-name prompt.
 //!
 //! This is intentionally a session/room-level concern, not an engine rule —
 //! there is no Comprehensive Rules concept of "undo." The engine is never
 //! told why it was handed an older `GameState`; it just continues from
 //! whatever state it's given, exactly as it does on reconnect/restore.
 
-use std::collections::HashSet;
-
+use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use phase_ai::session::AiSession;
 
-use crate::session::GameSession;
+pub use engine::game::takeback::{
+    RewindOption, RewindTarget, TakebackLedger, TakebackOutcome, TakebackResolution,
+    MAX_TAKEBACK_HISTORY, MAX_TURN_REWIND_HISTORY,
+};
 
-/// How many prior authoritative snapshots a session retains for takeback
-/// purposes. Bounded so a long game session can't accumulate unbounded
-/// memory — a takeback can only reach back to the most recent action, so
-/// anything beyond a handful of entries is never reachable anyway.
-pub const MAX_TAKEBACK_HISTORY: usize = 12;
+use crate::session::{bind_fresh_interaction_session, GameSession, HostingMode};
 
-/// A takeback request awaiting unanimous human approval.
-#[derive(Debug, Clone)]
-pub struct PendingTakeback {
-    /// The player who asked for the takeback. Implicitly counted as having
-    /// approved their own request.
-    pub requested_by: PlayerId,
-    /// The authoritative state to restore if every human seat approves —
-    /// the snapshot taken immediately before the requester's last
-    /// state-mutating action.
-    pub target_state: GameState,
-    /// Human seats that have approved so far. The request resolves the
-    /// instant this set contains every human seat in the session.
-    pub approvals: HashSet<PlayerId>,
+/// Whether this deployment offers turn-granular rewind.
+///
+/// A **policy**, not a capability of the mechanism: the machinery is
+/// mode-agnostic and `LastAction` is deliberately *not* scoped by it. Nobody
+/// asked for a table-wide vote at turn scale, and the trigger surface
+/// (`DebugPanel`) is not gated by `showSandboxTools` — it is reachable in every
+/// mode via the keyboard shortcut. Gating capture as well as publication means
+/// a shared server retains zero turn snapshots rather than retaining snapshots
+/// it will never offer.
+pub fn offers_turn_rewind(hosting: HostingMode) -> bool {
+    hosting == HostingMode::SingleUser
 }
 
-/// Outcome of requesting or responding to a takeback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TakebackOutcome {
-    /// Still waiting on one or more human players to respond.
-    Pending,
-    /// Every human seat approved — the session state has already been
-    /// rolled back to the target snapshot by the time this is returned.
-    Approved,
-    /// A human player declined — the request was withdrawn and the
-    /// authoritative state is unchanged.
-    Rejected,
+/// The ledger a session hosted under `hosting` keeps: with a turn ring iff
+/// [`offers_turn_rewind`].
+pub(crate) fn takeback_ledger_for(hosting: HostingMode, game_number: u8) -> TakebackLedger {
+    if offers_turn_rewind(hosting) {
+        TakebackLedger::with_turn_rewind(game_number)
+    } else {
+        TakebackLedger::new(game_number)
+    }
 }
 
 impl GameSession {
     /// Records the current authoritative state as a takeback checkpoint,
-    /// tagged with the player about to act — to be called immediately
-    /// before that player's action is applied. Caps retention at
-    /// [`MAX_TAKEBACK_HISTORY`] (oldest dropped first).
-    ///
-    /// Tagging by actor (rather than just "most recent action") is what lets
-    /// `request_takeback` find *this player's* last action even when other
-    /// players have acted since — see its doc comment.
+    /// tagged with the player about to act.
     pub fn push_takeback_snapshot(&mut self, actor: PlayerId) {
-        if self.takeback_history.len() >= MAX_TAKEBACK_HISTORY {
-            self.takeback_history.pop_front();
-        }
-        self.takeback_history.push_back((actor, self.state.clone()));
+        self.push_takeback_state(actor, self.state.clone());
+    }
+
+    /// Records the pre-action state for an action that has already succeeded.
+    pub fn push_takeback_state(&mut self, actor: PlayerId, state: GameState) {
+        self.takeback.record_point(actor, state);
+    }
+
+    /// The per-transition rewind bookkeeping. Every authoritative state
+    /// transition calls this with **its own** event batch and post-state —
+    /// never with `self.state`, which several call sites have already advanced
+    /// past the transition being recorded.
+    pub fn observe_transition(&mut self, events: &[GameEvent], state: &GameState) {
+        self.takeback.observe_transition(events, state);
+    }
+
+    /// The turn boundaries this session currently offers, oldest first.
+    pub fn rewind_options(&self) -> Vec<RewindOption> {
+        self.takeback.rewind_options()
     }
 
     /// Human (non-AI) seats in this session, in seat order. AI seats never
@@ -83,118 +84,99 @@ impl GameSession {
             .collect()
     }
 
-    /// Resolves the pending request if every human seat has now approved,
-    /// applying the rollback in place. Returns `None` if still pending.
-    fn try_resolve_pending_takeback(&mut self) -> Option<TakebackOutcome> {
-        let pending = self.pending_takeback.as_ref()?;
-        let humans = self.human_seats();
-        if !humans.iter().all(|p| pending.approvals.contains(p)) {
-            return None;
-        }
-        let pending = self.pending_takeback.take().expect("checked above");
-        self.state = pending.target_state;
-        engine::game::rekey_after_trusted_restore(&mut self.state);
-        // The rolled-back state is the new baseline; snapshots from the
-        // branch we just discarded no longer correspond to reachable
-        // history, and taking another takeback back through them would
-        // resurrect actions the table just agreed to undo.
-        self.takeback_history.clear();
-        Some(TakebackOutcome::Approved)
+    pub(crate) fn ai_seat_list(&self) -> Vec<PlayerId> {
+        self.ai_seats.iter().copied().collect()
     }
 
-    /// A human player requests rolling the game back to the state just
-    /// before *their own* most recent action — not simply the most recent
-    /// action by anyone. Other players may have acted since; rolling back
-    /// to before the requester's action necessarily discards those later
-    /// actions too (there is no way to keep them while undoing an earlier
-    /// action they were built on), but it must never target a snapshot that
-    /// precedes a different player's action while leaving the requester's
-    /// own action untouched. Auto-resolves to `Approved` immediately when
-    /// the requester is the only human at the table (e.g. solo vs. AI)
-    /// since there is nobody else to ask.
-    pub fn request_takeback(&mut self, player: PlayerId) -> Result<TakebackOutcome, String> {
-        if self.pending_takeback.is_some() {
-            return Err("A takeback request is already pending for this game".to_string());
+    /// The server-side half of an approved rollback, after the ledger has
+    /// installed the target into `self.state`.
+    pub(crate) fn after_takeback_approved(&mut self) {
+        bind_fresh_interaction_session(&mut self.state, &self.game_code);
+        // Every other path that installs a `GameState` wholesale rebuilds the
+        // AI session (`GameSession::start_game`, `from_persisted`); this one
+        // must too, now that an approved rollback can be followed immediately
+        // by `run_ai`. Rebuild rather than invalidate selectively:
+        // `rekey_after_trusted_restore` rewrites object identity, so the
+        // cached routes and prompts keyed on the discarded branch's ids are
+        // stale by construction, not merely cold.
+        if self.ai_session.is_some() {
+            self.ai_session = Some(AiSession::arc_from_game(&self.state));
         }
-        if !self.human_seats().contains(&player) {
-            return Err("Only human players may request a takeback".to_string());
-        }
-        let target_state = self
-            .takeback_history
-            .iter()
-            .rev()
-            .find(|(actor, _)| *actor == player)
-            .map(|(_, state)| state.clone())
-            .ok_or_else(|| "There is no previous action of yours to take back".to_string())?;
-
-        let mut approvals = HashSet::new();
-        approvals.insert(player);
-        self.pending_takeback = Some(PendingTakeback {
-            requested_by: player,
-            target_state,
-            approvals,
-        });
-
-        Ok(self
-            .try_resolve_pending_takeback()
-            .unwrap_or(TakebackOutcome::Pending))
     }
 
-    /// A human player approves or declines the pending takeback request.
-    /// A single decline withdraws the request outright (unanimity required).
+    /// A human player requests a rollback; see `TakebackLedger::request`.
+    pub fn request_takeback(
+        &mut self,
+        player: PlayerId,
+        target: RewindTarget,
+    ) -> Result<TakebackOutcome, String> {
+        self.reject_if_ai_driver_faulted()?;
+        let ai_seats = self.ai_seat_list();
+        let outcome = self
+            .takeback
+            .request(&mut self.state, player, target, &ai_seats)?;
+        if outcome == TakebackOutcome::Resolved(TakebackResolution::Approved) {
+            self.after_takeback_approved();
+        }
+        Ok(outcome)
+    }
+
+    /// A voter approves or declines the pending takeback request.
     pub fn respond_takeback(
         &mut self,
         player: PlayerId,
         approve: bool,
     ) -> Result<TakebackOutcome, String> {
-        if self.pending_takeback.is_none() {
-            return Err("There is no pending takeback request".to_string());
+        self.reject_if_ai_driver_faulted()?;
+        let ai_seats = self.ai_seat_list();
+        let outcome = self
+            .takeback
+            .respond(&mut self.state, player, approve, &ai_seats)?;
+        if outcome == TakebackOutcome::Resolved(TakebackResolution::Approved) {
+            self.after_takeback_approved();
         }
-        if !self.human_seats().contains(&player) {
-            return Err("Only human players may respond to a takeback request".to_string());
-        }
-
-        if !approve {
-            self.pending_takeback = None;
-            return Ok(TakebackOutcome::Rejected);
-        }
-
-        if let Some(pending) = self.pending_takeback.as_mut() {
-            pending.approvals.insert(player);
-        }
-        Ok(self
-            .try_resolve_pending_takeback()
-            .unwrap_or(TakebackOutcome::Pending))
+        Ok(outcome)
     }
 
     /// The original requester withdraws their own pending takeback request.
     pub fn cancel_takeback(&mut self, player: PlayerId) -> Result<(), String> {
-        match &self.pending_takeback {
-            Some(pending) if pending.requested_by == player => {
-                self.pending_takeback = None;
-                Ok(())
-            }
-            Some(_) => Err("Only the player who requested the takeback may cancel it".to_string()),
-            None => Err("There is no pending takeback request".to_string()),
-        }
+        self.reject_if_ai_driver_faulted()?;
+        self.takeback.cancel(player)
     }
 
     /// The `TakebackRequested` notification for the current pending request,
     /// if any. Used both for the original broadcast when a request goes out
     /// and to replay the same prompt to a socket that (re)connects while the
     /// vote is still in flight — otherwise a disconnected approver comes
-    /// back with no way to respond, and `handle_action` rejects all actions
-    /// while a request is pending, stalling the table.
+    /// back with no way to respond, and `handle_action` rejects every action
+    /// but a concession while a request is pending, stalling the table.
     pub fn pending_takeback_message(&self) -> Option<crate::protocol::ServerMessage> {
-        let pending = self.pending_takeback.as_ref()?;
+        let vote = self
+            .takeback
+            .pending_vote(&self.state, &self.ai_seat_list())?;
+        let requester = vote.requester;
         let requester_name = self
             .display_names
-            .get(pending.requested_by.0 as usize)
+            .get(requester.0 as usize)
             .cloned()
             .unwrap_or_default();
         Some(crate::protocol::ServerMessage::TakebackRequested {
-            requester: pending.requested_by,
+            requester,
             requester_name,
+            voters: vote.voters,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Capture, not just publication, is scoped to the sidecar: only a
+    /// `SingleUser` host builds a ledger with a turn ring.
+    #[test]
+    fn turn_rewind_is_offered_only_on_a_single_user_host() {
+        assert!(!offers_turn_rewind(HostingMode::Shared));
+        assert!(offers_turn_rewind(HostingMode::SingleUser));
     }
 }

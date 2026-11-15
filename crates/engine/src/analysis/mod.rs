@@ -1,7 +1,10 @@
 //! Offline game-state analysis used by the infinite-combo detector.
 //!
-//! This module is **purely additive** and changes no game behavior. It provides
-//! the measurement substrate the net-progress loop detector is built on:
+//! This module owns MEASUREMENT and mutates no `GameState`; the reducer is what
+//! reads it — to mint a loop-shortcut offer, to bound that offer, and to bound it
+//! again where the accepted proposal is spent. So a change here can move game
+//! behavior even though nothing here writes a board. It provides the measurement
+//! substrate the net-progress loop detector is built on:
 //!
 //! - [`ResourceVector`] — a snapshot/delta of the *monotone* resources a loop
 //!   can pump (mana, life, damage, library size, tokens, draws, triggers,
@@ -13,7 +16,7 @@
 //!   loop from a *mandatory-draw* (CR 104.4b) loop.
 //!
 //! The strict comparison treats differing life/damage/counters as different
-//! states (correct for a mandatory loop → draw). The detector needs the inverse:
+//! states. The detector needs the inverse:
 //! "same board, resources may differ" → a beneficial loop that should be
 //! shortcut (CR 732.2a) rather than drawn (CR 104.4b / CR 732.4).
 //!
@@ -23,14 +26,10 @@
 //!   stream, which a single `GameState` snapshot cannot supply.
 //! - [`loop_check`] — Engine A: [`detect_loop`] turns a same-board-plus-net-progress
 //!   measurement into a [`LoopCertificate`] (the unbounded axes + a [`WinKind`]),
-//!   the offline classification the corpus harness asserts against. Still
-//!   **zero gameplay change** — never called from the reducer.
-//! - [`ability_graph`] — Engine B: [`candidate_cycles`] is the static, offline
-//!   candidate generator. From a list of `CardFace` ASTs it builds an
-//!   ability/resource graph, finds SCCs, and emits over-approximate
-//!   [`CandidateCycle`]s for Engine A to confirm. Like the rest of this module it
-//!   is **purely additive** — it never drives the reducer and never touches a
-//!   `GameState`.
+//!   the offline classification the corpus harness asserts against.
+//! - [`ability_graph`] — Engine B: [`candidate_cycles`] emits over-approximate
+//!   `CandidateCycle`s; `game::play_trace` carries their members' plays and the
+//!   recorded-period confirmer decides.
 
 pub mod ability_graph;
 pub mod decision_template;

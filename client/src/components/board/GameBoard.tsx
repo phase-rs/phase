@@ -2,11 +2,12 @@ import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
+import { type MultiplayerBoardLayout, usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
-import { isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
+import { deriveActivationAffordances } from "../../viewmodel/cardActionChoice.ts";
 import {
   buildPlayerBattlefieldView,
   getBoardChoiceView,
@@ -25,20 +26,23 @@ import { OpponentSeatPane } from "./OpponentSeatPane.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { PlanechasePanel } from "./PlanechasePanel.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 
 interface GameBoardProps {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
-  showOpponentCards?: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
-  onViewZone?: (zone: "graveyard" | "exile" | "library", playerId: PlayerId) => void;
+  onViewZone?: (
+    zone: "graveyard" | "exile" | "library",
+    playerId: PlayerId,
+    launcher: HTMLButtonElement,
+  ) => void;
 }
 
 export const GameBoard = memo(function GameBoard({
+  effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
-  showOpponentCards = false,
   onKickPlayer,
   onViewZone = () => {},
 }: GameBoardProps) {
@@ -46,7 +50,7 @@ export const GameBoard = memo(function GameBoard({
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -61,22 +65,22 @@ export const GameBoard = memo(function GameBoard({
 
   const focusedId = resolveFocusedOpponent(focusedOpponent, opponents);
   const playerBattlefieldView = useMemo(
-    () => buildPlayerBattlefieldView(gameState, myId),
-    [gameState, myId],
+    () => buildPlayerBattlefieldView(gameState, myId, showOwnerPrintings),
+    [gameState, myId, showOwnerPrintings],
   );
   const focusedBattlefieldView = useMemo(
-    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId)),
-    [gameState, focusedId],
+    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId, showOwnerPrintings)),
+    [gameState, focusedId, showOwnerPrintings],
   );
   const opponentBattlefieldViews = useMemo(() => {
     return new Map(
       opponents.map((opponentId) => [
         opponentId,
-        buildPlayerBattlefieldView(gameState, opponentId),
+        buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings),
       ]),
     );
-  }, [gameState, opponents]);
-  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  }, [gameState, opponents, showOwnerPrintings]);
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
     if (splitBoardActive || !focusedBattlefieldView) return undefined;
@@ -88,11 +92,20 @@ export const GameBoard = memo(function GameBoard({
   }, [splitBoardActive, playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
 
   const boardInteractionState = useMemo(() => {
+    // THE single authority (viewmodel/cardActionChoice.ts). Computed BEFORE the
+    // `!gameState?.objects` early return so both returns spread the same value and
+    // no local shadow can exist: deleting the locals makes a stale shorthand key a
+    // compile error (TS18004) instead of a silent board-wide regression.
+    const affordances = deriveActivationAffordances(
+      waitingFor,
+      canActForWaitingState,
+      legalActionsByObject,
+      gameState?.objects,
+    );
     const validTargetObjectIds = new Set<number>();
     const validAttackerIds = new Set<number>();
-    const activatableObjectIds = new Set<number>();
+    const blockableAttackerIds = new Set<number>();
     const boardChoiceObjectIds = new Set<number>();
-    const manaTappableObjectIds = new Set<number>();
     const selectableSacrificeObjectIds = new Set<number>();
     const selectableManaCostCreatureIds = new Set<number>();
     const undoableTapObjectIds = new Set<number>();
@@ -138,6 +151,18 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
+    // CR 509.1a: combat.rs::get_valid_block_targets_for_player keeps only
+    // attackers this defender's blockers may legally block, so the union of
+    // every value here is already seat-scoped — an attacker aimed at another
+    // opponent never appears in this player's own DeclareBlockers prompt.
+    if (waitingFor?.type === "DeclareBlockers") {
+      for (const attackerIds of Object.values(waitingFor.data.valid_block_targets)) {
+        for (const objectId of attackerIds) {
+          blockableAttackerIds.add(objectId);
+        }
+      }
+    }
+
     for (const objectId of getWaitingForObjectChoiceIds(waitingFor)) {
       validTargetObjectIds.add(objectId);
     }
@@ -149,7 +174,7 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects, gameState?.allows_cancel_cast);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);
@@ -170,11 +195,11 @@ export const GameBoard = memo(function GameBoard({
 
     if (!gameState?.objects) {
       return {
-        activatableObjectIds,
+        ...affordances,
+        blockableAttackerIds,
         boardChoiceObjectIds,
         committedAttackerIds,
         incomingAttackerCounts,
-        manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds,
         undoableTapObjectIds,
@@ -183,52 +208,12 @@ export const GameBoard = memo(function GameBoard({
       };
     }
 
-    const playerCanAct =
-      waitingFor != null
-      && (
-        (waitingFor.type === "Priority" && canActForWaitingState)
-        || (waitingFor.type === "ManaPayment" && canActForWaitingState)
-        || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
-        // CR 118.12a: Disjunctive unless-cost — same input enablement as
-        // UnlessPayment (player chooses among sub-costs).
-        || (waitingFor.type === "UnlessPaymentChooseCost" && canActForWaitingState)
-      );
-
-    if (waitingFor?.type === "Priority" && canActForWaitingState) {
-      // The engine owns the "which permanent does this action act on" mapping
-      // via GameAction::source_object(), exposed as `legalActionsByObject`.
-      // The cyan activatable ring surfaces battlefield permanents with at
-      // least one non-mana action; mana abilities are handled by the separate
-      // mana-tappable ring below. This iteration is variant-agnostic — adding
-      // a future keyword activation requires zero frontend changes.
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        const hasNonManaAction = actions.some((action) => !isManaObjectAction(action, object));
-        if (hasNonManaAction) {
-          activatableObjectIds.add(objectId);
-        }
-      }
-    }
-
-    if (playerCanAct) {
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        if (actions.some((action) => isManaObjectAction(action, object))) {
-          manaTappableObjectIds.add(objectId);
-        }
-      }
-    }
-
     return {
-      activatableObjectIds,
+      ...affordances,
+      blockableAttackerIds,
       boardChoiceObjectIds,
       committedAttackerIds,
       incomingAttackerCounts,
-      manaTappableObjectIds,
       selectableSacrificeObjectIds,
       selectableManaCostCreatureIds,
       undoableTapObjectIds,
@@ -285,9 +270,8 @@ export const GameBoard = memo(function GameBoard({
                     playerId={opponentId}
                     battlefieldView={
                       opponentBattlefieldViews.get(opponentId)
-                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings)
                     }
-                    showCards={showOpponentCards}
                     onKickPlayer={onKickPlayer}
                     onViewZone={onViewZone}
                   />

@@ -1,20 +1,27 @@
+use crate::game::cost_payability::AbilityCostLegPayability;
+use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::functioning_abilities::static_kind_present;
+use crate::game::game_object::ObjectIncarnationRefExt;
+pub use crate::types::ability::is_mana_ability;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, ChosenAttribute,
-    ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
-    REMOVE_COUNTER_COST_ANY_NUMBER,
+    cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
+    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DoubleTarget, Effect,
+    ManaProduction, ObjectSelectionCardinality, QuantityExpr, QuantityRef, ResolvedAbility,
+    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, PayCostKind, PayableResource, PendingCostMoveResume,
-    PendingManaAbility, ProductionOverride, WaitingFor,
+    CastPaymentMode, CostResume, GameState, ManaAbilityActivationStage, ManaAbilityCostCursor,
+    ManaAbilityCostParent, ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode,
+    ManaAbilityResume, ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    ManaColorChoiceResume, ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind,
+    PayableResource, PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility,
+    ProductionOverride, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::mana::{ManaColor, ManaCost, ManaPipId, ManaPool, ManaType, PaymentContext};
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -22,6 +29,7 @@ use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
+use super::casting::activated_ability_granting_object;
 use super::cost_payability::{eligible_exile_cost_objects, exile_cost_effective_zone};
 use super::effects::mana::resolve_restrictions;
 use super::engine::EngineError;
@@ -33,38 +41,132 @@ use super::mana_sources::{mana_color_to_type, mana_type_to_color};
 use super::sacrifice;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
-/// Check if a typed ability definition represents a mana ability (CR 605).
-/// CR 605.3: Mana abilities produce mana and resolve immediately without using the stack.
-/// CR 605.1a: A mana ability cannot have targets. If the effect produces mana but the
-/// ability has targeting (e.g., via `multi_target`), it must use the stack instead.
-/// Currently `Effect::Mana` has no embedded target field and no `AbilityCost` variant
-/// implies targeting, so this check is defensive — if future variants introduce
-/// targeting on mana-producing abilities, this guard ensures correctness.
-pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref(),
-        _ => return false,
-    };
-    // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // Reject both the explicit `multi_target` mechanism and the embedded
-    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
-    // card in target opponent's hand" — the spell targets, so it must use the
-    // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
-        return false;
-    }
-    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
-    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
-    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
-    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
-    // off the instant-speed mana-ability path.
-    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
-    if mana_sources::cost_has_component(&ability_def.cost, |c| {
-        matches!(c, AbilityCost::Loyalty { .. })
-    }) {
-        return false;
-    }
-    true
+/// CR 605.3a + CR 601.2h: Distinguishes whether the cost-payability check
+/// inside [`mana_ability_ready_without_simulation_gated`] should treat the
+/// current game state as authoritative (`Current`) or as a planning estimate
+/// (`Planning`).
+///
+/// * `Current` — used by the activation legality gate and the readiness
+///   display. Delegates to [`AbilityCost::is_payable_for_mana_ability`], which
+///   checks mana affordability through the full auto-tap witness (CR 601.2g)
+///   and honors tag-scoped mana via the correct ability index (CR 106.6).
+/// * `Planning` — used by auto-tap source scanning. Delegates to
+///   [`AbilityCost::is_payable_in`] with the known `ability_index` and
+///   `ObjectLegPayment::Unguided` object legs (the mana-ability payment path
+///   prompts its legs without look-ahead, as in `Current`).
+///   That function already returns `true` for `AbilityCost::Mana` sub-costs
+///   (CR 601.2g defers them to the mana payment step), so filter-land / Signet
+///   costs are treated as payable during planning without duplicating the
+///   traversal. All other components (sacrifice, pay life, discard, tap) are
+///   still checked against the current game state through the same authority.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManaPayabilityMode {
+    /// Full current-state payability: mana affordability is checked now.
+    Current,
+    /// Planning mode: mana sub-costs are deferred; other costs checked now.
+    Planning,
+}
+
+/// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
+///
+/// Also detects a self-`ReturnToHand` cost: either form removes the source from
+/// the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
+/// sac-outlet mana ability that eats *other* permanents (Skirk Prospector,
+/// "Sacrifice a Goblin: Add {R}") keeps its source on the battlefield and stays
+/// renewable. Delegates to [`crate::types::ability::cost_has_component`] so a **bare**
+/// component and one nested in a `Composite` are both matched.
+///
+/// Deliberately private, but privacy is a signpost rather than a barrier: it
+/// removes the *convenient* route to the naive per-permanent form ("has a mana
+/// ability AND no mana ability self-sacs" — which wrongly drops a permanent
+/// carrying both a renewable and a self-sacrificing mana ability), and does not
+/// make that form inexpressible. `AbilityCost::Sacrifice` and
+/// `TargetFilter::SelfRef` are both public, so any downstream crate can rebuild
+/// this predicate, and one did: `phase-ai` carried a hand-rolled
+/// `ability_cost_requires_sacrifice` whose own doc said it "mirrors
+/// `mana_sources::cost_requires_sacrifice` which is private to the engine
+/// module". It matched only the `Composite` shape, so Gold's **bare**
+/// `Sacrifice` hit its `_ => false` arm and a Gold token counted as renewable.
+/// That miscount — a re-implementation drifting from the rule — is the argument
+/// for keeping the classification here, not any guarantee privacy provides. The
+/// only exported composition is `.any(is_renewable_mana_ability)`, which *is*
+/// the per-ability filter.
+fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| {
+        matches!(
+            c,
+            AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef
+        ) || matches!(
+            c,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        )
+    })
+}
+
+/// CR 605.1a criteria (1)-(3) + CR 701.21: a *renewable* mana ability — one that
+/// produces mana (per [`produces_mana_on_activation`]) without consuming its own
+/// source to do it.
+///
+/// This is the **development** predicate: it answers "is this permanent part of a
+/// standing manabase," not "can this produce mana right now." A Treasure, Gold,
+/// Lotus Petal, Black Lotus, or Chromatic Star is a one-shot conversion of a
+/// permanent into mana and is deliberately **excluded**; Commander's Sphere,
+/// Powerstone, Springleaf Drum, and Skirk Prospector are **included**.
+///
+/// For live availability use [`is_mana_source_ability`] — an untapped Treasure
+/// genuinely is one mana available right now, which is why the two predicates must
+/// not be unified.
+///
+/// **DELIBERATELY COMPOSED ON [`produces_mana_on_activation`], NOT ON
+/// [`is_mana_ability`] — do not "simplify" this back.** The two predicates answer
+/// different questions, so the CR 605.1a library criterion (criterion 4) must NOT
+/// reach this one. A **Millikin** or **Deranged Assistant** (`{T}, Mill a card:
+/// Add {C}`) and **Codie, Vociferous Codex** stop being rules mana abilities
+/// under the library clause, but they do not stop being manabase permanents:
+/// they still turn a tap into mana every turn without consuming themselves.
+/// Composing the development predicate on the rules predicate would demote all
+/// three to `ManaRole::None` through `phase-ai`'s `is_intrinsic_mana_source` ->
+/// `card_value::mana_role` -> `plan::controlled_mana_sources`, deleting them from
+/// manabase development and from the `mana_behind` deficit that drives mulligan
+/// `keep_tier` — an AI-strength regression for a reason that has nothing to do
+/// with manabase development. This composition keeps the value **unchanged for
+/// every input** across the CR 605.1a amendment.
+///
+/// The [`yields_mana_independent_of_pool`] conjunct does the same across the
+/// CR 701.10f admission: a pool doubling (Doubling Cube) became a mana ability,
+/// but its yield is the pool already present, so it is not a standing manabase
+/// source and this predicate's value is unchanged for every input.
+///
+/// Takes a single ability so callers compose with `.any()`; a permanent counts if
+/// **at least one** of its mana abilities is renewable (Crystal Vein carries both
+/// a renewable `{T}: Add {C}` and a self-sac `{T}, Sac: Add {C}{C}`).
+pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    produces_mana_on_activation(ability_def)
+        // CR 701.10f: a doubling's yield is the pool already present, so it is not
+        // a standing manabase source.
+        && yields_mana_independent_of_pool(ability_def)
+        && !cost_removes_self_from_battlefield(&ability_def.cost)
+}
+
+/// CR 701.10f: whether this ability's yield is fixed by the ability itself (a
+/// root `Effect::Mana`). A pool doubling (Doubling Cube) adds "an amount of
+/// mana of that type equal to the amount they already have", so its yield is
+/// the pool already present: it is a mana ability, but never by itself a
+/// source of mana.
+fn yields_mana_independent_of_pool(ability_def: &AbilityDefinition) -> bool {
+    matches!(*ability_def.effect, Effect::Mana { .. })
+}
+
+/// CR 605.1a + CR 701.10f: a mana ability that is by itself a source of mana —
+/// the predicate for heuristics that count mana sources or tally available
+/// mana. A Treasure counts (it genuinely is one mana available now); a pool
+/// doubling does not. Equal to [`is_mana_ability`] on every ability whose root
+/// is `Effect::Mana`; for routing and legality use [`is_mana_ability`].
+pub fn is_mana_source_ability(ability_def: &AbilityDefinition) -> bool {
+    is_mana_ability(ability_def) && yields_mana_independent_of_pool(ability_def)
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -92,10 +194,19 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// which is exactly the event a `TapsForMana` triggered mana ability fires
 /// from. It also accepts `ManaAdded`, because CR 605.1b explicitly includes
 /// abilities that trigger from mana being added. CR 605.1b also admits
-/// "triggered from the activation/resolution of an activated mana ability" in
-/// general, but mana abilities bypass the stack and do not emit a
-/// distinguishable `AbilityActivated` event; widening (b) to that axis requires
-/// first emitting such an event. No real card exercises the gap today.
+/// "triggered from the activation/resolution of an activated mana ability";
+/// mana activations now emit `AbilityActivated { kind: Mana }`, but that axis is
+/// not widened here: the parser strict-fails an activation trigger whose
+/// untargeted body could add mana (`could_be_triggered_mana_ability_body`), so
+/// no supported trigger needs inline routing from it. No printed card uses it.
+///
+/// A mana-echo body ("add one mana of any type that land produced") resolving
+/// from a multi-type tap event still qualifies here (CR 605.1b classifies on
+/// targets, event, and mana-adding ability — a choice owed at resolution is
+/// not an exclusion): it resolves inside immediate resolution and pauses for
+/// the SingleColor choice there (CR 608.2d), resumed by the fixed-point
+/// authority without a stack entry. The `echo_distinct_types` helper below is
+/// the single authority both the pause and the prompt read.
 pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
@@ -115,19 +226,106 @@ pub fn is_triggered_mana_ability(
     }
     // (b) CR 106.12a / CR 605.1b: triggered by a `{T}`-cost mana ability
     // resolving and producing mana, or by mana being added. See the doc comment
-    // above for the deliberately-not-yet-widened `AbilityActivated` axis.
+    // above for the deliberately-unwidened `AbilityActivated { kind: Mana }` axis.
+    // A choice owed at resolution (CR 608.2d mana-echo) does NOT fail this
+    // gate: classification keys on targets, event, and mana-adding ability,
+    // and the fixed-point authority pauses for and resumes the choice without
+    // leaving immediate resolution.
     matches!(
         trigger_event,
-        Some(GameEvent::TappedForMana { .. } | GameEvent::ManaAdded { .. })
+        Some(
+            GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaAdded { .. }
+        )
     )
 }
 
+/// CR 608.2d + CR 106.12a: distinct mana types carried by a tap/production
+/// event, in stable order; empty for any other event shape. Single authority
+/// for the pause question shared by `resolve` below and the fixed-point
+/// whitelist contract, so pausing and prompting cannot drift on what counts
+/// as multi-type.
+pub(crate) fn echo_distinct_types(event: &GameEvent) -> Vec<ManaType> {
+    let produced = match event {
+        GameEvent::TappedForMana { produced, .. }
+        | GameEvent::ManaAbilityProduced { produced, .. } => produced,
+        _ => return Vec::new(),
+    };
+    let mut distinct: Vec<ManaType> = produced
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    distinct.sort();
+    distinct
+}
+
+/// CR 608.2d: true when `ability`'s root effect is a mana-echo production
+/// ("add one mana of any type that land produced") and the firing event
+/// carries more than one distinct type. Single authority for the pause
+/// question shared by `resolve`, the Pass-1 skip, and the resolved-marker
+/// guard exemption below.
+pub(crate) fn echo_body_owes_type_choice(
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if !matches!(
+        &ability.effect,
+        Effect::Mana {
+            produced: ManaProduction::TriggerEventManaType,
+            ..
+        }
+    ) {
+        return false;
+    }
+    trigger_event.is_some_and(|event| echo_distinct_types(event).len() > 1)
+}
+
+/// CR 605.1b + CR 605.4a: the **resolver-facing** counterpart of
+/// [`is_triggered_mana_ability`].
+///
+/// [`is_triggered_mana_ability`] is the *acceptance-time* gate: it answers
+/// "does this classification-time graph qualify?" and is deliberately raw —
+/// any target anywhere in the graph makes it false. That is the right question
+/// once, when an occurrence is accepted.
+///
+/// It is the wrong question during resolution. `resolve_ability_chain` may
+/// materialize an engine resolution-context referent (a `chosen_players`
+/// member surfacing through `ControllerRef::ChosenPlayer`, for instance) into
+/// the overloaded `ResolvedAbility.targets` vector. That referent is not a
+/// CR 115.1d announcement target — `build_target_slots` surfaces no slot for
+/// it — so the already-accepted ability does not stop being a triggered mana
+/// ability partway through its own resolution. CR 605.4a keeps the occurrence
+/// stackless and owned by the immediate fixed point.
+///
+/// So: while the accepted-occurrence marker is live, the classification
+/// decision has already been made and is simply read back. Outside such an
+/// occurrence there is no marker and this delegates to the raw classifier with
+/// the ambient `current_trigger_event`, which is exactly baseline. Ordinary
+/// callers — including the compatibility `resolve_triggered_mana_ability_inline`
+/// wrapper, which deliberately installs no marker — are unaffected.
+pub(crate) fn is_resolving_triggered_mana(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if let Some(node) = state.active_accepted_triggered_mana_node {
+        debug_assert_eq!(
+            Some(node),
+            state.active_rules_execution_node,
+            "an accepted triggered-mana occurrence marker must name the ambient rules-execution \
+             node; a mismatch means a scope was entered or restored without its partner"
+        );
+        return true;
+    }
+    is_triggered_mana_ability(ability, state.current_trigger_event.as_ref())
+}
+
 /// True iff every reachable link (via `sub_ability` and `else_ability` per
-/// CR 608.2c) has `Effect::Mana`. The "every link is mana" rule is the
+/// CR 608.2c) adds mana ([`Effect::adds_mana_on_resolution`]: `Effect::Mana` or a
+/// CR 701.10f pool doubling). The "every link is mana" rule is the
 /// conservative reading of CR 605.1b(c) — inline resolution skips priority,
 /// so any non-mana effect reachable during resolution forces stack use.
 fn chain_is_all_mana(ability: &ResolvedAbility) -> bool {
-    visit_links_all(ability, &|link| matches!(link.effect, Effect::Mana { .. }))
+    visit_links_all(ability, &|link| link.effect.adds_mana_on_resolution())
 }
 
 /// True iff **any** reachable link (via `sub_ability` and `else_ability`)
@@ -173,44 +371,18 @@ fn sole_produced_color(produced: &[ManaType]) -> Option<ManaColor> {
     Some(first)
 }
 
-/// Visit every reachable link of `ability` — head + `sub_ability` chain +
-/// `else_ability` branches at each link — and return `true` iff `pred` holds
-/// for all of them. Mirrors `chain_is_all_mana` / `chain_has_any_targets`'s
-/// single traversal shape so the two walkers stay structurally identical.
+/// Visit every live link, including coin outcomes, and require `pred` for all.
 fn visit_links_all(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if !pred(ability) {
-        return false;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if !visit_links_all(sub, pred) {
-            return false;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if !visit_links_all(else_branch, pred) {
-            return false;
-        }
-    }
-    true
+    pred(ability)
+        && ability
+            .child_links()
+            .all(|(_, child)| visit_links_all(child, pred))
 }
 
 /// Dual of [`visit_links_all`]: returns `true` iff `pred` holds for any
 /// reachable link.
 fn visit_links_any(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if visit_links_any(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if visit_links_any(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    super::triggers::any_reachable_link(ability, pred)
 }
 
 /// CR 605.4a: Resolve a triggered mana ability inline (stack-skipped).
@@ -245,7 +417,9 @@ pub fn resolve_triggered_mana_ability_inline(
     let node = source.map(|source| {
         let caused_by = match trigger_event {
             Some(
-                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+                GameEvent::ManaAdded { source_id, .. }
+                | GameEvent::TappedForMana { source_id, .. }
+                | GameEvent::ManaAbilityProduced { source_id, .. },
             ) => state
                 .resolved_rules_journal
                 .latest_mana_producer_for_source(*source_id),
@@ -266,7 +440,11 @@ pub fn resolve_triggered_mana_ability_inline(
         // rather than defaulting to `color_options.first()`.
         state.current_triggered_mana_override = color_override;
         // Use the standard resolution entry so sub_ability chains resolve uniformly.
-        let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+        // CR 605.4a: mark the inline subresolution so work that must belong to
+        // a resolution carrier refuses to park inside it.
+        run_inline_mana_subresolution(state, |state| {
+            let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+        });
         state.current_triggered_mana_override = previous_mana_override;
         state.current_trigger_event = previous_trigger_event;
     });
@@ -332,16 +510,29 @@ pub(super) fn resolve_mana_ability_excluding(
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
     let waiting_before = state.waiting_for.clone();
-    let ability_index = state
+    // CR 602.5: Defense-in-depth: enforce activation prohibitions at resolution time.
+    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities can't be activated at this time (CR 602.5)".to_string(),
+        ));
+    }
+    let ability_index = state.objects.get(&source_id).and_then(|object| {
+        object
+            .abilities
+            .iter()
+            .position(|ability| ability == ability_def)
+    });
+    // CR 400.7 + CR 602.2a + CR 605.3b: capture the source incarnation at this
+    // announcement, before any cost is paid — see `activate_mana_ability`.
+    let announced_source_incarnation = state
         .objects
         .get(&source_id)
-        .and_then(|object| {
-            object
-                .abilities
-                .iter()
-                .position(|ability| ability == ability_def)
-        })
-        .unwrap_or(usize::MAX);
+        .map(|source| source.incarnation);
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     let pending = PendingManaAbility {
         player,
@@ -349,6 +540,13 @@ pub(super) fn resolve_mana_ability_excluding(
         ability_index,
         rules_execution_node,
         ability_snapshot: Some(ability_def.clone()),
+        announced_source_incarnation,
+        // CR 602.2a + CR 602.5c: same announcement capture as the manual
+        // path above — the resolved def is live here, before any cost.
+        announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+            source_id,
+            ability_def,
+        )),
         color_override,
         // The direct resolver normally leaves its caller's waiting root
         // untouched.  Its ordinary completion must therefore return to
@@ -358,21 +556,31 @@ pub(super) fn resolve_mana_ability_excluding(
         // synchronous auto-tap recursively retry its still-live caller.
         resume: ManaAbilityResume::Priority,
         cost_move_resume: resume.cloned(),
-        chosen_tappers: Vec::new(),
+        chosen_tappers: None,
         chosen_discards: Vec::new(),
         chosen_mana_payment: None,
-        chosen_counter_count: None,
+        payment_mode: CastPaymentMode::Auto,
+        pinned_pool_units: Vec::new(),
+        chosen_counter_counts: Vec::new(),
         chosen_x: None,
         collected_evidence: Vec::new(),
         chosen_exiled: Vec::new(),
         chosen_sacrificed_battlefield: Vec::new(),
         cost_paid_object: None,
+        cost_removed_counters: None,
         batch_siblings: Vec::new(),
     };
     // CR 605.3b + CR 616.1: This direct path is used by auto-tap and retains
     // its historical default-output semantics even when a cost move pauses.
     // The cursor serializes that resolution mode with the exact outer resume.
     let cost_event_start = events.len();
+    // CR 603.2 + CR 603.3b: Prepare a fresh child-facing snapshot of the live
+    // synchronous parent carrying that parent frame's current unscanned suffix,
+    // including every earlier sibling that already completed synchronously. The
+    // live parent cursor is never mutated, so a synchronous child drops this
+    // snapshot without duplicating the root's eventual scan.
+    let prepared_parent =
+        parent.map(|parent| parent_snapshot_with_current_cost_events(parent, events));
     let waiting_for = continue_mana_ability_cost_payment(
         state,
         pending,
@@ -381,17 +589,175 @@ pub(super) fn resolve_mana_ability_excluding(
             excluded_sources,
             sub_cost_demand,
             ManaAbilityCostResolutionMode::AutoResolved,
-            parent,
+            prepared_parent.as_ref(),
         ),
         events,
         cost_event_start,
     )?;
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        state.waiting_for = waiting_for;
-    } else {
+    // CR 605.3b + CR 601.2g-h: a mana ability that resolved returns to the
+    // payment that activated it; only a cost move paused on a prompt replaces
+    // the caller's root.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
         state.waiting_for = waiting_before;
+    } else {
+        state.waiting_for = waiting_for;
     }
     Ok(())
+}
+
+/// Find the `Effect::Mana` node within an ability's root or sub_ability chain.
+/// CR 608.2c: `ability` with the instructions before its production already
+/// performed — rooted at that `Effect::Mana` link, keeping the activation's cost
+/// and restrictions.
+pub(super) fn ability_from_mana_production(ability: &AbilityDefinition) -> AbilityDefinition {
+    let Some(production) = crate::types::ability::inline_mana_preamble(ability) else {
+        return ability.clone();
+    };
+    let mut remaining = ability.clone();
+    remaining.effect = production.effect.clone();
+    remaining.sub_ability = production.sub_ability.clone();
+    remaining
+}
+
+/// CR 608.2c: the instructions of a mana ability that precede its production,
+/// in written order — the chain cut just before its first `Effect::Mana` link.
+/// `None` when the production is the root (nothing precedes it).
+fn resolved_before_mana(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
+    if matches!(ability.effect, Effect::Mana { .. }) {
+        return None;
+    }
+    let mut head = ability.clone();
+    head.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(resolved_before_mana)
+        .map(Box::new);
+    Some(head)
+}
+
+/// CR 605.3b + CR 608.2c: perform the instructions that precede a mana
+/// ability's production (Empowered Autogenerator's counter), in written order,
+/// as part of the ability's immediate resolution. The single authority shared
+/// by live activation and by capacity projection.
+fn resolve_inline_mana_preamble(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(preamble) = resolved_before_mana(resolved) {
+        run_inline_mana_subresolution(state, |state| {
+            let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
+        });
+    }
+}
+
+/// CR 601.2g + CR 605.3b + CR 608.2c: the states a mana ability with an inline
+/// preamble could leave behind once that preamble has resolved, for sizing the
+/// mana it will add (an amount that reads the source's counters, Empowered
+/// Autogenerator). Each is a scratch clone; `state` is never mutated.
+///
+/// CR 616.1: replacement effects apply to the preamble exactly as they do live
+/// (Doubling Season doubles the counter). When competing replacements ask the
+/// controller to order them, every ordering is a reachable outcome, so one
+/// state is returned per ordering and the caller takes the one it needs (the
+/// maximum, for an announcement ceiling).
+pub(super) fn inline_preamble_outcomes(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+) -> Vec<GameState> {
+    let mut scratch = state.clone();
+    // The projection answers its own ordering prompts. Detach the enclosing cast
+    // so answering one cannot resume that cast (whose X announcement is what
+    // asked for this projection) and re-enter the projection.
+    scratch.pending_cast = None;
+    let mut events = Vec::new();
+    with_bound_mana_activation(
+        &mut scratch,
+        source_id,
+        player,
+        ability_def,
+        None,
+        None,
+        None,
+        None,
+        |scratch, resolved| resolve_inline_mana_preamble(scratch, resolved, &mut events),
+    );
+    settle_projected_replacements(scratch)
+}
+
+/// The part of a parked ordering prompt that decides what the rest of the
+/// chain can produce: the proposed event as modified so far (without which
+/// replacements already applied) and the multiset of replacements still to
+/// apply, by definition rather than by source object.
+fn replacement_prompt_signature(state: &GameState) -> Option<(String, Vec<String>)> {
+    let pending = state.pending_replacement.as_ref()?;
+    let mut event = pending.proposed.clone();
+    event.applied_set_mut().clear();
+    let mut remaining: Vec<String> = pending
+        .candidates
+        .iter()
+        .map(|rid| {
+            state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .map_or_else(|| format!("{rid:?}"), |def| format!("{def:?}"))
+        })
+        .collect();
+    remaining.sort_unstable();
+    Some((format!("{event:?}"), remaining))
+}
+
+/// CR 616.1f: answer every ordering prompt a projection parked on, branching per
+/// option, until no replacement is left to apply. CR 614.5: a replacement
+/// applies to an event at most once, so every answer consumes a candidate and
+/// the chain is bounded by the number of applicable replacements — there is no
+/// fixed prompt limit. Iterative (a worklist, not recursion) because a
+/// projection runs deep inside the casting flow's stack.
+///
+/// The orderings of n interchangeable replacements (five Winding Constrictors)
+/// are n! paths but only O(n) distinct futures: two branches whose proposed
+/// event and remaining-replacement multiset agree continue identically, so each
+/// such prompt is expanded once.
+fn settle_projected_replacements(state: GameState) -> Vec<GameState> {
+    let mut settled = Vec::new();
+    let mut expanded = HashSet::new();
+    let mut work = vec![Box::new(state)];
+    while let Some(state) = work.pop() {
+        let Some(pending) = state.pending_replacement.as_ref() else {
+            settled.push(*state);
+            continue;
+        };
+        if let Some(signature) = replacement_prompt_signature(&state) {
+            if !expanded.insert(signature) {
+                continue;
+            }
+        }
+        let options = super::replacement::pending_replacement_option_count(&state, pending);
+        for index in 0..options {
+            let mut branch = state.clone();
+            let mut events = Vec::new();
+            if super::engine_replacement::handle_replacement_choice(&mut branch, index, &mut events)
+                .is_ok()
+            {
+                work.push(branch);
+            }
+        }
+    }
+    settled
+}
+
+fn find_mana_effect(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let mut curr = Some(ability);
+    while let Some(node) = curr {
+        if matches!(node.effect, Effect::Mana { .. }) {
+            return Some(node);
+        }
+        curr = node.sub_ability.as_deref();
+    }
+    None
 }
 
 /// Produce mana from a resolved mana ability without paying costs.
@@ -401,6 +767,8 @@ pub(super) fn resolve_mana_ability_excluding(
 /// `cost_paid_object` carries the captured public characteristics of any
 /// object exiled or sacrificed as part of cost payment so production counts can
 /// resolve cost-paid-object refs (Food Chain / Burnt Offering class).
+/// `cost_removed_counters` is this activation's own payment's removed-counter
+/// count (`PendingManaAbility::cost_removed_counters`).
 #[allow(clippy::too_many_arguments)]
 fn produce_mana_from_ability(
     state: &mut GameState,
@@ -411,78 +779,216 @@ fn produce_mana_from_ability(
     color_override: Option<ProductionOverride>,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
+    cost_removed_counters: Option<u32>,
 ) {
-    // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
-    // cost-paid object snapshot so quantity resolution sees it. Reused for
-    // both production-count and sub-chain resolution paths so the same
-    // snapshot is visible end-to-end.
-    let resolved_for_quantity = resolved_mana_ability_for_current_state(
+    with_bound_mana_activation(
         state,
         source_id,
         player,
         ability_def,
         chosen_x,
         cost_paid_object,
+        announced_source_incarnation,
+        cost_removed_counters,
+        |state, resolved_for_quantity| {
+            produce_mana_from_bound_ability(
+                state,
+                source_id,
+                player,
+                ability_def,
+                events,
+                color_override,
+                resolved_for_quantity,
+            );
+        },
     );
+}
 
-    // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
-    // attach to each produced `ManaUnit`. Dropping these here is the bug that
-    // made Flamebraider's Elemental-only mana behave as unrestricted mana.
-    let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
-        match &resolved_for_quantity.effect {
-            Effect::Mana {
-                produced,
-                restrictions,
-                grants,
-                expiry,
-                target: None,
-            } => {
-                let mana = match color_override {
-                    // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
-                    // so the exact sequence lands in the pool (CR 605.3b).
-                    Some(ProductionOverride::Combination(types)) => types,
-                    Some(ProductionOverride::SingleColor(color)) => resolve_single_color_override(
-                        state,
-                        produced,
-                        &resolved_for_quantity,
-                        color,
-                    ),
-                    None => super::effects::mana::resolve_mana_types_for_ability(
-                        produced,
-                        state,
-                        &resolved_for_quantity,
-                    ),
-                };
-                let concrete = resolve_restrictions(restrictions, state, source_id);
-                let source_could_produce_two_or_more_colors =
-                    mana_sources::source_could_produce_two_or_more_colors(state, source_id, player);
-                (
-                    mana,
-                    concrete,
-                    grants.clone(),
-                    *expiry,
-                    source_could_produce_two_or_more_colors,
-                )
-            }
-            _ => (Vec::new(), Vec::new(), Vec::new(), None, false),
-        };
+/// CR 605.3b + CR 602.2b + CR 608.2h: run `body` against this activation's
+/// resolved mana ability with its own paid removed-counter count bound — the
+/// context field and the "this way" scalar — then restore the outer
+/// `last_effect_amount` (a mana ability can resolve inside another payment).
+/// The single binding authority for the colour prompt and production.
+#[allow(clippy::too_many_arguments)]
+fn with_bound_mana_activation<R>(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    chosen_x: Option<u32>,
+    cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
+    cost_removed_counters: Option<u32>,
+    body: impl FnOnce(&mut GameState, &ResolvedAbility) -> R,
+) -> R {
+    // CR 605.3b + CR 602.2b + CR 608.2h: a mana ability resolves immediately, so
+    // its own payment's count binds here; another activation's payment cannot
+    // reach it. The count is the preceding "this way" amount for the head
+    // production and the sub-chain. It binds BEFORE the ability is built: an
+    // "instead" condition (`apply_condition_instead_mana_swap`) reads the "this
+    // way" amount when it picks the production (CR 608.2c), as the stack route's
+    // resolution does.
+    let outer_last_effect_amount = cost_removed_counters.map(|n| {
+        state
+            .last_effect_amount
+            .replace(super::arithmetic::u32_to_i32_saturating(n))
+    });
+    // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
+    // cost-paid object snapshot so quantity resolution sees it. Reused for
+    // both production-count and sub-chain resolution paths so the same
+    // snapshot is visible end-to-end.
+    let mut resolved = resolved_mana_ability_for_current_state(
+        state,
+        source_id,
+        player,
+        ability_def,
+        chosen_x,
+        cost_paid_object,
+        announced_source_incarnation,
+    );
+    resolved.context.cost_removed_counter_amount = cost_removed_counters;
+    let result = body(state, &resolved);
+    if let Some(outer) = outer_last_effect_amount {
+        state.last_effect_amount = outer;
+    }
+    result
+}
 
+/// Produce mana from `resolved_for_quantity`, this activation's resolved mana
+/// ability with its paid count already bound (`with_bound_mana_activation`).
+fn produce_mana_from_bound_ability(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    color_override: Option<ProductionOverride>,
+    resolved_for_quantity: &ResolvedAbility,
+) {
     // CR 106.12: a permanent is "tapped for mana" when the activated mana
     // ability's cost includes the `{T}` symbol.
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
-    for &mana_type in &produced_mana {
-        mana_payment::produce_mana_with_attributes_from_source_quality(
-            state,
-            source_id,
-            mana_type,
-            player,
-            tapped,
-            source_could_produce_two_or_more_colors,
-            &restrictions,
-            &grants,
-            expiry,
-            events,
-        );
+
+    // CR 101.4 + CR 608.2c + CR 605.3b: A mana ability may instruct each player to add
+    // mana (Yurlok). It is still one mana ability resolving immediately, but
+    // the production instruction is performed once for every matching player
+    // in APNAP order. Preserve the printed controller separately while
+    // rebinding the acting/scoped player, exactly like the general
+    // `player_scope` resolution driver.
+    let recipients = ability_def.player_scope.as_ref().map_or_else(
+        || vec![player],
+        |scope| {
+            crate::game::players::apnap_order(state)
+                .into_iter()
+                .filter(|recipient| {
+                    super::effects::matches_player_scope(
+                        state, *recipient, scope, player, source_id,
+                    )
+                })
+                .collect()
+        },
+    );
+    let mut produced_for_tap_event = Vec::new();
+    let mut produced_for_ability_events = Vec::new();
+    for recipient in recipients {
+        let mut scoped = resolved_for_quantity.clone();
+        scoped.set_original_controller_recursive(player);
+        scoped.set_controller_recursive(recipient);
+        scoped.set_scoped_player_recursive(recipient);
+
+        // CR 106.6: Resolve spend-restriction templates, grants, and expiry so
+        // they attach to each produced `ManaUnit`.
+        let mana_node = find_mana_effect(&scoped);
+        let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
+            match (&scoped.effect, mana_node.map(|n| (&n.effect, n))) {
+                (
+                    _,
+                    Some((
+                        Effect::Mana {
+                            produced,
+                            restrictions,
+                            grants,
+                            expiry,
+                            target: None,
+                        },
+                        mana_resolved,
+                    )),
+                ) => {
+                    let mana = match color_override.clone() {
+                        // `Combination` is pre-chosen — skip `resolve_mana_types`
+                        // so the exact sequence lands in the pool (CR 605.3b).
+                        Some(ProductionOverride::Combination(types)) => types,
+                        Some(ProductionOverride::SingleColor(color)) => {
+                            resolve_single_color_override(state, produced, mana_resolved, color)
+                        }
+                        None => super::effects::mana::resolve_mana_types_for_ability(
+                            produced,
+                            state,
+                            mana_resolved,
+                        ),
+                    };
+                    let concrete = resolve_restrictions(restrictions, state, source_id);
+                    let source_could_produce_two_or_more_colors =
+                        mana_sources::source_could_produce_two_or_more_colors(
+                            state, source_id, player,
+                        );
+                    (
+                        mana,
+                        concrete,
+                        grants.clone(),
+                        *expiry,
+                        source_could_produce_two_or_more_colors,
+                    )
+                }
+                // CR 605.3b + CR 701.10f: a doubling mana ability resolves inline;
+                // it adds, for each type, as much as the recipient already has —
+                // read now, after its cost was paid (CR 601.2h). Added mana carries
+                // no restriction (Doubling Cube ruling), so no restriction/grant/
+                // expiry templates apply.
+                (
+                    Effect::Double {
+                        target_kind: DoubleTarget::ManaPool { color },
+                        ..
+                    },
+                    _,
+                ) => {
+                    // CR 605.3b: the doubling read every unit in the pool, so a
+                    // land refund (`UntapLandForMana`) could no longer reverse all
+                    // coupled mana — the recipient's undo window closes here.
+                    state.lands_tapped_for_mana.remove(&recipient);
+                    (
+                        super::effects::double::doubled_pool_mana(state, recipient, color.as_ref()),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        false,
+                    )
+                }
+                _ => (Vec::new(), Vec::new(), Vec::new(), None, false),
+            };
+
+        // CR 106.12a: `TappedForMana` is one source-level event for this
+        // resolution. Its payload is the full aggregate produced by the
+        // ability, including scoped recipients that exclude the activator.
+        produced_for_tap_event.extend(produced_mana.iter().copied());
+        if !produced_mana.is_empty() {
+            produced_for_ability_events.push((recipient, produced_mana.clone()));
+        }
+        for &mana_type in &produced_mana {
+            mana_payment::produce_mana_with_attributes_from_source_quality(
+                state,
+                source_id,
+                mana_type,
+                recipient,
+                tapped,
+                source_could_produce_two_or_more_colors,
+                &restrictions,
+                &grants,
+                expiry,
+                events,
+            );
+        }
     }
 
     // CR 105.3 + CR 106.1a + CR 605.3b: If a later clause in THIS mana ability
@@ -492,8 +998,8 @@ fn produce_mana_from_ability(
     // on the chain actually carrying an `AddChosenColor`, so ordinary producers
     // are untouched. Placed above the `TappedForMana` push below, which MOVES
     // `produced_mana`.
-    if chain_references_chosen_color(&resolved_for_quantity) {
-        if let Some(color) = sole_produced_color(&produced_mana) {
+    if chain_references_chosen_color(resolved_for_quantity) {
+        if let Some(color) = sole_produced_color(&produced_for_tap_event) {
             if let Some(obj) = state.objects.get_mut(&source_id) {
                 // CR 400.7: `chosen_attributes` persist on the permanent until it
                 // changes zones, and `chosen_color()` returns the FIRST match, so
@@ -506,16 +1012,29 @@ fn produce_mana_from_ability(
         }
     }
 
+    // CR 605.1b: Emit one aggregate event per receiving player for every
+    // mana-ability resolution, including abilities without a tap cost. Its
+    // output vector lets triggered mana abilities inspect each player's share
+    // of a multi-recipient resolution exactly once.
+    for (recipient, produced) in produced_for_ability_events {
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: recipient,
+            source_id,
+            produced,
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
+    }
+
     // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of
     // a `{T}`-cost mana ability that produces mana — not once per mana unit.
     // Emit a single `TappedForMana` here so the `TapsForMana` matcher fires
     // exactly once (the per-unit `ManaAdded` events above remain pool
     // accounting only).
-    if tapped && !produced_mana.is_empty() {
+    if tapped && !produced_for_tap_event.is_empty() {
         events.push(GameEvent::TappedForMana {
             player_id: player,
             source_id,
-            produced: produced_mana,
+            produced: produced_for_tap_event,
             tap_state: ManaTapState::from_tap(tapped),
         });
     }
@@ -524,9 +1043,13 @@ fn produce_mana_from_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
-    resolve_mana_ability_sub_chain(state, &resolved_for_quantity, events);
+    resolve_mana_ability_sub_chain(state, resolved_for_quantity, events);
 }
 
+/// CR 605.3b + CR 602.2a: Build the transient ability for a mana ability's
+/// prompt/production stage, carrying the facts captured at its announcement —
+/// the cost-paid object snapshot, the announced X, and the source incarnation
+/// the inline resolution's source-subject condition gate must read.
 fn resolved_mana_ability_for_current_state(
     state: &GameState,
     source_id: ObjectId,
@@ -534,11 +1057,20 @@ fn resolved_mana_ability_for_current_state(
     ability_def: &AbilityDefinition,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
 ) -> ResolvedAbility {
     let mut resolved =
         super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
     if let Some(snapshot) = cost_paid_object {
         resolved.set_cost_paid_object_recursive(snapshot);
+    }
+    // CR 400.7 + CR 602.2a + CR 605.3b: bind the announcement-captured source
+    // epoch before the condition-consuming swap below, so an inline mana
+    // sub-chain's source-subject condition reads the pre-cost object (its exit
+    // last-known information, CR 113.7a + CR 608.2h, for a self-moving cost)
+    // rather than the moved object at the same storage id.
+    if let Some(incarnation) = announced_source_incarnation {
+        resolved.set_announced_source_incarnation_recursive(Some(incarnation));
     }
     // CR 107.3a/.3c: bind the announced X into the resolved ability so produced
     // mana counts (`AnyCombination { count: Ref(Variable "X") }`) and any X-bearing
@@ -549,7 +1081,7 @@ fn resolved_mana_ability_for_current_state(
     apply_condition_instead_mana_swap(state, &resolved)
 }
 
-fn apply_condition_instead_mana_swap(
+pub(crate) fn apply_condition_instead_mana_swap(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -588,13 +1120,45 @@ fn resolve_single_color_override(
         None
     };
 
-    let resolved = super::effects::mana::resolve_mana_types_for_ability(produced, state, ability);
+    // CR 608.2d: an any-one-color amount reads the color chosen for it.
+    let bound = match mana_type_to_color(color) {
+        Some(chosen) => super::effects::mana::bind_any_one_color_choice(produced, chosen),
+        None => std::borrow::Cow::Borrowed(produced),
+    };
+    let resolved = super::effects::mana::resolve_mana_types_for_ability(&bound, state, ability);
 
     if let Some(previous) = previous_choice {
         state.last_named_choice = previous;
     }
 
     vec![color; resolved.len()]
+}
+
+/// CR 605.3c: true iff this mana ability has already been begun beneath the
+/// current decision and so can't be activated again until it has resolved.
+fn mana_ability_activation_begun(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    let Some(source) = state.objects.get(&source_id) else {
+        return false;
+    };
+    // CR 605.3c + CR 113.2c: a suspended ability is the one announced, wherever its source holds
+    // it now, and each equal instance of it on the source can be begun once.
+    let suspended = || {
+        let begun = state.waiting_for.suspended_mana_abilities();
+        begun.filter(|begun| begun.source_id == source_id)
+    };
+    let announced = suspended()
+        .filter(|begun| begun.ability_snapshot.as_ref() == Some(ability_def))
+        .count();
+    let instances = source.abilities.iter().filter(|held| *held == ability_def);
+    (announced > 0 && announced >= instances.count())
+        || suspended().any(|begun| {
+            begun.ability_snapshot.is_none() && begun.ability_index == Some(ability_index)
+        })
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -609,6 +1173,34 @@ pub fn activate_mana_ability(
     resume: ManaAbilityResume,
     color_override: Option<ProductionOverride>,
 ) -> Result<WaitingFor, EngineError> {
+    activate_mana_ability_with_payment_mode(
+        state,
+        source_id,
+        player,
+        ability_index,
+        ability_def,
+        events,
+        resume,
+        color_override,
+        CastPaymentMode::Auto,
+    )
+}
+
+/// CR 605.3b + CR 602.2b: [`activate_mana_ability`] with the player's
+/// mana-payment preference. `CastPaymentMode::Manual` stops before the
+/// ability's mana sub-cost is paid (see `advance_mana_ability_activation`).
+#[allow(clippy::too_many_arguments)]
+pub fn activate_mana_ability_with_payment_mode(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+    color_override: Option<ProductionOverride>,
+    payment_mode: CastPaymentMode,
+) -> Result<WaitingFor, EngineError> {
     let source = state
         .objects
         .get(&source_id)
@@ -620,7 +1212,17 @@ pub fn activate_mana_ability(
             "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
         ));
     }
-    if source.controller != player {
+    // CR 602.2 + CR 108.4a: the executor counterpart of the readiness gate in
+    // `mana_ability_ready_without_simulation_gated`. `GameAction::ActivateAbility`
+    // on a mana ability is routed straight here by `engine.rs` rather than through
+    // `casting::handle_activate_ability`, so this is where a directly-submitted
+    // mana activation is actually authorized and it must apply the same rule.
+    // CR 108.4: a card in a hand, graveyard, library or exile is neither a
+    // permanent nor a spell and so has no controller; CR 108.4a directs the ask to
+    // its owner. `controller_or_owner` is the single authority for that selection
+    // and keeps the CR 109.4c command-zone emblem on its controller. This runs
+    // ahead of the `activation_zone` check below, so it sees every zone.
+    if source.controller_or_owner() != player {
         return Err(EngineError::NotYourPriority);
     }
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
@@ -629,6 +1231,11 @@ pub fn activate_mana_ability(
             "Object is not in the correct zone (expected {:?})",
             required_zone
         )));
+    }
+    if mana_ability_activation_begun(state, source_id, ability_index, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "A mana ability can't be activated again until it has resolved (CR 605.3c)".to_string(),
+        ));
     }
     // CR 602.5: enforce activation prohibitions at the executor, not just at
     // legal-action filtering — a buggy or hostile client may submit
@@ -656,27 +1263,53 @@ pub fn activate_mana_ability(
         &ability_def.activation_restrictions,
     )?;
 
+    // CR 302.6: Direct mana activations obey the same {T}/{Q} creature gate
+    // as non-mana activations, before any journal or cost-payment mutation.
+    if let Some(cost) = &ability_def.cost {
+        super::restrictions::check_summoning_sickness_for_cost(state, source, cost)?;
+    }
+
+    // CR 400.7 + CR 602.2a + CR 605.3b: capture the source incarnation at this
+    // announcement — before the cost is paid, the same pre-payment moment the
+    // stack path records in `record_activation_announcement` (CR 602.2b routes
+    // the cost through the casting steps, CR 601.2h). A cost that moves the
+    // source (self-sacrifice, self-exile) advances the storage incarnation
+    // before the inline sub-chain resolves; the source-subject condition gate
+    // must read this epoch's exit last-known information instead.
+    let announced_source_incarnation = Some(source.incarnation);
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     advance_mana_ability_activation(
         state,
         PendingManaAbility {
             player,
             source_id,
-            ability_index,
+            ability_index: Some(ability_index),
             rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
+            announced_source_incarnation,
+            // CR 602.2a + CR 602.5c: capture the usage key at this same
+            // announcement — the resolved def is live here, before any cost
+            // is paid. A self-sacrifice cost can make the slot unresolvable
+            // by completion time; the inline completion consumes this.
+            announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+                source_id,
+                ability_def,
+            )),
             color_override,
             resume,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         },
         events,
@@ -686,11 +1319,23 @@ pub fn activate_mana_ability(
 fn complete_mana_ability_activation(
     state: &mut GameState,
     source_id: ObjectId,
-    ability_index: usize,
+    ability_index: Option<usize>,
+    announced_key: Option<crate::types::game_state::AbilityUsageKey>,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    super::restrictions::record_ability_activation(state, source_id, ability_index);
+    let Some(ability_index) = ability_index else {
+        return;
+    };
+    // CR 602.2 + CR 605.3a: counted like every activation, but not journaled:
+    // the turn journal holds non-mana activations only (see
+    // `GameState::abilities_activated_this_turn_by_player`). The key is the
+    // announcement's own — never re-derived here, so a self-sacrifice cost
+    // cannot unresolve the slot; a missing key skips exactly like today's
+    // missing-entry semantics.
+    if let Some(key) = announced_key {
+        super::restrictions::record_ability_activation(state, key, None);
+    }
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
@@ -709,23 +1354,51 @@ fn complete_mana_ability_activation(
 /// `Some(ManaChoicePrompt::AnyCombination)` when each produced mana unit has
 /// an independent color choice. Returns `None` when production is fully
 /// determined (Fixed, Colorless, single-option AnyOneColor).
+/// `color_ability` retains the original target context for dynamic color
+/// discovery; `count_ability` may be scoped to the count-source target for
+/// quantity resolution.
 pub(crate) fn mana_choice_prompt(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
-    ability: Option<&ResolvedAbility>,
+    color_ability: Option<&ResolvedAbility>,
+    count_ability: Option<&ResolvedAbility>,
 ) -> Option<ManaChoicePrompt> {
     let Effect::Mana { produced, .. } = effect else {
         return None;
     };
     match produced {
         ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
-            Some(ManaChoicePrompt::SingleColor {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice. CR 608.2d: an
+            // amount that reads the color chosen for this production (devotion
+            // to that color) is decided by that choice, so the prompt is
+            // needed when any color would add mana.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    let adds_mana = |produced: &ManaProduction| {
+                        !super::effects::mana::resolve_mana_types_for_ability(
+                            produced, state, ability,
+                        )
+                        .is_empty()
+                    };
+                    if super::effects::mana::any_one_color_count_reads_choice(produced) {
+                        color_options.iter().any(|color| {
+                            adds_mana(&super::effects::mana::bind_any_one_color_choice(
+                                produced, *color,
+                            ))
+                        })
+                    } else {
+                        adds_mana(produced)
+                    }
+                })
+                .unwrap_or(true);
+            produces_mana.then(|| ManaChoicePrompt::SingleColor {
                 options: color_options.iter().map(mana_color_to_type).collect(),
             })
         }
         ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
@@ -750,12 +1423,23 @@ pub(crate) fn mana_choice_prompt(
             // CR 106.1: Player chooses one of the colors among matching permanents they
             // control.
             let options = super::effects::mana::distinct_colors_among_permanents(
-                state, ability, source_id, filter,
+                state,
+                color_ability,
+                source_id,
+                filter,
             )
             .into_iter()
             .map(|color| mana_color_to_type(&color))
             .collect::<Vec<_>>();
-            if options.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -773,6 +1457,23 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::ChosenColor {
             fixed_alternative, ..
         } => {
+            if fixed_alternative.is_some() {
+                // CR 106.5: A fixed alternative makes production resolvable
+                // before the color choice. If it resolves to no mana, no color
+                // choice is needed. Pure chosen-color production must retain
+                // its prompt because that choice can determine its count.
+                let produces_mana = count_ability
+                    .map(|ability| {
+                        !super::effects::mana::resolve_mana_types_for_ability(
+                            produced, state, ability,
+                        )
+                        .is_empty()
+                    })
+                    .unwrap_or(true);
+                if !produces_mana {
+                    return None;
+                }
+            }
             let chosen = super::effects::mana::chosen_color_for_mana(state, source_id);
             match (fixed_alternative, chosen) {
                 // CR 106.1: "Add {fixed} or one mana of the chosen color" — once
@@ -815,7 +1516,15 @@ pub(crate) fn mana_choice_prompt(
                 owner,
                 source_id,
             );
-            if options.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -828,7 +1537,15 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::AnyInCommandersColorIdentity { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let identity = super::commander::commander_color_identity(state, owner);
-            if identity.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if identity.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor {
                     options: identity.iter().map(mana_color_to_type).collect(),
                 })
@@ -843,8 +1560,22 @@ pub(crate) fn mana_choice_prompt(
         // single option auto-picks). Mirrors `AnyTypeProduceableBy`.
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
-            let options = super::mana_sources::opponent_land_color_options(state, owner);
-            if options.len() > 1 {
+            // CR 106.1a + CR 105.1: the survey yields `ManaColor`s, so colorless can
+            // never be offered as an "any color" option.
+            let options: Vec<ManaType> =
+                super::mana_sources::opponent_land_color_options(state, owner)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect();
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -856,19 +1587,45 @@ pub(crate) fn mana_choice_prompt(
         // AnyCombination prompt only when the object has more than one color; 0 or
         // 1 color needs no prompt (CR 106.5 empty → no mana; single auto-picks).
         ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
-            let options = super::effects::mana::object_colors_for_scope(state, ability, *scope)
-                .iter()
-                .map(mana_color_to_type)
-                .collect::<Vec<_>>();
+            let options =
+                super::effects::mana::object_colors_for_scope(state, color_ability, *scope)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect::<Vec<_>>();
             if options.len() <= 1 {
                 return None;
             }
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
             if count > 0 {
                 Some(ManaChoicePrompt::AnyCombination { count, options })
+            } else {
+                None
+            }
+        }
+        // CR 608.2d + CR 106.12a: mana-echo bodies ("add one mana of any type
+        // that land produced" — Mirari's Wake, Selesnya Loft Gardens) read
+        // their type from the triggering tap event. A single resolution can
+        // produce several types at once (Simic Growth Chamber's {G}{U}), and
+        // the Oracle asks for exactly ONE of them, so the resolving player
+        // must choose when the event carries more than one distinct type.
+        // With 0 or 1 distinct types the resolver handles it without a
+        // prompt (CR 106.5: empty → no mana; single auto-picks — the common
+        // basic-land case stays prompt-free). Options come from the shared
+        // `echo_distinct_types` authority so the prompt agrees with the
+        // inline gate above on what counts as multi-type. Activation-time
+        // calls (whose effect can never be an echo production — no printed
+        // activated ability has this shape) see no tap event and stay silent.
+        ManaProduction::TriggerEventManaType => {
+            let options = state
+                .current_trigger_event
+                .as_ref()
+                .map(echo_distinct_types)
+                .unwrap_or_default();
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
             }
@@ -921,17 +1678,17 @@ pub fn handle_choose_mana_color(
         }
     };
 
-    let ability_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .or_else(|| pending.ability_snapshot.clone())
-        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    // CR 602.2a: the same announcement-bound definition production and the
+    // activation event used before the prompt.
+    let ability_def = mana_ability_definition(state, pending)?;
 
     let node = pending
         .rules_execution_node
         .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    // CR 605.4a: the choice action's own live-collection start. The already-paid
+    // cost range was collected by the frame that returned this prompt; this
+    // action owns only what production/completion emits from here.
+    let choice_action_start = events.len();
     state.with_rules_execution_node(node, |state| {
         produce_mana_from_ability(
             state,
@@ -942,17 +1699,107 @@ pub fn handle_choose_mana_color(
             Some(override_value),
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
         );
         complete_mana_ability_activation(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
     });
 
-    Ok(resume_waiting_for(pending.player, pending.resume.clone()))
+    // CR 603.2 + CR 605.3c + CR 605.4a: the second typed half of the colour
+    // seam. The frame this choice completes is a completed mana frame with an
+    // empty durable ledger, so it runs the SAME collection helper before
+    // returning its resume owner — and before `batch_activate_mana_siblings`
+    // begins the next sibling, each of which performs the same helper on its own
+    // finish path. That is the CR 605.4a pre-pass between siblings, in place of
+    // one aggregate scan after the loop.
+    if let Some(pause) = collect_completed_mana_frame_events(
+        state,
+        Vec::new(),
+        events,
+        choice_action_start,
+        ManaTriggerFixedPointResume::Root {
+            player: pending.player,
+            resume: Box::new(pending.resume.clone()),
+        },
+    ) {
+        return Ok(pause);
+    }
+
+    resume_mana_ability_root(state, pending.player, pending.resume.clone(), events)
+}
+
+/// CR 605.3b + CR 701.20a: Complete an activated mana ability that paused for an interactive
+/// reveal choice (e.g. Metalworker).
+pub(crate) fn handle_reveal_choice_for_mana_ability(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    eligible_cards: &[ObjectId],
+    cardinality: ObjectSelectionCardinality,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::effects::reveal_hand::validate_reveal_selection(eligible_cards, cardinality, &chosen)?;
+    super::effects::reveal_hand::reveal_selected_hand_cards(state, pending.player, &chosen, events);
+
+    // Each independent activation of a mana ability owns a fresh tracked set:
+    // publish it outside any enclosing resolution chain so it never unions into
+    // that chain's population, and hand the enclosing chain back afterwards.
+    let enclosing_chain = state.chain_tracked_set_id.take();
+    super::effects::publish_tracked_set(state, chosen);
+
+    let ability_def = mana_ability_definition(state, &pending)?;
+
+    let node = pending
+        .rules_execution_node
+        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    let choice_action_start = events.len();
+    state.with_rules_execution_node(node, |state| {
+        produce_mana_from_ability(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            events,
+            pending.color_override.clone(),
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+        );
+        complete_mana_ability_activation(
+            state,
+            pending.source_id,
+            pending.ability_index,
+            pending.announced_usage_key.clone(),
+            pending.player,
+            events,
+        );
+    });
+
+    state.chain_tracked_set_id = enclosing_chain;
+
+    if let Some(pause) = collect_completed_mana_frame_events(
+        state,
+        Vec::new(),
+        events,
+        choice_action_start,
+        ManaTriggerFixedPointResume::Root {
+            player: pending.player,
+            resume: Box::new(pending.resume.clone()),
+        },
+    ) {
+        return Ok(pause);
+    }
+
+    let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
+    Ok(super::triggers::preserve_order_triggers_resume(state, resume.clone()).unwrap_or(resume))
 }
 
 /// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
@@ -990,14 +1837,7 @@ pub(crate) fn batch_activate_mana_siblings(
     // The originally-activated source's mana ability is the shape every sibling
     // was selected to match. Re-resolve each sibling's matching ability index
     // (a sibling may carry unrelated abilities too).
-    let reference_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::InvalidAction("Mana ability source no longer exists".to_string())
-        })?;
+    let reference_def = mana_ability_definition(state, pending)?;
 
     for &sibling_id in pending.batch_siblings.iter().take(extra) {
         let Some((index, def)) = state.objects.get(&sibling_id).and_then(|obj| {
@@ -1030,32 +1870,68 @@ pub(crate) fn batch_activate_mana_siblings(
 }
 
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_tap_creatures_for_mana_ability(
     state: &mut GameState,
+    min_count: usize,
     count: usize,
+    mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     pending: &PendingManaAbility,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != count {
-        return Err(EngineError::InvalidAction(format!(
-            "Must tap exactly {} creature(s), got {}",
-            count,
-            chosen.len()
-        )));
+    match mode {
+        // CR 601.2h + CR 107.3a: the fixed-count form has `min_count == count`,
+        // so this range check subsumes the prior exact-match behavior unchanged;
+        // the X-sentinel form bounds the announced X to [0, eligible].
+        TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX => {
+            if chosen.len() < min_count || chosen.len() > count {
+                let requirement = if min_count == count {
+                    format!("exactly {count} creature(s)")
+                } else {
+                    format!("between {min_count} and {count} creature(s)")
+                };
+                return Err(EngineError::InvalidAction(format!(
+                    "Must tap {requirement}, got {}",
+                    chosen.len()
+                )));
+            }
+        }
+        // CR 605.1a: an aggregate (Crew/Saddle/Teamwork) tap cost is never a
+        // mana-ability cost — `tap_creature_cost_choice` refuses to register one,
+        // so this state is unreachable through the production registration path.
+        TapCreaturesSelectionMode::Aggregate(_) => {
+            return Err(EngineError::InvalidAction(
+                "Aggregate-power tap cost is not valid for a mana ability".to_string(),
+            ));
+        }
     }
-    for id in chosen {
+    for (index, id) in chosen.iter().enumerate() {
         if !legal_creatures.contains(id) {
             return Err(EngineError::InvalidAction(
                 "Selected creature not eligible for mana ability cost".to_string(),
             ));
         }
+        // CR 601.2h: one creature can only pay for itself once. Rejecting the
+        // duplicate here keeps the X binding below honest — a repeated id would
+        // otherwise inflate the announced X above the number actually tapped.
+        if chosen[..index].contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Cannot tap the same creature twice for a mana ability cost".to_string(),
+            ));
+        }
     }
 
     let mut updated = pending.clone();
-    updated.chosen_tappers = chosen.to_vec();
-    advance_mana_ability_activation(state, updated, events)
+    updated.chosen_tappers = Some(chosen.to_vec());
+    // CR 107.3a: for the X-sentinel form only, the selected payment count *is*
+    // the announced value of X for this mana ability. `min_count == 0` is not a
+    // usable signal here for the same reason it is not at the spell-cost seam.
+    if matches!(mode, TapCreaturesSelectionMode::VariableX) {
+        updated.chosen_x = Some(chosen.len().try_into().unwrap_or(u32::MAX));
+    }
+    continue_mana_ability_activation(state, updated, events)
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Complete a non-self exile
@@ -1099,16 +1975,16 @@ pub fn handle_exile_for_mana_ability(
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
     // characteristics before it leaves its zone.
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
     updated.chosen_exiled = chosen.to_vec();
     updated.cost_paid_object = captured;
-    advance_mana_ability_activation(state, updated, events)
+    continue_mana_ability_activation(state, updated, events)
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Complete the
@@ -1130,6 +2006,13 @@ pub fn handle_sacrifice_for_mana_ability(
             chosen.len()
         )));
     }
+    // CR 118.3: one permanent pays for one of the sacrifices.
+    if contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot sacrifice the same permanent more than once for a mana ability cost"
+                .to_string(),
+        ));
+    }
     for id in chosen {
         if !legal_permanents.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -1146,16 +2029,16 @@ pub fn handle_sacrifice_for_mana_ability(
     }
 
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
     updated.chosen_sacrificed_battlefield = chosen.to_vec();
     updated.cost_paid_object = captured;
-    advance_mana_ability_activation(state, updated, events)
+    continue_mana_ability_activation(state, updated, events)
 }
 
 fn deferred_spell_sacrifice_reserved(state: &GameState, object_id: ObjectId) -> bool {
@@ -1163,7 +2046,7 @@ fn deferred_spell_sacrifice_reserved(state: &GameState, object_id: ObjectId) -> 
         pending
             .deferred_sacrificed_permanents
             .iter()
-            .any(|selection| selection.object_id == object_id)
+            .any(|selection| selection.selected_object() == Some(object_id))
     })
 }
 
@@ -1182,6 +2065,12 @@ pub fn handle_discard_for_mana_ability(
             chosen.len()
         )));
     }
+    // CR 118.3: one card pays for one of the discards.
+    if contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot discard the same card more than once for a mana ability cost".to_string(),
+        ));
+    }
     for id in chosen {
         if !legal_cards.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -1192,7 +2081,7 @@ pub fn handle_discard_for_mana_ability(
 
     let mut updated = pending.clone();
     updated.chosen_discards = chosen.to_vec();
-    advance_mana_ability_activation(state, updated, events)
+    continue_mana_ability_activation(state, updated, events)
 }
 
 #[cfg(test)]
@@ -1240,6 +2129,74 @@ impl ManaActivationGates {
     }
 }
 
+/// CR 305.6: builds the minimal synthetic `AbilityDefinition` (Tap cost,
+/// `Effect::Mana`) standing in for a land's INTRINSIC "{T}: Add [mana
+/// symbol]" ability — the ability every land with a basic land type has
+/// whether or not any `AbilityDefinition` object represents it. Used so a
+/// legality check's `kind`/`exemption`/cost axes (e.g. Damping Matrix's
+/// "unless they're mana abilities" carve-out) evaluate identically to how
+/// they would against a real, printed mana ability.
+fn intrinsic_land_mana_ability_definition(color: ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
+}
+
+/// CR 305.6 + CR 602.5: Is a land's basic-land-type INTRINSIC mana ability
+/// currently blocked — by ANY of the gates a printed mana ability would be
+/// checked against? `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for a land with no
+/// `AbilityDefinition` object at all (Urborg/Blood-Moon-class grants), but
+/// CR 305.6's intrinsic ability is still an activated mana ability, so every
+/// gate `mana_ability_ready_without_simulation_gated` applies to a real one —
+/// phased-out (CR 702.26b), detained (CR 701.35a), zone (CR 113.6), tapped/
+/// can't-tap (CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b), summoning sickness
+/// (CR 302.6), CantBeActivated/CantActivateDuring (CR 602.5), static
+/// activation restrictions (CR 604/605.3b) — must apply to it too. Routes the
+/// synthetic definition through that SAME single-authority readiness check
+/// rather than re-implementing any subset of it: the function takes an
+/// `AbilityDefinition` by reference and never indexes `obj.abilities`, so a
+/// synthesized definition with no real storage slot is exactly as valid an
+/// input as a printed one. `ability_index: 0` is inert here — the intrinsic
+/// ability carries empty `activation_restrictions` (so `ability_index` is
+/// never read by that check) and a bare `Tap` cost (whose payability check
+/// doesn't consult it either).
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+    gates: Option<&ManaActivationGates>,
+) -> bool {
+    let ability_def = intrinsic_land_mana_ability_definition(color);
+    let ready = match gates {
+        Some(gates) => mana_ability_ready_without_simulation_gated(
+            state,
+            controller,
+            object_id,
+            0,
+            &ability_def,
+            ManaPayabilityMode::Current,
+            gates,
+        ),
+        None => {
+            mana_ability_ready_without_simulation(state, controller, object_id, 0, &ability_def)
+        }
+    };
+    !ready
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
@@ -1257,16 +2214,18 @@ fn mana_ability_ready_without_simulation(
         source_id,
         ability_index,
         ability_def,
+        ManaPayabilityMode::Current,
         &gates,
     )
 }
 
-fn mana_ability_ready_without_simulation_gated(
+pub(crate) fn mana_ability_ready_without_simulation_gated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
+    payability_mode: ManaPayabilityMode,
     gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
@@ -1281,8 +2240,19 @@ fn mana_ability_ready_without_simulation_gated(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.2a: Only the controller may activate the ability.
-    if obj.controller != player {
+    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
+    // controller) can activate its activated ability unless the object specifically
+    // says otherwise." CR 108.4: a card is not a permanent or spell — and so has no
+    // controller — in a hand, graveyard, library or exile, and CR 108.4a directs
+    // anything asking for that controller to use the owner instead. This gate admits
+    // those zones (`activation_zone`, checked just below), so it must ask for the
+    // permission reference point rather than a raw `.controller`.
+    //
+    // `GameObject::controller_or_owner` is the single authority for that selection.
+    // Routing through it rather than swapping in `.owner` is what keeps the command
+    // zone correct: CR 109.4c makes an emblem an object that DOES have a controller
+    // while sitting in the command zone, and the helper carries that exception.
+    if obj.controller_or_owner() != player {
         return false;
     }
     // CR 113.6 + CR 113.6b: A permanent's abilities function only on the battlefield by
@@ -1297,8 +2267,8 @@ fn mana_ability_ready_without_simulation_gated(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
-    // CR 701.26a + CR 508.1f: a "can't become tapped" source (e.g. a goaded mana
-    // dork) can't activate a tap-cost mana ability. A {Q} untap-cost ability is
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b: a "can't become tapped"
+    // source can't pay a tap-cost mana ability. A {Q} untap-cost ability is
     // unaffected — untapping is governed by `StaticMode::CantUntap`.
     if mana_sources::has_tap_component(&ability_def.cost)
         && crate::game::restrictions::object_cant_tap(state, source_id)
@@ -1346,15 +2316,106 @@ fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
-    // CR 605.3a + CR 601.2h: The mana sub-cost (pool + choice-of-object) must be
-    // currently payable. is_payable_for_mana_ability's Mana arm uses auto_tap with
-    // require_current_payability=false, so it does not recurse here.
+    // CR 605.3a + CR 601.2h: Gate on cost payability, using the shared authority
+    // from cost_payability.rs.
+    //
+    // `Current` — delegates to `is_payable_for_mana_ability`, which checks mana
+    // affordability via the auto-tap witness (CR 601.2g) and honors tag-scoped mana
+    // via the correct ability index (CR 106.6).
+    //
+    // `Planning` — delegates to `is_payable_in(…, Some(ability_index), Unguided)`. That function
+    // already returns `true` for `AbilityCost::Mana` sub-costs (CR 601.2g defers
+    // them to the mana payment step), so filter-land / Signet costs are treated as
+    // payable during planning. All other components (sacrifice, pay life, discard,
+    // tap) are still checked through the same existing cost-payability authority,
+    // preventing them from drifting from the full-legality path.
     if let Some(cost) = &ability_def.cost {
-        if !cost.is_payable_for_mana_ability(state, player, source_id) {
-            return false;
+        match payability_mode {
+            ManaPayabilityMode::Current => {
+                if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+                    return false;
+                }
+            }
+            ManaPayabilityMode::Planning => {
+                // Object-using legs are judged as the mana-ability payment
+                // path pays them (unguided), the same as `Current` readiness.
+                if !cost.is_payable_in(
+                    state,
+                    player,
+                    source_id,
+                    Some(ability_index),
+                    super::cost_payability::ObjectLegPayment::Unguided,
+                    super::cost_payability::CostSourceRole::AbilitySource,
+                ) {
+                    return false;
+                }
+            }
         }
     }
     true
+}
+
+/// CR 605.3a + CR 106.12 + CR 107.6 + CR 701.21a: True when the full-state
+/// legality clone in [`can_activate_mana_ability_now_gated`] would only
+/// re-derive an answer the non-simulating readiness gate has already settled.
+///
+/// Two disjoint shapes qualify:
+/// * [`mana_sources::cost_conclusively_payable_by_cheap_gate`] — no cost, or a
+///   cost built solely from the `{T}`/`{Q}` symbols. Unchanged.
+/// * A whole-tree choice-free cost that sacrifices exactly the ability's own
+///   source ([`mana_sources::has_unambiguous_self_sacrifice_component`]) —
+///   Treasure's `{T}, Sacrifice this token` (CR 111.10a) and Gold's tapless
+///   `Sacrifice this token` (CR 111.10c). `SacrificeRequirement::Aggregate`,
+///   `Count { count: n > 1 }` and every non-`SelfRef` target are excluded BY
+///   CONSTRUCTION by that predicate's `Count { count: 1 }` / `SelfRef` match —
+///   a non-self sacrifice may have no legal victim, so its simulation is
+///   load-bearing and must not be skipped.
+///
+/// The second shape is the first MULTI-component cost the engine answers
+/// without simulating, so the two divergences an earlier component can
+/// introduce are guarded explicitly. Both guards are conservative: a `true`
+/// declines the fast path and falls through to the unchanged simulation, so a
+/// spurious guard costs performance, never correctness. Note that Guard 2's
+/// granularity is the whole board rather than this source: `static_kind_present`
+/// is a board-global `StaticModeKind` presence read (CR 604.1), so a single
+/// `CantPayCost` permanent anywhere on the battlefield (Yasharn, Impeccable Sire)
+/// returns EVERY mana source to the clone path, not only the sources a
+/// prohibition could actually name.
+///
+/// Two divergences deliberately need NO guard:
+/// * CR 616.1 — a replacement on the sacrifice's battlefield -> graveyard move
+///   makes `sacrifice_permanent` return `NeedsReplacementChoice`, which the
+///   self-sacrifice payment arm maps to `Ok(ManaAbilityPaymentProgress::Paused)`,
+///   so the simulation returns `Ok` and reports the same `true` this path does.
+/// * CR 608.2h — the production tail runs after the source has left the
+///   battlefield, so a source-referential produced amount (Lotus Blossom's
+///   `CountersOn { scope: Source }`) reads last known information. That changes
+///   the amount of mana, never the legality answer: the tail's only two `?`
+///   operators are `mana_ability_definition` (rescued by the activation's
+///   `ability_snapshot`) and `resume_mana_ability_root` (infallible for the
+///   `Priority` resume the legality simulation uses).
+fn legality_simulation_is_redundant(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> bool {
+    if mana_sources::cost_conclusively_payable_by_cheap_gate(cost) {
+        return true;
+    }
+    mana_sources::has_unambiguous_self_sacrifice_component(cost)
+        // CR 601.2g: a permanent already committed to a pending spell's
+        // additional sacrifice cost is reserved; paying this ability's cost
+        // then errors at `continue_mana_ability_cost_payment_in_node`. Reuses
+        // the payment path's own authority rather than re-deriving it.
+        && !cost_sacrifices_reserved_source(state, source_id, cost)
+        // CR 118.3 + CR 601.2h: the readiness gate evaluated
+        // `player_cant_sacrifice_as_cost` on the PRE-payment state, but the
+        // payment re-evaluates it after this tree's `{T}` component has
+        // already tapped the source, and a prohibition's object filter can
+        // read that tapped bit (`FilterProp::Tapped`). O(1) presence read
+        // (CR 604.1): a `false` here is precise post-flush, so the two
+        // evaluations are provably identical; a `true` declines and simulates.
+        && !static_kind_present(state, StaticModeKind::CantPayCost)
 }
 
 pub fn can_activate_mana_ability_now(
@@ -1397,9 +2458,24 @@ pub fn can_activate_mana_ability_now_gated(
         source_id,
         ability_index,
         ability_def,
+        ManaPayabilityMode::Current,
         gates,
     ) {
         return false;
+    }
+    // CR 107.3a + CR 601.2b via CR 602.2b: an X-announcing activation stops at
+    // its announcement before any cost leg is paid, and the cheap gate above
+    // already judged every leg payable at X = 0 (CR 107.1b + CR 601.2h). The
+    // only pre-announcement checks it lacks are CR 605.3c (an ability begun
+    // beneath this decision can't be activated again) and the CR 601.2g
+    // reserved sacrifice. Simulating instead would compute the X cap, whose
+    // capacity scan (`x_ceiling_mana_capacity` -> `mana_ability_usable_for_payment`)
+    // reads every other source's `Current` readiness, so a second X-announcing
+    // source would simulate its own announcement and read this source's
+    // readiness back, without end.
+    if mana_ability_announces_x(&ability_def.cost) {
+        return !mana_ability_activation_begun(state, source_id, ability_index, ability_def)
+            && !cost_sacrifices_reserved_source(state, source_id, &ability_def.cost);
     }
     // CR 605.3a + CR 106.12 + CR 107.6: When the cheap gate already conclusively
     // decides payability (no cost, or a {T}/{Q}-only cost whose production +
@@ -1407,8 +2483,12 @@ pub fn can_activate_mana_ability_now_gated(
     // simulation. Eliminates the mana-display board-sweep clone-storm (Cryptolith
     // Rite granting bare `{T}: Add` to ~700 tokens => ~700 clones/sweep). Mana/
     // resource/composite costs still simulate — the auto-tap affordability
-    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE.
-    if mana_sources::cost_conclusively_payable_by_cheap_gate(&ability_def.cost) {
+    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE. CR 111.10a +
+    // CR 701.21a: a whole-tree choice-free cost that sacrifices the ability's
+    // OWN source (Treasure, Gold, Lotus Petal) is conclusively decided the same
+    // way, behind two state-aware guards — see
+    // [`legality_simulation_is_redundant`].
+    if legality_simulation_is_redundant(state, source_id, &ability_def.cost) {
         return true;
     }
     can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
@@ -1422,6 +2502,7 @@ fn can_activate_mana_ability_by_simulation(
     ability_def: &AbilityDefinition,
 ) -> bool {
     crate::game::perf_counters::record_state_clone_for_legality();
+    crate::game::perf_counters::record_mana_readiness_state_clone();
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,
@@ -1445,17 +2526,139 @@ pub(crate) fn collect_evidence_cost_amount(cost: &AbilityCost) -> Option<u32> {
     }
 }
 
-// CR 107.3a + CR 702.179f: a mana-ability cost of "Pay X speed".
-fn pay_speed_x_cost(cost: &AbilityCost) -> bool {
-    match cost {
+/// A flattened mana-ability cost leg whose X the player announces before any
+/// cost is paid. The single classifier the announcement gate and the readiness
+/// fast path share, so the two cannot disagree about which activations stop at
+/// an announcement.
+enum AnnouncedXLeg<'a> {
+    /// CR 702.179f: "Pay X speed" (Chicago Loop).
+    Speed,
+    /// CR 107.3a: a mana leg carrying `{X}` (Wizard's Rockets' `{X}, {T},
+    /// Sacrifice this artifact`).
+    Mana(&'a ManaCost),
+}
+
+// CR 107.3a + CR 601.2b via CR 602.2b + CR 702.179f: a cost leg containing an X
+// the ability's text doesn't define, whose value the controller announces as the
+// ability is activated, before any cost is paid.
+fn announced_x_leg(leg: &AbilityCost) -> Option<AnnouncedXLeg<'_>> {
+    match leg {
         AbilityCost::PaySpeed {
             amount:
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable { name },
                 },
-        } if name == "X" => true,
-        AbilityCost::Composite { costs } => costs.iter().any(pay_speed_x_cost),
-        _ => false,
+        } if name == "X" => Some(AnnouncedXLeg::Speed),
+        AbilityCost::Mana { cost } if cost.has_x() => Some(AnnouncedXLeg::Mana(cost)),
+        _ => None,
+    }
+}
+
+/// CR 107.3a: true iff any leg of this mana ability's cost (at any `Composite`
+/// depth — the legs `mana_ability_cost_components` flattens for the cost
+/// cursor) announces X. Borrows rather than flattening: this runs on the
+/// readiness hot path.
+fn mana_ability_announces_x(cost: &Option<AbilityCost>) -> bool {
+    fn any_announced_x_leg(cost: &AbilityCost) -> bool {
+        match cost {
+            AbilityCost::Composite { costs } => costs.iter().any(any_announced_x_leg),
+            leg => announced_x_leg(leg).is_some(),
+        }
+    }
+    cost.as_ref().is_some_and(any_announced_x_leg)
+}
+
+/// CR 107.3a + CR 107.3i: the X-announcement prompt for a mana ability's cost —
+/// the resource to name and the largest X the player can pay. With several
+/// X-announcing legs, CR 107.3i makes them share one X, so the announcement is
+/// bounded by the smallest leg cap and names that leg's resource.
+fn mana_ability_x_announcement(
+    state: &GameState,
+    pending: &PendingManaAbility,
+    cost: &AbilityCost,
+) -> Option<(PayableResource, u32)> {
+    let mut announcement: Option<(PayableResource, u32)> = None;
+    for leg in mana_ability_cost_components(cost) {
+        let candidate = match announced_x_leg(&leg) {
+            None => continue,
+            // CR 118.3: a player can't pay a cost without the resources to pay
+            // it fully, so X is bounded by the player's current speed.
+            // CR 702.179f: a player with no speed has speed 0.
+            Some(AnnouncedXLeg::Speed) => (
+                PayableResource::Speed,
+                super::speed::effective_speed(state, pending.player) as u32,
+            ),
+            // CR 107.3a + CR 602.2b: a mana ability's `{X}` leg announces X
+            // for that cost, so the chosen amount concretizes X.
+            Some(AnnouncedXLeg::Mana(mana_leg)) => (
+                PayableResource::Mana {
+                    base_cost: mana_leg.clone(),
+                    composition: ManaAmountComposition::ConcretizeX,
+                },
+                mana_leg_x_cap(state, pending, mana_leg),
+            ),
+        };
+        announcement = match announcement {
+            Some(current) if current.1 <= candidate.1 => Some(current),
+            _ => Some(candidate),
+        };
+    }
+    announcement
+}
+
+/// CR 107.3a + CR 118.3: the largest X a player can pay for a mana ability's
+/// `{X}`-bearing mana leg, from the pool and every other mana source.
+/// CR 605.3c + CR 118.3: this activation's source and every activation
+/// suspended beneath it can't help pay (a `{T}` source can't be tapped twice) —
+/// the same exclusion the leg's payment applies.
+fn mana_leg_x_cap(state: &GameState, pending: &PendingManaAbility, leg: &ManaCost) -> u32 {
+    let excluded: HashSet<ObjectId> = pending
+        .suspended_chain()
+        .map(|begun| begun.source_id)
+        .collect();
+    super::casting_costs::max_x_value_excluding(state, pending.player, leg, None, &excluded)
+}
+
+/// CR 107.3a + CR 107.3i + CR 601.2f via CR 602.2b: the activation's cost with
+/// the announced X substituted into every mana leg at any `Composite` depth, so
+/// each `{X}` is paid as that much generic mana. `None` (not yet announced)
+/// leaves the cost unchanged.
+fn announced_mana_ability_cost(
+    cost: &Option<AbilityCost>,
+    chosen_x: Option<u32>,
+) -> Option<AbilityCost> {
+    match (cost, chosen_x) {
+        (Some(cost), Some(x)) => Some(concretize_announced_mana_x(cost, x)),
+        (cost, _) => cost.clone(),
+    }
+}
+
+/// CR 605.3a + CR 107.3a: the mana sub-cost `pending` pays, with an announced
+/// X concretized — the one cost the gate, the window's pins, its confirmation
+/// and its derived view all read.
+pub(crate) fn pending_mana_sub_cost(
+    state: &GameState,
+    pending: &PendingManaAbility,
+) -> Result<Option<ManaCost>, EngineError> {
+    let ability_def = mana_ability_definition(state, pending)?;
+    let activation_cost = announced_mana_ability_cost(&ability_def.cost, pending.chosen_x);
+    Ok(mana_sub_cost_of(&activation_cost).cloned())
+}
+
+fn concretize_announced_mana_x(cost: &AbilityCost, x: u32) -> AbilityCost {
+    match cost {
+        AbilityCost::Mana { cost } => {
+            let mut cost = cost.clone();
+            cost.concretize_x(x);
+            AbilityCost::Mana { cost }
+        }
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| concretize_announced_mana_x(cost, x))
+                .collect(),
+        },
+        other => other.clone(),
     }
 }
 
@@ -1466,35 +2669,49 @@ pub(super) fn advance_mana_ability_activation(
 ) -> Result<WaitingFor, EngineError> {
     let ability_def = mana_ability_definition(state, &pending)?;
 
-    // CR 107.3a + CR 601.2b + CR 702.179f: A `Pay X speed` mana-ability cost
-    // (Chicago Loop's `Pay X speed: Add X mana in any combination of colors`)
-    // requires the player to announce X before any cost is paid or mana is
-    // produced. X is bound to BOTH the speed cost and the produced-mana count.
+    // CR 107.3a + CR 601.2b via CR 602.2b + CR 702.179f: a mana-ability cost
+    // leg carrying an X the text doesn't define — `Pay X speed` (Chicago Loop's
+    // `Pay X speed: Add X mana in any combination of colors`) or an `{X}` mana
+    // leg (Wizard's Rockets' `{X}, {T}, Sacrifice this artifact: Add X mana in
+    // any combination of colors`) — requires the player to announce X before
+    // any cost is paid or mana is produced. X is bound to BOTH the cost and the
+    // produced-mana count. CR 107.1b: X can't be negative, so the floor is 0.
     if pending.chosen_x.is_none() {
-        if let Some(cost) = &ability_def.cost {
-            if pay_speed_x_cost(cost) {
-                // CR 118.3: a player can't pay a cost without the resources to
-                // pay it fully, so X is bounded by the player's current speed.
-                // CR 702.179f: a player with no speed has speed 0.
-                let max = super::speed::effective_speed(state, pending.player) as u32;
-                let source_id = pending.source_id;
-                let player = pending.player;
-                return Ok(WaitingFor::PayAmountChoice {
-                    player,
-                    resource: PayableResource::Speed,
-                    min: 0,
-                    max,
-                    accumulated: 0,
-                    source_id,
-                    pending_mana_ability: Some(Box::new(pending)),
-                });
+        if let Some((resource, max)) = ability_def
+            .cost
+            .as_ref()
+            .and_then(|cost| mana_ability_x_announcement(state, &pending, cost))
+        {
+            // CR 601.2g: a permanent already committed to a pending spell's
+            // sacrifice cost can't be sacrificed for this ability; refuse
+            // before announcing rather than after X is chosen.
+            if cost_sacrifices_reserved_source(state, pending.source_id, &ability_def.cost) {
+                return Err(EngineError::ActionNotAllowed(
+                    "This permanent is already committed to a spell sacrifice cost".to_string(),
+                ));
             }
+            let source_id = pending.source_id;
+            let player = pending.player;
+            return Ok(WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id,
+                pending_mana_ability: Some(Box::new(pending)),
+            });
         }
     }
 
+    // CR 107.3a + CR 107.3i + CR 601.2f via CR 602.2b: once announced, X is
+    // fixed; the {X} leg is paid as that much generic mana — enumeration, the
+    // payment window, and the cursor all read this one concrete cost.
+    let activation_cost = announced_mana_ability_cost(&ability_def.cost, pending.chosen_x);
+
     if pending.chosen_discards.is_empty() {
         if let Some((count, cards)) =
-            discard_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+            discard_cost_choice(state, pending.player, pending.source_id, &ability_def)
         {
             if cards.len() < count {
                 return Err(EngineError::ActionNotAllowed(
@@ -1514,21 +2731,28 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
-    if pending.chosen_tappers.is_empty() {
-        if let Some((count, creatures)) =
-            tap_creature_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+    // CR 107.3a + CR 601.2h: `is_none()`, NOT `is_empty()`. An empty selection
+    // is a legal, ANSWERED X=0 payment of the X-sentinel form, so deriving
+    // "unanswered" from the collection's cardinality re-surfaces this same
+    // prompt forever. Matches the already-correct `chosen_x.is_none()` gate.
+    if pending.chosen_tappers.is_none() {
+        if let Some((min_count, max_count, creatures, mode)) =
+            tap_creature_cost_choice(state, pending.player, pending.source_id, &ability_def)
         {
-            if creatures.len() < count {
+            // CR 601.2h: partial payment is refused for the fixed-count form
+            // (`min_count == count`). CR 107.3a's X-sentinel form has a zero
+            // floor, so an empty board is a legal X=0 activation, not a failure.
+            if creatures.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough untapped creatures to pay mana ability cost".to_string(),
                 ));
             }
             return Ok(WaitingFor::PayCost {
                 player: pending.player,
-                kind: PayCostKind::TapCreatures { aggregate: None },
+                kind: PayCostKind::TapCreatures { mode },
                 choices: creatures,
-                count,
-                min_count: 0,
+                count: max_count,
+                min_count,
                 resume: CostResume::ManaAbility {
                     mana_ability: Box::new(pending),
                 },
@@ -1552,7 +2776,7 @@ pub(super) fn advance_mana_ability_activation(
     // object's public characteristics can be captured at payment time.
     if pending.chosen_exiled.is_empty() {
         if let Some((count, zone, cards)) =
-            exile_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+            exile_cost_choice(state, pending.player, pending.source_id, &ability_def)
         {
             if cards.len() < count {
                 return Err(EngineError::ActionNotAllowed(
@@ -1577,12 +2801,8 @@ pub(super) fn advance_mana_ability_activation(
     // producing mana so the selected permanent is sacrificed as the cost.
     if pending.chosen_sacrificed_battlefield.is_empty() {
         if let Some((count, permanents)) =
-            sacrifice_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+            sacrifice_cost_choice(state, pending.player, pending.source_id, &ability_def)
         {
-            let permanents: Vec<ObjectId> = permanents
-                .into_iter()
-                .filter(|id| !deferred_spell_sacrifice_reserved(state, *id))
-                .collect();
             if permanents.len() < count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice for mana ability cost".to_string(),
@@ -1613,6 +2833,7 @@ pub(super) fn advance_mana_ability_activation(
                 if !super::effects::collect_evidence::can_collect_evidence(
                     state,
                     pending.player,
+                    None,
                     amount,
                 ) {
                     return Err(EngineError::ActionNotAllowed(
@@ -1631,22 +2852,73 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
-    // CR 107.1c + CR 605.3a: "Remove any number of <type> counters" in a
-    // mana-ability cost requires choosing the count before costs are paid and
-    // mana is produced.
-    if pending.chosen_counter_count.is_none() {
-        if let Some(counter_type) = any_number_self_remove_counter_cost(&ability_def.cost) {
-            let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
-            return Ok(WaitingFor::PayAmountChoice {
-                player: pending.player,
-                resource: PayableResource::Counters,
-                min: 0,
-                max,
-                accumulated: 0,
-                source_id: pending.source_id,
-                pending_mana_ability: Some(Box::new(pending)),
-            });
+    // CR 118.3 + CR 601.2h: a composite cost mixing an `Any`-type chosen-count
+    // `RemoveCounter` leaf with a TYPED (`OfType`) chosen-count leaf has no
+    // sound reservation model and is deliberately left unsupported rather than
+    // mishandled — see `chosen_count_remove_counter_leaves_mix_any_with_typed`'s
+    // doc comment for the full bin-packing rationale (briefly: reserving the
+    // `Any` leaf's amount against the typed leaf can wrongly refuse a legal
+    // payment, e.g. 3 storage + 2 charge counters with an `Any` choice of 3
+    // then a charge choice of 2; NOT reserving it risks the untyped `Any`
+    // removal consuming the counters the typed leaf needed instead). This
+    // predicate is shared with the parser
+    // (`demote_unsupported_composite_counter_choice_costs` in `oracle.rs`),
+    // which must not accept this shape as an ordinary supported cost, so the
+    // two layers can never disagree about which shape is unsupported.
+    //
+    // Two `OfType` leaves of the same type, or two `Any` leaves, are NOT
+    // matched here and remain fully supported: both members of either pair
+    // draw from literally the same pool, so `reserved_overlapping_counter_count`
+    // below reserves them exactly, with no allocation ambiguity.
+    if let Some(cost) = &ability_def.cost {
+        if crate::types::ability::chosen_count_remove_counter_leaves_mix_any_with_typed(cost) {
+            return Err(EngineError::InvalidAction(
+                "A composite mana-ability cost combining an \"any number of\" counter-choice \
+                 leaf of unspecified type with a typed counter-choice leaf is not supported"
+                    .to_string(),
+            ));
         }
+    }
+
+    // CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any number
+    // of" counters): a mana-ability cost using either chosen-count sentinel
+    // requires choosing the count before costs are paid and mana is produced.
+    // Walked via the SAME recursive flatten payment uses
+    // (`append_mana_ability_cost_components`) rather than a hand-rolled
+    // one-level-deep matcher, so a chosen-count `RemoveCounter` nested inside
+    // more than one level of `Composite` (e.g. a static cost tax wraps the
+    // base cost in an outer `Composite`) is still found — otherwise payment
+    // would reach a leaf with no prior prompt and fail with "Missing counter
+    // count for mana ability". A composite cost with more than one such leaf
+    // (a literal-X leaf alongside an unrelated "any number of" leaf) prompts
+    // for each leaf in turn, appending one independent entry per leaf to
+    // `chosen_counter_counts` rather than collapsing them into one value.
+    // CR 118.3 + CR 601.2h: the `max` offered for each subsequent leaf
+    // already excludes whatever an EARLIER, type-overlapping leaf reserved
+    // (`next_unchosen_remove_counter_leaf_bounds`), so two leaves that can draw
+    // from the same counters (same type, or an `Any` leaf) can never together
+    // announce more than the object actually has.
+    if let Some((min, max)) = next_unchosen_remove_counter_leaf_bounds(
+        state,
+        pending.source_id,
+        &ability_def.cost,
+        &pending.chosen_counter_counts,
+        pending.chosen_x,
+    ) {
+        if min > max {
+            return Err(EngineError::ActionNotAllowed(
+                "Not enough counters to pay the announced X for every cost clause".to_string(),
+            ));
+        }
+        return Ok(WaitingFor::PayAmountChoice {
+            player: pending.player,
+            resource: PayableResource::Counters,
+            min,
+            max,
+            accumulated: 0,
+            source_id: pending.source_id,
+            pending_mana_ability: Some(Box::new(pending)),
+        });
     }
 
     // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
@@ -1657,45 +2929,69 @@ pub(super) fn advance_mana_ability_activation(
     // activate other mana abilities while paying this activation cost (CR
     // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
-        if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
-            let (source_types, source_subtypes) =
-                super::casting::activation_source_types(state, pending.source_id);
-            let activation_ctx = PaymentContext::Activation {
-                source_types: &source_types,
-                source_subtypes: &source_subtypes,
-                ability_tag: None,
-            };
+        if let Some(sub_cost) = mana_sub_cost_of(&activation_cost) {
+            // CR 602.2b + CR 601.2g + CR 605.3a: a manually paid mana ability gives its
+            // player the chance to activate mana abilities, and to direct which pool
+            // mana pays, before its mana sub-cost is paid (CR 601.2h). Nothing has
+            // been paid yet, so withdrawing it reverses cleanly (CR 733.1).
+            if super::casting::payment_mode_pays_mana_manually(pending.payment_mode)
+                && sub_cost.mana_value() > 0
+            {
+                return Ok(WaitingFor::ManaAbilityManaPayment {
+                    player: pending.player,
+                    pending_mana_ability: Box::new(pending),
+                });
+            }
+            let activation_context = super::casting::activation_payment_context(
+                state,
+                pending.source_id,
+                pending.ability_index,
+            );
+            let activation_ctx = activation_context.as_payment_context();
             let pool = &state.players[pending.player.0 as usize].mana_pool;
-            let plans = enumerate_hybrid_payment_plans(pool, sub_cost, &activation_ctx);
+            let plans = enumerate_hybrid_payment_plans(
+                pool,
+                sub_cost,
+                &activation_ctx,
+                &pending.pinned_pool_units,
+            );
             match plans.len() {
                 0 if {
-                    let excluded_sources = std::collections::HashSet::from([pending.source_id]);
+                    // CR 605.3c: auto-tap may not pay with a source suspended beneath this one.
+                    let excluded_sources: HashSet<ObjectId> = pending
+                        .suspended_chain()
+                        .map(|begun| begun.source_id)
+                        .collect();
                     !super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
                         state,
                         pending.player,
                         pending.source_id,
+                        pending.ability_index,
                         sub_cost,
                         &excluded_sources,
                     )
                 } =>
                 {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot pay mana cost for mana ability".to_string(),
-                    ));
-                }
-                0 => {}
-                1 => {
-                    let mut updated = pending;
-                    updated.chosen_mana_payment = Some(plans.into_iter().next().unwrap());
-                    return advance_mana_ability_activation(state, updated, events);
-                }
-                _ => {
-                    return Ok(WaitingFor::PayManaAbilityMana {
+                    // CR 605.3a + CR 117.1d + CR 601.2g via CR 602.2b: the player
+                    // may activate other mana abilities to pay this one's mana
+                    // cost; the window opens only when such an ability exists.
+                    if !super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
+                        state,
+                        pending.player,
+                        Some(pending.source_id),
+                        Some(&activation_ctx),
+                    ) {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay mana cost for mana ability".to_string(),
+                        ));
+                    }
+                    return Ok(WaitingFor::ManaAbilityManaPayment {
                         player: pending.player,
-                        options: plans,
                         pending_mana_ability: Box::new(pending),
                     });
                 }
+                0 => {}
+                _ => return route_pool_payment_plans(state, pending, plans, events),
             }
         }
     }
@@ -1705,12 +3001,17 @@ pub(super) fn advance_mana_ability_activation(
     // re-enters this choice-discovery prefix after the player answers a
     // replacement choice, so paid components and selected objects stay paid.
     let cost_event_start = events.len();
+    // CR 605.3c: the same exclusion binds the payment the feasibility check admitted.
+    let suspended_sources: HashSet<ObjectId> = pending
+        .suspended_chain()
+        .map(|begun| begun.source_id)
+        .collect();
     continue_mana_ability_cost_payment(
         state,
         pending,
         mana_ability_cost_cursor(
-            &ability_def.cost,
-            &HashSet::new(),
+            &activation_cost,
+            &suspended_sources,
             None,
             ManaAbilityCostResolutionMode::Interactive,
             None,
@@ -1720,23 +3021,128 @@ pub(super) fn advance_mana_ability_activation(
     )
 }
 
+/// CR 605.3a + CR 107.4e: route a non-empty set of pool payment plans — one
+/// plan pays, several ask which hybrid assignment.
+fn route_pool_payment_plans(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    plans: Vec<Vec<ManaType>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    debug_assert!(!plans.is_empty());
+    match <[Vec<ManaType>; 1]>::try_from(plans) {
+        Ok([plan]) => {
+            let mut updated = pending;
+            updated.chosen_mana_payment = Some(plan);
+            advance_mana_ability_activation(state, updated, events)
+        }
+        Err(options) => Ok(WaitingFor::PayManaAbilityMana {
+            player: pending.player,
+            options,
+            pending_mana_ability: Box::new(pending),
+        }),
+    }
+}
+
+/// CR 601.2h + CR 118.3a via CR 602.2b: the player confirms a manual mana
+/// ability's payment. The CR 601.2g opportunity is over, so the mana sub-cost
+/// is paid from the pool as it stands — pinned units first — or refused
+/// (CR 601.2h: unpayable costs can't be paid); the window stays open.
+pub(crate) fn confirm_manual_mana_ability_payment(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !super::casting::payment_mode_pays_mana_manually(pending.payment_mode) {
+        return Err(EngineError::ActionNotAllowed(
+            "Only a manual mana-ability payment is confirmed by passing".to_string(),
+        ));
+    }
+    let sub_cost = pending_mana_sub_cost(state, &pending)?.ok_or_else(|| {
+        EngineError::InvalidAction("This mana ability has no mana cost to pay".to_string())
+    })?;
+    let activation_context =
+        super::casting::activation_payment_context(state, pending.source_id, pending.ability_index);
+    let plans = enumerate_hybrid_payment_plans(
+        &state.players[pending.player.0 as usize].mana_pool,
+        &sub_cost,
+        &activation_context.as_payment_context(),
+        &pending.pinned_pool_units,
+    );
+    if plans.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "The mana pool does not cover this mana ability's cost".to_string(),
+        ));
+    }
+    route_pool_payment_plans(state, pending, plans, events)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManaAbilityPaymentProgress {
     Complete,
     Paused,
 }
 
+/// CR 602.2a + CR 605.3b: the mana ability being activated, as bound when it was
+/// announced. The announcement snapshot is authoritative: once a cost moves the
+/// source (resetting its abilities) or a granted ability is removed, the live
+/// index may name a different ability, and production, completion and the
+/// activation's kind must all read the one definition the player activated.
+/// Only a pending restored from before the snapshot existed (`None`) falls back
+/// to the live index.
 fn mana_ability_definition(
     state: &GameState,
     pending: &PendingManaAbility,
 ) -> Result<AbilityDefinition, EngineError> {
+    if let Some(snapshot) = pending.ability_snapshot.as_ref() {
+        return Ok(snapshot.clone());
+    }
     state
         .objects
         .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .and_then(|obj| {
+            pending
+                .ability_index
+                .and_then(|index| obj.abilities.get(index))
+        })
         .cloned()
-        .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))
+}
+
+/// CR 603.2 + CR 603.3b: Build the child-facing snapshot of a live synchronous
+/// parent frame. Only this clone's ledger gains the parent's current unscanned
+/// suffix; the live parent cursor keeps its own `cost_event_start` and its
+/// events remain in the reducer vector, so a synchronous child that drops the
+/// snapshot cannot duplicate the root's eventual scan. Preparation runs at every
+/// child entry, so a later pausing sibling inherits the parent prefix plus all
+/// earlier synchronously completed siblings in chronological order.
+fn parent_snapshot_with_current_cost_events(
+    parent: &ManaAbilityCostParent,
+    events: &[GameEvent],
+) -> ManaAbilityCostParent {
+    debug_assert!(
+        matches!(
+            parent.lifecycle,
+            ManaAbilityCostParentLifecycle::Synchronous
+        ),
+        "only a live synchronous parent may be augmented; a suspended parent's prefix is already durable"
+    );
+    debug_assert!(
+        parent.current_action_event_start <= events.len(),
+        "parent event marker must index the live reducer event vector"
+    );
+    let mut prepared = parent.clone();
+    if matches!(
+        parent.lifecycle,
+        ManaAbilityCostParentLifecycle::Synchronous
+    ) {
+        let start = parent.current_action_event_start.min(events.len());
+        prepared
+            .cursor
+            .deferred_cost_events
+            .extend_from_slice(&events[start..]);
+    }
+    prepared
 }
 
 fn mana_ability_cost_cursor(
@@ -1746,14 +3152,16 @@ fn mana_ability_cost_cursor(
     resolution_mode: ManaAbilityCostResolutionMode,
     parent: Option<&ManaAbilityCostParent>,
 ) -> ManaAbilityCostCursor {
-    let mut remaining = Vec::new();
-    if let Some(cost) = cost {
-        append_mana_ability_cost_components(cost, &mut remaining);
-    }
+    let remaining = cost
+        .as_ref()
+        .map(mana_ability_cost_components)
+        .unwrap_or_default();
     let mut excluded_sources: Vec<_> = excluded_sources.iter().copied().collect();
     excluded_sources.sort_unstable_by_key(|source_id| source_id.0);
     ManaAbilityCostCursor {
         remaining,
+        activation: ManaAbilityActivationStage::Unpublished,
+        remaining_life_payments: Vec::new(),
         resolution_mode,
         excluded_sources,
         sub_cost_demand: sub_cost_demand.copied(),
@@ -1761,18 +3169,30 @@ fn mana_ability_cost_cursor(
         next_discard: 0,
         next_exiled: 0,
         next_sacrificed: 0,
+        next_counter_choice: 0,
+        cost_removed_counters: None,
+        counter_removal: None,
         selected_exile_remaining: None,
         selected_sacrifice_remaining: None,
-        // CR 603.2 + CR 603.3b: A nested child takes over every unscanned
-        // event already owned by its suspended parent.  It appends only newly
-        // emitted events if it pauses, then hands the one batch back on
-        // completion; no ancestor batch is copied twice.
-        deferred_cost_events: parent.map_or_else(Vec::new, |parent| {
-            parent.cursor.deferred_cost_events.clone()
-        }),
+        // CR 603.2 + CR 603.3b: A nested child starts with an empty frame-local
+        // ledger. Its parent snapshot retains every ancestor-owned event
+        // opaquely until a suspended child moves its own events upward.
+        deferred_cost_events: Vec::new(),
         current_action_deferred_start: 0,
         parent: parent.cloned().map(Box::new),
     }
+}
+
+/// CR 601.2h + CR 602.2b: The leaf components of a mana ability's cost, in the
+/// order its cost cursor pays them, with every `Composite` (at any depth)
+/// flattened. The single authority for that shape: the cursor pays exactly these
+/// components, and auto-tap planning inspects the same list
+/// (`casting_costs::planned_mana_sub_costs_fundable`), so the two cannot disagree
+/// about how many mana payments an activation makes.
+pub(crate) fn mana_ability_cost_components(cost: &AbilityCost) -> Vec<AbilityCost> {
+    let mut remaining = Vec::new();
+    append_mana_ability_cost_components(cost, &mut remaining);
+    remaining
 }
 
 fn append_mana_ability_cost_components(cost: &AbilityCost, remaining: &mut Vec<AbilityCost>) {
@@ -1809,6 +3229,19 @@ fn suspend_mana_ability_parent_chain(parent: Option<&mut ManaAbilityCostParent>)
     }
 }
 
+/// Only a pre-delivery replacement-ordering pause may replace the active prompt
+/// with `ReplacementChoice`. A post-delivery substitute can keep a replacement
+/// record while it waits on its own prompt, so it has no ordering player and
+/// must remain visible.
+fn pause_pre_delivery_mana_cost_replacement_choice(
+    state: &mut GameState,
+    choice_player: Option<PlayerId>,
+) {
+    if let Some(choice_player) = choice_player.filter(|_| state.pending_replacement.is_some()) {
+        super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+}
+
 fn pause_mana_ability_cost_payment(
     state: &mut GameState,
     pre_delivery_choice_player: Option<PlayerId>,
@@ -1833,19 +3266,32 @@ fn pause_mana_ability_cost_payment(
         pending: Box::new(pending),
         cursor,
     });
-    // `NeedsChoice` also reports a post-delivery replacement continuation.
-    // That continuation has already consumed `pending_replacement` and installed
-    // its own live prompt, which must remain visible while the typed cursor is
-    // parked. Pre-delivery CR 616.1 ordering is the only case that needs a
-    // synthesized ReplacementChoice.
-    if state.pending_replacement.is_some() {
-        super::costs::pause_cost_payment_for_replacement_choice(
-            state,
-            pre_delivery_choice_player.expect(
-                "a pending replacement must identify the player ordering the interrupted mana cost",
-            ),
-        );
-    }
+    pause_pre_delivery_mana_cost_replacement_choice(state, pre_delivery_choice_player);
+}
+
+/// CR 605.4a + CR 608.2d + CR 605.3b: A nested mana sub-cost's auto-taps owed
+/// a pre-spend echo choice. The enclosing activation's snapshot (`parent`)
+/// still has that Mana component unpaid, so park it exactly as a replacement
+/// pause would — but with only the events from before the sub-cost attempt,
+/// because the echo settlement already claimed the attempt's own range. The
+/// next priority boundary resumes the same component with the bonus in the
+/// pool.
+fn pause_mana_ability_cost_payment_for_echo_choice(
+    state: &mut GameState,
+    mut pending: PendingManaAbility,
+    mut cursor: ManaAbilityCostCursor,
+    unscanned_events: &[GameEvent],
+) {
+    promote_cost_move_resume_chain(&mut pending, cursor.parent.as_deref_mut());
+    suspend_mana_ability_parent_chain(cursor.parent.as_deref_mut());
+    cursor.current_action_deferred_start = cursor.deferred_cost_events.len();
+    cursor
+        .deferred_cost_events
+        .extend_from_slice(unscanned_events);
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::ManaAbilityPayment {
+        pending: Box::new(pending),
+        cursor,
+    });
 }
 
 fn mana_ability_cursor_after_current_component(
@@ -1860,7 +3306,7 @@ fn ensure_mana_ability_selection_cursor_consumed(
     pending: &PendingManaAbility,
     cursor: &ManaAbilityCostCursor,
 ) -> Result<(), EngineError> {
-    if cursor.next_tapper != pending.chosen_tappers.len() {
+    if cursor.next_tapper != pending.chosen_tappers.as_ref().map_or(0, Vec::len) {
         return Err(EngineError::InvalidAction(
             "Too many creatures selected for mana ability cost".to_string(),
         ));
@@ -1880,21 +3326,88 @@ fn ensure_mana_ability_selection_cursor_consumed(
             "Too many permanents selected for mana ability sacrifice cost".to_string(),
         ));
     }
+    if cursor.next_counter_choice != pending.chosen_counter_counts.len() {
+        return Err(EngineError::InvalidAction(
+            "Too many counter-count choices announced for mana ability cost".to_string(),
+        ));
+    }
     Ok(())
 }
 
+/// CR 603.2 + CR 603.3b: Move one suspended child's frame-local trigger-event
+/// ledger into its parent without replacing the parent's earlier events.
+fn append_suspended_child_cost_events(
+    parent: &mut ManaAbilityCostCursor,
+    child: &mut ManaAbilityCostCursor,
+    current: &[GameEvent],
+) {
+    parent
+        .deferred_cost_events
+        .extend(std::mem::take(&mut child.deferred_cost_events));
+    parent.deferred_cost_events.extend_from_slice(current);
+}
+
+/// CR 107.3a + CR 601.2h: Advance the payment cursor past the component just
+/// applied, so `ensure_mana_ability_selection_cursor_consumed` can confirm the
+/// whole announced selection was consumed and nothing was left over.
+///
+/// `chosen_x` is the ANNOUNCED value of X for this activation
+/// (`PendingManaAbility::chosen_x`), bound once at selection completion by
+/// `handle_tap_creatures_for_mana_ability`. It is a parameter rather than a
+/// `&PendingManaAbility` for the same reason `paid_discard_count` already is:
+/// the contract is "advance from the cost's announced facts", and that keeps
+/// this unit-testable without building a pending activation.
+///
+/// Private to this module, like every other cost-cursor helper here. There is
+/// exactly one production call site, in
+/// `pay_selected_mana_ability_cost_components`; the `Aggregate` exhaustiveness
+/// guard below — unreachable through `apply()` because
+/// `tap_creature_cost_choice` refuses to register an aggregate tap cost — is
+/// asserted from this file's own `x_sentinel_mana_ability_cost_application`
+/// test module, which reaches a private item as a descendant module rather
+/// than through widened production visibility.
 fn advance_mana_ability_selection_cursor(
     cursor: &mut ManaAbilityCostCursor,
     cost: &AbilityCost,
     paid_discard_count: Option<usize>,
+    chosen_x: Option<u32>,
 ) -> Result<(), EngineError> {
     match cost {
         AbilityCost::TapCreatures { requirement, .. } => {
-            cursor.next_tapper += requirement.fixed_count().ok_or_else(|| {
-                EngineError::InvalidAction(
-                    "Aggregate-power tap cost is not valid for a mana ability".to_string(),
-                )
-            })? as usize;
+            // CR 107.3a: the cursor must advance by the ANNOUNCED X, not by the
+            // `u32::MAX` X-sentinel that `fixed_count()` reports for the
+            // `Tap X untapped ...` form — the same authority the application
+            // loop in `pay_mana_ability_cost_with_choices` already reads.
+            // Exhaustive with no wildcard so a fourth
+            // `TapCreaturesSelectionMode` variant breaks the build here instead
+            // of silently taking a wrong branch.
+            cursor.next_tapper += match requirement.selection_mode() {
+                TapCreaturesSelectionMode::Fixed => requirement
+                    .fixed_count()
+                    .expect("Fixed mode is derived from TapCreaturesRequirement::Count"),
+                TapCreaturesSelectionMode::VariableX => chosen_x.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Missing announced X for tap-creatures mana ability cost".to_string(),
+                    )
+                })?,
+                // Unreachable through the production path, by this engine's own
+                // invariant: `tap_creature_cost_choice`'s
+                // `let count = requirement.fixed_count()?;` yields `None` for
+                // the aggregate form, so an aggregate-power tap cost is never
+                // registered as a mana-ability cost component and never
+                // reaches this cursor. NOT a rules prohibition: CR 605.1a
+                // states a mana ability's criteria (no target, could add mana,
+                // not a loyalty ability, and no cost or effect that moves a
+                // card to or from a library) and an aggregate-power tap cost
+                // violates none of them. Kept as an exhaustiveness guard so a
+                // fourth `TapCreaturesSelectionMode` cannot silently take a
+                // wrong branch.
+                TapCreaturesSelectionMode::Aggregate(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "Aggregate-power tap cost is not valid for a mana ability".to_string(),
+                    ));
+                }
+            } as usize;
         }
         AbilityCost::Discard { self_scope, .. } if !self_scope.is_source_card() => {
             cursor.next_discard += paid_discard_count.expect(
@@ -1909,6 +3422,17 @@ fn advance_mana_ability_selection_cursor(
                 ));
             };
             cursor.next_sacrificed += count as usize;
+        }
+        // CR 601.2b: a chosen-count self-RemoveCounter leaf consumes exactly
+        // one entry from `chosen_counter_counts`, regardless of the amount
+        // announced — unlike `next_discard`/`next_sacrificed`, which advance
+        // by the paid quantity, this cursor advances by leaf count.
+        AbilityCost::RemoveCounter {
+            count,
+            target: None,
+            ..
+        } if is_chosen_remove_counter_cost_count(*count) => {
+            cursor.next_counter_choice += 1;
         }
         _ => {}
     }
@@ -1951,6 +3475,7 @@ fn pay_selected_mana_ability_exile_cost(
             state,
             pending.player,
             pending.source_id,
+            activated_ability_granting_object(state, pending.source_id, pending.ability_index),
             effective_zone,
             filter,
             count,
@@ -2065,6 +3590,7 @@ fn pay_selected_mana_ability_sacrifice_cost(
             pending.player,
             object_id,
             filter,
+            activated_ability_granting_object(state, pending.source_id, pending.ability_index),
             events,
         )? {
             sacrifice::SacrificeOutcome::Complete => {}
@@ -2203,33 +3729,46 @@ fn pay_mana_ability_cost_component(
             )
         }
         cost if is_self_contained_mana_subcost(cost) => {
+            // CR 602.2b + CR 605.3b: a fixed- or ALL-count self counter leg
+            // (Pentad Prism) credits this activation's own cursor ledger.
             match super::costs::pay_ability_cost_for_activation(
                 state,
                 pending.player,
                 pending.source_id,
                 cost,
-                None,
+                pending.ability_index,
+                &mut cursor.cost_removed_counters,
                 events,
             )? {
                 super::costs::PaymentOutcome::Paid => Ok(ManaAbilityPaymentProgress::Complete),
                 super::costs::PaymentOutcome::Paused { .. } => {
-                    let Some(PendingCostMoveResume::Cast { .. }) =
-                        state.pending_cost_move_resume.take()
-                    else {
-                        unreachable!(
-                            "a paused delegated mana-ability cost must retain the activation cost move"
-                        );
+                    // CR 118.11 + CR 616.1: the replacement pipeline delivers this
+                    // removal; the cursor settles it by measurement on resume.
+                    // The payer parked it with no attached payment and a
+                    // `FinishPending` tail, neither of which the cursor needs.
+                    let counter_removal = match state.pending_cost_move_resume.take() {
+                        Some(PendingCostMoveResume::Cast { .. }) => None,
+                        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                            pending: None,
+                            removal,
+                            ..
+                        }) => Some(removal),
+                        _ => unreachable!(
+                            "a paused delegated mana-ability cost must retain the activation cost move or its deferred counter removal"
+                        ),
                     };
                     let pre_delivery_choice_player = state
                         .pending_replacement
                         .is_some()
                         .then(|| state.waiting_for.acting_player())
                         .flatten();
+                    let mut resumed = mana_ability_cursor_after_current_component(cursor);
+                    resumed.counter_removal = counter_removal;
                     pause_mana_ability_cost_payment(
                         state,
                         pre_delivery_choice_player,
                         pending,
-                        mana_ability_cursor_after_current_component(cursor),
+                        resumed,
                         events,
                         cost_event_start,
                     );
@@ -2261,6 +3800,7 @@ fn pay_mana_ability_cost_component(
             let mut tappers = pending
                 .chosen_tappers
                 .iter()
+                .flatten()
                 .copied()
                 .skip(cursor.next_tapper);
             let mut discards = pending
@@ -2275,42 +3815,123 @@ fn pay_mana_ability_cost_component(
                 .skip(cursor.next_sacrificed);
             // CR 605.3b + CR 605.3c: A nested source that pauses while
             // funding this Mana component must retain this exact parent cursor.
-            // The child cursor inherits the parent's existing deferred batch
-            // when it is constructed.  Do not also copy this action's events
-            // into the parent: if the child pauses, its own cursor appends them
-            // exactly once and becomes the temporary settlement authority.
+            // The child's frame-local deferred ledger starts empty; ancestor
+            // events stay opaque in this parent snapshot until upward handoff.
             let parent_cursor = cursor.clone();
             let parent = ManaAbilityCostParent {
                 pending: Box::new(pending.clone()),
                 cursor: Box::new(parent_cursor),
                 lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+                // CR 603.2 + CR 603.3b: Record where this parent frame's own
+                // unscanned events begin so each nested child entry can prepare
+                // a snapshot carrying that prefix plus any earlier synchronous
+                // sibling. The live cursor and its `cost_event_start` are not
+                // modified.
+                current_action_event_start: cost_event_start,
             };
-            if let Err(error) = pay_mana_ability_cost_with_choices(
+            // CR 601.2b: index into `chosen_counter_counts` by this cursor's
+            // own `next_counter_choice`, not a single blanket scalar — a
+            // composite cost may carry more than one chosen-count
+            // `RemoveCounter` leaf (see `next_unchosen_remove_counter_leaf`),
+            // each needing its own independently-announced value.
+            let chosen_counter_count = pending
+                .chosen_counter_counts
+                .get(cursor.next_counter_choice)
+                .copied();
+            let prior_waiting_for = state.waiting_for.clone();
+            let component_event_start = events.len();
+            let component_progress = match pay_mana_ability_cost_with_choices(
                 state,
                 pending.source_id,
                 pending.player,
+                pending.ability_index,
                 &Some(cost.clone()),
                 events,
                 &mut tappers,
                 &mut discards,
                 &mut sacrificed,
                 pending.chosen_mana_payment.as_deref(),
-                pending.chosen_counter_count,
+                &pending.pinned_pool_units,
+                chosen_counter_count,
+                &mut cursor.cost_removed_counters,
                 pending.chosen_x,
                 &excluded_sources,
                 cursor.sub_cost_demand.as_ref(),
                 Some(&parent),
             ) {
+                Ok(progress) => progress,
                 // CR 605.3b + CR 605.3c + CR 616.1: A nested mana source
                 // paused on a replacement-aware cost. Its serialized cursor
                 // owns this exact parent; do not turn that valid suspension
                 // into a failed parent mana payment.
-                if super::casting::mana_ability_cost_payment_is_paused(state) {
+                Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {
+                    return Ok(ManaAbilityPaymentProgress::Paused)
+                }
+                // CR 605.4a + CR 608.2d: The sub-cost's own auto-taps owed a
+                // pre-spend echo choice. The settlement already claimed every
+                // event this attempt produced, so only the earlier still-unscanned
+                // prefix travels with the parked cursor; its next component is
+                // still this unpaid Mana cost, which the next priority boundary
+                // retries with the bonus in the pool.
+                Err(_) if state.pending_triggered_mana_resume.is_some() => {
+                    pause_mana_ability_cost_payment_for_echo_choice(
+                        state,
+                        *parent.pending,
+                        *parent.cursor,
+                        &events[cost_event_start..component_event_start],
+                    );
                     return Ok(ManaAbilityPaymentProgress::Paused);
                 }
-                return Err(error);
+                Err(error) => return Err(error),
+            };
+            advance_mana_ability_selection_cursor(
+                cursor,
+                cost,
+                paid_discard_count,
+                pending.chosen_x,
+            )?;
+            let handed_to_replacement = match &component_progress {
+                ManaAbilityCostComponentProgress::Complete => None,
+                ManaAbilityCostComponentProgress::HandedToReplacement {
+                    remaining_life_payments,
+                    counter_removal,
+                    choice_player,
+                } => {
+                    cursor
+                        .remaining_life_payments
+                        .clone_from(remaining_life_payments);
+                    cursor.counter_removal.clone_from(counter_removal);
+                    Some(*choice_player)
+                }
+            };
+            // CR 614.6: The cost itself may be paid while a replacement's
+            // interactive substitute remains unresolved. Advance the cursor
+            // exactly once, then park the mana ability until that substitute
+            // terminally leaves the resolution stack.
+            if let Some(choice_player) = handed_to_replacement {
+                // CR 118.3b + CR 616.1: the replacement pipeline now delivers
+                // this component, so resuming must not pay it again.
+                pause_mana_ability_cost_payment(
+                    state,
+                    choice_player,
+                    pending,
+                    mana_ability_cursor_after_current_component(cursor),
+                    events,
+                    cost_event_start,
+                );
+                return Ok(ManaAbilityPaymentProgress::Paused);
             }
-            advance_mana_ability_selection_cursor(cursor, cost, paid_discard_count)?;
+            if state.waiting_for != prior_waiting_for {
+                pause_mana_ability_cost_payment(
+                    state,
+                    None,
+                    pending,
+                    cursor.clone(),
+                    events,
+                    cost_event_start,
+                );
+                return Ok(ManaAbilityPaymentProgress::Paused);
+            }
             Ok(ManaAbilityPaymentProgress::Complete)
         }
     }
@@ -2319,7 +3940,7 @@ fn pay_mana_ability_cost_component(
 fn finish_mana_ability_cost_payment(
     state: &mut GameState,
     mut pending: PendingManaAbility,
-    cursor: ManaAbilityCostCursor,
+    mut cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
@@ -2328,63 +3949,249 @@ fn finish_mana_ability_cost_payment(
         ManaAbilityCostResolutionMode::AutoResolved
     );
     let has_deferred_cost_events = !cursor.deferred_cost_events.is_empty();
+    let is_ultimate_root = cursor.parent.is_none();
+    // CR 605.3b + CR 605.4a: The `AutoResolved` direct resolver
+    // (`resolve_mana_ability_excluding`) is not an action's completed root mana
+    // frame — it is the synchronous auto-tap/probe entry, whose events belong to
+    // the OUTER cost owner already on the Rust call stack and whose caller
+    // restores its own `waiting_for`. It keeps its historical default-output
+    // semantics: with an empty durable ledger it performs no collection at all,
+    // exactly as baseline. Only a frame that already owns replacement-paused
+    // events settles from this path.
+    let settles_completed_frame =
+        is_ultimate_root && (has_deferred_cost_events || !resolves_automatically);
+    if matches!(
+        cursor.parent.as_deref(),
+        Some(ManaAbilityCostParent {
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            ..
+        })
+    ) {
+        debug_assert!(
+            cursor.deferred_cost_events.is_empty(),
+            "a synchronous mana child cannot own deferred ancestor events"
+        );
+    }
     let parent = cursor
         .parent
-        .clone()
+        .take()
         .filter(|parent| matches!(parent.lifecycle, ManaAbilityCostParentLifecycle::Suspended));
     let ability_def = mana_ability_definition(state, &pending)?;
-    if !resolves_automatically && pending.color_override.is_none() {
-        let resolved_for_prompt = resolved_mana_ability_for_current_state(
+    // CR 602.2b + CR 605.3b: every cost leg is paid, so the cursor's ledger is
+    // this activation's final removed-counter count. It rides `pending` across
+    // the colour prompt to production.
+    pending.cost_removed_counters = cursor.cost_removed_counters;
+    // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
+    // has become activated. Publish it here — before the colour prompt and
+    // before production — for every resolution mode (manual, auto-tap, nested
+    // sub-cost), and observe its triggers at this boundary (CR 603.10): the
+    // ability's own resolution may yet sacrifice or change its source.
+    // CR 605.1a: classified from the bound definition like every activation.
+    // This path is the mana-ability path, but an ability that fails a CR 605.1a
+    // criterion (Millikin's library-moving cost) can still be driven through
+    // it; it is then an ordinary activation, and "that isn't a mana ability"
+    // triggers must see it as one.
+    // CR 605.3b: it resolves immediately after activation, so the publication
+    // precedes the inline preamble below; a preamble paused on a replacement
+    // choice resumes past this boundary (`Published`) and never re-emits.
+    if cursor.activation == ManaAbilityActivationStage::Unpublished {
+        let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+        // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
+        // activation began, before any cost; never `mana_ability_definition`'s
+        // post-payment live fallback (a pending without its snapshot is `Unknown`).
+        let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
+        let activation_event = super::casting_targets::emit_ability_activated(
+            state,
+            pending.player,
+            pending.source_id,
+            activation_kind,
+            activation_cost,
+            None,
+            ability_def.activation_zone.unwrap_or(Zone::Battlefield),
+            events,
+        );
+        super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        cursor.activation = ManaAbilityActivationStage::Published;
+    }
+    // CR 605.3b + CR 608.2c: a mana ability whose production follows other
+    // instructions (Empowered Autogenerator's counter) performs them now, in
+    // written order, once its costs are paid — before the colour prompt and
+    // production read the state they change.
+    if crate::types::ability::inline_mana_preamble(&ability_def).is_some() {
+        with_bound_mana_activation(
             state,
             pending.source_id,
             pending.player,
             &ability_def,
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+            |state, resolved| resolve_inline_mana_preamble(state, resolved, events),
         );
-        if let Some(choice) = mana_choice_prompt(
-            &resolved_for_prompt.effect,
+        // CR 616.1 + CR 608.2c: an instruction of the chain paused on a
+        // replacement choice (competing counter replacements). Park the
+        // activation exactly like a paused cost payment — its snapshot narrowed
+        // to the part still owed, the mana production — so, once the choice
+        // settles, the same typed resume continues it exactly once through the
+        // colour prompt, production and the payment it interrupted.
+        if state.pending_replacement.is_some() {
+            pending.ability_snapshot = Some(ability_from_mana_production(&ability_def));
+            cursor.parent = parent;
+            pause_mana_ability_cost_payment(state, None, pending, cursor, events, cost_event_start);
+            return Ok(state.waiting_for.clone());
+        }
+    }
+    if !resolves_automatically && pending.color_override.is_none() {
+        // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
+        // and gated by this activation's own paid count, under the same binding
+        // its production uses; the outer "this way" amount is restored before
+        // the prompt is returned.
+        let source_id = pending.source_id;
+        let prompt = with_bound_mana_activation(
             state,
-            pending.source_id,
-            Some(&resolved_for_prompt),
-        ) {
+            source_id,
+            pending.player,
+            &ability_def,
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+            |state, resolved_for_prompt| {
+                // The production node — the root for a plain mana ability, a
+                // later link when instructions precede the mana.
+                let production =
+                    find_mana_effect(resolved_for_prompt).unwrap_or(resolved_for_prompt);
+                mana_choice_prompt(
+                    &production.effect,
+                    state,
+                    source_id,
+                    Some(production),
+                    Some(production),
+                )
+            },
+        );
+        if let Some(choice) = prompt {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
                 && cost_resolves_without_choice(&ability_def.cost)
+                && crate::types::ability::inline_mana_preamble(&ability_def).is_none()
             {
                 pending.batch_siblings =
                     batch_eligible_siblings(state, pending.player, pending.source_id, &ability_def);
             }
+            let choice_player = pending.player;
+            let context = ManaChoiceContext::ManaAbility(Box::new(pending));
             let resume = WaitingFor::ChooseManaColor {
-                player: pending.player,
-                choice,
-                context: ManaChoiceContext::ManaAbility(Box::new(pending)),
+                player: choice_player,
+                choice: choice.clone(),
+                context: context.clone(),
             };
-            if has_deferred_cost_events {
-                settle_mana_ability_cost_events(
+            if settles_completed_frame {
+                // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: A mana-color
+                // choice returns before the ordinary post-action pipeline
+                // runs, so the already-paid cost range needs its one normal
+                // trigger collection here — through the SAME typed
+                // completed-frame seam the durable-ledger root uses, whether
+                // or not that ledger is empty. The empty-ledger shape used to
+                // fall through to a bare `process_triggers`, which dispatched
+                // an ordinary cost observer separately from the frame's own
+                // synthetic reflexive.
+                debug_assert!(cursor.parent.is_none());
+                if let Some(pause) = collect_completed_mana_frame_events(
                     state,
                     cursor.deferred_cost_events,
                     events,
                     cost_event_start,
-                );
+                    ManaTriggerFixedPointResume::ColorChoice(Box::new(ManaColorChoiceResume {
+                        player: choice_player,
+                        choice,
+                        context,
+                    })),
+                ) {
+                    return Ok(pause);
+                }
                 if let Some(order_wf) =
                     super::triggers::preserve_order_triggers_resume(state, resume.clone())
                 {
                     return Ok(order_wf);
                 }
-            } else if events.len() > cost_event_start {
-                // CR 603.2 + CR 603.3b + CR 605.3b: A mana-color choice
-                // returns before the ordinary post-action pipeline runs.
-                // Its already-paid cost events therefore need their one
-                // normal trigger collection here. Replacement-paused events
-                // are deliberately excluded: their typed cursor owns them
-                // until `settle_mana_ability_cost_events` above.
-                let cost_events = events[cost_event_start..].to_vec();
-                super::triggers::process_triggers(state, &cost_events);
             }
             return Ok(resume);
         }
     }
 
+    let mut enclosing_reveal_chain = None;
+    // CR 605.3b + CR 107.1c + CR 701.20a: a mana ability that reveals "any
+    // number of [filter] cards in your hand" (Metalworker) asks for that
+    // selection while it resolves; production resumes from the choice.
+    if let Effect::RevealHand {
+        card_filter,
+        cardinality: cardinality @ ObjectSelectionCardinality::AnyNumber,
+        ..
+    } = &*ability_def.effect
+    {
+        // The filter is evaluated from the activated ability's source, as
+        // the resolver evaluates it from the resolving ability.
+        // CR 601.2a: a spell mid-cast is not a card in hand (shared exclusion).
+        let eligible = super::mana_sources::reveal_eligible_hand_cards(
+            state,
+            pending.source_id,
+            pending.player,
+            card_filter,
+            super::mana_sources::spell_being_cast(state, pending.player),
+        );
+        // CR 400.2: hand size is public but which cards are eligible is not,
+        // so the prompt's existence must not depend on eligibility — any
+        // non-empty hand gets the prompt (with only the empty selection legal
+        // when nothing matches). Only an empty hand skips it.
+        // The synchronous auto-resolver (`AutoResolved`) has no prompt to
+        // surface — its caller restores its own `waiting_for` — so it takes
+        // the always-legal CR 107.1c choice of zero cards rather than
+        // parking a selection nobody would answer.
+        let hand_is_empty = state.players[pending.player.0 as usize].hand.is_empty();
+        if !hand_is_empty && !resolves_automatically {
+            let resume = WaitingFor::RevealChoice {
+                player: pending.player,
+                cards: eligible,
+                filter: card_filter.clone(),
+                optional: false,
+                decline_runs_continuation: false,
+                cardinality: *cardinality,
+                pending_mana_ability: Some(Box::new(pending.clone())),
+            };
+            if settles_completed_frame {
+                debug_assert!(cursor.parent.is_none());
+                if let Some(pause) = collect_completed_mana_frame_events(
+                    state,
+                    cursor.deferred_cost_events,
+                    events,
+                    cost_event_start,
+                    ManaTriggerFixedPointResume::Root {
+                        player: pending.player,
+                        resume: Box::new(pending.resume.clone()),
+                    },
+                ) {
+                    return Ok(pause);
+                }
+                if let Some(order_wf) =
+                    super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                {
+                    return Ok(order_wf);
+                }
+            }
+            return Ok(resume);
+        } else {
+            // CR 107.1c: zero cards revealed. Publish this activation's own
+            // empty set outside any enclosing chain so production counts
+            // it — not an earlier activation's set — and restore the
+            // enclosing chain once production has read it.
+            enclosing_reveal_chain = Some(state.chain_tracked_set_id.take());
+            super::effects::publish_tracked_set(state, Vec::new());
+        }
+    }
+
+    let production_events_start = events.len();
     produce_mana_from_ability(
         state,
         pending.source_id,
@@ -2394,25 +4201,37 @@ fn finish_mana_ability_cost_payment(
         pending.color_override.clone(),
         pending.chosen_x,
         pending.cost_paid_object,
+        pending.announced_source_incarnation,
+        pending.cost_removed_counters,
     );
+    if let Some(enclosing_chain) = enclosing_reveal_chain {
+        state.chain_tracked_set_id = enclosing_chain;
+    }
     if !resolves_automatically {
         complete_mana_ability_activation(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
     }
+    // CR 605.4a: A triggered mana ability resolves immediately after the mana
+    // ability that triggered it, before the enclosing payment path collects
+    // ordinary triggers or resumes its payment prompt.
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, production_events_start);
     if let Some(parent) = parent {
         let mut parent_cursor = *parent.cursor;
-        // CR 603.2 + CR 603.3b: The child now owns the complete old batch;
-        // append its current action exactly once, then transfer that batch to
-        // the parent before it retries its still-unpaid Mana component.
-        parent_cursor.deferred_cost_events = cursor.deferred_cost_events;
-        parent_cursor
-            .deferred_cost_events
-            .extend_from_slice(&events[cost_event_start..]);
+        // CR 603.2 + CR 603.3b: Move the suspended child's frame-local batch
+        // upward without replacing the ancestor's earlier ledger. Append the
+        // child's current action exactly once before retrying the parent's
+        // still-unpaid Mana component.
+        append_suspended_child_cost_events(
+            &mut parent_cursor,
+            &mut cursor,
+            &events[cost_event_start..],
+        );
         let parent_event_start = events.len();
         return continue_mana_ability_cost_payment(
             state,
@@ -2422,45 +4241,68 @@ fn finish_mana_ability_cost_payment(
             parent_event_start,
         );
     }
+    // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: EVERY completed root mana
+    // frame settles through the one typed seam, whether or not its durable
+    // ledger holds replacement-paused events and whatever it resumes to — and it
+    // settles **before** `resume_mana_ability_root`, not after.
+    //
+    // Baseline had two bypasses here. The durable-ledger branch called the
+    // typed seam; a `ManaPayment`/`UnlessPayment` resume with an empty ledger
+    // called `process_triggers` directly (because the post-action pipeline is
+    // guarded by `waiting_for == Priority` and would otherwise drop every
+    // already-paid cost observer — Scavenger's Talent, Korvold, Mayhem Devil,
+    // ...; #5963); and a `Priority` resume with an empty ledger fell through to
+    // the pipeline's own generic scan. The first bypass could dispatch an
+    // ordinary cost observer separately from this frame's synthetic reflexive;
+    // the second could let the pipeline rediscover events the frame already
+    // owns. The typed seam closes both: it journals every live occurrence it
+    // claims into `consumed_before_priority_trigger_events`, so the pipeline's
+    // scan is narrowed by the journal rather than by excluding the `Priority`
+    // resume, and nothing double-fires (e.g. Kilo's becomes-tapped proliferate
+    // under a standalone Relic activation).
+    //
+    // Settlement-before-resume is what makes CR 605.4a hold at a durable-ledger
+    // root: this frame's accepted triggered mana must be spendable BY the thing
+    // it resumes into (the automatic payment finalizer, the unless-payment
+    // poll, the pay-to-end permission), exactly as it already is at the colour
+    // and `TapLandForMana` roots. It is also the only ordering at which
+    // `pending.resume` still exists, so the frame can name its own root in
+    // `ManaTriggerFixedPointResume::Root` for an accepted pause instead of the
+    // `Parent` variant, which is factually wrong for a parentless root.
+    if settles_completed_frame {
+        debug_assert!(cursor.parent.is_none());
+        if let Some(pause) = settle_mana_ability_cost_events(
+            state,
+            std::mem::take(&mut cursor.deferred_cost_events),
+            events,
+            cost_event_start,
+            ManaTriggerFixedPointResume::Root {
+                player: pending.player,
+                resume: Box::new(pending.resume.clone()),
+            },
+        ) {
+            return Ok(pause);
+        }
+    }
+
     let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
     if super::casting::mana_ability_cost_payment_is_paused(state) {
-        defer_cost_events_into_active_mana_root(
-            state,
-            cursor.deferred_cost_events,
-            &events[cost_event_start..],
-        );
+        debug_assert!(is_ultimate_root);
+        // A settled frame has nothing left to hand upward: its ledger was taken
+        // and its live occurrences are already journaled, so re-deferring them
+        // into the next root would let that root's durable segment — which the
+        // journal does NOT filter — collect them a second time.
+        if !settles_completed_frame {
+            defer_cost_events_into_active_mana_root(
+                state,
+                cursor.deferred_cost_events,
+                &events[cost_event_start..],
+            );
+        }
         return Ok(resume);
     }
 
-    if has_deferred_cost_events {
-        settle_mana_ability_cost_events(
-            state,
-            cursor.deferred_cost_events,
-            events,
-            cost_event_start,
-        );
-        return Ok(
-            super::triggers::preserve_order_triggers_resume(state, resume.clone())
-                .unwrap_or(resume),
-        );
-    }
-
-    // CR 603.2 + CR 603.3b + CR 605.3b: A direct (non-paused) mana-ability
-    // action normally reaches the ordinary post-action trigger pipeline, which
-    // remains its settlement authority. But that pipeline only runs for a
-    // `Priority` resume (it is guarded by `waiting_for == Priority`). A mana
-    // ability activated during mana payment or an unless-cost payment resumes
-    // to `ManaPayment`/`UnlessPayment`, which the pipeline skips — so its
-    // already-paid cost events (sacrifice, discard, exile) would never be
-    // scanned and every observer would be dropped (Scavenger's Talent, Korvold,
-    // Mayhem Devil, ...; #5963). Scan them here, the single settlement
-    // authority, exactly as the `ChooseManaColor` branch above already does for
-    // an interrupted mana-color choice. A `Priority` resume stays EXCLUDED so
-    // the pipeline remains the sole scan site and nothing double-fires (e.g.
-    // Kilo's becomes-tapped proliferate under a standalone Relic activation).
-    if !matches!(resume, WaitingFor::Priority { .. }) && events.len() > cost_event_start {
-        let cost_events = events[cost_event_start..].to_vec();
-        super::triggers::process_triggers(state, &cost_events);
+    if settles_completed_frame {
         return Ok(
             super::triggers::preserve_order_triggers_resume(state, resume.clone())
                 .unwrap_or(resume),
@@ -2476,36 +4318,89 @@ fn finish_mana_ability_cost_payment(
 /// events are scanned here even when the nominal resume is Priority.
 fn settle_mana_ability_cost_events(
     state: &mut GameState,
+    deferred: Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
+    current_start: usize,
+    outer_resume: ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
+    debug_assert!(
+        !matches!(outer_resume, ManaTriggerFixedPointResume::Parent),
+        "a parentless root must name its own resume, never the Parent variant"
+    );
+    collect_completed_mana_frame_events(state, deferred, events, current_start, outer_resume)
+}
+
+/// CR 603.2 + CR 603.3b + CR 605.4a: prepare the exact durable-plus-unconsumed-live
+/// batch for one completed mana frame and drive it through the single
+/// classifier/dispatcher fixed point.
+///
+/// Used for **every** completed mana frame, whether or not its durable ledger is
+/// empty, so the no-ledger direct/colour/`TapLandForMana` shapes stop falling
+/// through to a separate aggregate scan.
+///
+/// The historical inline output of the durable segment appears once in the
+/// logical batch and once only as a public copy in the returned event vector;
+/// the copies are excluded from the live logical segment while their live
+/// occurrences are still journaled, so the durable tail and the copied public
+/// tail are never concatenated into the trigger batch twice.
+pub(crate) fn collect_completed_mana_frame_events(
+    state: &mut GameState,
     mut deferred: Vec<GameEvent>,
     events: &mut Vec<GameEvent>,
     current_start: usize,
-) {
+    outer_resume: ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
     let deferred_original_len = deferred.len();
     super::triggers::resolve_tap_mana_triggers_inline(state, &mut deferred, 0);
+    let historical_copy_start = events.len();
     events.extend(deferred[deferred_original_len..].iter().cloned());
+    let historical_copy_end = events.len();
     super::triggers::resolve_tap_mana_triggers_inline(state, events, current_start);
-    deferred.extend_from_slice(&events[current_start..]);
-    if !deferred.is_empty() {
-        super::triggers::process_triggers(state, &deferred);
-    }
-    // The typed cursor has already collected the events emitted by this action.
-    // Claim their exact occurrences through the normal post-action authority so
-    // a Priority resume cannot scan the same events a second time.
-    state.consumed_before_priority_trigger_events.extend(
-        events
-            .iter()
-            .enumerate()
-            .skip(current_start)
-            .map(
-                |(index, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: events[..index]
-                        .iter()
-                        .filter(|prior| *prior == event)
-                        .count(),
-                },
-            ),
+
+    // One chronological logical batch: the durable segment exactly once, then
+    // every live event this frame owns that an earlier synchronous child or a
+    // completed resume prefix has not already claimed.
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let live_indices: Vec<usize> = (current_start..events.len())
+        .filter(|index| !(historical_copy_start..historical_copy_end).contains(index))
+        .filter(|index| {
+            let occurrence = super::triggers::trigger_event_occurrence(events, *index);
+            !consumed.iter().any(|claimed| {
+                claimed.event == events[*index]
+                    && claimed.occurrence == occurrence
+                    && claimed
+                        .scope
+                        .consumes(super::triggers::TriggerCollectionRequester::Ordinary)
+            })
+        })
+        .collect();
+    let mut batch = deferred;
+    batch.extend(live_indices.iter().map(|index| events[*index].clone()));
+
+    let live_end = events.len();
+    let pause = super::triggers::collect_mana_action_trigger_batch(state, &batch, outer_resume);
+
+    // Only after the combined collection result is durably owned: claim every
+    // exact live occurrence this frame is responsible for, by full-action index.
+    let occurrences = (current_start..live_end)
+        .map(
+            |index| crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: events[index].clone(),
+                occurrence: super::triggers::trigger_event_occurrence(events, index),
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
+            },
+        )
+        .collect();
+    super::triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect(
+        "mana-ability cost-settlement consumed-before-priority trigger journal cause must be live",
     );
+    pause
 }
 
 /// CR 603.2 + CR 603.3b: A parent payment can immediately pause again after
@@ -2530,23 +4425,119 @@ fn defer_cost_events_into_active_mana_root(
     cursor
         .deferred_cost_events
         .extend_from_slice(&current[..inherited_current_len]);
+    cursor.current_action_deferred_start = cursor.deferred_cost_events.len();
     cursor.deferred_cost_events.extend(local_events);
-    cursor.current_action_deferred_start = 0;
 }
 
-fn resume_mana_ability_root(
+/// CR 605.4a: convert one completed fixed point's typed outer continuation back
+/// into the suspended mana frame's own wait, exactly once.
+///
+/// This is the resumed-occurrence counterpart of the tails
+/// `finish_mana_ability_cost_payment` and `handle_choose_mana_color` run
+/// synchronously, and it mirrors them exactly — including the paused-payment
+/// early exit and the `preserve_order_triggers_resume` wrap. It never re-defers
+/// a cost-event ledger: the frame that installed this continuation already took
+/// its ledger and journaled its live occurrences before pausing.
+pub(crate) fn resume_settled_mana_frame(
+    state: &mut GameState,
+    outer_resume: ManaTriggerFixedPointResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    match outer_resume {
+        // A nested child frame's suspended parent cursor is the authority; no
+        // wait is reconstructed here.
+        ManaTriggerFixedPointResume::Parent => Ok(None),
+        ManaTriggerFixedPointResume::Root { player, resume } => {
+            let resumed = resume_mana_ability_root(state, player, *resume, events)?;
+            if super::casting::mana_ability_cost_payment_is_paused(state) {
+                return Ok(Some(resumed));
+            }
+            Ok(Some(
+                super::triggers::preserve_order_triggers_resume(state, resumed.clone())
+                    .unwrap_or(resumed),
+            ))
+        }
+        ManaTriggerFixedPointResume::ColorChoice(choice) => {
+            let ManaColorChoiceResume {
+                player,
+                choice,
+                context,
+            } = *choice;
+            let resume = WaitingFor::ChooseManaColor {
+                player,
+                choice,
+                context,
+            };
+            Ok(Some(
+                super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                    .unwrap_or(resume),
+            ))
+        }
+    }
+}
+
+/// CR 602.2 + CR 733.1: continues a begun mana-ability activation none of whose costs is paid;
+/// one that can no longer be completed is reversed alone, and what it was paying for goes on
+/// (CR 733.2). `EngineError::ActivationReversed` is not reused: it restores the state from before
+/// the submitted action, which would undo a mana ability completed in that action (CR 605.3b).
+pub(super) fn continue_mana_ability_activation(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let before = state.clone();
+    let events_before = events.len();
+    let (player, source_id, place) = (pending.player, pending.source_id, pending.chain_place());
+    let resume = pending.resume.clone();
+    advance_mana_ability_activation(state, pending, events).or_else(|_| {
+        *state = before;
+        events.truncate(events_before);
+        super::play_trace::mana_ability_reversed(state, source_id, place);
+        resume_mana_ability_root(state, player, resume, events)
+    })
+}
+
+pub(crate) fn resume_mana_ability_root(
+    state: &mut GameState,
+    mana_source_controller: PlayerId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2g + CR 605.3b: the single authority for the row policy of a
+    // resumed automatic payment. A synchronous auto-tap never reaches this
+    // root (its direct resolver resumes to `Priority`; the payment root is
+    // promoted only when a cost move pauses). When the root continues an
+    // automatic payment that suspended, however it got here (a cost-move
+    // replacement, a triggered-mana prompt, a colour choice), the policy that
+    // payment decided lived only in its call frames and is not persisted, so
+    // every auto-tap below plans with every row: drawback avoidance applies
+    // only to a payment that completes without suspending. Any other root (a
+    // hand-activated mana ability retrying its activation, a prompt) keeps the
+    // enclosing policy, so a fresh payment it starts still decides.
+    let enclosing_row_policy = state.active_auto_tap_row_policy;
+    if resume.resumes_automatic_payment() {
+        state.active_auto_tap_row_policy = Some(super::casting_costs::AutoTapRowPolicy::AllRows);
+    }
+    let resumed = resume_mana_ability_root_payment(state, mana_source_controller, resume, events);
+    state.active_auto_tap_row_policy = enclosing_row_policy;
+    resumed
+}
+
+fn resume_mana_ability_root_payment(
     state: &mut GameState,
     mana_source_controller: PlayerId,
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     match resume {
+        // CR 118.12 + CR 605.3b: the paused root resumes a choice its fresh
+        // entry already gated.
         ManaAbilityResume::EffectPayCost {
             payer,
             return_to,
             ability,
             cost,
-        } => match super::costs::pay_ability_cost_for_resolution(
+        } => match super::costs::resume_ability_cost_for_resolution(
             state,
             payer,
             cost.as_ref(),
@@ -2585,7 +4576,259 @@ fn resume_mana_ability_root(
         ManaAbilityResume::CompanionToHand { player, cost } => {
             super::companion::resume_companion_to_hand_payment(state, player, cost, events)
         }
+        // CR 116.2i + CR 605.3b: the announced cost is locked; finish the roll
+        // exactly once after its payment completes, including through a further
+        // echo choice or a deferred life payment.
+        ManaAbilityResume::PlanarDieRoll { player, cost } => {
+            super::planechase::resume_paid_planar_die_roll(state, player, cost, events)
+        }
+        // CR 508.1d + CR 509.1c + CR 605.4a: finish the suspended combat
+        // declaration once its tax bonus is in the pool. The frozen proposal
+        // and price ride on the root, so nothing is re-derived or rescored.
+        ManaAbilityResume::CombatTaxPayment {
+            player,
+            context,
+            total_cost,
+            per_creature,
+            pending,
+        } => super::engine_combat::resume_combat_tax_payment(
+            state,
+            player,
+            context,
+            total_cost,
+            per_creature,
+            pending,
+            events,
+        ),
+        // CR 116.2b + CR 605.3b: NOT compiler-forced either — the `resume =>`
+        // catch-all below would route a paused turn-face-up payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            source,
+            cost,
+            announced_x,
+            cost_source,
+        } => super::morph::resume_turn_face_up_payment(
+            state,
+            player,
+            source,
+            cost,
+            cost_source,
+            announced_x,
+            events,
+        ),
+        // CR 116.2c + CR 605.3b: NOT compiler-forced — the `resume =>` catch-all
+        // below would silently route a paused pay-to-end payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::EndContinuousEffect {
+            player,
+            group,
+            cost,
+        } => super::end_continuous_effect::resume_end_continuous_effect_payment(
+            state, player, group, cost, events,
+        ),
+        // CR 116.2m + CR 605.3b: NOT compiler-forced either — the `resume =>`
+        // catch-all below would silently route a paused unlock payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::RoomUnlock {
+            player,
+            object_id,
+            door,
+            cost,
+        } => super::room::resume_room_unlock_payment(state, player, object_id, door, cost, events),
+        // CR 116.2h + CR 605.3b: NOT compiler-forced — the `resume =>`
+        // catch-all below would silently route a paused foretell payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::Foretell {
+            player,
+            object_id,
+            cost,
+            payment_cost,
+            turn_foretold,
+        } => super::casting::resume_foretell_payment(
+            state,
+            player,
+            object_id,
+            cost,
+            payment_cost,
+            turn_foretold,
+            events,
+        ),
+        // CR 605.3a + CR 602.2b: the window's activation completed; the pending
+        // activation decides its payment again.
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => continue_mana_ability_activation(state, *pending_mana_ability, events),
         resume => Ok(resume_waiting_for(mana_source_controller, resume)),
+    }
+}
+
+/// CR 118.3b + CR 119.4 + CR 616.1: Finish the outer action after a
+/// Phyrexian-style life component was paid and its replacement post-effects
+/// completed. This path must not call the mana-payment authority again: the
+/// selected mana units were already spent before the replacement choice
+/// opened.
+pub(crate) fn finish_mana_root_after_deferred_life_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match resume {
+        ManaAbilityResume::Priority => Ok(WaitingFor::Priority { player }),
+        ManaAbilityResume::ManaPayment {
+            outer_player,
+            convoke_mode,
+        } => Ok(resume_waiting_for(
+            player,
+            ManaAbilityResume::ManaPayment {
+                outer_player,
+                convoke_mode,
+            },
+        )),
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => Ok(resume_waiting_for(
+            player,
+            ManaAbilityResume::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+        )),
+        ManaAbilityResume::UnlessPayment {
+            outer_player,
+            cost,
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+            repeat,
+        } => {
+            let remaining_cost = super::costs::remaining_cost_after_paid_mana_prefix(cost.as_ref());
+            match remaining_cost {
+                Some(cost) => {
+                    // CR 118.12 + CR 605.3b + CR 616.1: Only the leading mana
+                    // component was committed before the life-replacement
+                    // pause. Resume the exact suffix before suppressing the
+                    // unless effect.
+                    super::engine_payment_choices::continue_unless_payment_after_paid_mana_prefix(
+                        state,
+                        outer_player.unwrap_or(player),
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                        repeat,
+                        events,
+                    )
+                }
+                None => super::engine_payment_choices::finish_successful_unless_payment(
+                    state,
+                    pending_effect.as_ref(),
+                    &trigger_event,
+                    events,
+                    None,
+                ),
+            }
+        }
+        ManaAbilityResume::EffectPayCost {
+            payer,
+            return_to,
+            ability,
+            cost,
+        } => {
+            if let Some(remaining_cost) =
+                super::costs::remaining_cost_after_paid_mana_prefix(cost.as_ref())
+            {
+                // CR 118.12 + CR 608.2c: Re-enter resolution through the
+                // remaining PayCost suffix. The ordinary continuation authority
+                // then pays it before handing off to the original rider.
+                super::effects::prepend_remaining_pay_cost_before_parked_rider(
+                    state,
+                    ability.as_ref(),
+                    payer,
+                    remaining_cost,
+                );
+                Ok(WaitingFor::Priority { player: return_to })
+            } else {
+                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    Ok(WaitingFor::Priority { player: return_to })
+                } else {
+                    Ok(state.waiting_for.clone())
+                }
+            }
+        }
+        ManaAbilityResume::CompanionToHand { player, .. } => Ok(
+            super::companion::finish_paid_companion_to_hand(state, player, events),
+        ),
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            source,
+            announced_x,
+            cost_source,
+            ..
+        // CR 702.37e + CR 107.3d: payment has completed, so commit the
+        // turn-face-up action with its already-announced X value.
+        } => super::morph::finish_paid_turn_face_up(
+            state,
+            player,
+            source,
+            cost_source,
+            announced_x,
+            events,
+        ),
+        ManaAbilityResume::EndContinuousEffect { player, group, .. } => Ok(
+            super::end_continuous_effect::finish_paid_end_continuous_effect(
+                state, player, group, events,
+            ),
+        ),
+        // CR 116.2m + CR 709.5c: the deferred life component finished, so the
+        // paid unlock commits its designation once.
+        ManaAbilityResume::RoomUnlock {
+            player,
+            object_id,
+            door,
+            ..
+        } => Ok(super::room::finish_paid_room_unlock(
+            state, player, object_id, door, events,
+        )),
+        // CR 116.2h + CR 118.3b: the deferred life component finished, so the
+        // paid foretell action exiles and stamps the card once.
+        ManaAbilityResume::Foretell {
+            player,
+            object_id,
+            cost,
+            turn_foretold,
+            ..
+        } => super::casting::finish_paid_foretell(
+            state,
+            player,
+            object_id,
+            cost,
+            turn_foretold,
+            events,
+        ),
+        // CR 116.2i + CR 118.3b: the deferred life component finished, so the
+        // paid roll commits once with its locked cost.
+        ManaAbilityResume::PlanarDieRoll { player, .. } => {
+            super::planechase::finish_paid_planar_die_roll(state, player, events);
+            Ok(WaitingFor::Priority { player })
+        }
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => continue_mana_ability_activation(state, *pending_mana_ability, events),
+        ManaAbilityResume::PhyrexianCastPayment { .. }
+        | ManaAbilityResume::FinalizePendingManaPayment { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. } => Err(EngineError::InvalidAction(
+            "Cast mana payment reached the non-cast deferred-life continuation".to_string(),
+        )),
     }
 }
 
@@ -2616,6 +4859,69 @@ fn continue_mana_ability_cost_payment_in_node(
         return Err(EngineError::ActionNotAllowed(
             "This permanent is already committed to a spell sacrifice cost".to_string(),
         ));
+    }
+    // CR 118.11 + CR 616.1 + CR 602.2b: a counter leg's removal that waited on a
+    // replacement choice is settled first: its measured count is this
+    // activation's (a modified removal has still been paid), then the leg's
+    // later removals are paid before any later component.
+    if let Some(paused) = cursor.counter_removal.take() {
+        let PausedCounterCostRemoval {
+            in_flight,
+            remaining,
+            replacement_subtree: _,
+        } = *paused;
+        let settled =
+            super::effects::counters::settled_in_flight_counter_removal(state, &in_flight);
+        super::costs::credit_cost_removed_counters(&mut cursor.cost_removed_counters, settled);
+        if let super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(paused) =
+            super::costs::pay_counter_cost_removals(
+                state,
+                remaining,
+                Some(&mut cursor.cost_removed_counters),
+                events,
+            )
+        {
+            cursor.counter_removal = Some(Box::new(paused));
+            pause_mana_ability_cost_payment(state, None, pending, cursor, events, cost_event_start);
+            return Ok(state.waiting_for.clone());
+        }
+    }
+    while let Some(amount) = cursor.remaining_life_payments.first().copied() {
+        cursor.remaining_life_payments.remove(0);
+        // CR 118.3b + CR 119.4 + CR 616.1: Paying life is a life-loss event,
+        // so competing replacements may pause this activation before the
+        // payment is applied. Preserve its exact suffix and ordering player.
+        match life_costs::pay_life_as_cast_or_activation_cost(state, pending.player, amount, events)
+        {
+            PayLifeCostResult::Paid { .. } => {}
+            PayLifeCostResult::PaidWithDeferredSubstitution { .. } => {
+                pause_mana_ability_cost_payment(
+                    state,
+                    None,
+                    pending,
+                    cursor,
+                    events,
+                    cost_event_start,
+                );
+                return Ok(state.waiting_for.clone());
+            }
+            PayLifeCostResult::DeferredReplacementChoice { choice_player, .. } => {
+                pause_mana_ability_cost_payment(
+                    state,
+                    Some(choice_player),
+                    pending,
+                    cursor,
+                    events,
+                    cost_event_start,
+                );
+                return Ok(state.waiting_for.clone());
+            }
+            PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot complete deferred Phyrexian life cost for mana ability".to_string(),
+                ));
+            }
+        }
     }
     while let Some(cost) = cursor.remaining.first().cloned() {
         match pay_mana_ability_cost_component(
@@ -2652,11 +4958,17 @@ pub(crate) fn resume_mana_ability_cost_move(
     continue_mana_ability_cost_payment(state, *pending, cursor, events, 0)
 }
 
-/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
-/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
-/// 1 damage to you.") resolve atomically with the mana production. Walks the
-/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
-/// controller, GainLife, etc.) route through the standard effect handlers.
+/// CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+/// effect chain (e.g. painlands' "This land deals 1 damage to you.")
+/// resolves that chain inline — mana abilities don't use the stack, so
+/// the sub-ability runs as part of the same atomic resolution.
+///
+/// When the root ability is `Effect::Mana`, root production consumed only the root,
+/// so its `sub_ability` (which may contain conditional `Effect::Mana` additions like
+/// Urza's Tower or Ugin's Labyrinth) must execute. When the root is a non-Mana effect
+/// (e.g. `Effect::RevealHand` for Metalworker), `produce_mana_from_ability` already
+/// consumed the `Effect::Mana` sub-node, so we skip only that consumed node and resolve
+/// any remaining sub-ability tail.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2665,13 +4977,59 @@ fn resolve_mana_ability_sub_chain(
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
     };
+    // A non-Mana root (Metalworker's `RevealHand`) has already had its
+    // `Effect::Mana` sub-node consumed by `produce_mana_from_ability`; only the
+    // tail after that node remains to resolve.
+    let sub = if matches!(ability.effect, Effect::Mana { .. }) {
+        sub
+    } else {
+        match find_mana_effect(ability) {
+            Some(production) => match production.sub_ability.as_deref() {
+                Some(tail) => tail,
+                None => return,
+            },
+            None => sub,
+        }
+    };
+    // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
+    // whose prelude resets `last_effect_amount`; carry the head's cost-removed
+    // counter count onto the sub root so that prelude reseeds it ("then add an
+    // additional {B} for each charge counter removed this way").
+    let carried;
+    let sub = match ability.context.cost_removed_counter_amount {
+        Some(removed) => {
+            let mut owned = sub.clone();
+            owned.context.cost_removed_counter_amount = Some(removed);
+            carried = owned;
+            &carried
+        }
+        None => sub,
+    };
     // Errors during the sub-chain are non-fatal — mana has already been
     // added to the pool and the cost has been paid. The damage/life clause
     // of a painland cannot legitimately fail in a well-formed game state.
-    let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
+    // CR 605.3b: the sub-chain is an inline subresolution; see
+    // `GameState::mana_subresolution_depth`.
+    run_inline_mana_subresolution(state, |state| {
+        let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
+    });
 }
 
-fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
+/// CR 605.3a + CR 605.3b + CR 608.2c: a mana ability activated while another
+/// spell or ability is resolving (to pay a cost it asks for) resolves inline. It is not
+/// a new resolution of that outer ability, so the outer resolution's own
+/// "that color" (`named_color_this_resolution`) must survive it: the inline
+/// chain starts with a fresh slot (its depth-zero entry resets it, and a color
+/// it names stays its own) and the outer value is restored afterwards.
+fn run_inline_mana_subresolution(state: &mut GameState, run: impl FnOnce(&mut GameState)) {
+    let outer_named_color = state.named_color_this_resolution.take();
+    state.mana_subresolution_depth += 1;
+    run(state);
+    state.mana_subresolution_depth -= 1;
+    state.named_color_this_resolution = outer_named_color;
+}
+
+pub(super) fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
     ids.iter()
         .enumerate()
         .any(|(index, id)| ids[index + 1..].contains(id))
@@ -2682,18 +5040,21 @@ fn pay_mana_ability_cost_with_choices<I, J, L>(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
+    ability_index: Option<usize>,
     cost: &Option<AbilityCost>,
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
     chosen_discards: &mut J,
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
+    pinned_pool_units: &[ManaPipId],
     chosen_counter_count: Option<u32>,
+    cost_removed_counters: &mut Option<u32>,
     chosen_x: Option<u32>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     parent: Option<&ManaAbilityCostParent>,
-) -> Result<(), EngineError>
+) -> Result<ManaAbilityCostComponentProgress, EngineError>
 where
     I: Iterator<Item = ObjectId>,
     J: Iterator<Item = ObjectId>,
@@ -2704,47 +5065,82 @@ where
             "This permanent is already committed to a spell sacrifice cost".to_string(),
         ));
     }
+    let granter = activated_ability_granting_object(state, source_id, ability_index);
 
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
         // CR 605.3a + CR 601.2h: Top-level mana sub-cost (e.g. hypothetical
         // `{R}: Add {G}{G}`). Composite costs route through the Composite arm.
         Some(AbilityCost::Mana { cost }) => {
-            pay_mana_sub_cost(
+            match pay_mana_sub_cost(
                 state,
                 source_id,
                 player,
+                ability_index,
                 cost,
                 chosen_hybrid_payment,
+                pinned_pool_units,
                 events,
                 excluded_sources,
                 sub_cost_demand,
                 parent,
-            )?;
+            )? {
+                ManaAbilityCostComponentProgress::Complete => {}
+                paused @ ManaAbilityCostComponentProgress::HandedToReplacement { .. } => {
+                    return Ok(paused)
+                }
+            }
         }
-        // CR 605.1a + CR 701.17a: Bare `Mill` mana-ability cost. The Millikin
-        // `{T}, Mill a card: Add {C}` shape routes through the Composite arm; this
-        // arm covers a hypothetical mill-only mana ability for completeness.
+        // CR 605.1a (2026 amendment): unreachable by construction — an activated
+        // ability whose cost moves a card to or from a library is no longer a mana
+        // ability, so no `Mill` cost reaches this payer. Retained rather than
+        // deleted because the `match` over `AbilityCost` is exhaustive and this is
+        // the shared mana-ability cost payer; deleting the arm would require
+        // inventing an error path for a case the classifier already prevents. If
+        // `is_mana_ability` is ever relaxed, this arm is already correct.
+        // CR 701.17a: mill puts cards from the top of a library into a graveyard.
         Some(AbilityCost::Mill { count }) => mill_for_mana_cost(state, player, *count, events)?,
         Some(AbilityCost::PayLife { amount }) => {
             // CR 119.4 + CR 903.4: QuantityExpr resolves against the activator's
             // current state (e.g. commander color identity count).
             let resolved =
                 super::quantity::resolve_quantity(state, amount, player, source_id).max(0) as u32;
-            pay_life_cost(state, player, resolved, events)?
+            match pay_life_cost(state, player, resolved, events)? {
+                ManaAbilityCostComponentProgress::Complete => {}
+                paused @ ManaAbilityCostComponentProgress::HandedToReplacement { .. } => {
+                    return Ok(paused)
+                }
+            }
         }
         Some(AbilityCost::TapCreatures {
             requirement,
             filter,
         }) => {
-            // CR 605.1a: Mana-ability tap costs (Convoke-style) are fixed-count
-            // only; the aggregate "total power N" form is reserved for
-            // Crew/Saddle/Teamwork, which are never mana abilities.
-            let count = requirement.fixed_count().ok_or_else(|| {
-                EngineError::InvalidAction(
-                    "Aggregate-power tap cost is not valid for a mana ability".to_string(),
-                )
-            })?;
+            // CR 605.1a: the aggregate "total power N" form is reserved for
+            // Crew/Saddle/Teamwork, which are never mana abilities; fixed-count
+            // and X-sentinel forms both are valid mana-ability tap costs.
+            //
+            // CR 107.3a: the loop bound must be the *selection* size, not the raw
+            // requirement count — for the X-sentinel form the requirement count is
+            // `u32::MAX`, and draining that many tappers would fail immediately
+            // after consuming the (much smaller) real selection. The announced X,
+            // bound at selection completion by
+            // `handle_tap_creatures_for_mana_ability`, is the authority.
+            let count = match requirement.selection_mode() {
+                TapCreaturesSelectionMode::Fixed => requirement
+                    .fixed_count()
+                    .expect("Fixed mode is derived from TapCreaturesRequirement::Count"),
+                TapCreaturesSelectionMode::VariableX => chosen_x.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Missing announced X for tap-creatures mana ability cost".to_string(),
+                    )
+                })?,
+                TapCreaturesSelectionMode::Aggregate(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "Aggregate-power tap cost is not valid for a mana ability".to_string(),
+                    ));
+                }
+            };
             for _ in 0..count {
                 let chosen_id = chosen_tappers.next().ok_or_else(|| {
                     EngineError::InvalidAction(
@@ -2757,6 +5153,7 @@ where
                     player,
                     chosen_id,
                     filter,
+                    granter,
                     cost_has_source_tap_component(cost),
                     events,
                 )?;
@@ -2795,6 +5192,7 @@ where
                         player,
                         chosen_id,
                         filter.as_ref(),
+                        granter,
                         events,
                     )?;
                 }
@@ -2851,7 +5249,7 @@ where
                 })?;
                 if matches!(
                     sacrifice_selected_permanent_for_mana_cost(
-                        state, source_id, player, chosen_id, target, events,
+                        state, source_id, player, chosen_id, target, granter, events,
                     )?,
                     sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
                 ) {
@@ -2885,7 +5283,13 @@ where
             };
             if matches!(
                 super::costs::pay_ability_cost_for_activation(
-                    state, player, source_id, &cost, None, events,
+                    state,
+                    player,
+                    source_id,
+                    &cost,
+                    ability_index,
+                    cost_removed_counters,
+                    events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
             ) {
@@ -2896,11 +5300,17 @@ where
             }
         }
         // Self-contained components (Untap, Exert, PayEnergy, self-ReturnToHand,
-        // EffectCost) delegate to the single-authority cost payer.
+        // non-draw EffectCost) delegate to the single-authority cost payer.
         Some(c) if is_self_contained_mana_subcost(c) => {
             if matches!(
                 super::costs::pay_ability_cost_for_activation(
-                    state, player, source_id, c, None, events,
+                    state,
+                    player,
+                    source_id,
+                    c,
+                    ability_index,
+                    cost_removed_counters,
+                    events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
             ) {
@@ -2910,8 +5320,8 @@ where
                 ));
             }
         }
-        // CR 122.1 + CR 601.2b: Standalone RemoveCounter-on-self mana-ability
-        // cost (Pentad Prism, Crystalline Crawler, Druids' Repository class).
+        // CR 601.2b: Standalone RemoveCounter-on-self mana-ability cost
+        // (Pentad Prism, Crystalline Crawler, Druids' Repository class).
         Some(AbilityCost::RemoveCounter {
             count,
             counter_type,
@@ -2919,15 +5329,68 @@ where
             ..
         }) => {
             let count = match *count {
-                REMOVE_COUNTER_COST_ANY_NUMBER => chosen_counter_count.ok_or_else(|| {
-                    EngineError::InvalidAction("Missing counter count for mana ability".to_string())
-                })?,
+                // CR 107.3a (literal "Remove X counters", e.g. Saltcrusted
+                // Steppe) and CR 107.1c (literal "any number of" counters, e.g.
+                // Pentad Prism) are two distinct rules with two distinct Oracle
+                // phrasings, but both require a player-chosen count announced
+                // before costs are paid, so both sentinels read that one
+                // pre-announced value here. `is_chosen_remove_counter_cost_count`
+                // is the single predicate for "this sentinel needs a choice" —
+                // do not re-derive the equivalence by matching both sentinels
+                // in an `|` arm, which would imply they share one rule.
+                count if is_chosen_remove_counter_cost_count(count) => {
+                    let announced = chosen_counter_count.ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Missing counter count for mana ability".to_string(),
+                        )
+                    })?;
+                    // CR 118.3 + CR 601.2h: a player can't pay a cost without
+                    // the resources to pay it in full. The prompt gate already
+                    // reserves overlapping earlier leaves' announced amounts
+                    // when sizing this leaf's `max`
+                    // (`next_unchosen_remove_counter_leaf_bounds`), so this is a
+                    // defense-in-depth re-check against the object's CURRENT
+                    // counters at the moment of payment — `remove_counters_for_mana_cost`
+                    // would otherwise silently pay LESS than announced via its
+                    // `available.min` clamp (which exists for the unrelated
+                    // "remove all" semantics), rather than refusing an
+                    // impossible aggregate.
+                    let available =
+                        removable_counter_count_for_mana_cost(state, source_id, counter_type);
+                    if announced > available {
+                        return Err(EngineError::InvalidAction(
+                            "Cannot pay counter-removal cost: insufficient counters remaining"
+                                .to_string(),
+                        ));
+                    }
+                    announced
+                }
                 REMOVE_COUNTER_COST_ALL => {
                     removable_counter_count_for_mana_cost(state, source_id, counter_type)
                 }
                 count => count,
             };
-            remove_counters_for_mana_cost(state, source_id, counter_type, count, events);
+            let removals =
+                plan_counter_removals_for_mana_cost(state, source_id, counter_type, count);
+            // CR 605.3b + CR 602.2b + CR 601.2h: the mana ability's production
+            // reads the count actually removed, credited to this activation's
+            // own cursor ledger (`produce_mana_from_ability`). CR 616.1: a
+            // removal waiting on a replacement choice is handed to the cursor,
+            // which settles it on resume.
+            if let super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(paused) =
+                super::costs::pay_counter_cost_removals(
+                    state,
+                    removals,
+                    Some(cost_removed_counters),
+                    events,
+                )
+            {
+                return Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
+                    remaining_life_payments: Vec::new(),
+                    counter_removal: Some(Box::new(paused)),
+                    choice_player: None,
+                });
+            }
         }
         Some(other) => {
             return Err(EngineError::InvalidAction(format!(
@@ -2937,7 +5400,28 @@ where
         None => {}
     }
 
-    Ok(())
+    Ok(ManaAbilityCostComponentProgress::Complete)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManaAbilityCostComponentProgress {
+    Complete,
+    /// CR 118.3b + CR 119.4 + CR 616.1: the component is paid, but its payment
+    /// is waiting on the replacement pipeline, which now owns delivering it: a
+    /// life payment whose replacement is still ordering or running its
+    /// interactive post-effect, or a mana sub-cost whose mana is spent and whose
+    /// Phyrexian life (`remaining_life_payments` is the unpaid suffix) paused
+    /// the same way. Resuming continues after the component rather than paying
+    /// it again. A payment that pauses before it spends anything (a nested
+    /// source's own cost) never reaches here: that child parks its own cursor.
+    /// `counter_removal` is a counter-removal component whose current removal
+    /// waits on a replacement choice (CR 118.11): the cursor settles it by
+    /// measurement on resume and then pays its later removals.
+    HandedToReplacement {
+        remaining_life_payments: Vec<u32>,
+        counter_removal: Option<Box<PausedCounterCostRemoval>>,
+        choice_player: Option<PlayerId>,
+    },
 }
 
 fn cost_sacrifices_reserved_source(
@@ -2965,9 +5449,15 @@ fn ability_cost_sacrifices_source(cost: &AbilityCost) -> bool {
 /// graveyard. Routes through the replacement pipeline (mirroring `mill::resolve`
 /// and the rad-counter handler) so graveyard-redirect replacements (Rest in
 /// Peace / Leyline of the Void) apply and "a card was put into a graveyard"
-/// triggers see the milled cards. Millikin (`{T}, Mill a card: Add {C}`) is the
-/// canonical case — mill is a non-mana cost component and the {C} is produced
-/// unconditionally.
+/// triggers see the milled cards.
+///
+/// Millikin (`{T}, Mill a card: Add {C}`) **was** the canonical case and is no
+/// longer a mana ability under CR 605.1a's 2026 library criterion, so this
+/// function is unreachable from the mana fast path — see the
+/// `Some(AbilityCost::Mill { .. })` arm of the mana-ability cost payer above,
+/// which records why the arm is retained rather than deleted. The mill mechanics
+/// below remain correct for a relaxed classifier or a future non-library mill
+/// cost.
 fn mill_for_mana_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -3022,12 +5512,26 @@ fn mill_for_mana_cost(
 /// is paid interactively via the `CollectEvidenceChoice` prompt that
 /// `advance_mana_ability_activation` surfaces before mana production (CR 701.59),
 /// so it is a no-op in the cost-payment match rather than a delegated payment.
+///
+/// A draw `EffectCost` is excluded. CR 605.3b: a mana ability resolves
+/// immediately, so a delegated component may pause only when the cost payer
+/// leaves the activation's `Cast` cost-move root for this cursor to adopt (the
+/// self-`ReturnToHand` move does). The `Draw` leg pauses on a replacement choice
+/// (Dredge) with no such root. It is also never part of a mana ability: CR 605.1a
+/// disqualifies any ability whose cost moves a card from a library, so
+/// `is_mana_ability` already rejects it and this exclusion keeps a direct
+/// resolution call from reaching the delegated payer. A refused component falls
+/// through to the cost payer's "Unsupported mana ability cost" error.
+///
+/// The put-counter `EffectCost` stays admitted because Wall of Roots pays
+/// through it, but it does not yet meet that contract: a CR 616.1 replacement
+/// choice on its counter placement pauses without a `Cast` root.
 fn is_self_contained_mana_subcost(cost: &AbilityCost) -> bool {
     match cost {
+        AbilityCost::EffectCost { effect } => !matches!(effect.as_ref(), Effect::Draw { .. }),
         AbilityCost::Untap
         | AbilityCost::Exert
         | AbilityCost::PayEnergy { .. }
-        | AbilityCost::EffectCost { .. }
         | AbilityCost::ReturnToHand {
             filter: Some(TargetFilter::SelfRef),
             ..
@@ -3050,12 +5554,29 @@ fn pay_life_cost(
     player: PlayerId,
     amount: u32,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+) -> Result<ManaAbilityCostComponentProgress, EngineError> {
     // CR 118.3 + CR 119.4 + CR 119.8: Delegate to the single-authority helper
     // so mana-ability life costs honor the replacement pipeline and the
     // CantLoseLife lock identically to every other pay-life path.
     match life_costs::pay_life_as_cast_or_activation_cost(state, player, amount, events) {
-        PayLifeCostResult::Paid { .. } => Ok(()),
+        PayLifeCostResult::Paid { .. } => Ok(ManaAbilityCostComponentProgress::Complete),
+        // CR 118.3b + CR 616.1: in both deferred outcomes the life-loss event
+        // belongs to the replacement pipeline, which delivers it, exactly as
+        // the cast path treats them (`DeferredLifeCostResume::Cast`).
+        PayLifeCostResult::PaidWithDeferredSubstitution { .. } => {
+            Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
+                remaining_life_payments: Vec::new(),
+                counter_removal: None,
+                choice_player: None,
+            })
+        }
+        PayLifeCostResult::DeferredReplacementChoice { choice_player, .. } => {
+            Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
+                remaining_life_payments: Vec::new(),
+                counter_removal: None,
+                choice_player: Some(choice_player),
+            })
+        }
         PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => Err(
             EngineError::ActionNotAllowed("Cannot pay life cost for mana ability".to_string()),
         ),
@@ -3095,7 +5616,15 @@ fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
     cost.as_ref().is_none_or(cost_component_choice_free)
 }
 
-fn cost_component_choice_free(cost: &AbilityCost) -> bool {
+/// CR 605.3a: True iff a single cost node resolves with no player prompt. The
+/// full-tree building block behind [`cost_resolves_without_choice`]: a
+/// `Composite` qualifies only when **every** component qualifies, so a
+/// self-sacrifice component sitting beside a choice-bearing sibling (Lion's Eye
+/// Diamond's `Discard`) is correctly rejected. Shared with
+/// `mana_sources::has_unambiguous_self_sacrifice_component` so the auto-tap
+/// eligibility gate applies the identical whole-tree invariant rather than a
+/// per-component `any` match.
+pub(crate) fn cost_component_choice_free(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
         AbilityCost::Sacrifice(cost)
@@ -3167,10 +5696,19 @@ fn enumerate_hybrid_payment_plans(
     pool: &ManaPool,
     cost: &ManaCost,
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
 ) -> Vec<Vec<ManaType>> {
     let hybrid_pairs = hybrid_shard_pairs(cost);
     let mut plans = Vec::new();
-    enumerate_plans_rec(pool, cost, ctx, &hybrid_pairs, &mut Vec::new(), &mut plans);
+    enumerate_plans_rec(
+        pool,
+        cost,
+        ctx,
+        pins,
+        &hybrid_pairs,
+        &mut Vec::new(),
+        &mut plans,
+    );
     plans
 }
 
@@ -3196,23 +5734,24 @@ fn enumerate_plans_rec(
     pool: &ManaPool,
     cost: &ManaCost,
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
     hybrid_pairs: &[(ManaType, ManaType)],
     chosen: &mut Vec<ManaType>,
     out: &mut Vec<Vec<ManaType>>,
 ) {
     if chosen.len() == hybrid_pairs.len() {
-        if try_pay_with_hybrid_plan(pool, cost, chosen, ctx).is_some() {
+        if try_pay_with_hybrid_plan(pool, cost, chosen, ctx, pins).is_some() {
             out.push(chosen.clone());
         }
         return;
     }
     let (a, b) = hybrid_pairs[chosen.len()];
     chosen.push(a);
-    enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
+    enumerate_plans_rec(pool, cost, ctx, pins, hybrid_pairs, chosen, out);
     chosen.pop();
     if a != b {
         chosen.push(b);
-        enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
+        enumerate_plans_rec(pool, cost, ctx, pins, hybrid_pairs, chosen, out);
         chosen.pop();
     }
 }
@@ -3226,13 +5765,14 @@ fn try_pay_with_hybrid_plan(
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: &PaymentContext<'_>,
+    pins: &[ManaPipId],
 ) -> Option<()> {
     // CR 106.6: Plan publication and auto-selection must use the same
     // activation context as the authoritative real debit. Otherwise the
     // engine can offer a restricted mana unit that execution then rejects.
     // The simulated spent units are discarded; provenance is recorded only
     // at the real payment site.
-    select_cost_with_plan(pool, cost, plan, Some(ctx))
+    select_cost_with_plan(pool, cost, plan, Some(ctx), pins)
         .ok()
         .map(|_| ())
 }
@@ -3251,6 +5791,7 @@ fn select_cost_with_plan(
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: Option<&PaymentContext<'_>>,
+    pins: &[ManaPipId],
 ) -> Result<Vec<crate::types::mana::ManaUnit>, mana_payment::PaymentError> {
     use crate::types::mana::ManaCostShard;
     let ManaCost::Cost { shards, generic } = cost else {
@@ -3283,11 +5824,11 @@ fn select_cost_with_plan(
         &scratch_cost,
         None,
         ctx,
-        false,
+        None,
         None,
         crate::types::mana::LifePaymentColors::EMPTY,
-        // CR 118.3a: mana-ability activation sub-costs are not pinnable.
-        &[],
+        // CR 118.3a: pool units the player directed in the manual window are spent first.
+        pins,
     )
     .map(|(spent, _life)| spent)
 }
@@ -3316,13 +5857,15 @@ fn pay_mana_sub_cost(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
+    ability_index: Option<usize>,
     cost: &ManaCost,
     hybrid_plan: Option<&[ManaType]>,
+    pins: &[ManaPipId],
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     parent: Option<&ManaAbilityCostParent>,
-) -> Result<(), EngineError> {
+) -> Result<ManaAbilityCostComponentProgress, EngineError> {
     let Some(hybrid_plan) = hybrid_plan else {
         // CR 605.3c: Every source already in `excluded_sources` is an ancestor
         // mana-ability activation that is synchronously suspended on the call
@@ -3336,20 +5879,49 @@ fn pay_mana_sub_cost(
         // chain, or a self-loop terminate instead of recursing infinitely.
         let mut excluded_sources = excluded_sources.clone();
         excluded_sources.insert(source_id);
-        // CR 605.1a: A mana ability never carries a power-up tag (power-up
-        // abilities can't produce mana), so the tag-scoped activation context is
-        // `None` here — Quinjet's {R}{R} must not pay another mana ability's cost.
-        return super::casting::pay_ability_mana_cost_excluding_with_parent(
+        // CR 601.2g + CR 605.3b: a sub-cost that funds an outer automatic
+        // payment (`sub_cost_demand` is that payment's reserved colours, kept on
+        // the cursor across a pause) never chooses its rows on its own: deciding
+        // per sub-cost could spend a source a sibling still needs. Inside the
+        // live payment it takes the policy that payment published; with no live
+        // payment (its parent resumed after a pause) it plans with every row.
+        let enclosing_row_policy = state.active_auto_tap_row_policy;
+        if sub_cost_demand.is_some() && enclosing_row_policy.is_none() {
+            state.active_auto_tap_row_policy =
+                Some(super::casting_costs::AutoTapRowPolicy::AllRows);
+        }
+        let payment = super::casting::pay_ability_mana_cost_excluding_with_parent(
             state,
             player,
             source_id,
+            ability_index,
             cost,
-            None,
             events,
             &excluded_sources,
             sub_cost_demand,
             parent,
         );
+        state.active_auto_tap_row_policy = enclosing_row_policy;
+        let payment = payment?;
+        let choice_player = state
+            .pending_replacement
+            .is_some()
+            .then(|| state.waiting_for.acting_player())
+            .flatten();
+        return Ok(match payment {
+            super::casting::ManaCostPayment::Paid(()) => ManaAbilityCostComponentProgress::Complete,
+            // CR 107.4f + CR 118.3b: `ManaCostPayment::Paused` is returned only
+            // after the mana was spent, when a Phyrexian life payment paused on
+            // a replacement; the suffix it reports is still owed.
+            super::casting::ManaCostPayment::Paused {
+                remaining_life_payments,
+                ..
+            } => ManaAbilityCostComponentProgress::HandedToReplacement {
+                remaining_life_payments,
+                counter_removal: None,
+                choice_player,
+            },
+        });
     };
 
     // CR 106.6: The mana sub-cost of a mana ability is paid as part of an
@@ -3358,20 +5930,16 @@ fn pay_mana_sub_cost(
     // pool's restriction-blind `pay_cost`. Without this, activation-only
     // mana (e.g. Heart of Ramos) would silently pay through for the {R} half
     // of a hypothetical "{R}: Add {G}{G}" mana ability.
-    let (source_types, source_subtypes) = super::casting::activation_source_types(state, source_id);
-    // CR 605.1a: Mana abilities never carry a power-up tag, so `ability_tag` is
-    // `None` for the mana-ability sub-cost activation context.
-    let ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag: None,
-    };
+    let activation_context =
+        super::casting::activation_payment_context(state, source_id, ability_index);
+    let ctx = activation_context.as_payment_context();
     state.restamp_pool_pip_ids(player);
     let spent = select_cost_with_plan(
         &state.players[player.0 as usize].mana_pool,
         cost,
         hybrid_plan,
         Some(&ctx),
+        pins,
     )
     .map_err(|_| {
         EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
@@ -3382,12 +5950,17 @@ fn pay_mana_sub_cost(
         .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
         })?;
-    state.layers_dirty.mark_full();
+    // CR 106.4 + CR 613.1: Spending pool mana only changes continuous effects
+    // that read unspent mana (Omnath's "+1/+1 for each unspent green mana");
+    // re-evaluate layers only when one exists, like every other pool spend.
+    if mana_payment::has_unspent_mana_continuous_effects(state) {
+        state.layers_dirty.mark_full();
+    }
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.
     let _ = events;
-    Ok(())
+    Ok(ManaAbilityCostComponentProgress::Complete)
 }
 
 /// CR 605.3b: Complete a `PayManaAbilityMana` prompt by validating the
@@ -3406,28 +5979,161 @@ pub fn handle_pay_mana_ability_mana(
     }
     let mut updated = pending.clone();
     updated.chosen_mana_payment = Some(payment.to_vec());
-    advance_mana_ability_activation(state, updated, events)
+    continue_mana_ability_activation(state, updated, events)
 }
 
-fn any_number_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
-    match cost.as_ref()? {
-        AbilityCost::RemoveCounter {
-            count: REMOVE_COUNTER_COST_ANY_NUMBER,
-            counter_type,
-            target: None,
-            ..
-        } => Some(counter_type),
-        AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
+// CR 601.2b: every self-RemoveCounter mana-ability cost leaf whose count is
+// one of the chosen-count sentinels (`is_chosen_remove_counter_cost_count`),
+// in the SAME order `append_mana_ability_cost_components` flattens them for
+// payment. Named neutrally (not "any_number") because the sentinel set spans
+// two distinct rules with two distinct Oracle phrasings: literal "Remove X
+// counters" (CR 107.3a) and literal "any number of" counters (CR 107.1c).
+fn chosen_count_self_remove_counter_leaves(
+    cost: &Option<AbilityCost>,
+) -> Vec<(u32, &CounterMatch)> {
+    let Some(cost) = cost.as_ref() else {
+        return Vec::new();
+    };
+    let mut flattened = Vec::new();
+    append_mana_ability_cost_component_refs(cost, &mut flattened);
+    flattened
+        .into_iter()
+        .filter_map(|cost| match cost {
             AbilityCost::RemoveCounter {
-                count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                count,
                 counter_type,
                 target: None,
                 ..
-            } => Some(counter_type),
+            } if is_chosen_remove_counter_cost_count(*count) => Some((*count, counter_type)),
             _ => None,
-        }),
-        _ => None,
+        })
+        .collect()
+}
+
+// CR 118.3 + CR 601.2h: whether two `RemoveCounter` counter-type matchers can
+// draw from overlapping counters on the same object. `Any` overlaps every
+// type (including another `Any`); two `OfType` matchers overlap only when
+// they name the same counter type.
+fn counter_match_overlaps(a: &CounterMatch, b: &CounterMatch) -> bool {
+    match (a, b) {
+        (CounterMatch::Any, _) | (_, CounterMatch::Any) => true,
+        (CounterMatch::OfType(a), CounterMatch::OfType(b)) => a == b,
     }
+}
+
+// CR 118.3 + CR 601.2h: a player can't pay a cost without the resources to
+// pay it in full. When a composite cost carries more than one chosen-count
+// `RemoveCounter` leaf that draws from the SAME pool — two `OfType` leaves of
+// the same type, or two `Any` leaves (an `Any` mixed with a DIFFERENT
+// `OfType` leaf is refused earlier — `chosen_count_remove_counter_leaves_mix_any_with_typed`
+// — before this function is ever reached, since that specific pairing isn't
+// reservable this way) — the amount already announced for an EARLIER
+// overlapping leaf must be reserved before sizing a LATER leaf's prompt —
+// otherwise two leaves could each announce up to the object's full available
+// count against counters that can only be removed once, and payment would
+// silently underpay the later leaf via `remove_counters_for_mana_cost`'s
+// `available.min` clamp (which exists for the unrelated "remove all"
+// semantics, not to rescue an over-announced chosen count) instead of
+// refusing the impossible aggregate.
+fn reserved_overlapping_counter_count(
+    leaves: &[(u32, &CounterMatch)],
+    chosen: &[u32],
+    counter_type: &CounterMatch,
+) -> u32 {
+    leaves
+        .iter()
+        .zip(chosen.iter())
+        .filter(|(other, _)| counter_match_overlaps(other.1, counter_type))
+        .map(|(_, amount)| *amount)
+        .sum()
+}
+
+// CR 118.3 + CR 601.2h: the next chosen-count self-RemoveCounter leaf that
+// has not yet been answered, together with the maximum legal announcement
+// for it — the object's current count for that type MINUS whatever earlier,
+// overlapping leaves already reserved. `pending.chosen_counter_counts.len()`
+// is the count of leaves already answered, in flattened order, so the next
+// unanswered leaf is always at that index.
+fn next_unchosen_remove_counter_leaf_bounds(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+    already_chosen: &[u32],
+    chosen_x: Option<u32>,
+) -> Option<(u32, u32)> {
+    let leaves = chosen_count_self_remove_counter_leaves(cost);
+    let leaf_index = already_chosen.len();
+    let &(count, counter_type) = leaves.get(leaf_index)?;
+    let available = removable_counter_count_for_mana_cost(state, source_id, counter_type);
+    let reserved = reserved_overlapping_counter_count(&leaves, already_chosen, counter_type);
+    let mut max = available.saturating_sub(reserved);
+
+    // CR 107.3a + CR 107.3i + CR 118.3: every literal-X leaf uses the same
+    // announced X. Reserve enough counters for all still-unanswered X leaves
+    // sharing each pool before offering a count for this leaf.
+    let remaining_x = |matcher: &CounterMatch| {
+        leaves[leaf_index..]
+            .iter()
+            .filter(|(leaf_count, leaf_matcher)| {
+                *leaf_count == REMOVE_COUNTER_COST_X
+                    && counter_match_overlaps(leaf_matcher, matcher)
+            })
+            .count() as u32
+    };
+    if count == REMOVE_COUNTER_COST_X {
+        for &(leaf_count, matcher) in &leaves[leaf_index..] {
+            if leaf_count != REMOVE_COUNTER_COST_X {
+                continue;
+            }
+            let available = removable_counter_count_for_mana_cost(state, source_id, matcher);
+            let reserved = reserved_overlapping_counter_count(&leaves, already_chosen, matcher);
+            max = max.min(available.saturating_sub(reserved) / remaining_x(matcher));
+        }
+        if let Some(x) = chosen_x {
+            return Some((x, max.min(x)));
+        }
+    } else if let Some(x) = chosen_x {
+        max = max.saturating_sub(remaining_x(counter_type).saturating_mul(x));
+    }
+    Some((0, max))
+}
+
+// CR 601.2b: `append_mana_ability_cost_components` (used for payment) clones
+// each leaf; this borrowing twin walks the same recursion for read-only
+// lookups (the prompt gate and the literal-X classifier below) without
+// cloning every cost leaf on each check.
+fn append_mana_ability_cost_component_refs<'a>(
+    cost: &'a AbilityCost,
+    remaining: &mut Vec<&'a AbilityCost>,
+) {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            for cost in costs {
+                append_mana_ability_cost_component_refs(cost, remaining);
+            }
+        }
+        cost => remaining.push(cost),
+    }
+}
+
+// CR 107.3i: whether the next unanswered chosen-count self-RemoveCounter leaf
+// (the one `pending.chosen_counter_counts.len()` indexes) is the literal-X
+// sentinel rather than the "any number of" sentinel — only a literal-X leaf's
+// announced count also binds `PendingManaAbility::chosen_x`, since CR 107.3i
+// requires every instance of X on the object to share that one value, and
+// "any number of" has no X in its Oracle text at all.
+pub(crate) fn next_chosen_counter_leaf_is_literal_x(
+    state: &GameState,
+    pending: &PendingManaAbility,
+) -> bool {
+    let Ok(ability_def) = mana_ability_definition(state, pending) else {
+        return false;
+    };
+    chosen_count_self_remove_counter_leaves(&ability_def.cost)
+        .into_iter()
+        .map(|(count, _)| count)
+        .nth(pending.chosen_counter_counts.len())
+        == Some(REMOVE_COUNTER_COST_X)
 }
 
 fn removable_counter_count_for_mana_cost(
@@ -3439,30 +6145,33 @@ fn removable_counter_count_for_mana_cost(
         return 0;
     };
     match counter_type {
-        CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        CounterMatch::Any => {
+            u32::try_from(counter_type.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         CounterMatch::OfType(counter_type) => obj.counters.get(counter_type).copied().unwrap_or(0),
     }
 }
 
-fn remove_counters_for_mana_cost(
-    state: &mut GameState,
+/// CR 118.3 + CR 122.1 + CR 601.2h: plan a mana ability's remove-counter cost
+/// leaf as removals from `source_id`, before any counter moves. `Any` takes
+/// counters type by type, in `CounterType` order (issue #4878: the counter map
+/// is a default-RandomState HashMap, so its own order is per-process).
+fn plan_counter_removals_for_mana_cost(
+    state: &GameState,
     source_id: ObjectId,
     counter_type: &CounterMatch,
     mut count: u32,
-    events: &mut Vec<GameEvent>,
-) {
+) -> Vec<PendingCounterRemoval> {
     match counter_type {
-        CounterMatch::OfType(counter_type) => {
-            super::effects::counters::remove_counter_with_replacement(
-                state,
-                source_id,
-                counter_type.clone(),
-                count,
-                events,
-            );
-        }
+        CounterMatch::OfType(counter_type) => vec![PendingCounterRemoval {
+            object_id: source_id,
+            counter_type: counter_type.clone(),
+            count,
+        }],
         CounterMatch::Any => {
-            let counters: Vec<(CounterType, u32)> = state
+            let mut counters: Vec<(CounterType, u32)> = state
                 .objects
                 .get(&source_id)
                 .map(|obj| {
@@ -3472,22 +6181,23 @@ fn remove_counters_for_mana_cost(
                         .collect()
                 })
                 .unwrap_or_default();
+            counters.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut removals = Vec::new();
             for (counter_type, available) in counters {
                 if count == 0 {
                     break;
                 }
                 let to_remove = available.min(count);
                 if to_remove > 0 {
-                    super::effects::counters::remove_counter_with_replacement(
-                        state,
-                        source_id,
+                    removals.push(PendingCounterRemoval {
+                        object_id: source_id,
                         counter_type,
-                        to_remove,
-                        events,
-                    );
+                        count: to_remove,
+                    });
                     count -= to_remove;
                 }
             }
+            removals
         }
     }
 }
@@ -3517,12 +6227,16 @@ fn tap_creature_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
-    cost: &Option<AbilityCost>,
-) -> Option<(usize, Vec<ObjectId>)> {
+    ability: &AbilityDefinition,
+) -> Option<(usize, usize, Vec<ObjectId>, TapCreaturesSelectionMode)> {
+    let cost = &ability.cost;
     let (requirement, filter) = super::casting::find_tap_creatures_cost(cost.as_ref()?)?;
-    // CR 605.1a: mana-ability tap costs (Convoke-style) are fixed-count only.
+    // CR 605.1a: the aggregate form is never a valid mana-ability tap cost;
+    // fixed-count and X-sentinel forms both are. `fixed_count()` returning `None`
+    // is the aggregate rejection.
     let count = requirement.fixed_count()?;
-    let creatures = state
+    let mode = requirement.selection_mode();
+    let creatures: Vec<ObjectId> = state
         .battlefield
         .iter()
         .copied()
@@ -3540,23 +6254,67 @@ fn tap_creature_cost_choice(
                 state,
                 id,
                 filter,
-                &FilterContext::from_source(state, source_id),
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                &FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(ability.granting_object),
             )
         })
         .collect();
-    Some((count as usize, creatures))
+    // CR 107.3a: a `u32::MAX` count is the "Tap X untapped … you control"
+    // X-sentinel, whose payable range is [0, eligible] — never a literal floor of
+    // `u32::MAX`. A fixed (non-X) count degrades to `(count, count)`, preserving
+    // the CR 601.2h exact-payment requirement for every existing card.
+    let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, creatures.len());
+    Some((min_count, max_count, creatures, mode))
 }
 
 fn discard_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
-    cost: &Option<AbilityCost>,
+    ability: &AbilityDefinition,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = find_non_self_discard_cost(cost.as_ref()?)?;
-    let resolved = super::quantity::resolve_quantity(state, count, player, source_id).max(0);
-    let cards = super::casting::find_eligible_discard_targets(state, player, source_id, filter);
-    Some((resolved as usize, cards))
+    let cost = ability.cost.as_ref()?;
+    let payer = super::casting::DiscardCostPayer::Definition(ability.granting_object);
+    // Mana-ability interactive discard applies only to a player-CHOSEN discard leg; a
+    // non-Chosen discard (e.g. random / top-of-hand) is not a mid-activation card selection,
+    // so this interactive surfacing does not handle it. (Pre-existing scope; keeps blast
+    // radius nil.) `find_non_self_discard` is the single detector shared with the
+    // casting/activation path; the `Chosen` gate below is the ONLY mana-specific divergence.
+    let (_count, _filter, selection) = super::casting::find_non_self_discard(cost)?;
+    if selection != CardSelectionMode::Chosen {
+        return None;
+    }
+    // Single authority for the zero-count auto-pay + payability rules (CR 601.2h + CR 701.9a):
+    // delegate to `resolve_non_self_discard_requirement` so the mana path stays aligned with the
+    // activation path in one place. `Ok(Some)` => interactive selection; `Ok(None)` => zero-card
+    // discard paid by doing nothing (skip the leg). `Err` (fewer eligible cards than the nonzero
+    // count) is unreachable here because `cost_payability` already gated activation on hand size,
+    // so `unwrap_or_default()`'s `None` fallback is the correct "no selection to surface" result.
+    let (count, mut eligible) =
+        super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost, payer)
+            .unwrap_or_default()?;
+    if let Some((pending_spell, reserved)) = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.ability.controller == player)
+        .and_then(|pending| {
+            pending
+                .deferred_hand_discard_cost
+                .as_ref()
+                .and_then(|cost| {
+                    cost.reserved_count()
+                        .map(|count| (pending.object_id, count))
+                })
+        })
+    {
+        eligible.retain(|&id| id != pending_spell);
+        if eligible.len() < count + reserved {
+            return None;
+        }
+    }
+    Some((count, eligible))
 }
 
 /// CR 117.1 + CR 118.3: Match non-self `AbilityCost::Exile` shapes. Returns
@@ -3584,13 +6342,14 @@ fn exile_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
-    cost: &Option<AbilityCost>,
+    ability: &AbilityDefinition,
 ) -> Option<(usize, Zone, Vec<ObjectId>)> {
-    let (count, zone, filter) = find_exile_cost(cost.as_ref()?)?;
+    let (count, zone, filter) = find_exile_cost(ability.cost.as_ref()?)?;
+    let granter = ability.granting_object;
     if zone == Zone::Library {
         return None;
     }
-    let cards = eligible_exile_cost_objects(state, player, source_id, zone, filter, count)
+    let cards = eligible_exile_cost_objects(state, player, source_id, granter, zone, filter, count)
         .into_iter()
         .filter(|id| !deferred_spell_sacrifice_reserved(state, *id))
         .collect();
@@ -3617,6 +6376,7 @@ fn prepare_deterministic_exile_cost_selection(
         state,
         pending.player,
         pending.source_id,
+        None,
         Zone::Library,
         None,
         count,
@@ -3627,10 +6387,10 @@ fn prepare_deterministic_exile_cost_selection(
         ));
     }
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
     let mut updated = pending.clone();
     updated.chosen_exiled = chosen;
@@ -3646,35 +6406,71 @@ fn sacrifice_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
-    cost: &Option<AbilityCost>,
+    ability: &AbilityDefinition,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = super::casting::find_non_self_sacrifice_cost(cost.as_ref()?)?;
+    let sacrifice = super::casting::find_non_self_sacrifice_cost(ability.cost.as_ref()?)?;
+    let crate::types::ability::SacrificeRequirement::Count { count } = sacrifice.requirement else {
+        return None;
+    };
+    let filter = &sacrifice.target;
+    let granter = ability.granting_object;
+    // CR 118.10: a permanent committed to a pending spell sacrifice can't also
+    // pay this cost.
     let permanents =
-        super::casting::find_eligible_sacrifice_targets(state, player, source_id, filter);
+        super::casting::find_eligible_sacrifice_targets(state, player, source_id, granter, filter)
+            .into_iter()
+            .filter(|id| !deferred_spell_sacrifice_reserved(state, *id))
+            .collect();
     Some((count as usize, permanents))
 }
 
-fn find_non_self_discard_cost(
-    cost: &AbilityCost,
-) -> Option<(&crate::types::ability::QuantityExpr, Option<&TargetFilter>)> {
-    match cost {
-        AbilityCost::Discard {
-            count,
-            filter,
-            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
-        } => Some((count, filter.as_ref())),
-        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
-        _ => None,
-    }
+/// CR 601.2g + CR 605.3a: Whether paying this mana ability's cost asks the
+/// player to choose an object (a card to discard, a creature to tap, a card to
+/// exile, a permanent to sacrifice, evidence to collect), exactly the prompts
+/// `advance_mana_ability_activation` raises. Auto-tap never makes these choices.
+pub(crate) fn cost_requires_object_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> bool {
+    discard_cost_choice(state, player, source_id, ability).is_some()
+        || tap_creature_cost_choice(state, player, source_id, ability).is_some()
+        || exile_cost_choice(state, player, source_id, ability).is_some()
+        || sacrifice_cost_choice(state, player, source_id, ability).is_some()
+        || ability
+            .cost
+            .as_ref()
+            .and_then(collect_evidence_cost_amount)
+            .is_some()
 }
 
+/// CR 118.3 + CR 608.2h: The objects a mana ability's exile or sacrifice cost
+/// could be paid with, as its own choice prompts offer them: the candidates for
+/// the cost-paid object its yield may read. `None` when the cost chooses no
+/// such object.
+pub(crate) fn cost_paid_object_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<Vec<ObjectId>> {
+    exile_cost_choice(state, player, source_id, ability)
+        .map(|(_, _, cards)| cards)
+        .or_else(|| {
+            sacrifice_cost_choice(state, player, source_id, ability)
+                .map(|(_, permanents)| permanents)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tap_selected_creature_for_mana_cost(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
     chosen_id: ObjectId,
     filter: &TargetFilter,
+    granter: Option<ObjectIncarnationRef>,
     exclude_source: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
@@ -3697,7 +6493,10 @@ fn tap_selected_creature_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected creature does not satisfy mana ability cost".to_string(),
@@ -3716,6 +6515,7 @@ fn discard_selected_card_for_mana_cost(
     player: PlayerId,
     chosen_id: ObjectId,
     filter: Option<&TargetFilter>,
+    granter: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     let player_state = state
@@ -3732,7 +6532,10 @@ fn discard_selected_card_for_mana_cost(
             state,
             chosen_id,
             target_filter,
-            &FilterContext::from_source(state, source_id),
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            &FilterContext::from_source_with_controller(source_id, player)
+                .with_granting_object(granter),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Selected card does not satisfy mana ability discard cost".to_string(),
@@ -3751,6 +6554,7 @@ fn sacrifice_selected_permanent_for_mana_cost(
     player: PlayerId,
     chosen_id: ObjectId,
     filter: &TargetFilter,
+    granter: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<sacrifice::SacrificeOutcome, EngineError> {
     let obj = state.objects.get(&chosen_id).ok_or_else(|| {
@@ -3765,7 +6569,10 @@ fn sacrifice_selected_permanent_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
@@ -3804,6 +6611,23 @@ pub(crate) fn resume_waiting_for(
             player: outer_player.unwrap_or(mana_source_controller),
             convoke_mode,
         },
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => WaitingFor::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        },
+        // The window itself; `resume_mana_ability_root` re-enters the pending
+        // activation instead, after the caller's completed-frame triggers.
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => WaitingFor::ManaAbilityManaPayment {
+            player: pending_mana_ability.player,
+            pending_mana_ability,
+        },
         ManaAbilityResume::UnlessPayment {
             outer_player,
             cost,
@@ -3811,6 +6635,7 @@ pub(crate) fn resume_waiting_for(
             trigger_event,
             effect_description,
             remaining,
+            repeat,
         } => WaitingFor::UnlessPayment {
             player: outer_player.unwrap_or(mana_source_controller),
             cost: *cost,
@@ -3818,11 +6643,22 @@ pub(crate) fn resume_waiting_for(
             trigger_event,
             effect_description,
             remaining,
+            repeat,
         },
         ManaAbilityResume::EffectPayCost { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. }
-        | ManaAbilityResume::CompanionToHand { .. } => {
+        | ManaAbilityResume::CombatTaxPayment { .. }
+        | ManaAbilityResume::CompanionToHand { .. }
+        // CR 116.2c + CR 116.2i + CR 116.2b + CR 116.2m + CR 116.2h: like
+        // `CompanionToHand`, the pay-to-end, planar-die, turn-face-up,
+        // Room-unlock, and foretell special actions are resumed by
+        // `resume_mana_ability_root`'s named arms, never here.
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
+        | ManaAbilityResume::TurnFaceUp { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
     }
@@ -3830,25 +6666,273 @@ pub(crate) fn resume_waiting_for(
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ability::ChooseOneOfKind;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::casting_costs::AutoTapRowPolicy;
+    use crate::game::scenario::{GameScenario, P0};
+
+    use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// CR 601.2g + CR 605.3b: a mana ability's own sub-cost that funds an outer
+    /// automatic payment (`sub_cost_demand` present) never chooses its rows on
+    /// its own. With no live payment (its parent resumed after a pause) it plans
+    /// with every row; inside a live payment it takes that payment's policy; a
+    /// standalone sub-cost (no outer demand) decides. Board: Arena of Glory and a
+    /// Mountain fund a `{R}` sub-cost. Every row exerts Arena (its `{R}{R}` row,
+    /// funded by the Mountain); deciding taps one land and leaves Arena unexerted.
+    #[test]
+    fn outer_payment_sub_cost_never_decides_its_rows_alone() {
+        let exerted = |demand: Option<mana_payment::ColorDemand>,
+                       active: Option<AutoTapRowPolicy>| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let arena = scenario
+                .add_land_from_oracle(
+                    P0,
+                    "Arena of Glory",
+                    "{T}: Add {R}.\n{R}, {T}, Exert this land: Add {R}{R}.",
+                )
+                .id();
+            scenario.add_basic_land(P0, ManaColor::Red);
+            let funded = scenario
+                .add_artifact_from_oracle(P0, "Sub-cost Witness", "{R}, {T}: Add {C}{C}.")
+                .id();
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            state.active_auto_tap_row_policy = active;
+            let sub_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            };
+            let progress = pay_mana_sub_cost(
+                state,
+                funded,
+                P0,
+                Some(0),
+                &sub_cost,
+                None,
+                &[],
+                &mut Vec::new(),
+                &HashSet::new(),
+                demand.as_ref(),
+                None,
+            )
+            .expect("reach: the {R} sub-cost is paid");
+            assert!(matches!(
+                progress,
+                ManaAbilityCostComponentProgress::Complete
+            ));
+            assert_eq!(
+                state.active_auto_tap_row_policy, active,
+                "the sub-cost payment restores the enclosing window"
+            );
+            state
+                .transient_continuous_effects
+                .iter()
+                .filter(|effect| effect.affected == TargetFilter::SpecificObject { id: arena })
+                .any(|effect| {
+                    effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::CantUntap
+                            }
+                        )
+                    })
+                })
+        };
+
+        assert!(
+            !exerted(None, None),
+            "a standalone sub-cost decides and avoids the exert"
+        );
+        assert!(
+            exerted(Some([0; 5]), None),
+            "reach: an outer payment's sub-cost with no live payment plans with every row"
+        );
+        assert!(
+            !exerted(
+                Some([0; 5]),
+                Some(AutoTapRowPolicy::WithoutAvoidableDrawbacks)
+            ),
+            "inside a live payment the sub-cost takes that payment's policy"
+        );
+    }
+
+    /// **CR 605.4a — the acceptance decision is THREADED, not re-derived.**
+    ///
+    /// `is_triggered_mana_ability` answers CR 605.1b about a
+    /// *classification-time* graph, and it is deliberately raw: a target
+    /// anywhere makes it false. `is_resolving_triggered_mana` answers a
+    /// different question at a different time — "is the occurrence currently
+    /// executing an accepted triggered mana ability?" — because
+    /// `resolve_ability_chain` may materialize an engine resolution-context
+    /// referent into the overloaded `targets` vector partway through the very
+    /// resolution whose status is being asked about. CR 605.4a says that
+    /// occurrence stays stackless; re-asking the raw predicate would say
+    /// otherwise and hand the body to the ordinary prompt path.
+    ///
+    /// Rows:
+    ///
+    /// * **(a) no marker, qualifying graph** ⇒ true, delegated;
+    /// * **(b) no marker, targeted graph** ⇒ false, delegated. (a)+(b) are the
+    ///   two-sided reach guard that the delegation is real rather than a
+    ///   constant;
+    /// * **(c) no marker, wrong firing event** ⇒ false, so the ambient
+    ///   `current_trigger_event` is genuinely consulted;
+    /// * **(d) marker live, targeted graph** ⇒ **true** — the delta. This is
+    ///   exactly the clone shape (b) rejects, so the two rows differ only by
+    ///   the marker;
+    /// * **(e) marker cleared again** ⇒ (b)'s answer returns, proving the
+    ///   marker is scope-shaped rather than sticky.
+    ///
+    /// REVERT-PROBE: delete the marker short-circuit so the helper always
+    /// delegates ⇒ (d) flips to false while (a), (b), (c) and (e) still pass.
+    /// The inverse probe — returning `true` whenever the marker is `None` — is
+    /// caught by (b) and (c).
+    #[test]
+    fn the_accepted_occurrence_marker_is_the_resolution_time_classification_authority() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        let mana_effect = || Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+        let untargeted = ResolvedAbility::new(mana_effect(), vec![], ObjectId(1), PlayerId(0));
+        // The post-injection clone: identical body, but the resolver has
+        // written a context referent into the overloaded `targets` vector.
+        let injected = ResolvedAbility::new(
+            mana_effect(),
+            vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: ManaType::Colorless,
+            source_id: ObjectId(1),
+            tap_state: ManaTapState::default(),
+        });
+
+        // (a) + (b): both truth values are reachable through delegation.
+        assert!(
+            is_resolving_triggered_mana(&state, &untargeted),
+            "(a) with no accepted occurrence live this must BE the raw classifier"
+        );
+        assert!(
+            !is_resolving_triggered_mana(&state, &injected),
+            "(b) CR 605.1b at classification time: a target in the graph rejects"
+        );
+
+        // (c) the ambient firing event is genuinely part of the delegation.
+        let restore_event = state.current_trigger_event.take();
+        assert!(
+            !is_resolving_triggered_mana(&state, &untargeted),
+            "(c) CR 605.1b(b): no qualifying firing event, no triggered mana ability"
+        );
+        state.current_trigger_event = restore_event;
+
+        // (d) THE DELTA: inside an accepted occurrence the same rejected clone
+        // is still the accepted occurrence's own body.
+        let node = RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(1));
+        state.active_rules_execution_node = Some(node);
+        state.active_accepted_triggered_mana_node = Some(node);
+        assert!(
+            is_resolving_triggered_mana(&state, &injected),
+            "(d) CR 605.4a: a resolution-context referent injected AFTER acceptance \
+             does not make an already-accepted occurrence begin using the stack"
+        );
+
+        // (e) the marker is scope-shaped: restoring it restores (b)'s answer.
+        state.active_accepted_triggered_mana_node = None;
+        state.active_rules_execution_node = None;
+        assert!(
+            !is_resolving_triggered_mana(&state, &injected),
+            "(e) outside the occurrence the raw classification-time answer returns"
+        );
+    }
+
+    /// Matrix rows 15c + 20 — CR 605.1a classification is unchanged. This reader
+    /// also bypasses `Effect::target_filter()`.
+    ///
+    /// CR 605.1a: a mana ability "doesn't require a target." Any declared role —
+    /// recipient OR count source, context-ref or not — means the ability names a
+    /// target and must use the stack. Writing this with `surfaced_filters()`
+    /// would wrongly PROMOTE the ten context-ref cards to mana abilities, letting
+    /// them resolve without the stack. The `target: None` positive is the reach
+    /// guard: a blanket `return false` would satisfy every negative below.
+    #[test]
+    fn is_mana_ability_classification_unchanged_for_every_fixture_role() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+
+        let mk = |target| {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target,
+                },
+            )
+        };
+
+        for (name, role) in mana_fixture_roles() {
+            assert!(
+                !is_mana_ability(&mk(Some(role))),
+                "{name}: a declared mana role means the ability targets (CR 605.1a)                  and must use the stack"
+            );
+        }
+
+        // Jeska's Will shape: a COUNT-SOURCE-only role is still a target.
+        assert!(
+            !is_mana_ability(&mk(Some(
+                crate::types::ability::ManaTargetRole::CountSource {
+                    count_source: crate::types::ability::TargetFilter::Player,
+                }
+            ))),
+            "a count-source-only mana ability targets and is not a mana ability"
+        );
+
+        // Reach guard / positive: an unqualified mana ability IS one.
+        assert!(
+            is_mana_ability(&mk(None)),
+            "an unqualified mana ability (Cabal Coffers class) is still a mana ability"
+        );
+    }
+
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
-        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
-        ManaProduction, MultiTargetSpec, ObjectScope, PlayerScope, QuantityExpr, QuantityRef,
-        SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-        REMOVE_COUNTER_COST_ANY_NUMBER,
+        DevotionColors, Duration, Effect, EffectKind, FilterProp, LinkedExileScope,
+        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        REMOVE_COUNTER_COST_X,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLink, ExileLinkKind};
-    use crate::types::identifiers::CardId;
+    use crate::types::game_state::{ExileLink, ExileLinkKind, PendingReplacement};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
     };
+    use crate::types::proposed_event::{DrawEventStage, ProposedEvent, ReplacementId};
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -3865,6 +6949,218 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    #[test]
+    fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                stage: DrawEventStage::Individual,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: ObjectId(7),
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
+        });
+        let live_prompt = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(7),
+            effect_kind: EffectKind::Discard,
+            up_to: false,
+            unless_filter: None,
+            discard_frame: None,
+        };
+        state.waiting_for = live_prompt.clone();
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, None);
+        assert_eq!(
+            state.waiting_for, live_prompt,
+            "a post-delivery substitute has no ordering player and retains its live prompt"
+        );
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, Some(PlayerId(0)));
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    candidate_count: 1,
+                    ..
+                }
+            ),
+            "an explicit pre-delivery ordering player still opens the replacement choice"
+        );
+    }
+
+    #[test]
+    fn targetless_mana_reflexive_produces_mana_now_and_waits_on_stack() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let source = create_object(
+            &mut state,
+            CardId(9901),
+            player,
+            "Rubble Rouser fixture".to_string(),
+            Zone::Battlefield,
+        );
+        let mut reflexive = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+        );
+        reflexive.condition = Some(AbilityCondition::WhenYouDo);
+        reflexive.player_scope = Some(PlayerFilter::Opponent);
+        let mana = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        })
+        .sub_ability(reflexive);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(mana);
+        let opponent_life = state.players[1].life;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("activate targetless reflexive mana ability");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.players[1].life, opponent_life);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            state.stack[0].kind,
+            crate::types::game_state::StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                crate::types::actions::GameAction::PassPriority,
+            )
+            .expect("pass priority to resolve reflexive");
+            safety -= 1;
+        }
+        assert_eq!(state.players[1].life, opponent_life - 2);
+    }
+
+    #[test]
+    fn scoped_mana_ability_tap_event_aggregates_recipient_dependent_production() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(9900),
+            PlayerId(0),
+            "Opponent Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+        for (index, (controller, color)) in [
+            (PlayerId(0), ManaColor::Green),
+            (PlayerId(1), ManaColor::Blue),
+            (PlayerId(2), ManaColor::Red),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let land = create_object(
+                &mut state,
+                CardId(9901 + index as u64),
+                controller,
+                format!("{color:?} Land"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            Arc::make_mut(&mut state.objects.get_mut(&land).unwrap().abilities).push(
+                make_mana_ability(ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                }),
+            );
+        }
+        let ability = make_mana_ability(ManaProduction::OpponentLandColors {
+            count: QuantityExpr::Fixed { value: 1 },
+        })
+        .player_scope(PlayerFilter::Opponent);
+        let mut events = Vec::new();
+
+        resolve_mana_ability(&mut state, source, PlayerId(0), &ability, &mut events, None).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.players[1].mana_pool.total(), 1);
+        assert_eq!(state.players[2].mana_pool.total(), 1);
+        let recipient_colors = [
+            state.players[1].mana_pool.unit_at(0).unwrap().color,
+            state.players[2].mana_pool.unit_at(0).unwrap().color,
+        ];
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::TappedForMana {
+                player_id: PlayerId(0),
+                source_id,
+                produced,
+                ..
+            } if *source_id == source
+                && *produced == recipient_colors
+        )));
+        let mut recipient_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ManaAbilityProduced {
+                    player_id,
+                    source_id,
+                    produced,
+                    ..
+                } if *source_id == source => Some((*player_id, produced.clone())),
+                _ => None,
+            })
+            .collect();
+        recipient_events.sort_by_key(|(player, _)| *player);
+        assert_eq!(
+            recipient_events,
+            vec![
+                (PlayerId(1), vec![recipient_colors[0]]),
+                (PlayerId(2), vec![recipient_colors[1]]),
+            ],
+            "each recipient receives one distinct aggregate ManaAbilityProduced event"
+        );
     }
 
     fn gemstone_caverns_mana_ability() -> AbilityDefinition {
@@ -3938,6 +7234,1355 @@ mod tests {
         }
     }
 
+    /// Skirk Prospector: "Sacrifice a Goblin: Add {R}". The sacrifice target is a
+    /// *type* filter, not `SelfRef`, so the source survives and stays renewable.
+    fn skirk_prospector_mana_ability() -> AbilityDefinition {
+        make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))),
+            1,
+        )))
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // CR 605.1a (2026 amendment) — the library-movement criterion.
+    //
+    // "An activated ability is a mana ability if ... its cost and effect don't
+    // move any card to or from a library."
+    //
+    // Rows V1-V13 of the plan's verification matrix. Every negative below is
+    // paired with a positive reach-guard in the SAME test, built from the SAME
+    // builder with the minimal one-node delta, so a fixture that never reaches
+    // the seam cannot pass vacuously.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// `{T}: Add {C}` — the minimal mana ability every row below perturbs.
+    fn colorless_tap_mana_ability() -> AbilityDefinition {
+        make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        })
+    }
+
+    /// `{T}: Add {C}` with the root activation cost replaced (CR 602.1a).
+    fn mana_ability_with_cost(cost: AbilityCost) -> AbilityDefinition {
+        colorless_tap_mana_ability().cost(cost)
+    }
+
+    /// A bare chain link carrying `effect` and no cost.
+    fn link(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+    }
+
+    /// `{T}: Add {C}` with `effect` chained as the `sub_ability` — an
+    /// instruction this ability follows during its own resolution (CR 608.2c).
+    fn mana_ability_with_sub_effect(effect: Effect) -> AbilityDefinition {
+        let mut def = colorless_tap_mana_ability();
+        def.sub_ability = Some(Box::new(link(effect)));
+        def
+    }
+
+    /// `{T}: Add {C}` with a fully-specified chain link.
+    fn mana_ability_with_sub(sub: AbilityDefinition) -> AbilityDefinition {
+        let mut def = colorless_tap_mana_ability();
+        def.sub_ability = Some(Box::new(sub));
+        def
+    }
+
+    fn draw_one() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn surveil_one() -> Effect {
+        Effect::Surveil {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn scry_one() -> Effect {
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn exile_cost(zone: Option<Zone>) -> AbilityCost {
+        AbilityCost::Exile {
+            count: 1,
+            zone,
+            filter: None,
+        }
+    }
+
+    fn pay_life_one() -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// A `CreateDelayedTrigger` wrapping `effect` — CR 603.7a, a separate
+    /// ability that resolves later (CR 603.3).
+    fn delayed(effect: Effect) -> Effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            effect: Box::new(link(effect)),
+            uses_tracked_set: false,
+        }
+    }
+
+    /// V1 — CR 605.1a + CR 701.17a: a **root** cost-side `Mill` disqualifies.
+    /// Millikin / Deranged Assistant: `{T}, Mill a card: Add {C}`.
+    #[test]
+    fn mill_cost_is_not_a_mana_ability() {
+        let millikin = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(
+            !is_mana_ability(&millikin),
+            "CR 605.1a: a Mill cost moves a card from a library"
+        );
+
+        // Reach-guard, same builder, one-node delta: swap Mill for PayLife.
+        let paid = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, pay_life_one()],
+        });
+        assert!(
+            is_mana_ability(&paid),
+            "the identical shape with a non-library cost IS a mana ability"
+        );
+    }
+
+    /// V2 — cost recursion reaches `Composite`, `OneOf`, and `PerCounter.base`.
+    /// The last two are exactly what `types::ability::cost_has_component` cannot
+    /// see, which is why this criterion has its own recursive predicate.
+    #[test]
+    fn nested_cost_shapes_reach_the_library_predicate() {
+        let composite = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+                AbilityCost::Mill { count: 1 },
+            ],
+        };
+        let one_of = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        AbilityCost::Mill { count: 1 },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+            ],
+        };
+        let per_counter = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mill { count: 1 }),
+        };
+        for (label, cost) in [
+            ("Composite", composite),
+            ("OneOf nested in Composite", one_of),
+            ("PerCounter base", per_counter),
+        ] {
+            assert!(
+                !is_mana_ability(&mana_ability_with_cost(cost)),
+                "{label}: nested Mill must disqualify"
+            );
+        }
+
+        // Reach-guards: the same three shapes with PayLife in place of Mill.
+        let composite_ok = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+                pay_life_one(),
+            ],
+        };
+        let one_of_ok = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        pay_life_one(),
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+            ],
+        };
+        let per_counter_ok = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(pay_life_one()),
+        };
+        for (label, cost) in [
+            ("Composite", composite_ok),
+            ("OneOf nested in Composite", one_of_ok),
+            ("PerCounter base", per_counter_ok),
+        ] {
+            assert!(
+                is_mana_ability(&mana_ability_with_cost(cost)),
+                "{label}: the non-library twin must stay a mana ability"
+            );
+        }
+    }
+
+    /// V2b — a cost on a **nested chain link** disqualifies. A root-only
+    /// application of the cost criterion passes all three of these wrongly,
+    /// because a `Mill` cost is not an `Effect` and no effect-shaped visitor can
+    /// ever see it (CR 605.1a "its cost and effect" + CR 608.2c).
+    #[test]
+    fn mill_cost_on_a_chain_link_is_not_a_mana_ability() {
+        let mill_link = || link(Effect::NoOp).cost(AbilityCost::Mill { count: 1 });
+        let paid_link = || link(Effect::NoOp).cost(pay_life_one());
+
+        let mut sub = colorless_tap_mana_ability();
+        sub.sub_ability = Some(Box::new(mill_link()));
+        assert!(!is_mana_ability(&sub), "sub_ability link cost");
+
+        let mut els = colorless_tap_mana_ability();
+        els.else_ability = Some(Box::new(mill_link()));
+        assert!(!is_mana_ability(&els), "else_ability link cost");
+
+        let mut modal = colorless_tap_mana_ability();
+        modal.mode_abilities = vec![mill_link()];
+        assert!(!is_mana_ability(&modal), "mode_abilities link cost");
+
+        // Reach-guards: the same three links with a non-library cost. These
+        // prove the walker reaches nested links at all, so the negatives above
+        // are prunes of a real read rather than a miss.
+        let mut sub_ok = colorless_tap_mana_ability();
+        sub_ok.sub_ability = Some(Box::new(paid_link()));
+        assert!(is_mana_ability(&sub_ok), "sub_ability link reached");
+
+        let mut else_ok = colorless_tap_mana_ability();
+        else_ok.else_ability = Some(Box::new(paid_link()));
+        assert!(is_mana_ability(&else_ok), "else_ability link reached");
+
+        let mut modal_ok = colorless_tap_mana_ability();
+        modal_ok.mode_abilities = vec![paid_link()];
+        assert!(is_mana_ability(&modal_ok), "mode_abilities link reached");
+    }
+
+    /// V2c — an `unless_pay` cost disqualifies. CR 118.12a routes the "unless
+    /// [a player does something]" form into CR 118.12, which supplies "the
+    /// action [do something] is a cost, **paid when the spell or ability
+    /// resolves**" — so this arrives under CR 605.1a's *effect* limb via
+    /// CR 608.2c, not under the CR 602.1a *activation cost* limb. Bare CR 118.12
+    /// is the wrong citation for an "unless" form.
+    #[test]
+    fn unless_pay_mill_cost_is_not_a_mana_ability() {
+        let mill_unless = crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::Mill { count: 1 },
+            payer: TargetFilter::Opponent,
+        };
+        let paid_unless = crate::types::ability::UnlessPayModifier {
+            cost: pay_life_one(),
+            payer: TargetFilter::Opponent,
+        };
+
+        assert!(
+            !is_mana_ability(&colorless_tap_mana_ability().unless_pay(mill_unless.clone())),
+            "CR 118.12a -> CR 118.12: an unless-pay Mill is a cost paid at resolution"
+        );
+        assert!(
+            is_mana_ability(&colorless_tap_mana_ability().unless_pay(paid_unless.clone())),
+            "reach-guard: the unless_pay leg is walked"
+        );
+
+        // Nested: an `unless_pay` on a chain link is reached too.
+        assert!(!is_mana_ability(&mana_ability_with_sub(
+            link(Effect::NoOp).unless_pay(mill_unless)
+        )));
+        assert!(is_mana_ability(&mana_ability_with_sub(
+            link(Effect::NoOp).unless_pay(paid_unless)
+        )));
+    }
+
+    /// V2e — the three **conditional** cost arms read their typed zone fields.
+    ///
+    /// This is the highest-consequence surface in the criterion, and it is the
+    /// only one that fails DANGEROUS. Every other conditional fails safe (an
+    /// ability wrongly keeps mana-ability status; zero cards affected today).
+    /// These three fail by STRIPPING status: writing
+    /// `AbilityCost::Exile { .. } => true` — dropping the zone read, a one-token
+    /// slip — strips mana-ability status from 13 shipping cards: Elvish Spirit
+    /// Guide, Simian Spirit Guide, Food Chain, Black Tulip, Cadaverous Bloom,
+    /// Ether, Jack-o'-Lantern, Mirrored Lotus, Molt Tender, Rubble Rouser,
+    /// Sunken Palace, Thornvault Forager, Titans' Nest.
+    ///
+    /// Both mutation directions are covered, and which assertion catches which
+    /// is not symmetric:
+    ///  - the **library** assertions fail under the `=> false` mutation;
+    ///  - the **non-library** assertions fail under the `=> true` mutation.
+    #[test]
+    fn cost_axis_conditional_arms_read_their_typed_zone_fields() {
+        // Library == disqualifying. Revert-failing for `=> false`.
+        assert!(!is_mana_ability(&mana_ability_with_cost(exile_cost(Some(
+            Zone::Library
+        )))));
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::SelfRef,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 1,
+                zone: Zone::Library,
+            }
+        )));
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
+                from_zone: Some(Zone::Library),
+            }
+        )));
+
+        // Non-library == still a mana ability. Revert-failing for `=> true`,
+        // the strip-status direction, and therefore the PRIMARY guard for the
+        // dangerous mutation — not optional decoration.
+        //
+        // `zone: None` is asserted EXPLICITLY and is the modal corpus value
+        // (Black Tulip / Ether / Food Chain / Mirrored Lotus). It is `false`
+        // because the classifier is static and cannot decide a missing zone on
+        // EITHER payment path: `cost_payability::exile_cost_effective_zone` is
+        // the authority for non-self costs only, and the `TargetFilter::SelfRef`
+        // path short-circuits before it and resolves to the source's own current
+        // zone (game state, which CR 605.2 forbids this classifier from
+        // reading).
+        for zone in [
+            None,                    // black tulip / ether / food chain / mirrored lotus
+            Some(Zone::Hand),        // elvish spirit guide / simian spirit guide
+            Some(Zone::Graveyard),   // jack-o'-lantern / molt tender / titans' nest
+            Some(Zone::Battlefield), // no shipping card, but the inferred default
+        ] {
+            assert!(
+                is_mana_ability(&mana_ability_with_cost(exile_cost(zone))),
+                "Exile {{ zone: {zone:?} }} must KEEP mana-ability status"
+            );
+        }
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::SelfRef,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 1,
+                zone: Zone::Graveyard,
+            }
+        )));
+        // Grinning Ignus: `from_zone: None` means BATTLEFIELD.
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
+                from_zone: None,
+            }
+        )));
+    }
+
+    /// V3 — effect-side at the root `sub_ability` link. Chromatic Sphere:
+    /// `{1}, {T}, Sacrifice this artifact: Add one mana of any color. Draw a
+    /// card.`
+    #[test]
+    fn draw_in_sub_ability_is_not_a_mana_ability() {
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+        // Reach-guard: the identical fixture with Draw replaced by NoOp.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(Effect::NoOp)));
+    }
+
+    /// V4 — effect-side at a **nested** `sub_ability` (depth >= 2). Deleting the
+    /// recursive chain arm makes this pass wrongly.
+    #[test]
+    fn draw_at_nested_sub_ability_depth_is_not_a_mana_ability() {
+        let mut inner = link(Effect::NoOp);
+        inner.sub_ability = Some(Box::new(link(draw_one())));
+        assert!(!is_mana_ability(&mana_ability_with_sub(inner)));
+
+        let mut inner_ok = link(Effect::NoOp);
+        inner_ok.sub_ability = Some(Box::new(link(Effect::NoOp)));
+        assert!(is_mana_ability(&mana_ability_with_sub(inner_ok)));
+    }
+
+    /// V5 — effect-side at an `else_ability` link.
+    #[test]
+    fn draw_in_else_branch_is_not_a_mana_ability() {
+        let mut def = colorless_tap_mana_ability();
+        def.else_ability = Some(Box::new(link(draw_one())));
+        assert!(!is_mana_ability(&def));
+
+        let mut ok = colorless_tap_mana_ability();
+        ok.else_ability = Some(Box::new(link(Effect::NoOp)));
+        assert!(is_mana_ability(&ok));
+    }
+
+    /// V5b — effect-side in a `mode_abilities` entry.
+    #[test]
+    fn draw_in_a_mode_is_not_a_mana_ability() {
+        let mut def = colorless_tap_mana_ability();
+        def.mode_abilities = vec![link(draw_one())];
+        assert!(!is_mana_ability(&def));
+
+        let mut ok = colorless_tap_mana_ability();
+        ok.mode_abilities = vec![link(Effect::NoOp)];
+        assert!(is_mana_ability(&ok));
+    }
+
+    /// V6 — the criterion does NOT narrow ordinary mana abilities. This guards
+    /// the over-narrowing direction across every shape the corpus actually
+    /// carries, including a real `Exile`-cost card.
+    #[test]
+    fn library_criterion_does_not_narrow_ordinary_mana_abilities() {
+        // Plain `{T}: Add {C}`.
+        assert!(is_mana_ability(&colorless_tap_mana_ability()));
+        // "Sacrifice a Goblin: Add {R}" — the existing builder.
+        assert!(is_mana_ability(&skirk_prospector_mana_ability()));
+        // Loot, the Pathfinder: `Exhaust — {G}, {T}: Add three mana of any one
+        // color.` The only mana ability in the corpus carrying an `ability_tag`.
+        let loot = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 3 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        assert!(is_mana_ability(&loot));
+
+        // Elvish Spirit Guide: "Exile this creature from your hand: Add {G}."
+        // NOTE the wording — "this **creature**", not "this card"; "Exile this
+        // card from your hand" is SIMIAN Spirit Guide. Same AST shape either
+        // way: `Exile { zone: Some(Hand), filter: Some(SelfRef) }`.
+        let spirit_guide = |zone: Option<Zone>| {
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            })
+            .cost(AbilityCost::Exile {
+                count: 1,
+                zone,
+                filter: Some(TargetFilter::SelfRef),
+            })
+        };
+        assert!(
+            is_mana_ability(&spirit_guide(Some(Zone::Hand))),
+            "Elvish Spirit Guide must remain a mana ability"
+        );
+        // Minimal one-field delta, so the pair isolates the zone read itself.
+        assert!(
+            !is_mana_ability(&spirit_guide(Some(Zone::Library))),
+            "the same cost with zone=Library is disqualifying"
+        );
+
+        // Paired negative for each positive shape: add a Mill cost.
+        for def in [
+            colorless_tap_mana_ability(),
+            skirk_prospector_mana_ability(),
+            loot,
+        ] {
+            let base_cost = def.cost.clone().unwrap_or(AbilityCost::Tap);
+            let milled = def.cost(AbilityCost::Composite {
+                costs: vec![base_cost, AbilityCost::Mill { count: 1 }],
+            });
+            assert!(
+                !is_mana_ability(&milled),
+                "a Mill cost disqualifies every shape"
+            );
+        }
+    }
+
+    /// V7 — `Scry` does NOT disqualify, but `Surveil` does. The two keyword
+    /// actions differ on exactly the axis under test, which is why they must
+    /// never share an arm: CR 701.22a scry puts cards on the bottom or top of
+    /// **your library** (every card starts and ends in the same library), while
+    /// CR 701.25a surveil can put them **into your graveyard**.
+    ///
+    /// A real shipping card depends on this: The Secret Lair, `{T}, Say the
+    /// secret word: Add one mana of any color. Scry 1. You gain 1 life.`
+    #[test]
+    fn scry_does_not_disqualify_but_surveil_does() {
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(scry_one())),
+            "CR 701.22a: scry reorders WITHIN a library — The Secret Lair"
+        );
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(surveil_one())),
+            "CR 701.25a: surveil can put cards into a graveyard"
+        );
+    }
+
+    /// V8 — library-adjacent effects that move nothing to or from a library.
+    #[test]
+    fn library_reorder_reveal_and_other_decks_do_not_disqualify() {
+        let benign = [
+            // CR 701.24a: "randomize the cards WITHIN it".
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            // CR 701.20b: "Revealing a card doesn't cause it to leave the zone
+            // it's in."
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                count: 1,
+            },
+            // CR 701.30a: the top card goes to the bottom or stays on top — of
+            // its own library either way.
+            Effect::Clash,
+            // CR 901.4: plane and phenomenon cards remain in the COMMAND ZONE.
+            Effect::ArrangePlanarDeckTop {
+                count: QuantityExpr::Fixed { value: 2 },
+                keep_on_top: QuantityExpr::Fixed { value: 1 },
+            },
+            // CR 701.51b + CR 717.2: the Attraction deck is in the command zone.
+            Effect::OpenAttractions { count: 1 },
+        ];
+        for effect in benign {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{effect:?} moves no card to or from a library"
+            );
+        }
+        // Paired negative in the same test: a Mill link in the same position.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
+            }
+        )));
+    }
+
+    /// V9 — the registered-later boundary holds at a chain-link root. Barbed
+    /// Sextant / Brass Infiniscope put their draw inside a delayed triggered
+    /// ability (CR 603.7a), which goes on the stack later as its own object
+    /// (CR 603.3), so it is not an instruction THIS ability follows (CR 608.2c).
+    #[test]
+    fn delayed_trigger_payload_is_not_this_abilitys_effect() {
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(delayed(draw_one()))),
+            "CR 603.7a: a delayed trigger's payload is a separate ability"
+        );
+        // Reach-guard: Chromatic Sphere — the SAME Draw, not wrapped.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(draw_one())),
+            "the unwrapped Draw in the same position DOES disqualify"
+        );
+    }
+
+    /// V9b — the boundary holds at DEPTH >= 1. This is the central falsifier: a
+    /// design that prunes only at chain-link roots and then delegates to an
+    /// unscoped walker reaches the delayed trigger's payload through any inline
+    /// branch carrier and wrongly disqualifies.
+    #[test]
+    fn boundary_holds_under_an_inline_choice_carrier() {
+        let wrapped = delayed(draw_one());
+
+        let carriers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(wrapped.clone())],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ),
+            (
+                "FlipCoin win branch",
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
+                    win_effect: Some(Box::new(link(wrapped.clone()))),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "RollDie result branch",
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 20,
+                        effect: Box::new(link(wrapped.clone())),
+                    }],
+                    modifier: None,
+                },
+            ),
+            (
+                "RevealFromHand on_decline",
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Controller,
+                    on_decline: Some(Box::new(link(wrapped.clone()))),
+                },
+            ),
+        ];
+        for (label, carrier) in &carriers {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(carrier.clone())),
+                "{label}: the boundary must hold one level down"
+            );
+        }
+
+        // `AbilityCost::EffectCost` re-enters the effect walk from the cost
+        // axis, so the scope must be threaded there too.
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::EffectCost {
+                effect: Box::new(wrapped),
+            }
+        )));
+
+        // Reach-guards: the same carriers with a BARE Draw, no wrapper. These
+        // prove each carrier is descended at all, so the positives above are
+        // boundary prunes rather than unreached subtrees.
+        let bare_carriers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(draw_one())],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ),
+            (
+                "FlipCoin win branch",
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
+                    win_effect: Some(Box::new(link(draw_one()))),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "RollDie result branch",
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 20,
+                        effect: Box::new(link(draw_one())),
+                    }],
+                    modifier: None,
+                },
+            ),
+            (
+                "RevealFromHand on_decline",
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Controller,
+                    on_decline: Some(Box::new(link(draw_one()))),
+                },
+            ),
+        ];
+        for (label, carrier) in &bare_carriers {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(carrier.clone())),
+                "{label}: reach-guard — the carrier IS descended"
+            );
+        }
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::EffectCost {
+                effect: Box::new(draw_one()),
+            }
+        )));
+    }
+
+    /// V9c — the boundary covers the replacement family, the emblem, and the
+    /// token's granted abilities. Each REGISTERS something rather than moving a
+    /// card during this resolution: CR 614.1 primary (a replacement applying to
+    /// a later event or to another object is NOT a self-replacement effect under
+    /// CR 614.15, so CR 605.1a's carve-out does not reach it), CR 114.1 for the
+    /// emblem, CR 111.1 for the token, CR 611.2 for
+    /// a granted continuous effect.
+    #[test]
+    fn replacement_emblem_and_token_payloads_are_not_this_abilitys_effect() {
+        fn granting_static(effect: Effect) -> StaticDefinition {
+            let mut def = StaticDefinition::new(StaticMode::Continuous);
+            def.modifications = vec![ContinuousModification::GrantAbility {
+                definition: Box::new(link(effect)),
+            }];
+            def
+        }
+
+        let wrapped: Vec<(&str, Effect)> = vec![
+            (
+                "CreateDrawReplacement",
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(link(draw_one())),
+                },
+            ),
+            (
+                "CreateEmblem",
+                Effect::CreateEmblem {
+                    statics: vec![granting_static(draw_one())],
+                    triggers: vec![],
+                },
+            ),
+            (
+                "GenericEffect granted ability",
+                Effect::GenericEffect {
+                    static_abilities: vec![granting_static(draw_one())],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
+            ),
+            (
+                "Token granted ability",
+                Effect::Token {
+                    name: "Test".to_string(),
+                    power: crate::types::ability::PtValue::Fixed(1),
+                    toughness: crate::types::ability::PtValue::Fixed(1),
+                    types: vec!["Creature".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    supertypes: vec![],
+                    static_abilities: vec![granting_static(Effect::Mill {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                        destination: Zone::Graveyard,
+                        position: crate::types::ability::LibraryPosition::Top,
+                    })],
+                    enter_with_counters: vec![],
+                },
+            ),
+        ];
+        for (label, effect) in &wrapped {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label}: the registered payload belongs to a later resolution \
+                 or to another object"
+            );
+        }
+
+        // Reach-guards: the unwrapped mover in the same chain position.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
+            }
+        )));
+    }
+
+    /// V9d — inline carriers are STILL descended (guards over-pruning). These
+    /// are branches of this resolution (CR 608.2c), not separate abilities.
+    #[test]
+    fn inline_carriers_are_still_descended() {
+        let movers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(draw_one()), link(Effect::NoOp)],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ),
+            (
+                "FlipCoin lose branch",
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
+                    win_effect: None,
+                    lose_effect: Some(Box::new(link(draw_one()))),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "SeparateIntoPiles chosen pile",
+                Effect::SeparateIntoPiles {
+                    partition_subject: crate::types::ability::VoterScope::AllPlayers,
+                    object_filter: TargetFilter::Controller,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: Box::new(link(draw_one())),
+                    pile_source: crate::types::ability::PileSource::Battlefield,
+                    unchosen_pile_effect: None,
+                },
+            ),
+            (
+                "Vote outcome template",
+                Effect::Vote {
+                    choices: vec!["a".to_string(), "b".to_string()],
+                    per_choice_effect: vec![
+                        Box::new(link(draw_one())),
+                        Box::new(link(Effect::NoOp)),
+                    ],
+                    starting_with: ControllerRef::You,
+                    voter_scope: crate::types::ability::VoterScope::AllPlayers,
+                    tally_mode: crate::types::ability::VoteTally::PerVote,
+                    subject: crate::types::ability::VoteSubject::Named,
+                    visibility: crate::types::ability::VoteVisibility::Open,
+                },
+            ),
+        ];
+        for (label, effect) in &movers {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label}: an inline branch is part of THIS resolution"
+            );
+        }
+
+        // Reach-guards: the same carriers with NoOp in place of Draw.
+        let benign: Vec<Effect> = vec![
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+            Effect::FlipCoins {
+                flips: crate::types::ability::CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(link(Effect::NoOp))),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::SeparateIntoPiles {
+                partition_subject: crate::types::ability::VoterScope::AllPlayers,
+                object_filter: TargetFilter::Controller,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(link(Effect::NoOp)),
+                pile_source: crate::types::ability::PileSource::Battlefield,
+                unchosen_pile_effect: None,
+            },
+            Effect::Vote {
+                choices: vec!["a".to_string(), "b".to_string()],
+                per_choice_effect: vec![Box::new(link(Effect::NoOp)), Box::new(link(Effect::NoOp))],
+                starting_with: ControllerRef::You,
+                voter_scope: crate::types::ability::VoterScope::AllPlayers,
+                tally_mode: crate::types::ability::VoteTally::PerVote,
+                subject: crate::types::ability::VoteSubject::Named,
+                visibility: crate::types::ability::VoteVisibility::Open,
+            },
+        ];
+        for effect in benign {
+            assert!(is_mana_ability(&mana_ability_with_sub_effect(effect)));
+        }
+    }
+
+    /// V10 — CR 603.12 reflexive links are excluded. Shaun & Rebecca, Agents:
+    /// `{T}: Add {C}. When you do, mill two cards.` A reflexive triggered
+    /// ability follows the rules for delayed triggered abilities (CR 603.7) and
+    /// goes on the stack the next time a player would receive priority
+    /// (CR 603.3) — the CR 603.12 exception is about WHEN the trigger condition
+    /// is checked, not about when the ability resolves.
+    #[test]
+    fn reflexive_when_you_do_link_is_a_separate_ability() {
+        let mill_two = || {
+            link(Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
+            })
+        };
+
+        let reflexive = mill_two().condition(AbilityCondition::WhenYouDo);
+        assert!(
+            is_mana_ability(&mana_ability_with_sub(reflexive)),
+            "CR 603.12 -> CR 603.7 -> CR 603.3: a 'when you do' link is a \
+             SEPARATE triggered ability"
+        );
+
+        // Reach-guard: the same chain with no condition at all.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub(mill_two())),
+            "an unconditioned Mill link is part of this resolution"
+        );
+
+        // And the guard must key on `WhenYouDo` ALONE. "If you do, ..." is
+        // CR 608.2c — one instruction conditional on another within the SAME
+        // resolution — and must keep being descended. Widening the guard to the
+        // engine's broader reflexive predicate (which unions the two because it
+        // answers the skip-on-decline question) fails this assertion.
+        let if_you_do = mill_two().condition(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub(if_you_do)),
+            "an 'if you do' rider is CR 608.2c, not CR 603.12"
+        );
+    }
+
+    /// V10b — the reflexive boundary holds on the COST axis too, because both
+    /// walkers consult ONE authority (`scope_prunes_nested_ability`). Removing
+    /// that call from the cost walker fails this row while leaving V10 green.
+    #[test]
+    fn reflexive_link_cost_is_also_excluded() {
+        let reflexive_cost = link(Effect::NoOp)
+            .cost(AbilityCost::Mill { count: 1 })
+            .condition(AbilityCondition::WhenYouDo);
+        assert!(
+            is_mana_ability(&mana_ability_with_sub(reflexive_cost)),
+            "the reflexive link's cost is the SEPARATE ability's cost"
+        );
+
+        // Reach-guard: the identical link without the condition (V2b's shape),
+        // proving the cost walker reaches nested links at all — so the positive
+        // above is a prune, not a miss.
+        let plain_cost = link(Effect::NoOp).cost(AbilityCost::Mill { count: 1 });
+        assert!(!is_mana_ability(&mana_ability_with_sub(plain_cost)));
+    }
+
+    /// V11 — `Effect::Mana`'s `grants` are deliberately NOT descended. Gilanra,
+    /// Caller of Wirewood: `{T}: Add {G}. When you spend this mana to cast a
+    /// spell with mana value 6 or greater, draw a card.` The rider is a
+    /// `ManaSpellGrant::TriggerOnSpend` — CR 603.3, a separate triggered ability
+    /// that fires when the mana is LATER spent, in a different resolution.
+    ///
+    /// `Effect::Mana` is the root of 100% of this classifier's inputs, so a
+    /// "helpful" descent into `grants` here would misclassify Gilanra and
+    /// Path of Ancestry. A future descent fails this test.
+    #[test]
+    fn mana_spend_grant_rider_is_a_separate_ability() {
+        let gilanra = {
+            let mut def = make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            });
+            if let Effect::Mana { grants, .. } = &mut *def.effect {
+                grants.push(crate::types::mana::ManaSpellGrant::TriggerOnSpend {
+                    filter: TargetFilter::Any,
+                    ability: Box::new(link(draw_one())),
+                });
+            } else {
+                panic!("make_mana_ability must build an Effect::Mana");
+            }
+            def
+        };
+        assert!(
+            is_mana_ability(&gilanra),
+            "CR 603.3: a TriggerOnSpend rider is a separate triggered ability"
+        );
+
+        // Reach-guard: the SAME Draw moved from `grants` to a plain chain link.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+    }
+
+    /// V12 — the zone-conditional effect arms read their typed fields, and
+    /// `Effect::Dig` is UNCONDITIONAL.
+    ///
+    /// `DigSource` is **not** a library-vs-not axis: under `PriorLook` the cards
+    /// are still in `player.library` (the look-only pass takes an iterator slice
+    /// and returns without removing them), so the library is the origin under
+    /// BOTH variants. A `source ==` test here — or a test on
+    /// `destination`/`rest_destination` — reproduces the same error on a
+    /// different field.
+    #[test]
+    fn zone_conditional_arms_read_their_typed_fields() {
+        fn dig(source: crate::types::ability::DigSource) -> Effect {
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(1),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
+                reveal: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                source,
+            }
+        }
+        fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin,
+                destination,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }
+        }
+        fn search(source_zones: Vec<Zone>) -> Effect {
+            Effect::SearchLibrary {
+                source_zones,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+                split: None,
+            }
+        }
+        fn counter(
+            zone: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        ) -> Effect {
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: zone,
+            }
+        }
+        fn pay_cost(cost: AbilityCost) -> Effect {
+            Effect::PayCost {
+                cost,
+                scale: None,
+                payer: TargetFilter::Controller,
+            }
+        }
+
+        // Library-touching configurations disqualify.
+        let disqualifying: Vec<(&str, Effect)> = vec![
+            ("SearchLibrary[Library]", search(vec![Zone::Library])),
+            (
+                "ChangeZone destination=Library",
+                change_zone(None, Zone::Library, TargetFilter::SelfRef),
+            ),
+            (
+                "ChangeZone origin=Library",
+                change_zone(Some(Zone::Library), Zone::Graveyard, TargetFilter::SelfRef),
+            ),
+            (
+                "ChangeZone origin=None, zone in the filter",
+                change_zone(
+                    None,
+                    Zone::Battlefield,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Library,
+                        },
+                    ])),
+                ),
+            ),
+            (
+                "Counter countered_spell_zone=Library",
+                counter(Some(
+                    crate::types::ability::SpellStackToGraveyardReplacement::Library {
+                        position: crate::types::ability::LibraryPosition::Top,
+                    },
+                )),
+            ),
+            ("PayCost{Mill}", pay_cost(AbilityCost::Mill { count: 1 })),
+            (
+                "Dig{Library}",
+                dig(crate::types::ability::DigSource::Library),
+            ),
+            (
+                "Dig{PriorLook}",
+                dig(crate::types::ability::DigSource::PriorLook),
+            ),
+        ];
+        for (label, effect) in &disqualifying {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label} moves a card to or from a library"
+            );
+        }
+
+        // Each CONDITIONAL arm with its non-library value — the reach-guards
+        // that prove the arms are evaluated rather than hardcoded.
+        let keeps: Vec<(&str, Effect)> = vec![
+            ("SearchLibrary[Graveyard]", search(vec![Zone::Graveyard])),
+            (
+                "ChangeZone graveyard->battlefield",
+                change_zone(Some(Zone::Graveyard), Zone::Battlefield, TargetFilter::Any),
+            ),
+            ("Counter{None}", counter(None)),
+            ("PayCost{PayLife}", pay_cost(pay_life_one())),
+            // For `Dig` the reach-guard is `Scry` — a genuine look-at-a-library
+            // WITHOUT moving anything, which is the axis Dig actually differs
+            // on. Round 2 used `Dig{PriorLook} => true` as this guard; that
+            // pinned the wrong answer and is deliberately NOT reinstated.
+            ("Scry", scry_one()),
+        ];
+        for (label, effect) in &keeps {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label} must keep mana-ability status"
+            );
+        }
+    }
+
+    /// V12b — exactly ONE of `SpellStackToGraveyardReplacement`'s four carriers
+    /// is read, and the asymmetry is the design.
+    ///
+    /// CR 605.1a scopes the criterion to "**its** cost and effect", so the
+    /// question is not "does this field mention a library" but "whose resolution
+    /// does the movement happen in".
+    ///  - `Counter.countered_spell_zone` IS read. CR 608.2c cites Memory Lapse's
+    ///    exact text ("Counter target spell. If that spell is countered this
+    ///    way, put it on top of its owner's library instead of into its owner's
+    ///    graveyard") as its OWN worked example of instructions this ability
+    ///    follows; CR 701.6a puts the countered spell in the graveyard during
+    ///    this resolution and the rider redirects that same event. Per CR 614.15
+    ///    it is a SELF-replacement effect, which CR 605.1a's closing sentence
+    ///    explicitly does NOT exclude.
+    ///  - `FreeCastFromZones.graveyard_replacement` and
+    ///    `CastingPermission::ExileWithAltCost.graveyard_replacement` are NOT
+    ///    read. Each replaces the CAST SPELL'S OWN LATER RESOLUTION at its
+    ///    CR 608.2n graveyard step ("as the final part of an instant or sorcery
+    ///    spell's resolution"). That later resolution belongs to a different
+    ///    object, so the rider is not this ability's own effect, so it is not a
+    ///    self-replacement effect under CR 614.15, so CR 605.1a's closing
+    ///    sentence says do not take it into account.
+    ///
+    /// Making the three arms symmetric fails this test, which is exactly its
+    /// purpose. The configuration has ZERO cards today, so no census, coverage
+    /// report, or card-level test can see it — this row is what makes the
+    /// verdict durable against a later round re-deriving it.
+    #[test]
+    fn only_counter_reads_the_stack_to_graveyard_replacement() {
+        use crate::types::ability::{
+            CastingPermission, LibraryPosition, SpellStackToGraveyardReplacement,
+        };
+
+        let library_rider = || SpellStackToGraveyardReplacement::Library {
+            position: LibraryPosition::Top,
+        };
+        let exile_with_alt_cost = |graveyard_replacement: Option<
+            SpellStackToGraveyardReplacement,
+        >| CastingPermission::ExileWithAltCost {
+            source_id: None,
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cost: ManaCost::generic(0),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement,
+            enters_with_counter: None,
+            enters_with_modifications: Default::default(),
+            mana_spend_permission: None,
+            cast_cost_modifier: None,
+        };
+        let grant = |graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
+            Effect::GrantCastingPermission {
+                permission: exile_with_alt_cost(graveyard_replacement),
+                target: TargetFilter::Any,
+                grantee: crate::types::ability::PermissionGrantee::AbilityController,
+            }
+        };
+        let free_cast =
+            |zones: Vec<Zone>, graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
+                Effect::FreeCastFromZones {
+                    count: Some(1),
+                    max_total_mv: None,
+                    filter: TargetFilter::Any,
+                    zones,
+                    graveyard_replacement,
+                }
+            };
+
+        // (1) `Counter`'s rider IS read: this ability's own resolution moves the
+        // card from the stack to a library.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: Some(library_rider()),
+            }
+        )));
+        // ... and its positive control: the same node with no rider.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: None,
+            }
+        )));
+
+        // (2) `FreeCastFromZones` reads `zones` ONLY.
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(free_cast(
+                vec![Zone::Graveyard],
+                Some(library_rider())
+            ))),
+            "graveyard_replacement is a rider on the CAST SPELL's later resolution"
+        );
+        // Positive control via the `zones` leg — proves the arm is reached and
+        // genuinely discriminating rather than hardcoded `false`.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(free_cast(
+                vec![Zone::Library],
+                None
+            ))),
+            "the `zones` leg IS read"
+        );
+
+        // (3) `GrantCastingPermission` is not descended: the same answer with
+        // and without the field, proving it is genuinely not consulted rather
+        // than accidentally agreeing.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(grant(Some(
+            library_rider()
+        )))));
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(grant(None))));
+
+        // `GrantCastingPermission` is UNCONDITIONALLY false, so no input to it
+        // can ever produce a `false` — both halves of the pair above assert
+        // `true` and would also pass on a malformed fixture that never reached
+        // the walked tree at all. This same-position control closes that hole:
+        // a library mover at the identical depth MUST disqualify.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(
+                Effect::PutAtLibraryPosition {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
+                    arranger: None,
+                }
+            )),
+            "positive control: the chain position the grant occupies IS walked"
+        );
+    }
+
+    /// V13 — `is_renewable_mana_ability` is NOT narrowed by the library
+    /// criterion. The divergence IS the assertion: a Millikin stops being a
+    /// rules mana ability (CR 605.1a criterion 4) while remaining a manabase
+    /// permanent, which is why the development predicate composes on
+    /// `produces_mana_on_activation` and not on `is_mana_ability`.
+    #[test]
+    fn renewable_predicate_survives_the_library_criterion() {
+        let millikin = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(
+            !is_mana_ability(&millikin),
+            "CR 605.1a criterion 4: Millikin's Mill cost disqualifies it"
+        );
+        assert!(
+            is_renewable_mana_ability(&millikin),
+            "but Millikin is still a standing manabase permanent — composing \
+             the development predicate on the rules predicate would delete it \
+             from manabase development and mulligan keep_tier"
+        );
+    }
+
+    /// Row 4a — CR 701.21: one-shot self-sacrificing mana sources are NOT
+    /// renewable. Gold is the constraint discriminator: its cost is a **bare**
+    /// `Sacrifice` (not wrapped in a `Composite` like Treasure's), so a
+    /// `Composite`-only implementation passes the Treasure assertion and fails
+    /// this one. Driven through the production `predefined_token_abilities`
+    /// materialization path, which is what actually lands on a live `GameObject`.
+    #[test]
+    fn treasure_and_gold_are_not_renewable_mana_abilities() {
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        let gold = crate::game::effects::token::predefined_token_abilities("Gold");
+        assert_eq!(treasure.len(), 1);
+        assert_eq!(gold.len(), 1);
+
+        // Positive control: both ARE mana abilities. This proves the exclusion
+        // comes from the sacrifice clause and not from a failure to classify as
+        // a mana ability at all.
+        assert!(is_mana_ability(&treasure[0]));
+        assert!(is_mana_ability(&gold[0]));
+
+        assert!(
+            !is_renewable_mana_ability(&treasure[0]),
+            "Treasure ({{T}}, Sacrifice) is a one-shot source, not development"
+        );
+        assert!(
+            !is_renewable_mana_ability(&gold[0]),
+            "Gold's cost is a BARE Sacrifice — a Composite-only match misses it"
+        );
+    }
+
+    /// Row 4b — CR 701.21a: sacrificing *another* permanent leaves the source on
+    /// the battlefield, so a sac-outlet mana ability stays renewable. A
+    /// filter-agnostic implementation (reusing `cost_includes_sacrifice` /
+    /// `ManaSourcePenalty::Sacrifices`) fails this row.
+    #[test]
+    fn non_self_sacrifice_mana_outlet_stays_renewable() {
+        assert!(
+            is_renewable_mana_ability(&skirk_prospector_mana_ability()),
+            "\"Sacrifice a Goblin: Add {{R}}\" keeps its source — still development"
+        );
+
+        // Paired negative: the identical shape with a SelfRef filter is excluded.
+        let self_sac = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        )));
+        assert!(!is_renewable_mana_ability(&self_sac));
+    }
+
+    /// A self-returning mana source (Grinning Ignus class) is a one-shot
+    /// conversion from the standing manabase, whether its return cost is bare
+    /// or composed with a tap cost.
+    #[test]
+    fn self_return_to_hand_mana_source_is_not_renewable() {
+        let bare_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        });
+        assert!(!is_renewable_mana_ability(&bare_return));
+
+        let composite_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::ReturnToHand {
+                    count: 1,
+                    filter: Some(TargetFilter::SelfRef),
+                    from_zone: None,
+                },
+            ],
+        });
+
+        assert!(!is_renewable_mana_ability(&composite_return));
+    }
+
+    /// Row 4c — Powerstone and Treasure are both artifact tokens differing only in
+    /// cost shape (bare `Tap` vs `Composite{Tap, Sacrifice}`), so this proves the
+    /// discriminator is the sacrifice clause rather than the token-ness.
+    #[test]
+    fn powerstone_is_a_renewable_mana_ability() {
+        let powerstone = crate::game::effects::token::predefined_token_abilities("Powerstone");
+        assert_eq!(powerstone.len(), 1);
+        assert!(is_renewable_mana_ability(&powerstone[0]));
+    }
+
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
         let def = make_mana_ability(ManaProduction::Fixed {
@@ -3971,6 +8616,185 @@ mod tests {
         .cost(AbilityCost::Tap);
         let non_mana_json = serde_json::to_value(&non_mana).unwrap();
         assert!(non_mana_json.get("is_mana_ability").is_none());
+    }
+
+    /// Doubling Cube, "{3}, {T}: Double the amount of each type of unspent mana
+    /// you have." — the shape the parser produces for it (checked against the
+    /// parser in `doubling_cube_is_a_mana_ability`).
+    fn doubling_cube_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Double {
+                target_kind: DoubleTarget::ManaPool { color: None },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(3),
+                },
+                AbilityCost::Tap,
+            ],
+        })
+    }
+
+    /// The first activated ability of a creature built from verbatim Oracle text.
+    fn parsed_creature_activated_ability(
+        name: &str,
+        power: i32,
+        toughness: i32,
+        oracle_text: &str,
+    ) -> AbilityDefinition {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_from_oracle(P0, name, power, toughness, oracle_text)
+            .id();
+        let runner = scenario.build();
+        runner.state().objects[&id]
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Activated)
+            .expect("an activated ability")
+            .clone()
+    }
+
+    /// K1 — CR 605.1a + CR 701.10f: doubling a pool's mana adds mana, the
+    /// ability has no target ("you" is a context reference), it is not a loyalty
+    /// ability and moves nothing to or from a library — so Doubling Cube's
+    /// ability is a mana ability, and the serialized UI flag says so.
+    #[test]
+    fn doubling_cube_is_a_mana_ability() {
+        let cube = doubling_cube_ability();
+        let mut scenario = GameScenario::new();
+        let parsed_id = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Doubling Cube",
+                "{3}, {T}: Double the amount of each type of unspent mana you have.",
+            )
+            .id();
+        let runner = scenario.build();
+        let parsed = runner.state().objects[&parsed_id]
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Activated)
+            .expect("Doubling Cube's activated ability");
+        assert_eq!(parsed.effect, cube.effect, "the parser's effect shape");
+        assert_eq!(parsed.cost, cube.cost, "the parser's cost shape");
+
+        assert!(is_mana_ability(&cube));
+        assert!(is_mana_ability(parsed));
+        assert_eq!(
+            serde_json::to_value(&cube).unwrap()["is_mana_ability"],
+            serde_json::json!(true)
+        );
+        // Reach guard: the existing root-`Effect::Mana` admission still holds.
+        assert!(is_mana_ability(&colorless_tap_mana_ability()));
+    }
+
+    /// K1 negatives — CR 605.1a "could add mana" + CR 701.10e: doubling counters
+    /// adds no mana. Ferrafor, Young Yew's verbatim Oracle text.
+    #[test]
+    fn counter_doubling_is_not_a_mana_ability() {
+        let ferrafor = parsed_creature_activated_ability(
+            "Ferrafor, Young Yew",
+            4,
+            7,
+            "When Ferrafor enters, create a number of 1/1 green Saproling creature tokens \
+             equal to the number of counters among creatures target player controls.\n\
+             {T}: Double the number of each kind of counter on target creature.",
+        );
+        assert!(
+            matches!(
+                *ferrafor.effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+            ),
+            "reach: Ferrafor's ability is a counter doubling: {:?}",
+            ferrafor.effect
+        );
+        assert!(!is_mana_ability(&ferrafor));
+    }
+
+    /// K1 synthetic negatives (no printed card has these shapes): a pool doubling
+    /// that declares a target fails CR 605.1a "doesn't require a target"; one
+    /// with a loyalty cost fails "it's not a loyalty ability". Each is the Cube
+    /// shape with one node changed, so the paired positive is
+    /// `doubling_cube_is_a_mana_ability`.
+    #[test]
+    fn targeted_or_loyalty_pool_doubling_is_not_a_mana_ability() {
+        let mut targeted = doubling_cube_ability();
+        *targeted.effect = Effect::Double {
+            target_kind: DoubleTarget::ManaPool { color: None },
+            target: TargetFilter::Player,
+        };
+        assert!(!is_mana_ability(&targeted));
+
+        let loyalty = doubling_cube_ability().cost(AbilityCost::Loyalty { amount: 1 });
+        assert!(!is_mana_ability(&loyalty));
+
+        assert!(is_mana_ability(&doubling_cube_ability()), "reach guard");
+    }
+
+    /// K2 — CR 701.10f: a pool doubling's yield is the pool already present, so
+    /// it is not a standing manabase source; the development predicate keeps its
+    /// pre-admission value.
+    #[test]
+    fn doubling_cube_is_not_a_renewable_mana_ability() {
+        let cube = doubling_cube_ability();
+        assert!(
+            is_mana_ability(&cube),
+            "reach: Doubling Cube is a mana ability"
+        );
+        assert!(!is_renewable_mana_ability(&cube));
+        assert!(is_renewable_mana_ability(&colorless_tap_mana_ability()));
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        assert!(!is_renewable_mana_ability(&treasure[0]));
+    }
+
+    /// K3 — CR 701.10f: `is_mana_source_ability` keeps the pre-admission
+    /// mana-ability verdict for every input — Doubling Cube is a mana ability but
+    /// adds no mana by itself; a Treasure is one mana available now.
+    #[test]
+    fn doubling_cube_is_not_a_mana_source_ability() {
+        let cube = doubling_cube_ability();
+        assert!(
+            is_mana_ability(&cube),
+            "reach: Doubling Cube is a mana ability"
+        );
+        assert!(!is_mana_source_ability(&cube));
+        assert!(is_mana_source_ability(&colorless_tap_mana_ability()));
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        assert!(is_mana_source_ability(&treasure[0]));
+
+        // CR 605.1a "doesn't require a target": Jetfire, Ingenious Scientist's
+        // targeted `Effect::Mana` is neither.
+        let jetfire = parsed_creature_activated_ability(
+            "Jetfire, Ingenious Scientist",
+            3,
+            4,
+            "More Than Meets the Eye {3}{U} (You may cast this card converted for {3}{U}.)\n\
+             Flying\n\
+             Remove one or more +1/+1 counters from among artifacts you control: Target \
+             player adds that much {C}. This mana can't be spent to cast nonartifact spells. \
+             Convert Jetfire.",
+        );
+        assert!(
+            matches!(
+                *jetfire.effect,
+                Effect::Mana {
+                    target: Some(_),
+                    ..
+                }
+            ),
+            "reach: Jetfire's ability is a targeted mana effect: {:?}",
+            jetfire.effect
+        );
+        assert!(!is_mana_ability(&jetfire));
+        assert!(!is_mana_source_ability(&jetfire));
     }
 
     #[test]
@@ -4588,7 +9412,7 @@ mod tests {
         let pool = &state.players[0].mana_pool;
         assert_eq!(pool.total(), 2);
         // Every produced unit must carry the Elemental restriction.
-        for unit in &pool.mana {
+        for unit in pool.units() {
             assert_eq!(
                 unit.restrictions,
                 vec![
@@ -4606,17 +9430,11 @@ mod tests {
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
-            keyword_kinds: vec![],
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            has_x_in_cost: false,
-            is_face_down: false,
-            cant_spend_mana: false,
+            ..Default::default()
         };
         let goblin_ctx = PaymentContext::Spell(&goblin_spell);
         let mut pool_clone = pool.clone();
-        let first_color = pool_clone.mana[0].color;
+        let first_color = pool_clone.unit_at(0).unwrap().color;
         assert!(
             pool_clone.spend_for(first_color, &goblin_ctx).is_none(),
             "Flamebraider mana must not be spendable on non-Elemental spells"
@@ -4626,13 +9444,7 @@ mod tests {
         let elemental_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elemental".to_string()],
-            keyword_kinds: vec![],
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            has_x_in_cost: false,
-            is_face_down: false,
-            cant_spend_mana: false,
+            ..Default::default()
         };
         let elemental_ctx = PaymentContext::Spell(&elemental_spell);
         assert!(
@@ -4649,6 +9461,7 @@ mod tests {
             source_types: &non_elemental_types,
             source_subtypes: &non_elemental_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         let mut pool_clone2 = pool.clone();
         assert!(
@@ -4663,6 +9476,7 @@ mod tests {
             source_types: &non_elemental_types,
             source_subtypes: &elemental_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         assert!(
             pool_clone2
@@ -4904,7 +9718,7 @@ mod tests {
             1,
             "with Power-Plant absent the And condition is false and only the base \
              Add {{C}} fires; pool = {:?}",
-            state.players[0].mana_pool.mana,
+            state.players[0].mana_pool,
         );
     }
 
@@ -4974,7 +9788,7 @@ mod tests {
             action,
             crate::types::actions::GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == source
         )));
 
@@ -4983,6 +9797,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("hand-zone self-exile mana ability should activate");
@@ -5047,6 +9862,13 @@ mod tests {
     /// (`Unsupported mana ability sub-cost: Mill`), so the readiness simulation
     /// in `can_activate_mana_ability_now` failed and the ability was never
     /// offered — the user could not tap Millikin for mana.
+    ///
+    /// **Premise note (CR 605.1a 2026 amendment):** the *ability-level* mill
+    /// mechanics asserted below remain correct, but Millikin's ability is no
+    /// longer reachable *as a mana ability* — its `Mill` cost moves a card from a
+    /// library, so `is_mana_ability` now returns `false` for it. This test still
+    /// passes because it drives the cost payer directly and never consults the
+    /// classifier; see `mill_cost_is_not_a_mana_ability` for the classification.
     #[test]
     fn millikin_mills_a_card_and_adds_colorless() {
         let mut state = GameState::new_two_player(42);
@@ -5173,6 +9995,136 @@ mod tests {
             Some(1),
             "the -0/-1 counter cost was paid onto Wall of Roots"
         );
+    }
+
+    /// CR 605.3b + CR 605.1a: the delegation gate refuses a draw `EffectCost`,
+    /// whose replacement-choice pause leaves no `Cast` root for the mana-ability
+    /// cursor, and keeps admitting every component that existing mana abilities
+    /// delegate (the kinds named in the predicate's doc).
+    #[test]
+    fn self_contained_mana_subcost_refuses_a_draw_effect_cost() {
+        let draw_cost = AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        assert!(
+            !is_self_contained_mana_subcost(&draw_cost),
+            "a draw cost can pause without an activation root, so it must not be delegated"
+        );
+
+        let delegated_kinds = [
+            AbilityCost::Untap,
+            AbilityCost::Exert,
+            AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
+            },
+            // Wall of Roots: put-counter-on-self.
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: CounterType::PowerToughness {
+                        power: 0,
+                        toughness: -1,
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            },
+            // Braid of Fire class: fixed mana produced as a cost.
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                }),
+            },
+            // Pentad Prism class: a fixed self-RemoveCounter.
+            AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                target: None,
+                selection: crate::types::ability::CounterCostSelection::SingleObject,
+            },
+        ];
+        for cost in &delegated_kinds {
+            assert!(
+                is_self_contained_mana_subcost(cost),
+                "{cost:?} must stay delegated to the single cost authority"
+            );
+        }
+    }
+
+    /// CR 605.1a + CR 605.3b: an `Add {G}` ability whose cost draws a card is not
+    /// a mana ability, and a direct resolution through the mana fast path refuses
+    /// the draw component instead of delegating it. The library and mana pool are
+    /// untouched, so nothing was paid or produced.
+    #[test]
+    fn a_draw_effect_cost_is_refused_on_the_mana_ability_path() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Draw-Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        });
+        assert!(
+            !is_mana_ability(&def),
+            "CR 605.1a: a draw cost moves a card from a library"
+        );
+
+        let library_before = state.players[0].library.len();
+        assert_eq!(
+            library_before, 1,
+            "reach guard: the draw has a card to take"
+        );
+        let mut events = Vec::new();
+        let result = resolve_mana_ability(&mut state, id, PlayerId(0), &def, &mut events, None);
+
+        assert!(
+            result.is_err(),
+            "the draw component must be refused, not delegated"
+        );
+        assert_eq!(state.players[0].library.len(), library_before);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
     }
 
     /// CR 107.14: Aether Hub class — `{T}, Pay {E}: Add {C}`. The `PayEnergy`
@@ -5573,6 +10525,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: treasure,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("token Treasure should activate into a color prompt");
@@ -5619,6 +10572,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Treasure should activate into a color prompt");
@@ -5696,16 +10650,23 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: ids[0],
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Treasure should activate into a color prompt");
 
         // O(N!) pre-fix blows far past this; O(N) post-fix stays well under it.
+        // The bound carries slack for parallel-schedule noise: MANA_READINESS_CALLS
+        // is a bare process-global, so any CONCURRENTLY-running test that exercises
+        // mana readiness increments it between this test's store(0) and load. The
+        // detector's discrimination survives the slack — the O(N!) regression this
+        // guards against produces >= 6! = 720 calls at N = 6, 15x over this bound,
+        // while observed schedule pollution is single-digit.
         assert!(
-            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 4 * N,
+            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 8 * N,
             "readiness calls must be linear in N (got {}, bound {})",
             MANA_READINESS_CALLS.load(Ordering::Relaxed),
-            4 * N
+            8 * N
         );
 
         let WaitingFor::ChooseManaColor {
@@ -5760,29 +10721,638 @@ mod tests {
         );
     }
 
-    /// CR 601.2g: A `Composite{{Tap, Sacrifice}}` mana cost (Treasure) is NOT
-    /// conclusively decided by the cheap gate, so it must still simulate — the
-    /// must-simulate path is preserved (clone >= 1) even though it is activatable.
-    /// A(b). The self-sacrifice is always a legal target, so this does NOT build a
-    /// cost that passes `is_payable` yet fails simulation.
+    /// CR 604.1: Make the O(1) `StaticModePresence` index precise, then zero the
+    /// perf counters. **Every self-sacrifice cheap-gate assertion below must go
+    /// through this.** A fresh `GameState` seeds
+    /// `StaticModePresence::all_present()`, so `legality_simulation_is_redundant`'s
+    /// `CantPayCost` presence guard declines the fast path until the layers
+    /// pipeline has flushed — a test that skips the flush measures an inert fast
+    /// path and its `== 0` clone assertion fails. Production always flushes first
+    /// (`public_state::finalize_rules_state` -> `finalize_display_state`), so this
+    /// mirrors production rather than papering over it.
+    fn flush_and_reset(state: &mut GameState) {
+        crate::game::layers::flush_layers(state);
+        crate::game::perf_counters::reset();
+    }
+
+    /// CR 701.21a: the bare self-sacrifice cost component — "Sacrifice this".
+    fn self_sacrifice_cost() -> AbilityCost {
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+    }
+
+    /// CR 111.10a: Treasure's `{T}, Sacrifice this token` cost tree.
+    fn tap_and_self_sacrifice_cost() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sacrifice_cost()],
+        }
+    }
+
+    fn any_one_color(count: QuantityExpr) -> ManaProduction {
+        ManaProduction::AnyOneColor {
+            count,
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        }
+    }
+
+    /// Attach one activated mana ability (`cost` -> `produced`) to a fresh
+    /// battlefield object at ability index 0. Single builder for the
+    /// self-sacrifice cheap-gate fixtures, so each test below states only the
+    /// axis it actually varies.
+    fn spawn_mana_source(
+        state: &mut GameState,
+        card: u64,
+        player: PlayerId,
+        name: &str,
+        cost: AbilityCost,
+        produced: ManaProduction,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(cost);
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
+        id
+    }
+
+    /// CR 118.3: install a global "players can't sacrifice a creature to pay a
+    /// cost" static (Yasharn class) on its own battlefield permanent. Fixture
+    /// shape mirrors `sacrifice_mana_cost_rejects_prohibited_selected_permanent`.
+    fn install_cant_sacrifice_creature_static(state: &mut GameState, card: u64, player: PlayerId) {
+        let lock = create_object(
+            state,
+            CardId(card),
+            player,
+            "Cost Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::Sacrifice {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            }));
+    }
+
+    /// CR 111.10a + CR 701.21a: A Treasure's `Composite{{Tap, Sacrifice this}}`
+    /// mana cost IS conclusively decided without simulating. The sacrifice target
+    /// is the ability's own source, so — behind the two state-aware guards in
+    /// `legality_simulation_is_redundant` — it is exactly as deterministic as the
+    /// bare `{T}` cost the cheap gate already skips.
+    ///
+    /// A(b), **rewritten**: this test previously pinned the pre-fix `clone >= 1`
+    /// behavior, which is the behavior being changed.
+    ///
+    /// REVERT-PROBE: drop the `has_unambiguous_self_sacrifice_component` disjunct
+    /// from `legality_simulation_is_redundant` and `state_clone_for_legality`
+    /// returns to 1 while `activatable` stays true.
     #[test]
-    fn composite_tap_sacrifice_still_simulates() {
+    fn composite_tap_self_sacrifice_skips_legality_clone() {
         let mut state = GameState::new_two_player(42);
         let treasure =
             make_any_color_treasure(&mut state, 9301, PlayerId(0), ManaColor::ALL.to_vec());
         let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
 
-        crate::game::perf_counters::reset();
+        flush_and_reset(&mut state);
         let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
         let snap = crate::game::perf_counters::snapshot();
 
         assert!(
             activatable,
-            "an untapped Treasure with a legal self-sacrifice is activatable"
+            "an untapped Treasure with a legal self-sacrifice is activatable \
+             (positive reach-guard: a 0-clone count is meaningless if the source \
+             was rejected upstream by the readiness gate)"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a whole-tree choice-free self-sacrifice cost is conclusively payable \
+             (CR 111.10a + CR 701.21a) — no legality clone"
+        );
+    }
+
+    /// CR 111.10c: Gold's tapless `Sacrifice this token: Add one mana of any
+    /// color` also skips the clone. The design deliberately composes
+    /// `has_unambiguous_self_sacrifice_component` (which requires a self-sacrifice
+    /// component to be present) rather than the `{T}`/`{Q}` anchor, so the tapless
+    /// half of the class is in — a *tapped* Gold token genuinely can still be
+    /// sacrificed for mana.
+    ///
+    /// REVERT-PROBE: re-anchor the fast path on `has_tap_component` and this goes
+    /// red while `composite_tap_self_sacrifice_skips_legality_clone` stays green.
+    #[test]
+    fn tapless_self_sacrifice_skips_legality_clone() {
+        let mut state = GameState::new_two_player(42);
+        let gold = spawn_mana_source(
+            &mut state,
+            9310,
+            PlayerId(0),
+            "Gold",
+            self_sacrifice_cost(),
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        // CR 106.12: a tapped source with no {T} component is still payable —
+        // the readiness gate's tapped check is gated on `has_tap_component`.
+        state.objects.get_mut(&gold).unwrap().tapped = true;
+        let def = state.objects.get(&gold).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), gold, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "a tapped Gold token can still pay its tapless self-sacrifice cost \
+             (CR 111.10c) — positive reach-guard for the clone count below"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a tapless self-sacrifice cost is conclusively payable — no legality clone"
+        );
+    }
+
+    /// **The direct discharge of "the fast path must not change the ANSWER."**
+    ///
+    /// For every shape the fast path now skips, the skipped simulation is run
+    /// explicitly and asserted to return the same `true` — so the design rests on
+    /// a measurement rather than on the assumption that the simulation would have
+    /// agreed. This is an equivalence test: it passes before and after the change
+    /// by construction, and it is the anti-vacuity backstop for U1/U2.
+    ///
+    /// Shapes (d) and (e) are the **Lotus Blossom class** (`lotus blossom`,
+    /// `glittering stockpile`, `shrine of boundless growth`): the produced amount
+    /// is `CountersOn { scope: Source }`, so the production tail reads the source
+    /// **after** `sacrifice_permanent` has already moved it to the graveyard —
+    /// last known information per CR 608.2h. (e) is the boundary where that read
+    /// yields zero. Either way the tail is infallible, so the legality answer
+    /// stays `true`; only the *amount* of mana can differ.
+    #[test]
+    fn self_sacrifice_fast_path_answer_matches_simulation() {
+        let assert_agrees =
+            |state: &GameState, id: ObjectId, def: &AbilityDefinition, label: &str| {
+                assert!(
+                    can_activate_mana_ability_by_simulation(state, PlayerId(0), id, 0, def),
+                    "{label}: the simulation the fast path skips must itself answer true"
+                );
+                assert!(
+                    can_activate_mana_ability_now(state, PlayerId(0), id, 0, def),
+                    "{label}: the fast path must report the simulation's answer"
+                );
+            };
+
+        // (a) Treasure — `{T}, Sacrifice this` -> one mana of any color.
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9320, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, treasure, &def, "Treasure {T} + self-sacrifice");
+
+        // (b) Gold — tapless `Sacrifice this`.
+        let mut state = GameState::new_two_player(42);
+        let gold = spawn_mana_source(
+            &mut state,
+            9321,
+            PlayerId(0),
+            "Gold",
+            self_sacrifice_cost(),
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        let def = state.objects.get(&gold).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, gold, &def, "Gold tapless self-sacrifice");
+
+        // (c) Colorless production — no color prompt, so the simulation runs the
+        // whole post-sacrifice production tail instead of parking on a choice.
+        let mut state = GameState::new_two_player(42);
+        let scion = spawn_mana_source(
+            &mut state,
+            9322,
+            PlayerId(0),
+            "Eldrazi Scion",
+            self_sacrifice_cost(),
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let def = state.objects.get(&scion).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, scion, &def, "colorless self-sacrifice production");
+
+        // (d) CR 608.2h — source-referential produced amount, counters PRESENT.
+        for (counters, label) in [
+            (3u32, "Lotus Blossom class, 3 petal counters"),
+            (0u32, "Lotus Blossom class, ZERO petal counters"),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let blossom = spawn_mana_source(
+                &mut state,
+                9323,
+                PlayerId(0),
+                "Lotus Blossom",
+                tap_and_self_sacrifice_cost(),
+                any_one_color(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Generic("petal".to_string())),
+                    },
+                }),
+            );
+            if counters > 0 {
+                state
+                    .objects
+                    .get_mut(&blossom)
+                    .unwrap()
+                    .counters
+                    .insert(CounterType::Generic("petal".to_string()), counters);
+            }
+            let def = state.objects.get(&blossom).unwrap().abilities[0].clone();
+            crate::game::layers::flush_layers(&mut state);
+            assert_agrees(&state, blossom, &def, label);
+        }
+    }
+
+    /// CR 701.21a: a **non-self** `Sacrifice` target stays OUT of the fast path —
+    /// a legal victim may not exist, so its simulation is load-bearing. Phyrexian
+    /// Altar shape, with a legal victim on the board so the readiness gate passes
+    /// and the decision seam is genuinely reached.
+    ///
+    /// The `activatable == true` assertion is the paired positive control: it
+    /// proves readiness passed, so `>= 1` measures the fast path declining rather
+    /// than an upstream rejection.
+    #[test]
+    fn non_self_sacrifice_mana_cost_still_simulates() {
+        let mut state = GameState::new_two_player(42);
+        let altar = spawn_mana_source(
+            &mut state,
+            9330,
+            PlayerId(0),
+            "Phyrexian Altar",
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        1,
+                    )),
+                ],
+            },
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(9331),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let def = state.objects.get(&altar).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), altar, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "a legal victim is on the board, so readiness passes and the decision \
+             seam is really reached (positive control for the clone count)"
         );
         assert!(
             snap.state_clone_for_legality >= 1,
-            "a Composite with a Sacrifice component must still simulate (CR 601.2g)"
+            "a non-self Sacrifice target must still simulate — the victim's \
+             existence is not settled by the cost's AST shape"
+        );
+    }
+
+    /// **Guard 1 — CR 601.2g.** A permanent already committed to a pending
+    /// spell's additional sacrifice cost is reserved: paying this ability's cost
+    /// would error at `continue_mana_ability_cost_payment_in_node`, so the fast
+    /// path must decline and let the simulation report `false`.
+    ///
+    /// Multi-authority fixture: two definition-identical Treasures on one board,
+    /// exactly one reserved. A hoisted or board-global guard fails this test,
+    /// because the guard is keyed on `source_id`.
+    ///
+    /// **Non-vacuity:** the unreserved sibling reporting `true` is what proves the
+    /// reservation was really installed — `PendingCast::new` seeds
+    /// `deferred_sacrificed_permanents` **empty**, so a fixture that only installs
+    /// a `PendingCast` reserves nothing and both sources would report `true`.
+    ///
+    /// REVERT-PROBE: delete the `cost_sacrifices_reserved_source` term and the
+    /// reserved source flips to `true` with 0 clones.
+    #[test]
+    fn self_sacrifice_reserved_for_pending_cast_still_simulates() {
+        use crate::types::game_state::{DeferredSpellSacrifice, PendingCast};
+
+        let mut state = GameState::new_two_player(42);
+        let reserved =
+            make_any_color_treasure(&mut state, 9340, PlayerId(0), ManaColor::ALL.to_vec());
+        let sibling =
+            make_any_color_treasure(&mut state, 9341, PlayerId(0), ManaColor::ALL.to_vec());
+        let spell = create_object(
+            &mut state,
+            CardId(9342),
+            PlayerId(0),
+            "Some Spell".to_string(),
+            Zone::Stack,
+        );
+        let mut pending = PendingCast::new(
+            spell,
+            CardId(9342),
+            ResolvedAbility::new(
+                Effect::unimplemented("Some Spell", "test fixture"),
+                Vec::new(),
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::generic(1),
+        );
+        // CR 601.2g: `deferred_spell_sacrifice_reserved` matches on `object_id`
+        // alone, and `PendingCast::new` seeds this vector empty — the reservation
+        // must be pushed explicitly or the test passes vacuously.
+        pending
+            .deferred_sacrificed_permanents
+            .push(DeferredSpellSacrifice::Selected {
+                object_id: reserved,
+                filter: TargetFilter::Typed(TypedFilter::permanent()),
+            });
+        state.pending_cast = Some(Box::new(pending));
+
+        let def = state.objects.get(&reserved).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let reserved_activatable =
+            can_activate_mana_ability_now(&state, PlayerId(0), reserved, 0, &def);
+        let reserved_snap = crate::game::perf_counters::snapshot();
+
+        crate::game::perf_counters::reset();
+        let sibling_activatable =
+            can_activate_mana_ability_now(&state, PlayerId(0), sibling, 0, &def);
+        let sibling_snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            !reserved_activatable,
+            "a Treasure reserved for a pending spell's additional sacrifice cost \
+             can't also pay this mana ability's cost (CR 601.2g)"
+        );
+        assert!(
+            reserved_snap.state_clone_for_legality >= 1,
+            "the reserved source declines the fast path and simulates"
+        );
+        assert!(
+            sibling_activatable,
+            "the definition-identical UNRESERVED sibling on the same board is \
+             still activatable — this is the non-vacuity guard proving the \
+             reservation was really installed"
+        );
+        assert_eq!(
+            sibling_snap.state_clone_for_legality, 0,
+            "the guard is per-source_id, not board-global: the sibling still \
+             takes the fast path"
+        );
+    }
+
+    /// **Guard 2 — CR 118.3 + CR 601.2h, non-vacuously.** The readiness gate
+    /// evaluates `player_cant_sacrifice_as_cost` on the PRE-payment state, but the
+    /// payment re-evaluates it after this cost tree's `{T}` component has already
+    /// tapped the source, and a prohibition's object filter can read that tapped
+    /// bit (`FilterProp::Tapped`). So whenever any `CantPayCost` static is
+    /// functioning, the fast path declines and simulates.
+    ///
+    /// The static here filters **creatures**, which does not match the artifact
+    /// Treasure, so readiness still passes and the decision seam is genuinely
+    /// reached — the guard is measured, not inferred from an upstream rejection.
+    ///
+    /// REVERT-PROBE: delete the `static_kind_present` term and the main arm's
+    /// clone count drops to 0.
+    #[test]
+    fn cant_pay_cost_static_presence_declines_self_sacrifice_fast_path() {
+        // Main arm: the static IS present.
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9350, PlayerId(0), ManaColor::ALL.to_vec());
+        install_cant_sacrifice_creature_static(&mut state, 9351, PlayerId(0));
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        // Non-vacuity FIRST: `static_kind_present` is an O(1) absence
+        // short-circuit, so an unflushed or mis-built board would let the
+        // assertions below pass for free.
+        assert!(
+            static_kind_present(&state, StaticModeKind::CantPayCost),
+            "the CantPayCost static must be functioning, or Guard 2 is untested"
+        );
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "the prohibition filters creatures, so an artifact Treasure is still \
+             activatable — readiness passed and the decision seam was reached"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "Guard 2 declines the fast path while any CantPayCost static is present"
+        );
+
+        // Paired positive control: the identical board WITHOUT the static.
+        let mut control = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut control, 9350, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = control.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut control);
+        assert!(
+            !static_kind_present(&control, StaticModeKind::CantPayCost),
+            "control board carries no CantPayCost static"
+        );
+        let activatable = can_activate_mana_ability_now(&control, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(activatable, "control Treasure is activatable");
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "without the static the same board takes the fast path — this is what \
+             makes the `>= 1` above a measurement rather than a broken board"
+        );
+    }
+
+    /// **The correctness guard: a genuinely prohibited self-sacrifice source must
+    /// report `false`.** The opposite fixture from Guard 2's test — here the
+    /// `CantPayCost { Sacrifice { creature } }` filter **matches** the source, so
+    /// the source really cannot pay.
+    ///
+    /// The answer must arrive from the **readiness gate** (`is_payable_for_mana_ability`
+    /// -> the `SelfRef` sacrifice arm's `!player_cant_sacrifice_as_cost` check),
+    /// BEFORE the cheap-gate decision is consulted. That is why
+    /// `state_clone_for_legality == 0` is load-bearing here: it pins that the
+    /// `false` came from readiness and not from a simulation. It goes red if
+    /// anyone reorders the decision seam ahead of the readiness gate.
+    ///
+    /// Both sub-cases carry a paired no-static control asserting `true`, so the
+    /// negative cannot pass because of summoning sickness, a tapped bit, or a
+    /// missing core type. **Deliberate asymmetry:** the control also reports 0
+    /// clones (it takes the fast path), so the discriminator between the arms is
+    /// `activatable`, never the counter.
+    #[test]
+    fn self_sacrifice_under_cant_pay_cost_static_reports_unactivatable() {
+        for (label, cost) in [
+            ("tapless self-sacrifice creature", self_sacrifice_cost()),
+            (
+                "tap-anchored self-sacrifice creature",
+                tap_and_self_sacrifice_cost(),
+            ),
+        ] {
+            let build = |with_static: bool| {
+                let mut state = GameState::new_two_player(42);
+                let source = spawn_mana_source(
+                    &mut state,
+                    9360,
+                    PlayerId(0),
+                    "Wild Cantor",
+                    cost.clone(),
+                    any_one_color(QuantityExpr::Fixed { value: 1 }),
+                );
+                {
+                    let obj = state.objects.get_mut(&source).unwrap();
+                    // CR 118.3: the prohibition's filter is applied to the
+                    // sacrificed object itself, so the source must be a creature
+                    // for the static to match it.
+                    obj.card_types.core_types.push(CoreType::Creature);
+                    // CR 302.6: keep the {T} sub-case out of the summoning-sickness
+                    // gate, so the only reason for a `false` is the prohibition.
+                    obj.summoning_sick = false;
+                }
+                if with_static {
+                    install_cant_sacrifice_creature_static(&mut state, 9361, PlayerId(0));
+                }
+                let def = state.objects.get(&source).unwrap().abilities[0].clone();
+                (state, source, def)
+            };
+
+            let (mut state, source, def) = build(true);
+            flush_and_reset(&mut state);
+            assert!(
+                static_kind_present(&state, StaticModeKind::CantPayCost),
+                "{label}: the CantPayCost static must be functioning, or this \
+                 negative assertion is vacuous"
+            );
+            let activatable = can_activate_mana_ability_now(&state, PlayerId(0), source, 0, &def);
+            let snap = crate::game::perf_counters::snapshot();
+
+            assert!(
+                !activatable,
+                "{label}: a creature under a `can't sacrifice a creature to pay a \
+                 cost` static can't pay its own self-sacrifice mana cost (CR 118.3)"
+            );
+            assert_eq!(
+                snap.state_clone_for_legality, 0,
+                "{label}: the `false` must come from the readiness gate, BEFORE \
+                 the cheap-gate decision — not from a legality simulation"
+            );
+
+            let (mut control, source, def) = build(false);
+            flush_and_reset(&mut control);
+            assert!(
+                !static_kind_present(&control, StaticModeKind::CantPayCost),
+                "{label}: control board carries no CantPayCost static"
+            );
+            let activatable = can_activate_mana_ability_now(&control, PlayerId(0), source, 0, &def);
+            assert!(
+                activatable,
+                "{label}: without the static the SAME source is activatable — this \
+                 is what proves the `false` above is caused by the prohibition and \
+                 not by sickness, a tapped bit, or a missing core type"
+            );
+        }
+    }
+
+    /// **CR 616.1 — the replacement disposition, tested rather than asserted.**
+    /// A "would be put into a graveyard" `Moved` replacement applies to the
+    /// sacrifice's inner battlefield -> graveyard move, so `sacrifice_permanent`
+    /// returns `NeedsReplacementChoice`. The self-sacrifice payment arm maps that
+    /// to `Ok(ManaAbilityPaymentProgress::Paused)`, which the payment loop returns
+    /// as `Ok` — so the simulation reports `true`, the same answer the fast path
+    /// reports. A replacement makes the payment **pause**, never **fail**.
+    ///
+    /// **Reach-guard first, and it is mandatory:** without it the test would pass
+    /// on a replacement definition that never matched, which is the exact failure
+    /// mode this row exists to rule out.
+    #[test]
+    fn self_sacrifice_with_graveyard_replacement_matches_simulation() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9370, PlayerId(0), ManaColor::ALL.to_vec());
+        let leyline = create_object(
+            &mut state,
+            CardId(9371),
+            PlayerId(0),
+            "Leyline of the Void".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&leyline)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+
+        // Reach-guard: prove on a throwaway clone that the definition genuinely
+        // intercepts this sacrifice's inner graveyard move.
+        let mut probe = state.clone();
+        let outcome =
+            sacrifice::sacrifice_permanent(&mut probe, treasure, PlayerId(0), &mut Vec::new())
+                .expect("sacrificing an on-battlefield permanent must not error");
+        assert!(
+            matches!(
+                outcome,
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
+            ),
+            "the graveyard-move replacement must really apply (CR 616.1), or the \
+             equivalence below would be asserted on a replacement that never fired"
+        );
+
+        assert!(
+            can_activate_mana_ability_by_simulation(&state, PlayerId(0), treasure, 0, &def),
+            "a CR 616.1 replacement makes the simulated payment PAUSE, not fail — \
+             `activate_mana_ability` still returns Ok"
+        );
+        assert!(
+            can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def),
+            "the fast path reports the same answer, so no guard is needed for the \
+             replacement axis"
         );
     }
 
@@ -5908,7 +11478,7 @@ mod tests {
     /// and EffectCost an arbitrary effect, so these are asserted at the
     /// classifier/wrapper level rather than as full runtime cards; the runtime
     /// "falls through to simulate" path itself is exercised by
-    /// `composite_tap_sacrifice_still_simulates` (A(b)) and
+    /// `non_self_sacrifice_mana_cost_still_simulates` (A(b)) and
     /// `filter_land_composite_still_activatable_via_simulation` (C).
     #[test]
     fn cheap_gate_hostile_costs_must_simulate() {
@@ -6033,6 +11603,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate first Treasure");
@@ -6075,6 +11646,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate first Treasure");
@@ -6117,6 +11689,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate the 5-color Treasure");
@@ -6236,6 +11809,7 @@ mod tests {
             GameEvent::LifeChanged {
                 player_id,
                 amount: -1,
+                ..
             } if *player_id == PlayerId(0)
         )));
         assert!(events
@@ -6391,6 +11965,206 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// CR 605.1a + CR 106.1: Build a Lion's-Eye-Diamond-shaped mana ability —
+    /// `Composite[Discard { HandSize }, Sacrifice(SelfRef)]` producing three mana
+    /// of one chosen color. Mirrors the real card's parsed cost
+    /// (`Discard { count: Ref HandSize(Controller), self_scope: FromHand }` +
+    /// `Sacrifice(SelfRef, 1)`), so a name change alone re-targets it to any card
+    /// in the same "discard your hand, sacrifice ~: add three mana" class.
+    fn discard_hand_sacrifice_three_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        })
+    }
+
+    /// Issue #6494 (PRIMARY revert-guard, mana path): Lion's Eye Diamond with an
+    /// EMPTY hand must be activatable — its "Discard your hand" leg with an empty
+    /// hand is a zero-card discard, paid by doing nothing (CR 601.2h + CR 701.9a).
+    ///
+    /// Oracle (Scryfall-verified): "Discard your hand, Sacrifice this artifact:
+    /// Add three mana of any one color. Activate only as an instant."
+    ///
+    /// At base the activation surfaces `WaitingFor::PayCost { Discard, count: 0 }`
+    /// (a dead prompt that re-emits forever), so the `ChooseManaColor` assertion
+    /// fails with `left: PayCost right: ChooseManaColor` — revert-sensitive to the
+    /// zero-count auto-pay guard `discard_cost_choice` now inherits from the shared
+    /// `casting::resolve_non_self_discard_requirement` authority. The 3-mana
+    /// assertion is a positive reach-guard (proves production, not a vacuous halt);
+    /// the sacrifice assertion proves the guard consumes ONLY the discard leg and
+    /// the self-sacrifice still fires.
+    #[test]
+    fn lions_eye_diamond_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let led = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Lion's Eye Diamond".to_string(),
+            Zone::Battlefield,
+        );
+        // No cards in hand — HandSize(Controller) resolves to 0.
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            led,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        // CR 601.2h + CR 701.9a: no dead PayCost { Discard, count: 0 } — the
+        // activation advances straight to the color choice.
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(options.len(), 5);
+                *expect_mana_ability_context(context)
+            }
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+
+        // CR 701.9a: nothing was discarded — the hand stays empty.
+        assert!(state.players[0].hand.is_empty());
+        // The self-sacrifice leg still fired — LED left the battlefield for the
+        // graveyard, and it is the ONLY card there (the zero-card discard added
+        // nothing), proving the guard consumed only the discard leg.
+        assert_eq!(state.players[0].graveyard.len(), 1);
+        assert!(state.players[0].graveyard.contains(&led));
+        assert_ne!(
+            state.objects.get(&led).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Red),
+            &mut events,
+        )
+        .unwrap();
+
+        // Positive reach-guard: production actually ran (not a vacuous halt).
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// Issue #6494 (mana path, class not card): Diamond Lion shares Lion's Eye
+    /// Diamond's "Discard your hand, Sacrifice ~: Add three mana of any one color"
+    /// shape, so the empty-hand fix is class-wide, not keyed to one card. Only the
+    /// object name differs from the LED case above.
+    #[test]
+    fn diamond_lion_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(7);
+        let lion = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Diamond Lion".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&lion).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            lion,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { .. },
+                context,
+                ..
+            } => *expect_mana_ability_context(context),
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+        assert_ne!(
+            state.objects.get(&lion).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
     }
 
     /// Helper: build a Pit-of-Offerings-style permanent with a `{T}: Add one mana
@@ -6742,6 +12516,8 @@ mod tests {
         // `state.exile_links` (see `change_zone::execute_zone_move`).
         let etb = ResolvedAbility::new(
             Ef::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -6923,6 +12699,10 @@ mod tests {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
             kind: crate::types::events::ActivatedAbilityKind::Normal,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }
@@ -7118,6 +12898,205 @@ mod tests {
         assert_eq!(state.players[1].mana_pool.count_color(ManaType::Red), 1);
     }
 
+    /// CR 106.4 + CR 109.5 + CR 608.2d: an UNSCOPED echo production (subjectless
+    /// body, no actor scoping — `target: None`) observing another player's
+    /// multi-type tap directs both the choice and the deposit to the TAPPER,
+    /// never the source controller. Mirrors the single-type sibling above into
+    /// the choosing shape: P0's source observes P1 tapping a {G}{U} land, P1
+    /// (not P0) is prompted, and answering Green lands exactly one Green in
+    /// P1's pool with P0 untouched. Reverting the prompt origin to the
+    /// controller default fails the prompt-player assert; reverting the
+    /// completion recipient fails the pool asserts.
+    #[test]
+    fn unscoped_echo_multitype_tap_prompts_and_pays_tapper() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Dual".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let echo_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unscoped Echo".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&echo_source)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land())),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::TappedForMana {
+                player_id: PlayerId(1),
+                source_id: land,
+                produced: vec![ManaType::Green, ManaType::Blue],
+                tap_state: crate::types::events::ManaTapState::FromTap,
+            }],
+        );
+
+        // The choice must go to the tapper P1 with both produced options —
+        // never to the source controller P0.
+        let pending_effect = match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "unscoped echo choice belongs to tapper P1, not controller P0"
+                );
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+                (**pending_effect).clone()
+            }
+            other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
+        };
+        crate::game::effects::mana::handle_choose_mana_effect(
+            &mut state,
+            &pending_effect,
+            PlayerId(1),
+            &ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::Blue],
+            },
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Green),
+            1,
+            "exactly the chosen bonus Green lands in the tapper's pool"
+        );
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Blue),
+            0,
+            "the unchosen type is not deposited"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "P0 gains nothing");
+    }
+
+    /// Same unscoped contract across suspension: when the firing event is gone
+    /// by completion time, the latched prompt player — not the controller
+    /// default — receives the deposit. Reverting the backstop misroutes the
+    /// bonus to P0.
+    #[test]
+    fn unscoped_echo_completion_without_live_event_uses_prompt_player() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Dual".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let echo_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unscoped Echo".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&echo_source)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land())),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::TappedForMana {
+                player_id: PlayerId(1),
+                source_id: land,
+                produced: vec![ManaType::Green, ManaType::Blue],
+                tap_state: crate::types::events::ManaTapState::FromTap,
+            }],
+        );
+        let pending_effect = match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                player,
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                (**pending_effect).clone()
+            }
+            other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
+        };
+        // The firing event is cleared while the choice is pending (ordinary
+        // stack resolution clears trigger-event context); the latched prompt
+        // player must still receive the deposit.
+        state.current_trigger_event = None;
+        crate::game::effects::mana::handle_choose_mana_effect(
+            &mut state,
+            &pending_effect,
+            PlayerId(1),
+            &ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::Blue],
+            },
+            ManaChoice::SingleColor(ManaType::Blue),
+            &mut vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Blue),
+            1,
+            "latched prompt player P1 receives the bonus without a live event"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "P0 gains nothing");
+    }
+
     #[test]
     fn taps_for_mana_cant_untap_trigger_binds_triggering_land() {
         let mut state = GameState::new_two_player(42);
@@ -7168,6 +13147,7 @@ mod tests {
                                 }])],
                                 duration: Some(duration.clone()),
                                 target: Some(TargetFilter::TriggeringSource),
+                                end_cost: None,
                             },
                         )
                         .duration(duration),
@@ -7277,21 +13257,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: source,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -7380,20 +13365,25 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_snapshot: None,
-            ability_index: 0,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
+            ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         }
     }
@@ -7590,21 +13580,26 @@ mod tests {
             let pending = PendingManaAbility {
                 player: PlayerId(0),
                 source_id: source,
-                ability_index: 0,
+                ability_index: Some(0),
                 rules_execution_node: None,
                 ability_snapshot: None,
+                announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
-                chosen_tappers: Vec::new(),
+                chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
-                chosen_counter_count: None,
+                payment_mode: CastPaymentMode::Auto,
+                pinned_pool_units: Vec::new(),
+                chosen_counter_counts: Vec::new(),
                 chosen_x: None,
                 collected_evidence: Vec::new(),
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                cost_removed_counters: None,
                 batch_siblings: Vec::new(),
             };
             let prompt = ManaChoicePrompt::SingleColor {
@@ -7823,21 +13818,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -7929,21 +13929,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -8084,9 +14089,9 @@ mod tests {
         assert!(state.objects.get(&ruins).unwrap().tapped);
         let pool = &state.players[0].mana_pool;
         assert_eq!(pool.total(), 1);
-        assert_eq!(pool.mana[0].color, ManaType::Blue);
+        assert_eq!(pool.unit_at(0).unwrap().color, ManaType::Blue);
         assert_eq!(
-            pool.mana[0].restrictions,
+            pool.unit_at(0).unwrap().restrictions,
             vec![ManaRestriction::OnlyForSpell]
         );
     }
@@ -8130,7 +14135,7 @@ mod tests {
         assert_eq!(pool.count_color(ManaType::Blue), 1);
         assert_eq!(pool.count_color(ManaType::Black), 0);
         assert_eq!(
-            pool.mana[0].restrictions,
+            pool.unit_at(0).unwrap().restrictions,
             vec![ManaRestriction::OnlyForSpell]
         );
     }
@@ -8389,6 +14394,77 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
     }
 
+    /// Pay Sunken Ruins' `{U/B}` sub-cost with floating black mana and report
+    /// whether the pool spend forced a full layer re-evaluation.
+    fn filter_land_pool_payment_dirties_layers(with_unspent_mana_static: bool) -> bool {
+        let mut state = GameState::new_two_player(42);
+        if with_unspent_mana_static {
+            // Omnath class: "+1/+1 for each unspent green mana you have".
+            let omnath_static = StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::UnspentMana {
+                            color: Some(ManaColor::Green),
+                        },
+                    },
+                },
+            ]);
+            let omnath = create_object(
+                &mut state,
+                CardId(9_901),
+                PlayerId(0),
+                "Unspent Mana Static".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&omnath).unwrap();
+            obj.static_definitions.push(omnath_static.clone());
+            obj.base_static_definitions = Arc::new(vec![omnath_static]);
+        }
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let WaitingFor::PayManaAbilityMana {
+            options,
+            pending_mana_ability,
+            ..
+        } = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap()
+        else {
+            panic!("ambiguous {{U/B}} payment must prompt");
+        };
+        crate::game::layers::flush_layers(&mut state);
+        crate::game::perf_counters::reset();
+        handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending_mana_ability,
+            &[ManaType::Black],
+            &mut events,
+        )
+        .unwrap();
+        crate::game::perf_counters::snapshot().layers_full_eval > 0
+    }
+
+    #[test]
+    fn filter_land_pool_payment_dirties_layers_only_for_unspent_mana_effects() {
+        // CR 106.4 + CR 613.1: Spending floating mana changes characteristics
+        // only through effects that read unspent mana, so a full layer
+        // re-evaluation is owed exactly when one is on the battlefield.
+        assert!(filter_land_pool_payment_dirties_layers(true));
+        assert!(!filter_land_pool_payment_dirties_layers(false));
+    }
+
     #[test]
     fn filter_land_colored_ability_not_activatable_with_empty_pool() {
         // CR 605.3a + CR 601.2h: Payability gate — colored filter-land
@@ -8463,7 +14539,7 @@ mod tests {
         Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
             .push(ability.clone());
 
-        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None)
+        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None, None)
             .expect("chosen-color mana should prompt for a color");
         assert!(matches!(prompt, ManaChoicePrompt::SingleColor { .. }));
 
@@ -8479,6 +14555,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+    }
+
+    #[test]
+    fn fixed_or_chosen_color_prompt_requires_positive_production() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(8110),
+            PlayerId(0),
+            "Fixed or Chosen Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        for (count, expected_prompt) in [(0, false), (1, true)] {
+            let ability = ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        count: QuantityExpr::Fixed { value: count },
+                        contribution: ManaContribution::Base,
+                        fixed_alternative: Some(ManaColor::Green),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+
+            assert_eq!(
+                mana_choice_prompt(
+                    &ability.effect,
+                    &state,
+                    source,
+                    Some(&ability),
+                    Some(&ability),
+                )
+                .is_some(),
+                expected_prompt,
+                "CR 106.5: fixed-or-chosen mana count {count} must {} a color prompt",
+                if expected_prompt {
+                    "reach"
+                } else {
+                    "not reach"
+                },
+            );
+        }
     }
 
     /// Issue #460 + CR 106.12a: Vorinclex's `TapsForMana` trigger must fire
@@ -8603,6 +14728,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: nykthos,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Nykthos's {2}{T} ability should activate");
@@ -8699,6 +14825,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Forest's {T} ability should activate");
@@ -8838,6 +14965,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: opp_forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("opponent's Forest {T} ability should activate");
@@ -8862,6 +14990,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: my_forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("controller's Forest {T} ability should activate");
@@ -8943,21 +15072,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
@@ -9154,6 +15288,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("storage mana ability should prompt for a counter count");
@@ -9187,6 +15322,846 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
+    // Regression for storage lands (Saltcrusted Steppe class): "Remove X storage
+    // counters from ~: Add X mana in any combination of colors" must bind the
+    // announced counter-removal count to BOTH the cost (chosen_counter_counts)
+    // AND the produced `Ref(Variable("X"))` quantity (chosen_x). Previously
+    // only chosen_counter_counts was set, so the counters were removed but the
+    // Variable("X") mana count resolved to 0 and no mana was produced.
+    #[test]
+    fn storage_land_variable_x_mana_ability_produces_chosen_amount() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8003),
+            player,
+            "Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Green, ManaColor::White],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    // Saltcrusted Steppe's Oracle text is "Remove X storage
+                    // counters", which the parser lowers to the literal-X
+                    // sentinel (`REMOVE_COUNTER_COST_X`), NOT the "any number of"
+                    // sentinel — the two are distinct parses (oracle_cost.rs)
+                    // that must both reach the same announced-count prompt/
+                    // payment path.
+                    costs: vec![AbilityCost::RemoveCounter {
+                        count: REMOVE_COUNTER_COST_X,
+                        counter_type: CounterMatch::OfType(storage.clone()),
+                        target: None,
+                        selection: crate::types::ability::CounterCostSelection::SingleObject,
+                    }],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("storage mana ability should prompt for a counter count");
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("chosen counter count should resume mana production");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "removing 2 storage counters must leave 1 remaining"
+        );
+
+        // An AnyCombination choice with multiple color options surfaces a
+        // mana-color prompt rather than auto-resolving (`mana_choice_prompt`).
+        // Submit the choice and confirm the produced amount matches the
+        // announced X (2), not the unresolved Variable("X") default of 0.
+        match &state.waiting_for {
+            WaitingFor::ChooseManaColor { .. } => {}
+            other => panic!("expected ChooseManaColor prompt, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::Combination(vec![
+                    ManaType::Green,
+                    ManaType::White,
+                ]),
+                count: 1,
+            },
+        )
+        .expect("mana color choice should resolve production");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green)
+                + state.players[0].mana_pool.count_color(ManaType::White),
+            2,
+            "Add X mana must produce X (2) mana units bound to the removed counter count"
+        );
+    }
+
+    // Regression: a chosen-count self-RemoveCounter mana-ability cost nested
+    // TWO levels deep inside `Composite` (the shape a static cost tax
+    // produces — see `casting_costs.rs`'s `AdditionalCost::Required` wrapping)
+    // must still reach the `PayAmountChoice` prompt. Before this fix, the
+    // prompt gate matched only one level of `Composite`, so a leaf this deep
+    // skipped straight to payment and failed with "Missing counter count for
+    // mana ability" instead of prompting.
+    #[test]
+    fn chosen_count_remove_counter_nested_two_composite_levels_deep_still_prompts() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8004),
+            player,
+            "Nested Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                // Two nested `Composite` levels around the chosen-count leaf,
+                // mirroring how a cost-increase tax wraps an existing cost
+                // (`casting_costs.rs`'s `AbilityCost::Composite { costs }` arm
+                // for `AdditionalCost::Required`) rather than a hand-built
+                // one-level `Composite`.
+                .cost(AbilityCost::Composite {
+                    costs: vec![AbilityCost::Composite {
+                        costs: vec![AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        }],
+                    }],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect(
+            "a chosen-count RemoveCounter cost nested two Composite levels deep must still prompt",
+        );
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("chosen counter count should resume mana production from a nested composite cost");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "a nested chosen-count RemoveCounter leaf must still remove the chosen amount"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    // Regression: a composite cost with a shared literal X and an unrelated
+    // "any number of" count (Pentad Prism/Black Mana Battery class) must
+    // keep the independent choice separate while applying the same X to both
+    // literal-X leaves. One scalar counter count would collapse the choices;
+    // separately stored counts without a shared X would accept two values
+    // for the same variable.
+    #[test]
+    fn composite_counter_costs_keep_independent_counts_and_one_announced_x() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8005),
+            player,
+            "Dual Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 5);
+            obj.counters.insert(charge.clone(), 5);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        // Single color option: no `ChooseManaColor` prompt, so
+                        // the test isolates the counter-count collapse bug
+                        // rather than exercising color selection too.
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Green],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        // Flattened first: the literal-X leaf. Its announced
+                        // amount must bind `chosen_x` (and thus the produced
+                        // mana count).
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        // Flattened second: an unrelated "any number of" leaf
+                        // over a DIFFERENT counter type. It has no `X` in its
+                        // Oracle text, so its announced amount must NOT bind
+                        // `chosen_x`.
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(charge.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("the first chosen-count leaf should prompt for its own count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(
+                    (*min, *max),
+                    (0, 2),
+                    "five storage counters can pay X twice only when X is at most two"
+                );
+            }
+            other => panic!("expected first PayAmountChoice, got {other:?}"),
+        }
+
+        // Announce X = 2 for both literal-X leaves.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the first leaf's answer should surface the second leaf's prompt");
+
+        // A second, independent prompt for the "any number of" leaf must
+        // follow — this is the crux of the collapse bug: a single scalar
+        // could not have represented two pending choices at once.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 5, "the second leaf's max must read the charge counters, not the already-answered storage counters");
+            }
+            other => panic!("expected a second, independent PayAmountChoice, got {other:?}"),
+        }
+
+        // Answer the independent "any number of" leaf with a different amount.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 3 },
+        )
+        .expect("the independent choice should reach the second literal-X prompt");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(
+                    (*min, *max),
+                    (2, 2),
+                    "the second literal-X leaf must use the announced X"
+                );
+            }
+            other => panic!("expected shared-X PayAmountChoice, got {other:?}"),
+        }
+        assert!(
+            crate::game::engine::apply_as_current(
+                &mut state,
+                crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+            )
+            .is_err(),
+            "a second literal-X leaf cannot announce a different value"
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the shared X should pay both leaves and produce mana");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "both literal-X leaves must remove the same announced amount (2)"
+        );
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&charge)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "the any-number leaf must remove exactly its own announced amount (3)"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            2,
+            "Add X mana must use the shared literal-X amount (2), not the unrelated any-number amount (3)"
+        );
+    }
+
+    // Regression: a composite cost with TWO chosen-count self-RemoveCounter
+    // leaves that OVERLAP (same counter type) must not let each leaf
+    // announce up to the object's full available count — the second leaf's
+    // prompt must reserve whatever the first leaf already claimed. CR 118.3
+    // + CR 601.2h: a player can't pay a cost without the resources to pay it
+    // fully. With 5 counters available, announcing 5 for the first leaf must
+    // leave 0 available for the second, not another 5.
+    #[test]
+    fn overlapping_chosen_count_remove_counter_leaves_reserve_each_others_amount() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8006),
+            player,
+            "Overlapping Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 5);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    // Both leaves target the SAME counter type, so they
+                    // overlap and can only jointly remove up to 5 total —
+                    // unlike the distinct-type composite test above.
+                    costs: vec![
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("the first leaf should prompt for its own count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => {
+                assert_eq!(*max, 5, "the first leaf sees all 5 available counters");
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // Announce the FULL available amount for the first (literal-X) leaf.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 5 },
+        )
+        .expect("announcing all 5 counters for the first leaf must be legal");
+
+        // The second leaf's prompt must reserve the first leaf's 5, leaving
+        // 0 — NOT another 5 read fresh off the still-unpaid object state.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(
+                    *max, 0,
+                    "the second leaf must not be offered counters the first leaf already reserved"
+                );
+            }
+            other => panic!("expected a reservation-capped second PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 0 },
+        )
+        .expect("the only legal amount for the exhausted second leaf is 0");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "exactly 5 counters total must be removed across both overlapping leaves, not 10"
+        );
+    }
+
+    // Regression: TWO `Any`-type chosen-count leaves share one aggregate pool
+    // across every counter type on the object, so — unlike an `Any` leaf
+    // mixed with a TYPED leaf — their announced amounts can be reserved
+    // exactly by total, with no per-type allocation needed: whichever
+    // counters actually get removed for the first leaf, the object still has
+    // (total available - first leaf's amount) counters left for the second,
+    // regardless of which types they are. This is the case
+    // `chosen_count_remove_counter_leaves_mix_any_with_typed` does NOT
+    // reject, and it must stay fully payable.
+    #[test]
+    fn two_any_type_chosen_count_remove_counter_leaves_share_one_aggregate_pool() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8009),
+            player,
+            "Dual Any Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            obj.counters.insert(charge.clone(), 2);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::Any,
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::Any,
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("the first Any leaf should prompt for its own count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => {
+                assert_eq!(
+                    *max, 5,
+                    "the first Any leaf sees all 5 counters across both types"
+                );
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // Announce 3 for the first Any leaf.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 3 },
+        )
+        .expect("announcing 3 for the first Any leaf must be legal");
+
+        // The second Any leaf's max must reserve exactly the first leaf's 3,
+        // leaving 2 — the aggregate reservation this engine DOES support.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(
+                    *max, 2,
+                    "the second Any leaf must see exactly the aggregate remainder (5 - 3 = 2)"
+                );
+            }
+            other => panic!("expected a reservation-capped second PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the full aggregate remainder must be payable for the second Any leaf");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0)
+                + state.objects[&land]
+                    .counters
+                    .get(&charge)
+                    .copied()
+                    .unwrap_or(0),
+            0,
+            "all 5 counters across both types must be removed by the two Any leaves"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    // Regression (defense in depth): even if a `PendingManaAbility` somehow
+    // reaches payment with `chosen_counter_counts` announcing MORE than the
+    // object's actual counters across overlapping leaves — bypassing the
+    // prompt-time reservation in `next_unchosen_remove_counter_leaf_bounds`
+    // entirely, as a stale or malformed resume might — payment must refuse
+    // the impossible aggregate rather than silently paying less than
+    // announced via `remove_counters_for_mana_cost`'s `available.min` clamp.
+    #[test]
+    fn overpaying_composite_counter_cost_via_preannounced_choices_is_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8007),
+            player,
+            "Overlapping Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 5);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        // Bypass the normal prompt round-trip entirely: both leaves already
+        // announce 5 against only 5 available counters (10 total demanded).
+        let pending = PendingManaAbility {
+            player,
+            source_id: land,
+            ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
+            ability_index: Some(0),
+            rules_execution_node: None,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: vec![5, 5],
+            chosen_x: Some(5),
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            cost_removed_counters: None,
+            batch_siblings: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = advance_mana_ability_activation(&mut state, pending, &mut events);
+        assert!(
+            result.is_err(),
+            "an over-announced overlapping counter-removal aggregate must be refused, not silently underpaid: got {result:?}"
+        );
+        // The leaves are paid in flattened order, so the first (literal-X)
+        // leaf's removal has already landed on the real state by the time the
+        // second leaf's guard rejects the aggregate — this direct call
+        // bypasses the simulation-based legality pre-check
+        // (`can_activate_mana_ability_by_simulation`) that the normal
+        // `ActivateAbility` action path runs first specifically because
+        // mid-payment mutations are not otherwise rolled back on error. What
+        // this test proves is narrower and still load-bearing: the SECOND
+        // leaf is refused rather than silently paid for fewer counters than
+        // announced, so state never ends up claiming both leaves succeeded.
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the first leaf's real removal still applies; the point under test is that the \
+             second leaf errors instead of silently removing 0 while reporting success"
+        );
+    }
+
+    // Regression: a composite cost mixing an `Any`-type chosen-count
+    // `RemoveCounter` leaf with an unrelated `OfType` chosen-count leaf has
+    // no sound reservation model (see
+    // `chosen_count_remove_counter_leaves_mix_any_with_typed`'s doc
+    // comment for the full bin-packing rationale) and is deliberately
+    // unsupported. With 3 storage counters and 2 charge counters, an
+    // Any-typed choice of 3 followed by a charge choice of 2 IS a legal
+    // allocation (remove 3 storage, then 2 charge) — reserving the `Any`
+    // leaf's amount against the typed leaf would wrongly refuse it, while
+    // paying it via the untyped auto-iterator could just as easily consume
+    // the charge counters the second leaf needed. Rather than mishandle
+    // either direction, this shape must fail activation outright.
+    #[test]
+    fn composite_cost_mixing_any_and_typed_chosen_count_leaves_is_unsupported() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8008),
+            player,
+            "Mixed Any And Typed Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            obj.counters.insert(charge.clone(), 2);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::Any,
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(charge.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        assert!(
+            !can_activate_mana_ability_now(&state, player, land, 0, &def),
+            "an Any-plus-typed chosen-count composite must not be offered as activatable, \
+             even though 3 storage + 2 charge counters make the naive per-leaf totals look payable"
+        );
+
+        let action_result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        );
+        assert!(
+            action_result.is_err(),
+            "activating this ability directly must also be refused, got {action_result:?}"
+        );
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "a refused activation must not remove any counters"
+        );
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&charge)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "a refused activation must not remove any counters"
+        );
+    }
+
     #[test]
     fn gemstone_mine_unpayable_without_counters() {
         let mut state = GameState::new_two_player(42);
@@ -9213,6 +16188,170 @@ mod tests {
         assert!(
             !can_activate_mana_ability_now(&state, player, land, 0, &def),
             "Gemstone Mine must not be activatable when it has no mining counters"
+        );
+    }
+
+    // Issue #6507 integration follow-up: `make_gemstone_mine` above omits the
+    // trailing "If there are no mining counters on this land, sacrifice it."
+    // sub-ability entirely, so it never exercised the reported bug or its fix
+    // through the real activation pipeline — only the parser-level AST shape
+    // is covered by `oracle::tests::gemstone_mine_conditional_sacrifice_binds_to_self_ref`.
+    // This fixture mirrors the actual end-to-end parsed shape (mana effect +
+    // conditional `Sacrifice { target: SelfRef }` sub-ability gated on zero
+    // mining counters) so activation itself proves the fix: mana is produced
+    // regardless, and the land is sacrificed only on the activation that
+    // removes its LAST counter.
+    fn make_gemstone_mine_with_sacrifice_sub_ability(
+        state: &mut GameState,
+        player: PlayerId,
+        initial_mining_counters: u32,
+    ) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(8003),
+            player,
+            "Gemstone Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        let mining_key = crate::types::counter::parse_counter_type("MINING");
+        obj.counters.insert(mining_key, initial_mining_counters);
+
+        let sacrifice_if_depleted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        )
+        .condition(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic("mining".to_string())),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Generic("mining".to_string())),
+                    target: None,
+                    selection: crate::types::ability::CounterCostSelection::SingleObject,
+                },
+            ],
+        })
+        .sub_ability(sacrifice_if_depleted);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        land
+    }
+
+    #[test]
+    fn gemstone_mine_survives_activation_with_counters_remaining() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine_with_sacrifice_sub_ability(&mut state, player, 2);
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            land,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .expect("Gemstone Mine activation must not fail with counters present");
+
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1,
+            "mana must be produced regardless of the trailing conditional sacrifice"
+        );
+        assert!(
+            state.battlefield.contains(&land),
+            "Gemstone Mine must remain on the battlefield while a mining counter remains after activation"
+        );
+    }
+
+    #[test]
+    fn gemstone_mine_sacrifices_itself_on_last_counter_removed() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine_with_sacrifice_sub_ability(&mut state, player, 1);
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            land,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .expect("Gemstone Mine activation must not fail on its last counter");
+
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1,
+            "mana must still be produced on the activation that empties the last counter"
+        );
+        assert!(
+            !state.battlefield.contains(&land),
+            "Gemstone Mine must be sacrificed once its last mining counter is removed (issue #6507)"
+        );
+        assert!(
+            state.players[player.0 as usize].graveyard.contains(&land),
+            "the sacrificed Gemstone Mine must land in its controller's graveyard"
         );
     }
 
@@ -9315,21 +16454,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(1),
             source_id: brushland,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -9880,21 +17024,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: source,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
 
@@ -9913,7 +17062,7 @@ mod tests {
     }
 
     #[test]
-    fn sacrifice_mana_cost_rejects_prohibited_selected_permanent() {
+    fn sacrifice_mana_cost_with_a_prohibited_selected_permanent_reverses_the_activation() {
         let mut state = GameState::new_two_player(42);
         let altar = create_object(
             &mut state,
@@ -9953,21 +17102,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: altar,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
 
@@ -9980,7 +17134,10 @@ mod tests {
             &mut Vec::new(),
         );
 
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Ok(WaitingFor::Priority { .. })),
+            "{result:?}"
+        );
         assert_eq!(
             state.objects.get(&creature).unwrap().zone,
             Zone::Battlefield
@@ -10081,21 +17238,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -10147,21 +17309,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -10221,6 +17388,7 @@ mod tests {
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
             object_id: paid.id,
             lki: paid.snapshot_for_mana_spent(),
+            incarnation: 0,
         });
 
         let resolved = resolve_quantity_with_targets(
@@ -10304,21 +17472,26 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -10335,7 +17508,7 @@ mod tests {
         // Every produced unit must carry the SpellType("Creature") restriction.
         let pool = &state.players[0].mana_pool;
         assert_eq!(pool.total(), 4);
-        for unit in &pool.mana {
+        for unit in pool.units() {
             assert_eq!(
                 unit.restrictions,
                 vec![crate::types::mana::ManaRestriction::OnlyForSpellType(
@@ -10619,5 +17792,625 @@ mod tests {
             !can_activate_mana_ability_now(&state, player, prism, 0, &def),
             "Pentad Prism must not be activatable without charge counters"
         );
+    }
+
+    /// Issue #6494 (shared seam): `casting::find_non_self_discard` is the SOLE
+    /// detector for FromHand discard cost legs and no longer filters by selection
+    /// mode — it returns the `CardSelectionMode` for BOTH `Chosen` and `Random`
+    /// legs (and recurses into `Composite`, e.g. Lion's Eye Diamond's shape). The
+    /// mana path's only divergence from the casting/activation path is the explicit
+    /// `Chosen` gate in `discard_cost_choice`, which routes accepted legs through
+    /// the shared `resolve_non_self_discard_requirement` authority so the zero-count
+    /// auto-pay + payability rules live in one place.
+    ///
+    /// Revert-sensitive: fails if `find_non_self_discard` re-adds a selection filter
+    /// (the `Random` assertions go `None`), or if `discard_cost_choice` drops its
+    /// `Chosen` gate (the `Random` leg would then surface an interactive selection).
+    #[test]
+    fn find_non_self_discard_is_sole_detector_mana_path_gates_on_chosen() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // One card in hand so a `Chosen` discard resolves to an interactive selection.
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+
+        let discard_leg = |selection| AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let chosen_leg = discard_leg(CardSelectionMode::Chosen);
+        let random_leg = discard_leg(CardSelectionMode::Random);
+        // LED-shaped composite: the Chosen discard leg lives beside a self-sacrifice.
+        let chosen_in_composite = AbilityCost::Composite {
+            costs: vec![
+                chosen_leg.clone(),
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        };
+
+        // Sole detector: reports the selection mode for BOTH variants (no selection
+        // filter), including inside a Composite.
+        let detect = crate::game::casting::find_non_self_discard;
+        assert!(matches!(
+            detect(&chosen_leg),
+            Some((_, _, CardSelectionMode::Chosen))
+        ));
+        assert!(matches!(
+            detect(&chosen_in_composite),
+            Some((_, _, CardSelectionMode::Chosen))
+        ));
+        assert!(matches!(
+            detect(&random_leg),
+            Some((_, _, CardSelectionMode::Random))
+        ));
+
+        // Mana selection gate: only a Chosen leg surfaces an interactive discard,
+        // and it does so through the shared resolver (Some((1, [card]))).
+        let ability = |cost| {
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![],
+                contribution: ManaContribution::Base,
+            })
+            .cost(cost)
+        };
+        match discard_cost_choice(&state, PlayerId(0), source, &ability(chosen_in_composite)) {
+            Some((count, cards)) => {
+                assert_eq!(count, 1);
+                assert_eq!(cards, vec![card]);
+            }
+            None => panic!("Chosen FromHand discard with a card in hand must surface a selection"),
+        }
+        // A non-Chosen (Random) FromHand discard is not a mid-activation card
+        // selection: the gate returns None even though the sole detector matched it.
+        assert!(discard_cost_choice(&state, PlayerId(0), source, &ability(random_leg)).is_none());
+    }
+
+    fn ledger_event(source_id: u64) -> GameEvent {
+        GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::NoOp,
+            source_id: ObjectId(source_id),
+            subject: None,
+        }
+    }
+
+    #[test]
+    fn nested_mana_cursor_starts_with_empty_frame_local_ledger() {
+        let mut parent_cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        parent_cursor.deferred_cost_events.push(ledger_event(1));
+        let parent = ManaAbilityCostParent {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: Box::new(parent_cursor),
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            current_action_event_start: 0,
+        };
+
+        let child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            Some(&parent),
+        );
+
+        assert!(child.deferred_cost_events.is_empty());
+        assert_eq!(
+            child
+                .parent
+                .as_deref()
+                .expect("child must retain its parent snapshot")
+                .cursor
+                .deferred_cost_events,
+            [ledger_event(1)]
+        );
+    }
+
+    #[test]
+    fn suspended_child_ledger_extends_parent_without_loss_or_overwrite() {
+        let mut parent = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        parent.deferred_cost_events = vec![ledger_event(1), ledger_event(2)];
+        let mut child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        child.deferred_cost_events = vec![ledger_event(3)];
+
+        append_suspended_child_cost_events(&mut parent, &mut child, &[ledger_event(4)]);
+
+        assert_eq!(
+            parent.deferred_cost_events,
+            [
+                ledger_event(1),
+                ledger_event(2),
+                ledger_event(3),
+                ledger_event(4)
+            ]
+        );
+        assert!(child.deferred_cost_events.is_empty());
+    }
+
+    #[test]
+    fn repeated_pause_transfer_preserves_local_suffix_boundary() {
+        let mut active_cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        active_cursor.deferred_cost_events = vec![ledger_event(5), ledger_event(8)];
+        active_cursor.current_action_deferred_start = 1;
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ManaAbilityPayment {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: active_cursor,
+        });
+
+        defer_cost_events_into_active_mana_root(
+            &mut state,
+            vec![ledger_event(1), ledger_event(2)],
+            &[ledger_event(7), ledger_event(8)],
+        );
+
+        let Some(PendingCostMoveResume::ManaAbilityPayment { cursor, .. }) =
+            state.pending_cost_move_resume.as_ref()
+        else {
+            panic!("expected active mana root");
+        };
+        assert_eq!(
+            cursor.deferred_cost_events,
+            [
+                ledger_event(5),
+                ledger_event(1),
+                ledger_event(2),
+                ledger_event(7),
+                ledger_event(8)
+            ]
+        );
+        assert_eq!(cursor.current_action_deferred_start, 4);
+    }
+
+    fn synchronous_parent_at(start: usize, ledger: Vec<GameEvent>) -> ManaAbilityCostParent {
+        let mut cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        cursor.deferred_cost_events = ledger;
+        ManaAbilityCostParent {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: Box::new(cursor),
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            current_action_event_start: start,
+        }
+    }
+
+    /// CR 603.2 + CR 603.3b: The prepared child-facing snapshot owns the live
+    /// parent frame's current unscanned suffix, while the live parent cursor is
+    /// never mutated. A synchronous child that drops the snapshot therefore
+    /// leaves exactly one representation of those events — the reducer vector.
+    #[test]
+    fn prepared_parent_snapshot_carries_current_suffix_without_mutating_live_parent() {
+        let parent = synchronous_parent_at(0, Vec::new());
+        let events = vec![ledger_event(1), ledger_event(2)];
+
+        let prepared = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            prepared.cursor.deferred_cost_events,
+            [ledger_event(1), ledger_event(2)],
+            "prepared snapshot must carry the parent's current unscanned suffix"
+        );
+        assert!(
+            parent.cursor.deferred_cost_events.is_empty(),
+            "the live parent cursor must not be mutated by preparation"
+        );
+
+        let child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            Some(&prepared),
+        );
+        assert!(
+            child.deferred_cost_events.is_empty(),
+            "a nested child's top-level ledger starts empty"
+        );
+        assert_eq!(
+            child
+                .parent
+                .as_deref()
+                .expect("child retains its prepared parent")
+                .cursor
+                .deferred_cost_events,
+            [ledger_event(1), ledger_event(2)]
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: Preparation runs at every child entry from the
+    /// unchanged ephemeral parent, so a later child sees the parent's own prefix
+    /// plus every earlier synchronously completed sibling exactly once. Extending
+    /// a previously prepared snapshot instead would double-append the prefix.
+    #[test]
+    fn later_child_snapshot_includes_earlier_synchronous_sibling_events_once() {
+        let parent = synchronous_parent_at(0, Vec::new());
+        let mut events = vec![ledger_event(1)];
+
+        let first = parent_snapshot_with_current_cost_events(&parent, &events);
+        assert_eq!(first.cursor.deferred_cost_events, [ledger_event(1)]);
+
+        // The first child completed synchronously and emitted its own event.
+        events.push(ledger_event(2));
+        let second = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            second.cursor.deferred_cost_events,
+            [ledger_event(1), ledger_event(2)],
+            "a later child prepares from the unchanged ephemeral parent, not from an earlier snapshot"
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: The parent frame's own `cost_event_start` is the
+    /// marker, so a parent that already scanned an earlier prefix contributes
+    /// only its unscanned suffix to the child snapshot.
+    #[test]
+    fn prepared_parent_snapshot_starts_at_the_parent_frame_marker() {
+        let parent = synchronous_parent_at(1, Vec::new());
+        let events = vec![ledger_event(1), ledger_event(2), ledger_event(3)];
+
+        let prepared = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            prepared.cursor.deferred_cost_events,
+            [ledger_event(2), ledger_event(3)]
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: A pause makes the prepared prefix durable, so the
+    /// ephemeral marker is never consulted again and is deliberately not
+    /// serialized. Round-tripping a suspended parent keeps the prefix while the
+    /// marker resets to its default.
+    #[test]
+    fn suspended_parent_prefix_survives_serde_while_marker_is_skipped() {
+        let mut parent = synchronous_parent_at(0, Vec::new());
+        parent = parent_snapshot_with_current_cost_events(&parent, &[ledger_event(1)]);
+        parent.lifecycle = ManaAbilityCostParentLifecycle::Suspended;
+        parent.current_action_event_start = 7;
+
+        let json = serde_json::to_string(&parent).expect("serialize suspended parent");
+        assert!(
+            !json.contains("current_action_event_start"),
+            "the ephemeral marker must not be serialized: {json}"
+        );
+        let restored: ManaAbilityCostParent =
+            serde_json::from_str(&json).expect("deserialize suspended parent");
+
+        assert_eq!(
+            restored.cursor.deferred_cost_events,
+            [ledger_event(1)],
+            "the durable prefix must survive suspension"
+        );
+        assert_eq!(restored.current_action_event_start, 0);
+        assert!(matches!(
+            restored.lifecycle,
+            ManaAbilityCostParentLifecycle::Suspended
+        ));
+    }
+
+    /// CR 107.3a + CR 605.1a — the mana-ability cost-APPLICATION loop bound.
+    ///
+    /// `pay_mana_ability_cost_with_choices`'s `TapCreatures` arm used to loop
+    /// `0..requirement.fixed_count()`, i.e. `0..u32::MAX` for a "Tap X untapped
+    /// … you control" cost. It drained the player's (small) real selection, then
+    /// asked the exhausted iterator for one more tapper and failed with
+    /// "Missing tapped creature selection for mana ability" — so an X-sentinel
+    /// mana ability could never be paid, regardless of the registration and
+    /// completion fixes.
+    ///
+    /// This is a direct-call test because the function is private to this
+    /// module; `casting_tests.rs` is `game::casting::tests`, a SIBLING of
+    /// `mana_abilities`, and Rust privacy puts this target out of its reach.
+    ///
+    /// REVERT-PROBE: restore `requirement.fixed_count()` as the loop bound ⇒
+    /// `x_sentinel_loop_bound_uses_the_announced_x` fails with the
+    /// "Missing tapped creature selection" error, while the `Fixed` sibling
+    /// below still passes (proving the fix is scoped to the sentinel shape).
+    mod x_sentinel_mana_ability_cost_application {
+        use super::*;
+        use crate::types::ability::TapCreaturesRequirement;
+
+        /// Two untapped creatures the caller can offer as tappers, plus a
+        /// battlefield source, on a fresh two-player state.
+        fn fixture() -> (GameState, ObjectId, Vec<ObjectId>) {
+            let mut state = GameState::new_two_player(42);
+            let player = PlayerId(0);
+            state.active_player = player;
+            state.priority_player = player;
+            state.waiting_for = WaitingFor::Priority { player };
+            let source = create_object(
+                &mut state,
+                CardId(9_701),
+                player,
+                "Hazel fixture".to_string(),
+                Zone::Battlefield,
+            );
+            let tappers: Vec<ObjectId> = (0..2)
+                .map(|i| {
+                    let id = create_object(
+                        &mut state,
+                        CardId(9_710 + i),
+                        player,
+                        format!("Token {i}"),
+                        Zone::Battlefield,
+                    );
+                    let obj = state.objects.get_mut(&id).unwrap();
+                    obj.card_types.core_types.push(CoreType::Creature);
+                    obj.power = Some(1);
+                    obj.toughness = Some(1);
+                    obj.tapped = false;
+                    obj.summoning_sick = false;
+                    id
+                })
+                .collect();
+            (state, source, tappers)
+        }
+
+        fn pay(
+            state: &mut GameState,
+            source: ObjectId,
+            requirement: TapCreaturesRequirement,
+            tappers: &[ObjectId],
+            chosen_x: Option<u32>,
+        ) -> Result<ManaAbilityCostComponentProgress, EngineError> {
+            let cost = Some(AbilityCost::TapCreatures {
+                requirement,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            });
+            let mut tap_iter = tappers.iter().copied();
+            let mut discards = std::iter::empty();
+            let mut sacrificed = std::iter::empty();
+            pay_mana_ability_cost_with_choices(
+                state,
+                source,
+                PlayerId(0),
+                Some(0),
+                &cost,
+                &mut Vec::new(),
+                &mut tap_iter,
+                &mut discards,
+                &mut sacrificed,
+                None,
+                &[],
+                None,
+                &mut None,
+                chosen_x,
+                &HashSet::new(),
+                None,
+                None,
+            )
+        }
+
+        /// The discriminator: an X-sentinel cost must consume exactly the
+        /// announced X (bound at selection completion by
+        /// `handle_tap_creatures_for_mana_ability`), not the raw `u32::MAX`.
+        #[test]
+        fn x_sentinel_loop_bound_uses_the_announced_x() {
+            let (mut state, source, tappers) = fixture();
+            // Positive reach guard: this really is the sentinel shape, so the
+            // test cannot silently degrade into the `Fixed` branch.
+            let requirement = TapCreaturesRequirement::Count { count: u32::MAX };
+            assert_eq!(
+                requirement.selection_mode(),
+                TapCreaturesSelectionMode::VariableX,
+                "reach guard: the fixture must be the X-sentinel shape"
+            );
+
+            pay(&mut state, source, requirement, &tappers, Some(2))
+                .expect("CR 107.3a: the announced X (2) bounds the tap loop");
+            assert!(
+                tappers.iter().all(|id| state.objects[id].tapped),
+                "both announced tappers must actually be tapped"
+            );
+        }
+
+        /// A smaller announced X taps strictly fewer creatures, proving the bound
+        /// tracks the announcement rather than the offered-iterator length.
+        #[test]
+        fn x_sentinel_loop_bound_taps_only_the_announced_count() {
+            let (mut state, source, tappers) = fixture();
+            pay(
+                &mut state,
+                source,
+                TapCreaturesRequirement::Count { count: u32::MAX },
+                &tappers,
+                Some(1),
+            )
+            .expect("CR 107.3a: X=1 is a legal announcement");
+            assert!(
+                state.objects[&tappers[0]].tapped,
+                "the first tapper is used"
+            );
+            assert!(
+                !state.objects[&tappers[1]].tapped,
+                "X=1 must not consume a second tapper"
+            );
+        }
+
+        /// X=0 is a legal announcement and taps nothing at all (CR 107.3a).
+        #[test]
+        fn x_sentinel_loop_bound_accepts_zero() {
+            let (mut state, source, tappers) = fixture();
+            pay(
+                &mut state,
+                source,
+                TapCreaturesRequirement::Count { count: u32::MAX },
+                &[],
+                Some(0),
+            )
+            .expect("CR 107.3a: X=0 is a legal announcement");
+            assert!(
+                tappers.iter().all(|id| !state.objects[id].tapped),
+                "X=0 taps nothing"
+            );
+        }
+
+        /// Hostile: an X-sentinel cost with NO announced X is a hard error rather
+        /// than a silent fallback to some other count.
+        #[test]
+        fn x_sentinel_without_an_announced_x_is_an_error() {
+            let (mut state, source, tappers) = fixture();
+            let err = pay(
+                &mut state,
+                source,
+                TapCreaturesRequirement::Count { count: u32::MAX },
+                &tappers,
+                None,
+            )
+            .expect_err("an unannounced X must not silently pick a count");
+            let EngineError::InvalidAction(message) = &err else {
+                panic!("expected an InvalidAction, got {err:?}");
+            };
+            assert!(
+                message.contains("Missing announced X"),
+                "the missing-X path must be what fired, got {message:?}"
+            );
+        }
+
+        /// Sibling: the FIXED shape is untouched — it still consumes exactly
+        /// `count` tappers, which is the pre-existing behavior for every non-X
+        /// mana-ability tap cost (Grand Architect, Springleaf Drum).
+        #[test]
+        fn fixed_loop_bound_is_unchanged() {
+            let (mut state, source, tappers) = fixture();
+            pay(
+                &mut state,
+                source,
+                TapCreaturesRequirement::count(1),
+                &tappers,
+                None,
+            )
+            .expect("a fixed `count: 1` tap cost consumes exactly one tapper");
+            assert!(state.objects[&tappers[0]].tapped);
+            assert!(
+                !state.objects[&tappers[1]].tapped,
+                "a `count: 1` cost must not consume a second tapper"
+            );
+        }
+
+        /// CR 605.1a: an aggregate (Crew/Saddle/Teamwork) tap cost is never a
+        /// mana-ability cost, and the exhaustive `match` on the selection mode
+        /// keeps that refusal explicit rather than falling through.
+        #[test]
+        fn aggregate_shape_is_refused() {
+            let (mut state, source, tappers) = fixture();
+            let err = pay(
+                &mut state,
+                source,
+                TapCreaturesRequirement::total_power_at_least(1),
+                &tappers,
+                Some(1),
+            )
+            .expect_err("CR 605.1a: an aggregate tap cost cannot fund a mana ability");
+            assert!(
+                matches!(err, EngineError::InvalidAction(_)),
+                "expected an InvalidAction, got {err:?}"
+            );
+            assert!(
+                tappers.iter().all(|id| !state.objects[id].tapped),
+                "a refused aggregate cost must not tap anything"
+            );
+        }
+
+        /// The cursor-ADVANCE sibling of [`aggregate_shape_is_refused`] above,
+        /// which covers the cost-APPLICATION loop. Both arms must refuse the
+        /// aggregate shape, and this one must refuse it with the message it
+        /// carried before Unit 2 replaced `fixed_count().ok_or_else(..)` with an
+        /// exhaustive `selection_mode()` match — byte-identical, so a
+        /// maintainer reading the error in a log sees no change.
+        ///
+        /// Direct-call, and legitimately so: `advance_mana_ability_selection_cursor`
+        /// is private to `game::mana_abilities` and this module is a DESCENDANT
+        /// of it, so Rust privacy already grants the reach and no production
+        /// visibility is widened for the assertion. The arm itself is dead code
+        /// under `apply()` — `tap_creature_cost_choice`'s
+        /// `requirement.fixed_count()?` refuses to register an aggregate tap
+        /// cost — so there is no production entry point to drive instead, which
+        /// is why this stays an exhaustiveness-guard assertion rather than a
+        /// scenario test.
+        ///
+        /// REVERT-PROBE: alter the aggregate arm's message text, or drop the arm
+        /// for a `_ => {}` wildcard (which advances by nothing and returns
+        /// `Ok`) ⇒ the message assertion, or the `expect_err`, fails.
+        #[test]
+        fn aggregate_shape_is_refused_by_the_cursor_advance() {
+            let aggregate = AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::total_power_at_least(5),
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            };
+            // Positive reach guard: the fixture really is the aggregate mode, so
+            // this cannot silently assert against the `Fixed` or `VariableX` arm.
+            let AbilityCost::TapCreatures { requirement, .. } = &aggregate else {
+                unreachable!("the fixture above is a TapCreatures cost");
+            };
+            assert!(
+                matches!(
+                    requirement.selection_mode(),
+                    TapCreaturesSelectionMode::Aggregate(_)
+                ),
+                "reach guard: the fixture must be the aggregate selection mode"
+            );
+            let mut cursor = mana_ability_cost_cursor(
+                &Some(aggregate.clone()),
+                &HashSet::new(),
+                None,
+                ManaAbilityCostResolutionMode::Interactive,
+                None,
+            );
+            let err = advance_mana_ability_selection_cursor(&mut cursor, &aggregate, None, None)
+                .expect_err("an aggregate tap cost is never a valid mana-ability cost");
+            let EngineError::InvalidAction(message) = &err else {
+                panic!("an aggregate mana-ability tap cost must be an InvalidAction, got {err:?}");
+            };
+            assert_eq!(
+                message, "Aggregate-power tap cost is not valid for a mana ability",
+                "the Aggregate arm's message must be byte-identical to the pre-fix one",
+            );
+            assert_eq!(
+                cursor.next_tapper, 0,
+                "a refused aggregate advance must not move the cursor"
+            );
+        }
     }
 }

@@ -1,11 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AlternativeAdditionalCostDescription,
   GameObject,
   ManaCost,
   WaitingFor,
 } from "../../../adapter/types.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -34,7 +36,10 @@ type AltKeyword = Extract<
   { type: "AlternativeCastChoice" }
 >["data"]["keyword"]["type"];
 
-function setSpectacleChoice(keyword: AltKeyword) {
+function setSpectacleChoice(
+  keyword: AltKeyword,
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null = null,
+) {
   const waitingFor: WaitingFor = {
     type: "AlternativeCastChoice",
     data: {
@@ -45,6 +50,7 @@ function setSpectacleChoice(keyword: AltKeyword) {
       normal_cost: { type: "Cost", shards: ["Red"], generic: 3 },
       alternative_cost: RED_COST,
       alternative_additional_cost: null,
+      alternative_additional_cost_description: alternativeAdditionalCostDescription,
     },
   };
 
@@ -68,10 +74,12 @@ describe("AlternativeCostModal", () => {
   beforeEach(() => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(undefined);
+    usePreferencesStore.setState({ language: "en" });
   });
 
   afterEach(() => {
     cleanup();
+    usePreferencesStore.setState({ language: "en" });
   });
 
   // Regression for issue #2939: the engine emits `keyword.type === "Spectacle"`
@@ -109,9 +117,33 @@ describe("AlternativeCostModal", () => {
     });
   });
 
+  it("renders and dispatches More Than Meets the Eye through AlternativeCastChoice", () => {
+    setSpectacleChoice("MoreThanMeetsTheEye");
+    render(<AlternativeCostModal />);
+
+    expect(screen.getByText("More Than Meets the Eye")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Cast Converted/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseAlternativeCast",
+      data: { choice: { type: "Alternative" } },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Cast Normally/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseAlternativeCast",
+      data: { choice: { type: "Normal" } },
+    });
+  });
+
   // The other engine `AlternativeCastKeyword` variants that the FE switch had
   // also been missing must likewise render without throwing.
-  it.each<AltKeyword>(["Emerge", "Impending", "Prototype", "Prowl"])(
+  it.each<AltKeyword>([
+    "Emerge",
+    "Impending",
+    "Prototype",
+    "Prowl",
+    "Surge",
+  ])(
     "renders the %s prompt without crashing",
     (keyword) => {
       setSpectacleChoice(keyword);
@@ -121,4 +153,27 @@ describe("AlternativeCostModal", () => {
       ).toBeInTheDocument();
     },
   );
+
+  it("renders Emerge's engine-provided sacrifice description", () => {
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
+    render(<AlternativeCostModal />);
+
+    expect(screen.getByText(/sacrificing an artifact/i)).toBeInTheDocument();
+  });
+
+  it("localizes Emerge's typed sacrifice quality", async () => {
+    usePreferencesStore.setState({ language: "es" });
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
+    render(<AlternativeCostModal />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/sacrificando un artefacto/i)).toBeInTheDocument();
+    });
+  });
 });

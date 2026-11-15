@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { isTauri } from "../../services/platform";
+import { isDesktopTauri, isTauri } from "../../services/platform";
 
 function EnterFullscreenIcon({ className }: { className?: string }) {
   return (
@@ -26,9 +26,11 @@ interface FullscreenButtonProps {
 export function FullscreenButton({ variant }: FullscreenButtonProps) {
   const { t } = useTranslation();
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+  const desktopTauri = isDesktopTauri();
+  const unknownOrMobileTauri = isTauri() && !desktopTauri;
 
   useEffect(() => {
-    if (isTauri()) {
+    if (desktopTauri) {
       let active = true;
       let unlisten: (() => void) | undefined;
 
@@ -65,16 +67,18 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
       };
     }
 
+    if (unknownOrMobileTauri) return;
+
     function onChange() {
       setIsFullscreen(!!document.fullscreenElement);
     }
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
+  }, [desktopTauri, unknownOrMobileTauri]);
 
   const toggle = useCallback(async () => {
     try {
-      if (isTauri()) {
+      if (desktopTauri) {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const appWindow = getCurrentWindow();
         const nextFullscreen = !(await appWindow.isFullscreen());
@@ -82,6 +86,8 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
         setIsFullscreen(nextFullscreen);
         return;
       }
+
+      if (unknownOrMobileTauri) return;
 
       if (document.fullscreenElement) {
         await document.exitFullscreen();
@@ -91,10 +97,12 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
     } catch (error) {
       console.warn("[phase.rs] Could not toggle fullscreen.", error);
     }
-  }, []);
+  }, [desktopTauri, unknownOrMobileTauri]);
 
   const Icon = isFullscreen ? ExitFullscreenIcon : EnterFullscreenIcon;
   const label = isFullscreen ? t("fullscreen.exit") : t("fullscreen.enter");
+
+  if (unknownOrMobileTauri) return null;
 
   if (variant === "game") {
     return (

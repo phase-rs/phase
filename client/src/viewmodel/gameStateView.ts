@@ -2,17 +2,25 @@ import type {
   GameAction,
   GameObject,
   GameState,
+  ObjectCounterDisplay,
   ObjectId,
   PlayerId,
+  TapCreaturesAggregate,
+  TargetRef,
   WaitingFor,
 } from "../adapter/types";
-import type { MultiplayerBoardLayout } from "../stores/preferencesStore";
+import type {
+  MultiplayerBoardLayout,
+  ResolvedMultiplayerBoardLayout,
+} from "../stores/preferencesStore";
 import {
   groupByName,
   partitionByType,
   type GroupedPermanent,
 } from "./battlefieldProps";
-import { playOrCastActionsForObject } from "./cardActionChoice.ts";
+import { getSeatCount } from "./seatCount";
+
+export { getSeatCount };
 
 export interface PlayerBattlefieldView {
   creatures: GroupedPermanent[];
@@ -22,14 +30,34 @@ export interface PlayerBattlefieldView {
   other: GroupedPermanent[];
 }
 
-export function getOpponentIds(
+/**
+ * Returns every opposing seat in fixed physical clockwise order, starting
+ * immediately after the viewer and wrapping once. Eliminated seats remain so
+ * seat-rendering UI can preserve their physical position.
+ */
+export function getAllOpponentIds(
   gameState: GameState | null,
   playerId: PlayerId,
 ): PlayerId[] {
   if (!gameState) return [];
   const seatOrder = gameState.seat_order ?? gameState.players.map((player) => player.id);
+  const viewerSeatIndex = seatOrder.indexOf(playerId);
+  if (viewerSeatIndex === -1) return seatOrder.filter((id) => id !== playerId);
+
+  return [
+    ...seatOrder.slice(viewerSeatIndex + 1),
+    ...seatOrder.slice(0, viewerSeatIndex),
+  ];
+}
+
+/** Returns live opposing seats in fixed physical clockwise order. */
+export function getOpponentIds(
+  gameState: GameState | null,
+  playerId: PlayerId,
+): PlayerId[] {
+  if (!gameState) return [];
   const eliminated = new Set(gameState.eliminated_players ?? []);
-  return seatOrder.filter((id) => id !== playerId && !eliminated.has(id));
+  return getAllOpponentIds(gameState, playerId).filter((id) => !eliminated.has(id));
 }
 
 /** Resolve the opponent tab/board focus, ignoring eliminated seats. */
@@ -44,19 +72,24 @@ export function resolveFocusedOpponent(
   return liveOpponents[0] ?? null;
 }
 
-// The game's seat count, stable across eliminations — the engine never
-// removes from `seat_order`. Single source of truth for layout decisions
-// like "is this 1v1?". Keep all callers (GameBoard, OpponentHud,
-// BlockAssignmentLines, AttackTargetLines) routed through here so they
-// cannot drift apart — the bug this helper exists to prevent is exactly
-// that drift.
-export function getSeatCount(gameState: GameState | null): number {
-  if (!gameState) return 0;
-  return gameState.seat_order?.length ?? gameState.players.length;
-}
-
 export function isOneOnOne(gameState: GameState | null): boolean {
   return getSeatCount(gameState) === 2;
+}
+
+/**
+ * Resolves the display layout without mutating the persisted raw preference.
+ * Two-player games always use the focused presentation. For multiplayer,
+ * `auto` selects focused on mobile and split elsewhere; explicit choices are
+ * honored on either viewport.
+ */
+export function resolveMultiplayerBoardLayout(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+  isMobile: boolean,
+): ResolvedMultiplayerBoardLayout {
+  if (seatCount <= 2) return "focused";
+  if (layout === "auto") return isMobile ? "focused" : "split";
+  return layout;
 }
 
 export function isSplitBoardActive(
@@ -94,6 +127,35 @@ export function getVisibleBoardPlayerIds(
   return focusedId == null ? [viewerId] : [viewerId, focusedId];
 }
 
+/** The seat whose container stores the shared `zone`, as published by the engine; null when per-player. */
+export function getSharedPileHolder(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+): PlayerId | null {
+  return gameState?.derived?.shared_piles?.[zone] ?? null;
+}
+
+/** Selects between two engine-provided seats: the shared pile's holder, else `seat`. */
+export function resolvePileSeat(
+  gameState: GameState | null | undefined,
+  zone: "graveyard" | "library",
+  seat: PlayerId,
+): PlayerId {
+  return getSharedPileHolder(gameState, zone) ?? seat;
+}
+
+/** The zone viewer pile a Graveyard/Exile object belongs to; exile stays per-seat. */
+export function getZoneViewerPile(
+  gameState: GameState | null | undefined,
+  obj: Pick<GameObject, "zone" | "owner">,
+): { zone: "graveyard" | "exile"; playerId: PlayerId } | null {
+  if (obj.zone === "Graveyard") {
+    return { zone: "graveyard", playerId: resolvePileSeat(gameState, "graveyard", obj.owner) };
+  }
+  if (obj.zone === "Exile") return { zone: "exile", playerId: obj.owner };
+  return null;
+}
+
 export function getPlayerZoneIds(
   gameState: GameState | null,
   zone: "graveyard" | "exile" | "library",
@@ -101,141 +163,170 @@ export function getPlayerZoneIds(
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
-    return gameState.players[playerId]?.graveyard ?? [];
+    return gameState.players[resolvePileSeat(gameState, "graveyard", playerId)]?.graveyard ?? [];
   }
   if (zone === "library") {
     // library[0] = top of library (engine convention from zones.rs). Returns
-    // the full ordered library; the library viewer filters to the cards the
-    // engine has revealed to the viewer (isLibraryCardRevealedToViewer) so
-    // unrevealed cards are never shown.
-    return gameState.players[playerId]?.library ?? [];
+    // the full ordered library; the library viewer consumes each object's
+    // engine-projected display visibility before rendering it.
+    return gameState.players[resolvePileSeat(gameState, "library", playerId)]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }
 
 /**
- * CR 701.20e: whether the engine's private "look at" set (Mishra's Bauble at an
- * opponent's library, a scry look, Glasses of Urza / Gitaxian Probe at a hand)
- * surfaces `objectId`'s identity to `viewerId`. Zone-agnostic — the engine's
- * `private_look_ids`/`private_look_player` fields carry object ids regardless
- * of which zone those objects sit in, so this same check backs both the
- * library viewer and the opponent-hand viewer below.
- */
-export function isPrivatelyLookedAtByViewer(
-  gameState: GameState | null,
-  objectId: ObjectId,
-  viewerId: PlayerId | null | undefined,
-): boolean {
-  // Guard against `undefined === undefined`: if the caller hasn't resolved a
-  // real viewer yet (e.g. mid-load) and `private_look_player` also happens to
-  // be unset, a bare `===` would match and leak the private look to nobody.
-  if (!gameState || viewerId == null) return false;
-  return (
-    gameState.private_look_player === viewerId &&
-    (gameState.private_look_ids?.includes(objectId) ?? false)
-  );
-}
-
-/**
- * Whether the engine has revealed a given library card's identity to `viewerId`.
- *
- * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
- * using the explicit reveal sets — NEVER the card name. In single-player the
- * client renders the raw, unredacted state (the `showAiHand` debug toggle depends
- * on it), so `name !== "Hidden Card"` is always true and cannot be used to infer
- * visibility; doing so leaks every opponent library card. This is the same
- * pattern `OpponentHand` uses for opponent hand cards.
- *
- * Deliberately excludes `public_revealed_cards`: the engine does not un-redact
- * library cards by that persistent memory set (a card revealed once and put back
- * must not leak its new position).
+ * Whether the engine has projected a library card's identity for this viewer.
+ * The display layer reads the per-object projection; it does not reconstruct
+ * visibility from reveal, look, or product-knowledge state.
  */
 export function isLibraryCardRevealedToViewer(
   gameState: GameState | null,
   objectId: ObjectId,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState) return false;
-  // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
-  // revealed") are visible to every player.
-  if (gameState.revealed_cards?.includes(objectId)) return true;
-  // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
-  // opponent's library; your own scry look) surfaces the peeked ids only to the
-  // looking player.
-  return isPrivatelyLookedAtByViewer(gameState, objectId, viewerId);
+  return gameState?.objects[objectId]?.display_visible_to_viewer ?? false;
 }
 
 /**
  * Whether a face-down card sitting in the shared Exile zone is visible to
  * `viewerId`.
  *
- * Mirrors the engine's `hidden_facedown_exile_ids` gate
- * (`crates/engine/src/game/visibility.rs`, CR 406.3 + CR 702.75a +
- * CR 702.143e): a foretold card's owner may look at it, and the controller of
- * the permanent that Hideaway-exiled a card may look at it. Every other
- * face-down exile — including a plain `TrackedBySource` link that grants no
- * look-permission (Bomat Courier, Necropotence, Asmodeus) — stays hidden.
- *
- * Like `isLibraryCardRevealedToViewer` above, this exists because single-player
- * renders the raw, unredacted state: `obj.face_down` alone can't distinguish
- * "hidden from this viewer" from "visible to this viewer", and the object's
- * `name`/`printed_ref` carry the real identity regardless of viewer. Used by
- * the exile `ZoneViewer` to keep an opponent's Hideaway-exiled card (or a
- * non-owner's foretold exile) from leaking its name or image.
+ * The rules permissions (Foretell, Hideaway, and face-down look effects) are
+ * resolved by Rust before this value reaches the client.
  */
 export function isFaceDownExileCardVisibleToViewer(
-  gameState: GameState | null,
+  _gameState: GameState | null,
   obj: GameObject,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState || !obj.face_down) return false;
-  if (obj.foretold && obj.owner === viewerId) return true;
-  return (gameState.exile_links ?? []).some(
-    (link) =>
-      link.exiled_id === obj.id &&
-      link.kind === "HideawayLookable" &&
-      gameState.objects[link.source_id]?.controller === viewerId,
-  );
+  return obj.face_down && (obj.display_visible_to_viewer ?? false);
 }
 
 /**
  * Whether `viewerId` may see the identity of `obj` for the card-report picker.
  *
- * Composes the engine-mirroring reveal-set helpers above; NEVER infers
- * visibility from `name !== HIDDEN_CARD_NAME`. In single-player the client
- * renders the raw, unredacted state (the `showAiHand` debug toggle depends on
- * it), so hidden-zone objects carry their real names and a name check would leak
- * every opponent card. Conservative: hides on any doubt, never leaks.
+ * Rust resolves every zone and reveal rule into `display_visible_to_viewer`.
+ * Conservative: hides on an omitted projection, never leaks.
  */
 export function isObjectReportableToViewer(
   gameState: GameState | null,
   obj: GameObject,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState) return false;
-  // CR 701.20b: a publicly revealed card is visible to every player.
-  const revealed = gameState.revealed_cards?.includes(obj.id) ?? false;
-  switch (obj.zone) {
-    case "Stack":
-    case "Battlefield":
-      // Public zones; a face-down (morph/manifest) permanent hides its identity
-      // from non-owners unless it has been publicly revealed.
-      return !obj.face_down || obj.owner === viewerId || revealed;
-    case "Graveyard":
-    case "Command":
-      return true; // public, face-up
-    case "Exile":
-      return !obj.face_down || isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
-    case "Hand":
-      // Own hand, or a card revealed to everyone (mirror OpponentHand's gate).
-      return (
-        obj.owner === viewerId ||
-        revealed ||
-        (gameState.public_revealed_cards?.includes(obj.id) ?? false)
-      );
-    case "Library":
-      return false; // hidden; rare face-up-top reveals are out of scope
+  return gameState != null && (obj.display_visible_to_viewer ?? false);
+}
+
+/**
+ * The engine-authored legal set for a prompt the player answers with ONE
+ * `GameAction::ChooseTarget` carrying a single `TargetRef` — CR 115.1: "the
+ * targets are object(s) and/or player(s) the spell or ability will affect."
+ *
+ * Returns `null` when `waitingFor` is not such a prompt, so a caller can tell
+ * "no click-targeting is in progress" from "click-targeting is in progress and
+ * nothing is legal yet". Same applicable-or-not convention as
+ * `getBoardChoiceView`, which `DialogHost` consumes as `!= null`.
+ *
+ * Membership needs BOTH halves; do not widen on either alone:
+ *   1. the engine has a `GameAction::ChooseTarget` apply arm for the variant, and
+ *   2. its legal-set field is typed `TargetRef[]`, so it can name a player.
+ *
+ * The other `ChooseTarget` variants carry `ObjectId[]` and therefore cannot name
+ * a player — `CopyTargetChoice.valid_targets`, `ExploreChoice.choosable`,
+ * `PopulateChoice.valid_tokens` (the engine's populate arm matches
+ * `TargetRef::Object` outright). They stay in `getWaitingForObjectChoiceIds`.
+ *
+ * Prompts answered by a DIFFERENT action are dialog-only by design and stay out.
+ * Each already renders its player rows in its own modal, so nothing is
+ * unreachable — only the click path differs:
+ *   - `DistributeAmong`   -> `DistributeAmong { distribution }`; a click carries
+ *                            no amount (DistributeAmongModal).
+ *   - `ProliferateChoice` -> `SelectTargets`; CR 701.34a chooses any-size subset
+ *     `TimeTravelChoice`     of permanents and/or players (ProliferateModal).
+ *   - multi-pick `ChooseObjectsSelection` -> `SelectTargets` (ProliferateModal).
+ *   - `EachPlayerCopyChosenSelection` -> `SelectTargets`, ORDERED (first pick is
+ *                            copied, second scales); a click carries no order.
+ *   - `ChooseOneOfBranch` -> `ChooseBranch { index }`; `parent_targets` is
+ *                            continuation context the modal never reads.
+ * All of the above are host-wrapped (`isClickThroughWaitingFor` is false for
+ * them: absent from `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`, or, for
+ * multi-pick `ChooseObjectsSelection`, excluded by its `max !== 1` guard), so a
+ * HUD glow beneath their `fixed inset-0` host could not be clicked even if it
+ * were offered.
+ *
+ * A single-pick `ChooseObjectsSelection` (`max === 1`) meets both criteria: the
+ * engine also accepts one `ChooseTarget` for it, and `eligible` is `TargetRef[]`.
+ * It is click-through (`ChooseObjectsSelection(max 1)` in `isClickThroughWaitingFor`);
+ * multi-pick shapes stay dialog-only.
+ *
+ * NOTE: `getWaitingForObjectChoiceIds` below keeps its own switch over a
+ * superset of these arms. The two must agree on every shared arm, and neither
+ * may silently gain an arm the other lacks. `PARTITION_FIXTURES` in
+ * `gameStateView.test.ts` is a `Record<WaitingFor["type"], …>`, so adding a
+ * variant to `WaitingFor` fails `pnpm run type-check` until that map records
+ * what the player axis does with it. Apply the two-criteria test above before
+ * answering that compile error.
+ */
+export function getWaitingForClickTargetRefs(
+  waitingFor: WaitingFor | null | undefined,
+): TargetRef[] | null {
+  switch (waitingFor?.type) {
+    case "TargetSelection":
+    case "TriggerTargetSelection":
+      return waitingFor.data.selection?.current_legal_targets ?? [];
+    case "CopyRetarget": {
+      // CR 707.10c: the copy's controller may choose new targets, one slot at a
+      // time — read the slot the engine is currently asking about.
+      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+      return slot?.legal_alternatives ?? [];
+    }
+    case "RetargetChoice":
+      // CR 115.7: a single-target retarget (Bolt Bend, Misdirection) is answered by a
+      // board/HUD click. An `All`-scope retarget keeps RetargetChoiceModal, whose
+      // confirm button needs pointer events, and the engine has no `ChooseTarget`
+      // arm for it — so it is not a click prompt at all.
+      return waitingFor.data.scope.type === "Single"
+        ? waitingFor.data.legal_new_targets
+        : null;
+    case "ReturnAsAuraTarget":
+      // CR 303.4: an Aura enters attached to an object OR a player, so this list
+      // mixes both. The engine owns which hosts are legal; the client only routes
+      // each ref to the surface that can render it.
+      return waitingFor.data.legal_targets;
+    case "ChooseTokenHost":
+      // Digital-only Alchemy (no CR entry): a batch boon's "one of them" host
+      // pick. Same cluster shape as ReturnAsAuraTarget — the engine owns which
+      // stamped entrants are still legal; the client only routes each ref.
+      return waitingFor.data.legal_targets;
+    case "ChooseObjectsSelection":
+      // CR 608.2d + CR 115.10a: a single-pick resolution choice is answered by one
+      // board/HUD click (the engine's `ChooseTarget` arm admits only `max == Some(1)`);
+      // its `eligible` mixes objects and players and is not a target list — hexproof
+      // creatures stay in it. Multi-pick selections keep ProliferateModal's
+      // `SelectTargets` subset.
+      return waitingFor.data.max === 1 ? waitingFor.data.eligible : null;
+    default:
+      return null;
   }
+}
+
+/**
+ * The players the engine is currently offering as click targets — the
+ * player-axis sibling of `getWaitingForObjectChoiceIds`, and the single
+ * authority for every surface that renders a seat (PlayerHud, OpponentHud's 1v1
+ * pill and multiplayer tabs, OpponentSeatHeader).
+ *
+ * Pair it with `useCanActForWaitingState()` at the call site: this function says
+ * WHICH players are legal, the hook says WHETHER this client may answer. The two
+ * resolve different seats on purpose — the hook against the real seat, the
+ * membership test against the rendered seat — and under a CR 723 turn-control
+ * effect those differ. See `usePerspectivePlayerId`.
+ */
+export function getWaitingForPlayerChoiceIds(
+  waitingFor: WaitingFor | null | undefined,
+): PlayerId[] {
+  return (getWaitingForClickTargetRefs(waitingFor) ?? []).flatMap((target) =>
+    "Player" in target ? [target.Player] : [],
+  );
 }
 
 export function getWaitingForObjectChoiceIds(
@@ -254,7 +345,7 @@ export function getWaitingForObjectChoiceIds(
       return (slot?.legal_alternatives ?? []).flatMap((t) => "Object" in t ? [t.Object] : []);
     }
     case "RetargetChoice":
-      // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are resolved by
+      // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are resolved by
       // a board click; multi-target (`All`-scope) retargets keep the dialog.
       if (waitingFor.data.scope.type !== "Single") return [];
       return waitingFor.data.legal_new_targets.flatMap((target) =>
@@ -267,10 +358,23 @@ export function getWaitingForObjectChoiceIds(
     case "ReturnAsAuraTarget":
       // CR 303.4 / CR 115.1: `legal_targets` is a TargetRef[] of object hosts
       // *and* players (Curse / enchant-player Auras). Only object hosts glow on
-      // the board; player hosts are handled by PlayerHud/OpponentHud glow.
+      // the board; player hosts are projected by
+      // `getWaitingForPlayerChoiceIds` above, which every seat-rendering
+      // surface reads.
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
+    case "ChooseTokenHost":
+      // Same mixed-axis projection as ReturnAsAuraTarget: object entrants glow
+      // on the board, player hosts on the seats.
+      return waitingFor.data.legal_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
+    case "ChooseObjectsSelection":
+      // CR 608.2d: only a single-pick selection is a board pick; multi-pick
+      // selections keep the dialog. Same mixed-axis projection as above.
+      if (waitingFor.data.max !== 1) return [];
+      return waitingFor.data.eligible.flatMap((t) => "Object" in t ? [t.Object] : []);
     default:
       return [];
   }
@@ -288,6 +392,7 @@ export type BoardChoiceIntent =
   | "return"
   | "exile"
   | "tap"
+  | "untap"
   | "crew"
   | "saddle"
   | "station"
@@ -304,13 +409,18 @@ export type BoardChoiceSelection =
   // "as though its power were N greater" / "using its toughness" make the
   // contribution differ from printed power; when absent (Ward-sacrifice total
   // power), the summation falls back to raw power.
-  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number> }
+  // `signed` selects the summation the engine validates: absent/false clamps
+  // each creature at zero (Crew/Saddle contributions, Ward-sacrifice total
+  // power); true sums raw signed power (TapCreatures aggregate costs, CR
+  // 107.1b — a -1-power creature genuinely lowers the total).
+  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number>; signed?: boolean }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
   // combined power is at most `power`; selecting beyond it blocks confirm.
   | { type: "totalPowerAtMost"; power: number };
 
 export type BoardChoiceResponse =
   | { type: "SelectCards" }
+  | { type: "ChooseUntap"; objectId: ObjectId }
   | { type: "CrewVehicle"; vehicleId: ObjectId }
   | { type: "ActivateStation"; spacecraftId: ObjectId }
   | { type: "SaddleMount"; mountId: ObjectId }
@@ -327,6 +437,7 @@ export interface BoardChoiceView {
   response: BoardChoiceResponse;
   sourceId?: ObjectId;
   skipAction?: GameAction;
+  skipLabel?: "keepTapped";
   cancelAction?: GameAction;
 }
 
@@ -354,8 +465,14 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
   }
-  if (data.resume.type === "Resolution") {
+  if (data.resume.type === "Resolution" || data.resume.type === "TeamTapPayment") {
     return undefined;
+  }
+  if (data.resume.type === "TurnFaceUp") {
+    return (data.resume.source?.object_id ?? data.resume.object_id) as ObjectId;
+  }
+  if (data.resume.type === "SpellCost") {
+    return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
   }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
@@ -377,9 +494,55 @@ function confirmedCountSelection(count: number, minCount: number): BoardChoiceSe
   return { type: "rangeCount", min: minCount, max: count };
 }
 
+/**
+ * CR 208.1 + CR 601.2f + CR 107.1b (Teamwork CR 702.194a / Bow to My
+ * Command): map a TapCreatures Aggregate cost's advertised comparator to the
+ * board-choice selection that gates confirmation on summed SIGNED power — the
+ * same `totalPowerAtLeast` mechanism CrewVehicle/SaddleMount use, with the
+ * `signed` flag set so a -1-power creature genuinely lowers the total,
+ * matching the engine validator (`tap_creatures_signed_total_power`).
+ * Crew/Saddle keep the default clamped summation (their engine contributions
+ * clamp per `object_crew_power_contribution`). Only `GE` ("total power N or
+ * greater") is constructible by any current engine registration site
+ * (`TapCreaturesRequirement::total_power_at_least` is the sole non-test
+ * constructor of the `Aggregate` requirement shape, and it hardcodes `GE`).
+ * Any comparator other than `GE` has no correct client representation yet;
+ * fail loud and block confirmation rather than guess.
+ */
+function tapCreaturesAggregateSelection(aggregate: TapCreaturesAggregate): BoardChoiceSelection {
+  switch (aggregate.comparator) {
+    case "GE":
+      return { type: "totalPowerAtLeast", power: aggregate.value, signed: true };
+    case "GT":
+    case "LT":
+    case "LE":
+    case "EQ":
+    case "NE":
+      console.error(
+        `Unsupported TapCreatures aggregate comparator "${aggregate.comparator}"; blocking confirmation.`,
+      );
+      return { type: "rangeCount", min: 0, max: 0 };
+  }
+}
+
+function isCancellablePayCost(
+  resume: Extract<WaitingFor, { type: "PayCost" }>["data"]["resume"],
+  allowsCancelCast?: boolean,
+): boolean {
+  if (allowsCancelCast !== undefined) {
+    return allowsCancelCast;
+  }
+  return (
+    resume.type === "Spell" ||
+    resume.type === "SpellCost" ||
+    resume.type === "TurnFaceUp"
+  );
+}
+
 export function getBoardChoiceView(
   waitingFor: WaitingFor | null | undefined,
   objects?: Record<ObjectId, GameObject | undefined>,
+  allowsCancelCast?: boolean,
 ): BoardChoiceView | null {
   switch (waitingFor?.type) {
     case "EffectZoneChoice": {
@@ -394,6 +557,8 @@ export function getBoardChoiceView(
         intent = "return";
       } else if (waitingFor.data.destination === "Exile") {
         intent = "exile";
+      } else if (waitingFor.data.effect_kind === "Untap") {
+        intent = "untap";
       }
       if (!intent) return null;
       const minCount = waitingFor.data.up_to === true ? waitingFor.data.min_count ?? 0 : waitingFor.data.count;
@@ -430,8 +595,31 @@ export function getBoardChoiceView(
         response: { type: "ChooseKeptPermanents" },
         sourceId: waitingFor.data.source_id,
       };
+    case "ChooseUntapSubset":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.group,
+        intent: "untap",
+        selection: { type: "rangeCount", min: 0, max: waitingFor.data.max },
+        response: { type: "SelectCards" },
+      };
+    case "UntapChoice": {
+      const objectId = waitingFor.data.candidates[0];
+      if (objectId == null) return null;
+      return {
+        player: waitingFor.data.player,
+        objectIds: [objectId],
+        intent: "untap",
+        selection: { type: "single", immediate: true },
+        response: { type: "ChooseUntap", objectId },
+        skipAction: { type: "ChooseUntap", data: { object_id: objectId, untap: false } },
+        skipLabel: "keepTapped",
+      };
+    }
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
+      const canCancel = isCancellablePayCost(waitingFor.data.resume, allowsCancelCast);
+      const cancelAction = canCancel ? { type: "CancelCast" as const } : undefined;
       switch (waitingFor.data.kind.type) {
         case "Sacrifice":
           return {
@@ -441,7 +629,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ReturnToHand":
           return {
@@ -451,7 +639,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ExilePermanent":
           return {
@@ -461,18 +649,23 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
-        case "TapCreatures":
+        case "TapCreatures": {
+          const { mode } = waitingFor.data.kind;
           return {
             player: waitingFor.data.player,
             objectIds: waitingFor.data.choices,
             intent: "tap",
-            selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.count),
+            selection:
+              typeof mode === "object"
+                ? tapCreaturesAggregateSelection(mode.Aggregate)
+                : confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
+        }
         default:
           return null;
       }
@@ -520,6 +713,7 @@ export function getBoardChoiceView(
         },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "StationTarget":
       return {
@@ -529,13 +723,14 @@ export function getBoardChoiceView(
         selection: { type: "single", immediate: true },
         response: { type: "ActivateStation", spacecraftId: waitingFor.data.spacecraft_id },
         sourceId: waitingFor.data.spacecraft_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "BlightChoice":
       return {
         player: waitingFor.data.player,
         objectIds: waitingFor.data.creatures,
         intent: "blight",
-        selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.count),
+        selection: confirmedCountSelection(1, 1),
         response: { type: "SelectCards" },
         sourceId: waitingFor.data.pending_cast.object_id,
         cancelAction: { type: "CancelCast" },
@@ -598,6 +793,8 @@ export function buildBoardChoiceAction(
   switch (choice.response.type) {
     case "SelectCards":
       return { type: "SelectCards", data: { cards: selectedIds } };
+    case "ChooseUntap":
+      return { type: "ChooseUntap", data: { object_id: choice.response.objectId, untap: true } };
     case "CrewVehicle":
       return {
         type: "CrewVehicle",
@@ -638,8 +835,11 @@ export function boardChoiceSelectedPower(
   // `totalPowerAtMost` (Slaughter the Strong's keep set) mirrors the engine's
   // CR 208.3 total, which sums raw power — a -1-power creature genuinely lowers
   // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
-  // `totalPowerAtLeast` contributes positive power only.
-  const clampNegative = choice.selection.type === "totalPowerAtLeast";
+  // `totalPowerAtLeast` contributes positive power only, while the
+  // TapCreatures-aggregate `signed` form sums raw power (CR 107.1b), matching
+  // the engine validator.
+  const clampNegative =
+    choice.selection.type === "totalPowerAtLeast" && choice.selection.signed !== true;
   // CR 702.122a / 702.171a: for Crew/Saddle the engine supplies each creature's
   // adjusted contribution (Pilot tokens' "+2 greater", Giant Ox's toughness).
   // Prefer it over printed power so the UI gates on the same value the engine
@@ -738,55 +938,10 @@ export function getBattlefieldSacrificeChoice(
   };
 }
 
-export type ZoneViewerTarget = {
-  zone: "graveyard" | "exile";
-  playerId: PlayerId;
-  objectIds: ObjectId[];
-};
-
-/**
- * When the player has Priority and the engine surfaces play/cast actions on
- * graveyard or exile cards (Retrace, Flashback, Adventure, etc.), return the
- * sole zone pile to auto-open in `ZoneViewer`. Mirrors the object-choice
- * auto-open grouping: only auto-open when every castable card lives in one
- * zone+owner pile so we don't trap the player in the wrong graveyard.
- */
-export function getCastableZoneViewerTarget(
-  waitingFor: WaitingFor | null | undefined,
-  objects: Record<ObjectId, GameObject> | undefined,
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
-): ZoneViewerTarget | null {
-  if (waitingFor?.type !== "Priority" || !objects || !legalActionsByObject) {
-    return null;
-  }
-
-  const groups = new Set<string>();
-  let firstHit: ZoneViewerTarget | null = null;
-  const objectIds: ObjectId[] = [];
-
-  for (const key of Object.keys(legalActionsByObject)) {
-    const objectId = Number(key) as ObjectId;
-    if (playOrCastActionsForObject(legalActionsByObject, objectId).length === 0) {
-      continue;
-    }
-    const obj = objects[objectId];
-    if (!obj) continue;
-    if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
-
-    const zone: ZoneViewerTarget["zone"] =
-      obj.zone === "Graveyard" ? "graveyard" : "exile";
-    groups.add(`${zone}:${obj.owner}`);
-    objectIds.push(objectId);
-    if (!firstHit) firstHit = { zone, playerId: obj.owner, objectIds };
-  }
-
-  objectIds.sort((a, b) => a - b);
-  return groups.size === 1 ? firstHit : null;
-}
-
 export function buildPlayerBattlefieldView(
   gameState: GameState | null,
   playerId: PlayerId,
+  showOwnerPrintings: boolean,
 ): PlayerBattlefieldView {
   if (!gameState) {
     return emptyBattlefieldView();
@@ -811,10 +966,15 @@ export function buildPlayerBattlefieldView(
   // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
   // Read exactly like ring_bearer — the adapter attaches `derived` onto gameState.
   const unboundedPileIds = new Set(gameState.derived?.unbounded_pile ?? []);
+  // CR 122.1: the engine's complete counter-display projection is part of the group IDENTITY —
+  // two permanents that render different counter rows must not share a representative. Read
+  // exactly like `unbounded_pile` above.
   return buildPlayerBattlefieldViewFromObjects(
     playerObjects,
     ringBearerIds,
     unboundedPileIds,
+    gameState.derived?.counter_display,
+    showOwnerPrintings,
   );
 }
 
@@ -822,6 +982,8 @@ export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
   unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -831,11 +993,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
   };
 }
 

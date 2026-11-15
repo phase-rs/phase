@@ -45,7 +45,13 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
-    let player = super::resolve_player_for_context_ref(state, ability, &target);
+    // CR 608.2c: this instruction owns the chain's referent slot from here on,
+    // including the arms where it produces nothing.
+    crate::game::morph::begin_face_down_referent_production(state);
+
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, &target) else {
+        return Ok(());
+    };
     // CR 110.2a: resolve the cloaking-player override through the single
     // canonical authority shared with ChangeZone/ChangeZoneAll/Manifest.
     let controller = super::change_zone::resolve_enters_under_player(

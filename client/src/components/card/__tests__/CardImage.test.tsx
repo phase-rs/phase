@@ -2,12 +2,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useCardImage } from "../../../hooks/useCardImage.ts";
-import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { CardImage } from "../CardImage.tsx";
 
-const mockUseEngineCardData = vi.hoisted(() => vi.fn(() => null));
+const mockUseEngineCardData = vi.hoisted(() => vi.fn<() => { name: string; oracle_text?: string } | null>(() => null));
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
   useCardImage: vi.fn(() => ({
     src: null,
     isLoading: true,
@@ -72,6 +72,16 @@ describe("CardImage art fallback (issue #6156)", () => {
     expect(document.querySelector("img")).toBeNull();
   });
 
+  it("uses the localized name alongside localized text when art is unavailable", () => {
+    mockUseCardImage.mockReturnValue({ src: null, isLoading: false, isRotated: false, isFlip: false });
+    mockUseEngineCardData.mockReturnValueOnce({ name: "機能不全ダニ", oracle_text: "日本語の印刷本文" });
+
+    render(<CardImage cardName="Haywire Mite" />);
+
+    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toHaveTextContent("日本語の印刷本文");
+    expect(mockUseEngineCardData).toHaveBeenCalledWith("Haywire Mite");
+  });
+
   it("includes the Oracle text in the fallback tile when it is known", () => {
     mockUseCardImage.mockReturnValue({
       src: null,
@@ -95,21 +105,32 @@ describe("CardImage art fallback (issue #6156)", () => {
   });
 
   it("falls back to the name text tile when a resolved image fails to load", () => {
+    const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "https://example.invalid/banana.png",
       isLoading: false,
       isRotated: false,
       isFlip: false,
+      advanceFailedSource,
     });
 
-    render(<CardImage cardName="Reveillark" />);
+    const { rerender } = render(<CardImage cardName="Reveillark" />);
 
     // The <img> renders first...
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
 
-    // ...then a load failure swaps in the same text tile.
+    // ...then the hook advances the exact failed source. Its settled result
+    // drives the component to the same text tile.
     fireEvent.error(img!);
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/banana.png");
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    rerender(<CardImage cardName="Reveillark" />);
 
     expect(screen.getByRole("img", { name: "Reveillark" })).toBeInTheDocument();
     expect(screen.getByText("Reveillark")).toBeInTheDocument();
@@ -168,25 +189,52 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
-    expect(img!.getAttribute("src")).toBe(CARD_BACK_URL);
+    expect(img).toHaveAttribute("src", "card-back.png");
+    // The card back has no size variants, so it must never carry a ladder that
+    // could resolve to a nonexistent asset.
+    expect(img!.getAttribute("srcset")).toBeNull();
     expect(screen.queryByRole("img", { name: "Grizzly Bears" })).toBeNull();
     expect(screen.queryByText("Grizzly Bears")).toBeNull();
   });
 
-  it("re-tries the image when the art source changes after a load failure", () => {
-    // A single component instance survives a permanent turning face up or a DFC
-    // transforming. Without a reset the latched `imageError` would pin the text
-    // tile in place even once a loadable face arrives.
+  it("serves a Scryfall card image at both widths, lazily", () => {
+    // `srcSet`, `sizes` and `loading` must arrive together: `sizes="auto"` is
+    // valid only with `loading="lazy"`, and without it the browser silently
+    // falls back to selecting the 488px asset for every card.
     mockUseCardImage.mockReturnValue({
-      src: "https://example.invalid/front.png",
+      src: "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318",
       isLoading: false,
       isRotated: false,
       isFlip: false,
     });
 
+    render(<CardImage cardName="War Room" />);
+
+    const img = document.querySelector("img");
+    expect(img!.getAttribute("srcset")).toBe(
+      "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318 146w, "
+      + "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318 488w",
+    );
+    expect(img!.getAttribute("sizes")).toBe("auto, 200px");
+    expect(img!.getAttribute("loading")).toBe("lazy");
+  });
+
+  it("re-tries the image when the art source changes after a load failure", () => {
+    // A single component instance survives a permanent turning face up or a DFC
+    // transforming. The failed source must be delegated to the hook without
+    // preventing a later generation from rendering its new active source.
+    const advanceFailedSource = vi.fn();
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/front.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      advanceFailedSource,
+    });
+
     const { rerender } = render(<CardImage cardName="Delver of Secrets" />);
     fireEvent.error(document.querySelector("img")!);
-    expect(screen.getByRole("img", { name: "Delver of Secrets" })).toBeInTheDocument();
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/front.png");
 
     // The transformed face resolves to a different, loadable src.
     mockUseCardImage.mockReturnValue({
@@ -200,5 +248,70 @@ describe("CardImage art fallback (issue #6156)", () => {
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
     expect(img!.getAttribute("src")).toBe("https://example.invalid/back.png");
+  });
+});
+
+describe("CardImage face-down marker (#7532)", () => {
+  it("renders the marker token art for a face-down permanent", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Hidden" faceDown faceDownCause="Manifest" />);
+
+    const img = screen.getByRole("img");
+    expect(img).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+  });
+
+  it("falls back to the card back when the marker image fails to load", () => {
+    const advanceFailedSource = vi.fn();
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      advanceFailedSource,
+    });
+
+    const { rerender } = render(
+      <CardImage cardName="Hidden" faceDown faceDownCause="Manifest" />,
+    );
+    const img = screen.getByRole("img");
+    // A resolved marker URL can still 404 (CDN gap, stale printing). A face-down
+    // permanent must never show a broken image, and must not fall through to the
+    // artless text tile either — the card back is its only fallback.
+    fireEvent.error(img);
+    expect(advanceFailedSource).toHaveBeenCalledWith(
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    rerender(<CardImage cardName="Hidden" faceDown faceDownCause="Manifest" />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", "card-back.png");
+  });
+
+  it("keeps the card back when no marker applies", () => {
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    // `TurnedFaceDown` (Ixidron) has no printed marker token.
+    render(<CardImage cardName="Hidden" faceDown faceDownCause="TurnedFaceDown" />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", "card-back.png");
   });
 });

@@ -9,6 +9,23 @@ export interface HandSlotRect {
 }
 
 /**
+ * The DOM selector that defines the reorder index space: every element it
+ * matches inside the hand container becomes one `HandSlotRect`, so a card it
+ * matches is a card the player can drop another card next to.
+ *
+ * It is deliberately NOT `[data-card-hover]`. That attribute means
+ * "inspectable" — it is what `usePreviewDismiss`'s `:hover` poll and `uiStore`'s
+ * deferred clear test for — and the castable exile/graveyard wings carry it so
+ * their preview survives a hover. Reusing it here would silently admit the wings
+ * into the reorder index space, shifting every slot and arrow position by the
+ * wing count while `computeReorderedHand` still indexes `player.hand`.
+ *
+ * Named here, beside the functions that consume the rects, so the two concerns
+ * cannot be re-merged by editing a string literal at a call site.
+ */
+export const HAND_REORDER_SELECTOR = "[data-hand-card]";
+
+/**
  * Fraction of a card's width that the *visible* slot between the two flanking
  * cards should open to once they slide apart. The drop target reads as a real
  * gap you could drop a card into, not a hairline.

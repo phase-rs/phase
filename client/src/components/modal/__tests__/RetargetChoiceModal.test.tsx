@@ -1,0 +1,222 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { GameState, TargetRef, WaitingFor } from "../../../adapter/types.ts";
+import { CardChoiceModal } from "../CardChoiceModal.tsx";
+import { RetargetChoiceModal } from "../RetargetChoiceModal.tsx";
+import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import {
+  buildCommanderFormatConfig,
+  buildGameState,
+  buildPlayer,
+  retargetChoiceWaitingForFactory,
+} from "../../../test/factories/gameStateFactory.ts";
+
+type RetargetChoiceWaitingFor = Extract<WaitingFor, { type: "RetargetChoice" }>;
+
+const dispatchMock = vi.fn();
+
+vi.mock("../../../hooks/useGameDispatch.ts", () => ({
+  useGameDispatch: () => dispatchMock,
+}));
+
+function setUp(data: Partial<RetargetChoiceWaitingFor["data"]>) {
+  const waitingFor = retargetChoiceWaitingForFactory.withData(data).build();
+  const state: GameState = buildGameState({
+    players: [buildPlayer({ id: 0, life: 40 }), buildPlayer({ id: 1, life: 40 })],
+    format_config: buildCommanderFormatConfig(),
+    waiting_for: waitingFor,
+  });
+  useGameStore.setState({
+    gameMode: "online",
+    gameState: state,
+    waitingFor,
+  });
+}
+
+const opp1: TargetRef = { Player: 0 };
+const opp2: TargetRef = { Player: 1 };
+
+describe("RetargetChoiceModal (via CardChoiceModal)", () => {
+  beforeEach(() => {
+    dispatchMock.mockClear();
+    useMultiplayerStore.setState({ activePlayerId: 0 });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  // CR 115.7d + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
+  // MED-2): admission for an `All`-scope submission is PER-SLOT
+  // (`engine::apply_retarget`'s `pool_for`), but this modal used to render
+  // the FLAT UNION for whichever slot was active — measured on a multi-slot
+  // prompt where the union had more entries than the active slot's own
+  // pool, so a rendered choice could be rejected by the reducer on click.
+  // Only `All`-scope prompts reach this modal at all (`CardChoiceModal`
+  // routes `Single` scope to the board's `TargetingOverlay` instead), so
+  // this is the modal's only reachable retarget shape.
+  it("renders per-slot pools for opaque coin paths and submits only positional choices", () => {
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2, opp1, opp1],
+      slots: [
+        { path: [{ CoinFlipBranch: { result: "Won" } }], slot: 0 },
+        { path: [{ CoinFlipBranch: { result: "Lost" } }], slot: 0 },
+        { path: ["SubAbility"], slot: 0 },
+      ],
+      slot_pools: [[opp2], [opp1, opp2], [opp1]],
+      legal_new_targets: [opp1, opp2],
+    });
+    render(<CardChoiceModal />);
+
+    // Active slot defaults to 0, whose OWN pool (`slot_pools[0]`) is
+    // `[opp2]` only. `opp1` is in the flat union but NOT slot 0's pool, so
+    // it must not be offered as a choice for this slot. `opp2` is also the
+    // default selection, so its button carries an extra "New target" badge
+    // — match on a name PREFIX rather than the exact label.
+    expect(screen.getByRole("button", { name: /^Opp 2/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Opp 1/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Target 2/ }));
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Target 3/ }));
+    // Target 3's OWN pool is `[opp1]`, unlike Target 1's `[opp2]`: a modal
+    // that read Target 1's pool here would offer Opp 2 and hide Opp 1.
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Opp 2/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [null, opp2, null] },
+    });
+  });
+
+  // Paired positive control: an outer-empty `slot_pools` (a compat payload
+  // predating the field, INVARIANT SC) falls back to the union — the fix
+  // above must not turn this row's absence into a silent "offer nothing."
+  it("falls back to the flat union when slot_pools is outer-empty (compat payload)", () => {
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2, opp1],
+      slot_pools: [],
+      legal_new_targets: [opp1, opp2],
+    });
+    render(<CardChoiceModal />);
+
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Opp 2/ })).toBeInTheDocument();
+  });
+
+  // CR 115.7d: every position starts kept; KEEP is sent as `null` and a
+  // chosen target as itself (Matt's partial retarget: change one target,
+  // keep another even if it is illegal now).
+  it("sends a kept position as null and a chosen one as its target", () => {
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2, opp1],
+      slot_pools: [[opp1, opp2], [opp1, opp2]],
+      legal_new_targets: [opp1, opp2],
+    });
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [opp1, null] },
+    });
+  });
+
+  it("reads re-choosing the announced target as a keep unless the engine marks it distinct", () => {
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2, opp1],
+      slot_pools: [[opp1, opp2], [opp1, opp2]],
+      legal_new_targets: [opp1, opp2],
+    });
+    render(<CardChoiceModal />);
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [null, null] },
+    });
+
+    cleanup();
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2, opp1],
+      slot_pools: [[opp1, opp2], [opp1, opp2]],
+      legal_new_targets: [opp1, opp2],
+      keep_is_distinct: [true, false],
+    });
+    render(<CardChoiceModal />);
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [opp2, null] },
+    });
+  });
+
+  // CR 115.7d: "choose new targets" on a ONE-position spell (Unsummon on A,
+  // A gained hexproof, B is legal) still offers Keep and submits `[null]`;
+  // the single position never needs a pick to confirm.
+  it("offers Keep on a single-position All prompt and submits [null]", () => {
+    setUp({
+      player: 0,
+      scope: { type: "All" },
+      current_targets: [opp2],
+      slot_pools: [[opp1]],
+      legal_new_targets: [opp1],
+    });
+    render(<CardChoiceModal />);
+
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Target 1/ })).not.toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    fireEvent.click(confirm);
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [null] },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [opp1] },
+    });
+  });
+
+  // Single scope is normally routed to the board overlay; the modal is
+  // rendered directly here so the absence of Keep is not vacuous.
+  it("offers no Keep on a Single-scope prompt", () => {
+    setUp({});
+    const data = retargetChoiceWaitingForFactory
+      .withData({
+        player: 0,
+        scope: { type: "Single" },
+        current_targets: [opp2],
+        slot_pools: [[opp1]],
+        legal_new_targets: [opp1],
+      })
+      .build().data;
+    render(<RetargetChoiceModal data={data} />);
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+  });
+});

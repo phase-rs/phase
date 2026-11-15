@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import { useGameStore } from "../../stores/gameStore";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId";
 import { isWaitingForHandled } from "../../game/waitingForRegistry";
+import { copyText } from "../../services/copyText";
 
 /**
  * Safety net for orphan `WaitingFor` states the frontend has no modal for.
@@ -53,13 +54,12 @@ export function UnhandledWaitingForModal({
   const diagnostic = buildDiagnostic(waitingFor);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(diagnostic);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
+    if (!(await copyText(diagnostic))) {
       window.prompt(t("unhandledWaitingFor.copyPrompt"), diagnostic);
+      return;
     }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
   };
 
   const reportUrl = buildReportUrl(waitingFor.type, diagnostic, t);

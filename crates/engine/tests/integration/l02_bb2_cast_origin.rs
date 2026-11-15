@@ -23,9 +23,10 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AbilityCondition, Comparator, CountScope, QuantityExpr, QuantityRef, TriggerCondition,
-    TypeFilter, ZoneRef,
+    AbilityCondition, Comparator, CountScope, FilterProp, QuantityExpr, QuantityRef, TargetFilter,
+    TriggerCondition, TypeFilter, ZoneRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
 use engine::types::game_state::CastingVariant;
@@ -58,6 +59,10 @@ const RAN_AND_SHAW: &str = "Flying, firebending 2\n\
 When Ran and Shaw enter, if you cast them and there are three or more Dragon and/or Lesson \
 cards in your graveyard, create a token that's a copy of Ran and Shaw, except it's not legendary.\n\
 {3}{R}: Dragons you control get +2/+0 until end of turn.";
+
+const DEATHBRINGER_REGENT: &str = "Flying\nWhen this creature enters, if you cast it from your hand and there are five or more other creatures on the battlefield, destroy all other creatures.";
+
+const MURDER: &str = "Destroy target creature.";
 
 /// A vanilla {0} reanimation sorcery: the entering permanent is *put onto the
 /// battlefield* (never cast), so its `cast_from_zone` stays `None` (CR 400.7).
@@ -247,6 +252,87 @@ fn ran_and_shaw_trigger_condition_is_cast_and_graveyard_count() {
         !has_condition_if_swallow(&parsed),
         "Condition_If must clear once the And-fold attaches"
     );
+}
+
+/// Deathbringer Regent: the generic cast-and-condition scanner must retain both
+/// the owner/caster-scoped hand provenance and the shared quantity condition.
+/// Revert-probe: remove its optional `from <zone>` grammar or register it after
+/// the simple zoned scanner → the condition is truncated or swallowed.
+#[test]
+fn deathbringer_regent_trigger_condition_is_hand_cast_and_other_creature_count() {
+    let parsed = parse(DEATHBRINGER_REGENT, "Deathbringer Regent", &["Creature"]);
+    let cond = first_trigger_condition(&parsed).expect("Regent ETB must carry a condition");
+    let conditions = match cond {
+        TriggerCondition::And { conditions } => conditions,
+        other => panic!("expected And[..], got {other:?}"),
+    };
+    assert_eq!(conditions.len(), 2, "hand-cast AND other-creature-count");
+    assert_eq!(
+        conditions[0],
+        TriggerCondition::WasCast {
+            zone: Some(Zone::Hand),
+            controller: Some(engine::types::ability::ControllerRef::You),
+            owner: Some(engine::types::ability::ControllerRef::You),
+        },
+        "first conjunct scopes both caster and owner for 'you cast it from your hand'"
+    );
+    match &conditions[1] {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        } => match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(
+                    tf.controller, None,
+                    "all creatures count, regardless of controller"
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::OtherThanTriggerObject),
+                    "'other creatures' must exclude the entering Regent, got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }),
+                    "the threshold must only count battlefield creatures, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed creature filter, got {other:?}"),
+        },
+        other => panic!("expected ObjectCount >= 5, got {other:?}"),
+    }
+    assert!(
+        !has_condition_if_swallow(&parsed),
+        "Condition_If must clear once the full conjunction attaches"
+    );
+}
+
+/// The generalized scanner requires an `and <condition>` tail, so a simple
+/// zoned cast gate still reaches the pre-existing positive-zone parser rather
+/// than being misclassified as a conjunction.
+#[test]
+fn simple_zoned_cast_gate_remains_a_single_condition() {
+    let parsed = parse(
+        "When Testcard enters, if you cast it from your hand, draw a card.",
+        "Testcard",
+        &["Creature"],
+    );
+    assert_eq!(
+        first_trigger_condition(&parsed),
+        Some(TriggerCondition::WasCast {
+            zone: Some(Zone::Hand),
+            controller: Some(engine::types::ability::ControllerRef::You),
+            owner: Some(engine::types::ability::ControllerRef::You),
+        })
+    );
+    assert!(!has_condition_if_swallow(&parsed));
 }
 
 // ===========================================================================
@@ -670,6 +756,201 @@ fn ran_and_shaw_opponent_graveyard_dragon_uncounted() {
         None,
         "opponent's Dragon does not count toward your graveyard → no copy"
     );
+}
+
+// ===========================================================================
+// R — Deathbringer Regent (Channel B, zoned cast-and-condition conjunction)
+// ===========================================================================
+
+/// Hand-cast Regent with five other creatures split across both players:
+/// both intervening-if conjuncts hold, so the ETB destroys every other
+/// creature while retaining Regent.
+#[test]
+fn deathbringer_regent_hand_cast_with_five_other_creatures_wipes_them() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let others: Vec<_> = (0..5)
+        .map(|i| {
+            let controller = if i == 4 { P1 } else { P0 };
+            scenario
+                .add_creature(controller, &format!("Other Creature {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let mut b = scenario.add_creature_to_hand_from_oracle(
+        P0,
+        "Deathbringer Regent",
+        5,
+        6,
+        DEATHBRINGER_REGENT,
+    );
+    b.with_mana_cost(engine::types::mana::ManaCost::generic(0));
+    let regent = b.id();
+    let mut runner = scenario.build();
+
+    let out = runner.cast(regent).resolve();
+    assert_eq!(
+        out.zone_of(regent),
+        Zone::Battlefield,
+        "the entering Regent is excluded by 'other creatures'"
+    );
+    for other in others {
+        assert_eq!(
+            out.zone_of(other),
+            Zone::Graveyard,
+            "five other creatures satisfy the count, so Regent destroys {other:?}"
+        );
+    }
+}
+
+/// Four other creatures miss the quantity conjunct, so the ETB never reaches
+/// its destroy effect even though the Regent was cast from the correct zone.
+#[test]
+fn deathbringer_regent_hand_cast_with_four_other_creatures_does_not_wipe() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let others: Vec<_> = (0..4)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Other Creature {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let mut b = scenario.add_creature_to_hand_from_oracle(
+        P0,
+        "Deathbringer Regent",
+        5,
+        6,
+        DEATHBRINGER_REGENT,
+    );
+    b.with_mana_cost(engine::types::mana::ManaCost::generic(0));
+    let regent = b.id();
+    let mut runner = scenario.build();
+
+    let out = runner.cast(regent).resolve();
+    assert_eq!(out.zone_of(regent), Zone::Battlefield);
+    for other in others {
+        assert_eq!(
+            out.zone_of(other),
+            Zone::Battlefield,
+            "four other creatures fail the count conjunct, so {other:?} survives"
+        );
+    }
+}
+
+/// Reanimation supplies the count but not the cast-from-hand provenance, so
+/// the conjunction is false and all five other creatures remain.
+#[test]
+fn deathbringer_regent_reanimated_with_five_other_creatures_does_not_wipe() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let others: Vec<_> = (0..5)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Other Creature {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let mut b = scenario.add_creature_to_graveyard(P0, "Deathbringer Regent", 5, 6);
+    b.from_oracle_text(DEATHBRINGER_REGENT);
+    let regent = b.id();
+    let mut reanimate = scenario.add_spell_to_hand_from_oracle(P0, "Reanimate", false, REANIMATE);
+    reanimate.with_mana_cost(engine::types::mana::ManaCost::generic(0));
+    let reanimate = reanimate.id();
+    let mut runner = scenario.build();
+
+    let out = runner.cast(reanimate).target_object(regent).resolve();
+    assert_eq!(
+        out.zone_of(regent),
+        Zone::Battlefield,
+        "reach-guard: reanimation put Regent onto the battlefield"
+    );
+    for other in others {
+        assert_eq!(
+            out.zone_of(other),
+            Zone::Battlefield,
+            "put-into-play is not a hand cast, so {other:?} survives"
+        );
+    }
+}
+
+/// The quantity side of an intervening-if is rechecked at resolution. Regent
+/// triggers with five others, then Murder removes one while its trigger waits
+/// on the stack; with only four left, the trigger resolves without wiping.
+#[test]
+fn deathbringer_regent_rechecks_other_creature_count_at_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let others: Vec<_> = (0..5)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Other Creature {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let victim = others[0];
+    let mut regent_builder = scenario.add_creature_to_hand_from_oracle(
+        P0,
+        "Deathbringer Regent",
+        5,
+        6,
+        DEATHBRINGER_REGENT,
+    );
+    regent_builder.with_mana_cost(engine::types::mana::ManaCost::generic(0));
+    let regent = regent_builder.id();
+    let mut murder_builder = scenario.add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER);
+    murder_builder.with_mana_cost(engine::types::mana::ManaCost::generic(0));
+    let murder = murder_builder.id();
+    let mut runner = scenario.build();
+
+    // Resolve Regent through the live priority protocol. Its ETB has passed the
+    // creation check and now waits on the stack above the empty spell stack.
+    runner.cast(regent).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes to resolve Regent");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes to resolve Regent");
+    assert_eq!(runner.state().objects[&regent].zone, Zone::Battlefield);
+    assert!(
+        !runner.state().stack.is_empty(),
+        "five others at entry must create Regent's intervening-if trigger"
+    );
+
+    // Cast and resolve the response through the scenario cast/target pipeline,
+    // leaving Regent's already-created trigger underneath it on the live stack.
+    runner.cast(murder).target_object(victim).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes to resolve Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes to resolve Murder");
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "reach-guard: Murder removed one of the five counted creatures"
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "Regent's trigger remains on the stack for its resolution-time recheck"
+    );
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes to resolve Regent's trigger");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes to resolve Regent's trigger");
+    assert_eq!(runner.state().objects[&regent].zone, Zone::Battlefield);
+    for other in others.into_iter().skip(1) {
+        assert_eq!(
+            runner.state().objects[&other].zone,
+            Zone::Battlefield,
+            "only four others remain at resolution, so Regent does not destroy {other:?}"
+        );
+    }
 }
 
 // ===========================================================================

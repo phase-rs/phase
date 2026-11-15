@@ -7,6 +7,22 @@
 //! CR 608.2c + CR 401.4: Uncast cards from the exile step must return to the
 //! library bottom via `PutAtLibraryPosition { ExiledBySource }`, not linger in
 //! exile linked to the source.
+//!
+//! The fixture's head noun is PLURALIZED from Sanwell's printed "a … spell", and
+//! nothing else is changed. Sanwell's own clause is a PAID batch cast printing a
+//! cap of ONE over a batch of six — a bound no mechanism this engine has can
+//! enforce, because the free-cast window models no mana payment and
+//! `record_lingering_permissions` writes an INDEPENDENT `CastingPermission` per
+//! object with no shared budget — so it is now refused outright by
+//! `CastFromZoneDriver::for_batch_bounds`. See
+//! `real_cards_whose_printed_cap_no_mechanism_can_carry_are_refused` in
+//! `kiora_self_library_peek_cast.rs` for that refusal, asserted on Sanwell's
+//! verbatim text.
+//!
+//! Issue #3267 is about the CLEANUP clause's target binding, which is orthogonal
+//! to the cap — the cap is read from the head noun's grammatical number alone —
+//! so pluralizing that one token keeps this regression pointed at the behavior it
+//! was written for, on a clause that still lowers.
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
@@ -20,7 +36,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::CardId;
 use engine::types::zones::Zone;
 
-const SANWELL_TRIGGER_BODY: &str = "exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.";
+const SANWELL_TRIGGER_BODY: &str = "exile the top six cards of your library. You may cast Vehicle or artifact creature spells from among them. Then put the rest on the bottom of your library in a random order.";
 
 fn sanwell_execute() -> engine::types::ability::AbilityDefinition {
     parse_effect_chain(SANWELL_TRIGGER_BODY, AbilityKind::Spell)

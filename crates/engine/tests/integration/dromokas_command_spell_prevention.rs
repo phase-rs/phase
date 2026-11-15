@@ -28,7 +28,7 @@
 //!
 //! CR 609.7 + CR 609.7a + CR 615.2 + CR 700.2d.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetFilter;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -37,6 +37,8 @@ use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use super::rules::{cast_spell_action, drive_modal_with_response, PriorityResponse};
 
 const DROMOKAS_COMMAND: &str = "Choose two —\n\
     • Prevent all damage target instant or sorcery spell would deal this turn.\n\
@@ -48,6 +50,140 @@ const DROMOKAS_COMMAND: &str = "Choose two —\n\
 /// itself; it stays on the stack while Dromoka (cast in response) resolves on
 /// top, so Dromoka's mode 1 can target it as the prevention source.
 const DAMAGE_INSTANT: &str = "This spell deals 3 damage to target player.";
+
+/// Cancel's printed text. Named "Cancel" and not "Counter": a card's own name
+/// is normalized to `~` in its Oracle text, so a counterspell named "Counter"
+/// would parse its own verb away and resolve as an inert `Unimplemented`.
+const COUNTER_TARGET_SPELL: &str = "Counter target spell.";
+
+/// CR 608.2b: a `ParentTargetSlot` prevention SOURCE that was an illegal target
+/// as the chain began to resolve is dropped, while the rest of the spell still
+/// applies to the slots that stayed legal.
+///
+/// Dromoka's Command is the only printed card that can show this: the other
+/// four cards whose `PreventDamage` reads a `ParentTargetSlot` source (Awe
+/// Strike, Dazzling Reflection, Hallow, Shieldmage Elder) each declare exactly
+/// ONE target, so making it illegal makes every target illegal and
+/// `stack.rs`'s `check_fizzle` counters the spell before
+/// `record_illegal_target_slots` ever runs. Two declared slots are what put the
+/// spell on the stamping path at all.
+///
+/// This row drives the REAL pipeline — the stamp is COMPUTED by
+/// `record_illegal_target_slots` from the re-validated chain, not written by
+/// the test — which is what the in-crate helper test beside
+/// `resolve_source_filter` cannot do.
+///
+/// HONEST LIMITATION, and why this asserts the shield's SHAPE rather than an
+/// unprevented damage event: slot 0 is a spell, and the only way a spell stops
+/// being a legal target is to leave the stack, after which it deals no damage
+/// at all. "Its damage is not prevented" is therefore unobservable for this
+/// consumer on any printed card. What IS observable, and what discriminates, is
+/// that the dropped slot resolves to `TargetFilter::None` instead of binding
+/// the stale `SpecificObject`.
+#[test]
+fn dromokas_command_drops_a_prevention_source_that_became_illegal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Mode 3's recipient. It stays legal throughout, so Dromoka does NOT
+    // fizzle, and the counter it receives proves the spell resolved.
+    let my_creature = scenario.add_creature(P0, "Shalai and Hallar", 3, 4).id();
+
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Searing Spell", true, DAMAGE_INSTANT)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dromoka's Command", true, DROMOKAS_COMMAND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    // P1's answer, cast in response to Dromoka: countering the bolt is what
+    // makes Dromoka's slot 0 illegal before Dromoka resolves.
+    let cancel = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cancel", true, COUNTER_TARGET_SPELL)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+
+    let mut runner = scenario.build();
+
+    let bolt_card = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id: bolt_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the damage instant must succeed");
+    drive_target_then_stop(&mut runner, &[], &[P0]);
+
+    // Dromoka declares both slots (the bolt, then the creature); P1 then
+    // counters the bolt above it, so the chain re-validates with slot 0 gone.
+    let cast = cast_spell_action(&runner, command);
+    let events = drive_modal_with_response(
+        &mut runner,
+        cast,
+        &[0, 2],
+        &[bolt, my_creature],
+        Some(PriorityResponse {
+            player: P1,
+            instant: cancel,
+            target: bolt,
+        }),
+    );
+
+    // Reach guards. Without these the row passes on a countered Dromoka, or on
+    // a bolt that was never answered — in either case testing nothing.
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Graveyard,
+        "reach guard: the response must have countered the bolt, or slot 0 \
+         stays legal and nothing is stamped"
+    );
+    assert_eq!(
+        runner.state().objects[&my_creature]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "reach guard: mode 3 must still resolve — CR 608.2b keeps the parts of \
+         the effect whose targets stayed legal. Counters: {:?}",
+        runner.state().objects[&my_creature].counters
+    );
+
+    // The stamped slot is DROPPED, not bound to the stale referent: no
+    // installed shield names the countered bolt.
+    let binds_the_bolt = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .chain(
+            runner.state().objects[&my_creature]
+                .replacement_definitions
+                .as_slice()
+                .iter(),
+        )
+        .filter_map(|r| r.damage_source_filter.as_ref())
+        .any(|f| filter_names(f, bolt));
+    assert!(
+        !binds_the_bolt,
+        "a prevention source that was an illegal target at resolution must be \
+         dropped, not bound as SpecificObject; pending: {:?}, events: {events:?}",
+        runner.state().pending_damage_replacements
+    );
+}
+
+/// Whether `filter` binds `object` anywhere in its tree, so the assertion reads
+/// the whole `And`/`Or` shape rather than only its outermost node.
+fn filter_names(filter: &TargetFilter, object: engine::types::identifiers::ObjectId) -> bool {
+    match filter {
+        TargetFilter::SpecificObject { id } => *id == object,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|f| filter_names(f, object))
+        }
+        _ => false,
+    }
+}
 
 #[test]
 fn dromokas_command_mode_one_source_scoped_prevent_puts_counter_once_no_loop() {

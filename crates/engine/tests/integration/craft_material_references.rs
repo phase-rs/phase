@@ -22,8 +22,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AggregateFunction, ContinuousModification, Effect, ManaProduction, ObjectProperty,
-    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AggregateFunction, CardTypeSetSource, ContinuousModification, Effect, ManaProduction,
+    ObjectProperty, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, GameState};
@@ -138,16 +138,16 @@ fn mastercraft_raptor_power_is_total_power_of_craft_materials() {
     // additionally pins the source to the linked-exile pool, not a tracked set.
     match power_qty {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::Power,
-                    filter,
-                },
-        } => assert!(
-            filter_reads_exiled_by_source(filter),
-            "power aggregate must read ExiledBySource, got {filter:?}"
-        ),
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } if aggregate.function() == AggregateFunction::Sum
+            && aggregate.property() == ObjectProperty::Power =>
+        {
+            assert!(
+                matches!(aggregate.source(), CardTypeSetSource::Objects { filter } if filter_reads_exiled_by_source(filter)),
+                "power aggregate must read ExiledBySource, got {:?}",
+                aggregate.source()
+            )
+        }
         other => panic!("expected Aggregate{{Sum, Power, ExiledBySource}}, got {other:?}"),
     }
 
@@ -198,12 +198,15 @@ fn sunbird_effigy_pt_is_distinct_colors_of_craft_materials() {
     for (label, qty) in [("power", &power), ("toughness", &toughness)] {
         match qty {
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctColorsAmongPermanents { filter },
+                qty:
+                    QuantityRef::DistinctColorsAmong {
+                        source: CardTypeSetSource::Objects { filter },
+                    },
             } => assert!(
                 filter_reads_exiled_by_source(filter),
                 "{label} colors must read ExiledBySource, got {filter:?}"
             ),
-            other => panic!("{label}: expected DistinctColorsAmongPermanents, got {other:?}"),
+            other => panic!("{label}: expected DistinctColorsAmong(Objects), got {other:?}"),
         }
     }
 
@@ -293,16 +296,16 @@ fn jadeheart_attendant_gains_life_equal_to_craft_material_mana_value() {
     // Revert guard: pre-fix this parsed to Unimplemented (name="gain").
     match amount {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::ManaValue,
-                    filter,
-                },
-        } => assert!(
-            filter_reads_exiled_by_source(filter),
-            "life amount must read ExiledBySource mana value, got {filter:?}"
-        ),
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } if aggregate.function() == AggregateFunction::Sum
+            && aggregate.property() == ObjectProperty::ManaValue =>
+        {
+            assert!(
+                matches!(aggregate.source(), CardTypeSetSource::Objects { filter } if filter_reads_exiled_by_source(filter)),
+                "life amount must read ExiledBySource mana value, got {:?}",
+                aggregate.source()
+            )
+        }
         other => panic!("expected Aggregate{{Sum, ManaValue, ExiledBySource}}, got {other:?}"),
     }
 

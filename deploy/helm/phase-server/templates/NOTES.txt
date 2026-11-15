@@ -1,0 +1,22 @@
+phase-server {{ .Chart.AppVersion }} ({{ if .Values.server.lobbyOnly }}lobby-only{{ else }}full{{ end }} mode)
+
+{{- if .Values.ingress.enabled }}
+WebSocket URL for the client's Server picker:  wss://{{ .Values.ingress.host }}/ws
+Health:                                        https://{{ .Values.ingress.host }}/health
+{{- end }}
+{{- if .Values.scaleOut.enabled }}
+
+Each ordinal is also reachable on its own hostname, which is what a shared
+"CODE@host" string resolves to:
+{{- range $i := until (int .Values.scaleOut.replicaMax) }}
+  {{ $.Values.scaleOut.scheme | default "https" }}://{{ include "phase-server.ordinalHost" (dict "ctx" $ "ordinal" $i) }}
+{{- end }}
+{{- end }}
+
+First boot downloads ~100 MiB of card data into the PVC before /health answers.
+{{- if .Values.scaleOut.enabled }}
+Every ordinal does this into its own volume, so a scale-up is not instant.
+Follow with:  kubectl -n {{ .Release.Namespace }} logs statefulset/{{ include "phase-server.fullname" . }} -f
+{{- else }}
+Follow with:  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "phase-server.fullname" . }} -f
+{{- end }}

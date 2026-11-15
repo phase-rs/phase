@@ -4,15 +4,21 @@ import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZoneDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import {
   type CommanderDamageEntry,
+  commandZoneBosses,
+  commandZoneConspiracies,
   commandZoneLeaders,
   commanderDamageEntriesFor,
 } from "../../viewmodel/commanderColumn.ts";
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
-import { CommanderCardZone } from "./CommanderCardZone.tsx";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
+import { BossCardZone, CommanderCardZone, ConspiracyCardZone } from "./CommanderCardZone.tsx";
 import { CommandZone } from "./CommandZone.tsx";
 
 interface CommandDockProps {
@@ -56,6 +62,14 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
     () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
+  const conspiraciesForPlayer = useMemo(
+    () => (gameState ? commandZoneConspiracies(gameState, playerId) : []),
+    [gameState, playerId],
+  );
+  const bossesForPlayer = useMemo(
+    () => (gameState ? commandZoneBosses(gameState, playerId) : []),
+    [gameState, playerId],
+  );
   const damageEntries = useMemo(
     () => (gameState ? commanderDamageEntriesFor(gameState, playerId) : []),
     [gameState, playerId],
@@ -73,7 +87,12 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
 
   // Same content gate PlayerArea used for `hasSupportExtras` — render nothing
   // when the command zone is empty so it reserves no corner space.
-  const hasContent = commandZoneLeadersForPlayer.length > 0 || emblemCount > 0 || damageEntries.length > 0;
+  const hasContent =
+    commandZoneLeadersForPlayer.length > 0 ||
+    conspiraciesForPlayer.length > 0 ||
+    bossesForPlayer.length > 0 ||
+    emblemCount > 0 ||
+    damageEntries.length > 0;
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
@@ -83,6 +102,8 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   const fullContent = (split: boolean) => (
     <div className={split ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}>
       <CommanderCardZone playerId={playerId} splitOverview={split} />
+      <ConspiracyCardZone playerId={playerId} splitOverview={split} />
+      <BossCardZone playerId={playerId} splitOverview={split} />
       <CommandZone playerId={playerId} />
       <CommanderDamage playerId={playerId} compact={split} />
     </div>
@@ -105,6 +126,8 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
     <CompactCommandDock
       isMirrored={isMirrored}
       commanders={commandZoneLeadersForPlayer}
+      conspiracies={conspiraciesForPlayer}
+      bosses={bossesForPlayer}
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}
@@ -119,6 +142,8 @@ interface CompactCommandDockProps {
   isMirrored: boolean;
   dockRole: "player" | "opponent";
   commanders: GameObject[];
+  conspiracies?: GameObject[];
+  bosses?: GameObject[];
   emblemCount: number;
   damageEntries: CommanderDamageEntry[];
   label: string;
@@ -129,6 +154,8 @@ function CompactCommandDock({
   isMirrored,
   dockRole,
   commanders,
+  conspiracies,
+  bosses,
   emblemCount,
   damageEntries,
   label,
@@ -139,12 +166,27 @@ function CompactCommandDock({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
-  const firstCommander = commanders[0];
-  const { src } = useCardImage(firstCommander?.name ?? "", { size: "normal" });
+  const firstCard = commanders[0] ?? conspiracies?.[0] ?? bosses?.[0];
+  const displayName = useLocalizedCardName(firstCard?.name ?? null) ?? firstCard?.name ?? "";
+  const imageProps = firstCard ? objectImageProps(firstCard) : null;
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps?.cardName ?? "",
+    {
+      size: "normal",
+      faceIndex: imageProps?.faceIndex,
+      isToken: imageProps?.isToken,
+      tokenFilters: imageProps?.tokenFilters,
+      tokenImageRef: imageProps?.tokenImageRef,
+      oracleId: imageProps?.oracleId,
+      faceName: imageProps?.faceName,
+      ownerPrinting: imageProps?.ownerPrinting,
+    },
+  );
   const totalDamage = damageEntries.reduce(
     (sum, entry) => sum + entry.views.reduce((s, v) => s + v.damage, 0),
     0,
   );
+  const totalCards = commanders.length + (conspiracies?.length ?? 0) + (bosses?.length ?? 0);
 
   useEffect(() => {
     if (!open) return;
@@ -227,17 +269,32 @@ function CompactCommandDock({
         title={label}
         aria-expanded={open}
       >
-        {firstCommander && src ? (
+        {firstCard && isLoading ? (
+          <span className="h-full w-full animate-pulse rounded-lg bg-gray-700" />
+        ) : firstCard && src ? (
           <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black/70">
-            <img src={src} alt={firstCommander.name} className="h-full w-full object-contain" draggable={false} />
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, rungs)}
+              alt={displayName}
+              className="h-full w-full object-contain"
+              draggable={false}
+              onError={() => advanceFailedSource?.(src)}
+            />
           </span>
+        ) : firstCard ? (
+          <CardArtFallback
+            name={displayName}
+            variant="artCrop"
+            className="h-full w-full rounded-lg"
+          />
         ) : (
           <span aria-hidden className="text-2xl leading-none text-amber-500/80">✦</span>
         )}
       </button>
-      {commanders.length > 1 && (
+      {totalCards > 1 && (
         <span className="pointer-events-none absolute left-0 top-0 rounded-br bg-amber-700 px-1 text-[9px] font-bold text-amber-100">
-          ×{commanders.length}
+          ×{totalCards}
         </span>
       )}
       {emblemCount > 0 && (

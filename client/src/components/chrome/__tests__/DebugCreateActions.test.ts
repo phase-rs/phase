@@ -42,6 +42,7 @@ describe("DebugCreateActions catalog token payloads", () => {
       counterType: "P1P1",
       counterCount: 0,
       runEtb: true,
+      count: 1,
     });
 
     expect(action?.data.request.data).toEqual({
@@ -63,6 +64,7 @@ describe("DebugCreateActions catalog token payloads", () => {
         counterType: "P1P1",
         counterCount: 0,
         runEtb: true,
+        count: 1,
         powerOverride: 4,
       }),
     ).toBeNull();
@@ -74,6 +76,7 @@ describe("DebugCreateActions catalog token payloads", () => {
         counterType: "P1P1",
         counterCount: 0,
         runEtb: true,
+        count: 1,
         powerOverride: 4,
         toughnessOverride: 5,
       })?.data.request.data,

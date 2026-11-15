@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -7,20 +7,31 @@ import type { TFunction } from "i18next";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useLocalizedCardContent } from "../../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../card/CardTextReference.tsx";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
-import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
+import type {
+  ObjectId,
+  StackAbilityKindView,
+  StackEntry as StackEntryType,
+  StackEntryDisplay,
+  StackPaidFactView,
+} from "../../adapter/types.ts";
 
 interface StackEntryProps {
   entry: StackEntryType;
@@ -43,17 +54,32 @@ interface StackEntryProps {
    * that don't proxy group data keep the prior per-entry rendering.
    */
   groupCount?: number;
+  /**
+   * The engine-selected object identity for a compact coalesced group. The
+   * visible card remains `entry`; choice membership and dispatch use this id.
+   */
+  choiceObjectId?: ObjectId;
+  /** All object identities represented by a compact group. */
+  groupedObjectIds?: ObjectId[];
   details?: StackEntryDisplay;
 }
 
-export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
-  const { t } = useTranslation("game");
+export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+  const { t } = useTranslation(["game", "common"]);
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const canActForWaitingState = useCanActForWaitingState();
   const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
+  // CR 701.20a: engine-authored names of the cards this entry keeps revealed.
+  const revealedCards = useGameStore(
+    (s) => s.gameState?.derived?.stack_revealed_cards?.[entry.id],
+  );
   const inspectObject = useUiStore((s) => s.inspectObject);
+  // A spell's stack entry id is its object id, so a card flight veils the
+  // entry by that id.
+  const flightHidden = useFlightVeil(entry.id);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
@@ -65,35 +91,51 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(entry.source_id);
     setPreviewSticky(true);
+    onHoverChange?.(true);
   });
 
   const sourceObj = objects?.[entry.source_id];
   // Prefer the engine-pre-resolved source name on triggered abilities (so the
   // display layer doesn't dereference ObjectId -> GameObject -> name itself).
   // Fall back to the objects map for spells/activated entries that don't carry
-  // a captured name, and to "Unknown" for synthetic game-rule triggers whose
-  // source_id is ObjectId(0).
+  // a captured name.
+  //
+  // There is deliberately NO last-resort literal here. This line used to end in
+  // `|| "Unknown"` for the rule-defined sourceless abilities this engine
+  // constructs (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad counters,
+  // and CR 702.179d speed). CR 113.7 defines an ability's source; CR 113.8
+  // instead defines its controller. (CR 901.8 separately gives Planechase's
+  // planeswalking ability no source.) "Unknown" is game-facing text no rule
+  // ever produced, invented by the display layer because the wire carried
+  // nothing. The engine names those abilities now, so the invention has nothing
+  // left to cover; if a name is ever missing again, an empty label is the honest
+  // answer and the engine-side guard is what should fail.
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
-  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "Unknown";
-  const imageLookup = sourceObj
-    ? cardImageLookup(sourceObj)
-    : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
+  const localized = useLocalizedCardContent(sourceName);
+  const displaySourceName = localized?.name || sourceName;
+  const imageProps = sourceObj ? objectImageProps(sourceObj) : null;
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
     sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
+  const rowOwnerRef = details?.printed_ref ?? undefined;
 
-  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps?.cardName ?? sourceName,
+    {
     size: "normal",
-    faceIndex: imageLookup.faceIndex,
+    faceIndex: imageProps?.faceIndex ?? 0,
     isToken: sourceIsToken,
-    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenFilters: imageProps?.tokenFilters,
     tokenImageRef: sourceTokenImageRef,
-    oracleId: imageLookup.oracleId,
-    faceName: imageLookup.faceName,
-  });
-  const [artError, setArtError] = useState(false);
-  useEffect(() => setArtError(false), [src]);
+    oracleId: imageProps?.oracleId,
+    faceName: imageProps?.faceName,
+    // A present row owns both printing and identity; never borrow a stale live identity.
+    ownerPrinting: details ? (rowOwnerRef ? details.printing : undefined) : imageProps?.ownerPrinting,
+    ownerPrintedRef: rowOwnerRef,
+    },
+  );
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -126,14 +168,15 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       ? y.target.ThisObject.source_id === entry.source_id && descMatches
       : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
   });
-  // Triggered abilities show "Triggered — From <source>" so the player can
-  // tell which permanent owns the trigger without hovering the card image.
-  // Activated abilities don't carry a pre-resolved source name (different
-  // engine path); they keep the bare "Activated" label.
-  const abilityLabel = details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
+  // Localize from the engine's typed `ability_kind`; with none (an older engine),
+  // show the engine's `kind_label` verbatim. Never parse `kind_label`.
+  // Ability descriptions below remain in their original text.
+  const abilityLabel = details?.ability_kind
+    ? formatStackAbilityKind(details.ability_kind, t)
+    : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? t("stack.activated")
     : isTriggered && triggerSourceName
-      ? t("stack.triggeredFrom", { source: triggerSourceName })
+      ? t("stack.triggeredFrom", { source: displaySourceName })
       : t("stack.triggered"));
   const triggerDescription =
     details?.ability_description
@@ -152,28 +195,37 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     details?.paid?.filter((fact) => fact.type !== "XValue").map((fact) => formatPaidFact(fact, t)) ??
     [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
-  const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
-  const seatColor = useSeatColor(entry.controller);
+  const stormCopyCount = details?.provenance?.type === "Storm"
+    ? details.provenance.data.copy_count
+    : undefined;
+  const revealedLabel =
+    revealedCards && revealedCards.length > 0
+      ? t("stack.revealedCards", { cards: revealedCards.join(", ") })
+      : undefined;
+  // The engine computes the live controller (CR 112.2 + CR 613.1b); `??` is this
+  // file's own established structural fallback for a prop the sole production
+  // caller always supplies (`details?.source_name`, `details?.kind_label`,
+  // `details?.targets` all use it above), not a semantic choice between two
+  // engine fields.
+  const liveController = details?.controller ?? entry.controller;
+  const controllerLabel =
+    liveController === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
+  const seatColor = useSeatColor(liveController);
   const controllerInitial =
-    entry.controller === playerId ? t("stack.controllerInitialYou") : t("stack.controllerInitialOpp", { seat: entry.controller });
+    liveController === playerId
+      ? t("stack.controllerInitialYou")
+      : t("stack.controllerInitialOpp", { seat: liveController });
 
-  // Targeting: check if this stack entry is a valid target for the current selection
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  // CR 115.7: A single-target retarget can redirect to another spell/ability on
-  // the stack (Bolt Bend on a counterspell), so stack entries are click targets.
-  const isRetargetChoice = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single";
-  const currentTargetRefs = isHumanTargetSelection
-    ? (waitingFor.data.selection?.current_legal_targets ?? [])
-    : isRetargetChoice
-      ? waitingFor.data.legal_new_targets
-      : [];
-  const isValidTarget = (isHumanTargetSelection || isRetargetChoice) && currentTargetRefs.some(
-    (target) => "Object" in target && target.Object === entry.id,
-  );
+  // Targeting: whether the engine is currently asking THIS seat to choose an
+  // object and this stack entry is one of the choices. `getWaitingForObjectChoiceIds`
+  // is the single WaitingFor -> choosable-ObjectId authority the battlefield,
+  // zones, and attachment dialogs already read; the stack reads it too, so every
+  // variant whose engine-authored legal set can name a stack object lights up
+  // here without a per-variant branch — CR 115.7 retargets (Bolt Bend onto a
+  // counterspell), CR 707.10c "may choose new targets for the copy", and plain
+  // CR 601.2c target announcement alike.
+  const isValidTarget =
+    canActForWaitingState && getWaitingForObjectChoiceIds(waitingFor).includes(choiceObjectId);
 
   // Ring style: targeting glow overrides default ring
   const ringClass = isValidTarget
@@ -183,7 +235,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const handleClick = () => {
     if (longPressFired.current) { longPressFired.current = false; return; }
     if (isValidTarget) {
-      dispatchAction({ type: "ChooseTarget", data: { target: { Object: entry.id } } });
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: choiceObjectId } } });
     } else {
       inspectObject(entry.source_id);
     }
@@ -192,15 +244,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, x: 30, scale: 0.9 }}
+      initial={flightHidden ? false : { opacity: 0, x: 30, scale: 0.9 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: 30, scale: 0.9 }}
       transition={{
         delay: index * 0.03 * pacingMultiplier,
         duration: pacingMultiplier === 0 ? 0 : undefined,
       }}
-      style={style}
+      style={flightHidden ? { ...style, visibility: "hidden" } : style}
       data-stack-entry={entry.id}
+      data-object-id={entry.id}
+      data-grouped-ids={groupedObjectIds && groupedObjectIds.length > 1 ? groupedObjectIds.join(" ") : undefined}
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}
@@ -229,23 +283,24 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
           />
-        ) : !src || artError ? (
+        ) : !src ? (
           // Issue #6156 on the stack: this path is explicitly token-aware
           // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
           // token's triggered or activated ability landed here and pulsed
           // forever — worse than a blank square, since it implies the art is
           // still coming. Name the source instead.
           <CardArtFallback
-            name={sourceName}
+            name={displaySourceName}
             className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
             src={src}
-            alt={sourceName}
+            {...getCardImageSrcSetProps(src, rungs)}
+            alt={displaySourceName}
             className="h-full w-full object-cover"
             draggable={false}
-            onError={() => setArtError(true)}
+            onError={() => advanceFailedSource?.(src)}
           />
         )}
       </div>
@@ -256,7 +311,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           card's width instead of a fixed px size. */}
       {isSpell && displayManaCost && (
         <div className="pointer-events-none absolute inset-0 @container">
-          <ManaCostPips cost={displayManaCost} size="fluid" className="absolute right-[5%] top-[2.5%]" />
+          <ManaCostPips cost={displayManaCost} size="fluid" />
         </div>
       )}
 
@@ -317,6 +372,59 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
+      {!isSpell && localized?.oracle_text && (
+        <PopoverMenu
+          ariaLabel={t("stack.readAbility")}
+          variant="dialog"
+          menuWidthPx={360}
+          onOpenChange={(open) => {
+            if (open) {
+              inspectObject(null);
+              setPreviewSticky(false);
+              onHoverChange?.(false);
+            }
+          }}
+          renderTrigger={({ ref, open, toggle }) => (
+            // 44px touch target on the left edge, mirroring the yield control on
+            // the right edge, so it never covers the bottom-right controller
+            // avatar and a near-miss tap does not fall through to ChooseTarget.
+            <button
+              ref={ref}
+              type="button"
+              data-testid="stack-read-ability"
+              aria-label={t("stack.readAbility")}
+              aria-haspopup="dialog"
+              aria-expanded={open}
+              title={t("stack.readAbility")}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={toggle}
+              className="absolute left-1 top-1/2 z-30 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800/90 text-slate-100 shadow-md ring-1 ring-white/25 hover:bg-slate-700"
+            >
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true" className="h-4 w-4">
+                <path d="M3 3h5l2 2 2-2h5v13h-5l-2 2-2-2H3V3Zm7 2v13" />
+              </svg>
+            </button>
+          )}
+        >
+          {(close) => (
+            <div className="p-3">
+              <h2 className="font-semibold text-white">{displaySourceName}</h2>
+              <p className="mt-1 text-xs text-purple-300">{abilityLabel}</p>
+              {triggerDescription && (
+                <div className="mt-3">
+                  <h3 className="text-xs text-slate-400">{t("cardTextReference.originalAbility")}</h3>
+                  <RichLabel text={triggerDescription} size="xs" className="mt-1 block whitespace-pre-wrap text-sm text-slate-200" />
+                </div>
+              )}
+              <CardTextReference text={localized.oracle_text} />
+              <button type="button" onClick={close} className="mt-3 min-h-11 rounded-lg border border-white/20 px-3 text-sm text-white">
+                {t("common:actions.close")}
+              </button>
+            </div>
+          )}
+        </PopoverMenu>
+      )}
+
       {selectedModeLabels.length > 0 && (
         <section
           aria-label={t("stack.selectedModes")}
@@ -333,8 +441,25 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </section>
       )}
 
-      {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+      {(stormCopyCount !== undefined || revealedLabel !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
+          {stormCopyCount !== undefined && (
+            <span
+              className="max-w-full rounded bg-violet-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-violet-100 shadow"
+              title={t("storm.copies", { count: stormCopyCount })}
+            >
+              {t("storm.copies", { count: stormCopyCount })}
+            </span>
+          )}
+          {revealedLabel !== undefined && (
+            <span
+              data-testid="stack-revealed-cards"
+              className="max-w-full truncate rounded bg-emerald-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-emerald-100 shadow"
+              title={revealedLabel}
+            >
+              {revealedLabel}
+            </span>
+          )}
           {targetLabels.slice(0, 2).map((label) => (
             <span
               key={`target-${label}`}
@@ -454,7 +579,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldThis")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.yieldThisHint", { source: sourceName })}
+                  {t("priorityYield.yieldThisHint", { source: displaySourceName })}
                 </span>
               </button>
               <button
@@ -471,7 +596,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldAllCopies")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.allCopiesHint", { source: sourceName })}
+                  {t("priorityYield.allCopiesHint", { source: displaySourceName })}
                 </span>
               </button>
               {matchingYield && (
@@ -537,6 +662,17 @@ function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
   }
 }
 
+function formatStackAbilityKind(kind: StackAbilityKindView, t: TFunction<"game">): string {
+  switch (kind.type) {
+    case "Activated":
+      return kind.data.number != null
+        ? t("stack.activatedAbilityNumber", { number: kind.data.number })
+        : t("stack.activatedAbility");
+    case "Triggered":
+      return t("stack.triggeredAbility");
+  }
+}
+
 function stackEntryTitle(
   label: string,
   description: string | undefined,
@@ -549,6 +685,6 @@ function stackEntryTitle(
     description ? `${label}: ${description}` : label,
     targets.length > 0 ? t("stack.titleTargets", { targets: targets.join(", ") }) : "",
     paid.length > 0 ? t("stack.titlePaid", { paid: paid.join(", ") }) : "",
-    context.length > 0 ? t("stack.titleContext", { context: context.join(", ") }) : "",
+    context.length > 0 ? t("stack.titleContext", { items: context.join(", ") }) : "",
   ].filter(Boolean).join("\n");
 }

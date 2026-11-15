@@ -8,7 +8,13 @@ import {
   type SyncIdentity,
   SyncConflictError,
 } from "./types";
-import { getSupabaseClient, isSupabaseConfigured } from "./supabaseClient";
+import {
+  getSupabaseClient,
+  isSupabaseConfigured,
+  pauseSupabaseClient,
+  recoverSupabaseChannelRemoval,
+  resumeSupabaseClient,
+} from "./supabaseClient";
 
 const BACKUP_TABLE = "user_backups";
 /**
@@ -46,9 +52,18 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
     return isSupabaseConfigured();
   }
 
+  resume(): Promise<void> {
+    return resumeSupabaseClient();
+  }
+
+  pause(): Promise<void> {
+    return pauseSupabaseClient();
+  }
+
   async restoreSession(): Promise<SyncIdentity | null> {
     const client = getSupabaseClient();
-    const { data } = await client.auth.getSession();
+    const { data, error } = await client.auth.getSession();
+    if (error) throw error;
     // Realtime authenticates the WebSocket via the user's JWT. On session-
     // restore (vs interactive sign-in), supabase-js does NOT propagate the
     // access token to the realtime module — the WebSocket connects then
@@ -70,11 +85,12 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
 
   async signOut(): Promise<void> {
     const client = getSupabaseClient();
-    await client.auth.signOut();
+    const { error } = await client.auth.signOut();
+    if (error) throw error;
+    this.current = null;
     // Switch realtime back to the unauthenticated default so any lingering
     // channel reconnect doesn't reuse the just-revoked JWT.
     await client.realtime.setAuth();
-    this.current = null;
   }
 
   identity(): SyncIdentity | null {
@@ -157,8 +173,8 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
    * see `supabase/schema.sql` for the ALTER PUBLICATION statement. Without it,
    * `subscribe` succeeds but no events ever fire (silent degrade).
    */
-  subscribe(onChange: (newRevision: number) => void): () => void {
-    if (!this.current) return () => {};
+  subscribe(onChange: (newRevision: number) => void): () => Promise<void> {
+    if (!this.current) return async () => {};
     const userId = this.current.userId;
     const client = getSupabaseClient();
     const channel = client
@@ -196,8 +212,20 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
           );
         }
       });
-    return () => {
-      void client.removeChannel(channel);
+    return async () => {
+      try {
+        const status = await client.removeChannel(channel);
+        if (
+          status === "ok" &&
+          !client.realtime.getChannels().includes(channel)
+        ) {
+          return;
+        }
+      } catch {
+        // The public recovery path below confirms registry removal before the
+        // disposer settles, including after an SDK removal rejection.
+      }
+      await recoverSupabaseChannelRemoval(client, [channel]);
     };
   }
 

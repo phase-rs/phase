@@ -1,22 +1,39 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useAnimationControls,
+  useReducedMotion,
+} from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AttackTarget, ChosenAttribute, GameObject, Keyword, ManaCost, PlayerId, Zone } from "../../adapter/types.ts";
+import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
+import type { ImageRungs } from "../../services/visualPacks/types.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
-import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { cardImageLookup, ownerPrintedRefOf, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
+import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
+import { CardBackFallback } from "./CardBackFallback.tsx";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
@@ -35,16 +52,17 @@ import {
   formatPTDelta,
 } from "../../viewmodel/attribution.ts";
 
-/**
- * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
- * display formatting — no game logic. Kept exhaustive so a new kind is a
- * compile error until a key is added.
- */
-const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
-  CantBeActivated: "abilityBlock.cantBeActivated",
-  CantActivateDuring: "abilityBlock.cantActivateDuring",
-  Prohibited: "abilityBlock.prohibited",
-};
+type CardPreviewArt =
+  | { kind: "back" }
+  | {
+      kind: "face";
+      src: string | null;
+      isLoading: boolean;
+      isRotated: boolean;
+      isFlip: boolean;
+      rungs?: ImageRungs;
+      advanceFailedSource?(failedSrc: string): void;
+    };
 
 let lastPointerPosition: { x: number; y: number } | null = null;
 
@@ -60,11 +78,18 @@ if (typeof window !== "undefined") {
 
 export interface CardHoverInfo {
   name: string;
+  scryfallId?: string;
   sourcePrinting?: SourcePrinting;
 }
 
+export type CardPreviewDockPosition = "top-right" | "middle-right";
+
 interface CardPreviewProps {
   cardName: string | null;
+  /** In-game object whose details and art metadata belong to this preview.
+   *  Explicitly carrying the identity keeps an exiting animation pinned to its
+   *  original object while a rapid hover/scrub starts the next preview. */
+  objectId?: number | null;
   backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
@@ -75,6 +100,8 @@ interface CardPreviewProps {
    *  covering the board. Drives the "side" card-preview preference. Ignored
    *  when an explicit `position` is given or on mobile. */
   dockSide?: boolean;
+  /** Vertical placement for a side-docked desktop preview. */
+  dockPosition?: CardPreviewDockPosition;
   /** Overrides the mobile-overlay dismiss handler. Contexts that drive the
    *  preview via their own state (e.g. the deck builder's hoveredCard) pass
    *  this so a tap-to-dismiss clears THAT state; defaults to the in-game
@@ -102,24 +129,50 @@ interface HandPreviewOrigin {
 
 export function CardPreview({
   cardName,
+  objectId,
   backFaceName,
   faceIndex,
   position,
   scryfallId,
   sourcePrinting,
   dockSide,
+  dockPosition,
   onDismiss,
   mobileLayout = "modal",
   handSourceObjectId,
 }: CardPreviewProps) {
+  const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
+  const shouldReduceMotion = useReducedMotion();
+  const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const isHeldCardDrag =
+    mobileHandGesture?.phase === "drag"
+    && mobileHandGesture.objectId === handSourceObjectId;
+  const [dragHandoffComplete, setDragHandoffComplete] = useState(false);
+  const heldSourceOrigin =
+    mobileHandGesture != null && mobileHandGesture.objectId === handSourceObjectId
+      ? mobileHandGesture.sourceOrigin
+      : null;
   const [measuredHandOrigin, setMeasuredHandOrigin] = useState<{
     objectId: number;
     origin: HandPreviewOrigin | null;
   } | null>(null);
 
   useLayoutEffect(() => {
-    if (!cardName || handSourceObjectId == null || typeof document === "undefined") {
+    // Same question as the render gate below, spelled the same way: an empty
+    // name is a subject, only `null` is "nothing to preview".
+    if (cardName == null || handSourceObjectId == null || typeof document === "undefined") {
       setMeasuredHandOrigin(null);
+      return;
+    }
+
+    // The source card leaves the fan as soon as the hold becomes active. Keep
+    // using the geometry captured immediately before that collapse so the
+    // preview still grows from the card the player's finger actually lifted.
+    if (heldSourceOrigin) {
+      setMeasuredHandOrigin({
+        objectId: handSourceObjectId,
+        origin: { objectId: handSourceObjectId, ...heldSourceOrigin },
+      });
       return;
     }
 
@@ -128,9 +181,12 @@ export function CardPreview({
     );
     // The same hand object can also render inside an overlay (most notably the
     // mulligan screen) while the board's resting PlayerHand remains mounted
-    // underneath. Require the resting source to be hovered so overlays retain
-    // their normal preview instead of inheriting the hand-origin animation.
-    if (!source || !source.matches(":hover")) {
+    // underneath. Require either desktop hover or the explicit mobile scrub
+    // marker so overlays retain their normal preview instead of inheriting the
+    // hand-origin animation.
+    const isActiveHandSource =
+      source?.matches(":hover") || source?.dataset.handTouchActive === "true";
+    if (!source || !isActiveHandSource) {
       setMeasuredHandOrigin({ objectId: handSourceObjectId, origin: null });
       return;
     }
@@ -147,7 +203,34 @@ export function CardPreview({
         width: source.offsetWidth || rect.width,
       },
     });
-  }, [cardName, handSourceObjectId]);
+  }, [cardName, handSourceObjectId, heldSourceOrigin]);
+
+  useEffect(() => {
+    if (!isHeldCardDrag) {
+      setDragHandoffComplete(false);
+      return undefined;
+    }
+
+    if (animationSpeedMultiplier <= 0) {
+      setDragHandoffComplete(true);
+      return undefined;
+    }
+
+    const durationMs = (shouldReduceMotion ? 60 : 120) * animationSpeedMultiplier;
+    const timeoutId = window.setTimeout(() => {
+      setDragHandoffComplete(true);
+    }, durationMs);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [animationSpeedMultiplier, isHeldCardDrag, shouldReduceMotion]);
+
+  // Keep the large inspection card alive just long enough to crossfade into
+  // the lifted card. The hand-sized drag visual already tracks the live finger
+  // position, so translating this second copy during the handoff would make
+  // the same card appear in two moving places at once.
+  if (isHeldCardDrag && (dragHandoffComplete || animationSpeedMultiplier <= 0)) {
+    return null;
+  }
 
   const handMeasurementReady =
     handSourceObjectId == null || measuredHandOrigin?.objectId === handSourceObjectId;
@@ -155,22 +238,38 @@ export function CardPreview({
     measuredHandOrigin && measuredHandOrigin.objectId === handSourceObjectId
       ? measuredHandOrigin.origin
       : null;
+  // A hand browse is one continuous preview session. Keeping this key stable
+  // across adjacent cards prevents AnimatePresence from leaving a trail of
+  // full-size previews that shrink onto previously scrubbed hand slots. The
+  // initial appearance and final dismissal still mount/unmount normally.
+  const previewKey = handSourceObjectId != null
+    ? "hand-preview"
+    : `${objectId ?? cardName}:${faceIndex ?? 0}:${scryfallId ?? ""}`;
 
   return (
     <AnimatePresence>
-      {cardName && handMeasurementReady ? (
+      {/* CR 709.5: a permanent with a shared type line doesn't have the name
+          of a half it hasn't unlocked, and CR 709.5d gives a copy of a Room
+          neither unlocked designation — so it has NO name at all. Its art
+          still resolves from the object's `printed_ref`, so an empty name is
+          a preview subject like any other. Only `null` is the caller's
+          "show nothing". */}
+      {cardName != null && handMeasurementReady ? (
         <CardPreviewInner
-          key={`${cardName}:${faceIndex ?? 0}:${scryfallId ?? ""}`}
+          key={previewKey}
           cardName={cardName}
+          objectId={objectId}
           backFaceName={backFaceName ?? null}
           faceIndex={faceIndex}
           position={position}
           scryfallId={scryfallId}
           sourcePrinting={sourcePrinting}
           dockSide={dockSide}
+          dockPosition={dockPosition}
           onDismiss={onDismiss}
           mobileLayout={mobileLayout}
           handOrigin={handOrigin}
+          mobileHandGesture={mobileHandGesture}
         />
       ) : null}
     </AnimatePresence>
@@ -179,34 +278,45 @@ export function CardPreview({
 
 function CardPreviewInner({
   cardName,
+  objectId,
   backFaceName: backFaceNameProp,
   faceIndex,
   position,
   scryfallId,
   sourcePrinting,
   dockSide,
+  dockPosition,
   onDismiss,
   mobileLayout,
   handOrigin,
+  mobileHandGesture,
 }: {
   cardName: string;
+  objectId?: number | null;
   backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
   dockSide?: boolean;
+  dockPosition?: CardPreviewDockPosition;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
   handOrigin: HandPreviewOrigin | null;
+  mobileHandGesture: MobileHandGesture | null;
 }) {
   const { t } = useTranslation("game");
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const previewObjectId = objectId === undefined ? inspectedObjectId : objectId;
   const dismissPreview = useUiStore((s) => s.dismissPreview);
   const showDebugId = useUiStore((s) => s.debugPanelOpen || s.debugInteractionMode);
   const obj = useGameStore((s) =>
-    inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
+    previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,
   );
+  // Catalog previews may inherit legacy inspection metadata, but not owner art.
+  const ownerLookup = objectId !== undefined && obj ? cardImageLookup(obj) : undefined;
+  const ownerPrinting = ownerLookup?.ownerPrinting;
+  const ownerPrintedRef = ownerLookup ? ownerPrintedRefOf(ownerLookup) : undefined;
   // `card_report` context needs a live, participating game: `obj == null` (deck
   // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
   // no game at all, and spectators don't report — building no context in these
@@ -228,13 +338,29 @@ function CardPreviewInner({
   const engineFrontFace = useEngineCardData(obj ? null : frontFaceName);
   const engineBackFace = useEngineCardData(obj ? null : backFaceName);
 
-  // Parse details: hierarchical tree with per-item support status.
-  // For in-game objects, look up by obj.name; for deck builder, use the face names.
-  const lookupName = obj?.name ?? frontFaceName;
-  const frontParseDetails = useCardParseDetails(lookupName);
-  const backParseDetails = useCardParseDetails(backFaceName);
-
   const isToken = obj?.display_source === "Token";
+  // Face-down permanents (#7547): opponents preview the cause MARKER full
+  // size (it carries the mechanic's reminder text); the controller previews
+  // the real card alone — the marker would only cover its rules text, and the
+  // controller already knows the mechanic (playtest call, 2026-08-19).
+  const previewMarkerRef = faceDownMarkerRef(
+    obj?.face_down ?? false,
+    obj?.face_down_cause,
+  );
+  const markerIsPrimary =
+    previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
+  // A hidden face-down PERMANENT whose cause has NO marker printing (unknown
+  // cause from an older save, or the Ixidron class) still gets a preview: the
+  // plain card back. It reveals nothing (CR 708.2a — the public face is a
+  // blank 2/2), and every art lookup below is suppressed so neither the
+  // generic label nor a blanked ref can leak into a network search.
+  // Battlefield only: a face-down card in a hidden zone (hideaway exile,
+  // issue #2889) has no public characteristics at all and keeps no preview.
+  const genericFaceDownBack =
+    obj != null
+    && obj.zone === "Battlefield"
+    && shouldRenderCardBack(obj)
+    && previewMarkerRef == null;
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
@@ -242,17 +368,35 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex: defaultFaceIndex,
-    isToken,
-    tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    scryfallId,
-    sourcePrinting,
-  });
+  const suppressArtLookup = markerIsPrimary || genericFaceDownBack;
+  // Parse details are identity lookups too. A stale concealed object may still
+  // carry its real name or face metadata, so neither face may cross this same
+  // hidden-information boundary.
+  const lookupName = suppressArtLookup ? null : obj?.name ?? frontFaceName;
+  const frontParseDetails = useCardParseDetails(lookupName);
+  const backParseDetails = useCardParseDetails(suppressArtLookup ? null : backFaceName);
+  const primaryImage = useCardImage(
+    suppressArtLookup ? "" : cardName,
+    {
+      size: "normal",
+      faceIndex: defaultFaceIndex,
+      isToken: isToken || markerIsPrimary,
+      tokenFilters: isToken && obj && !suppressArtLookup
+        ? tokenFiltersForObject(obj)
+        : undefined,
+      tokenImageRef: markerIsPrimary
+        ? previewMarkerRef
+        : isToken && obj && !genericFaceDownBack
+          ? obj.token_image_ref
+          : undefined,
+      oracleId: suppressArtLookup ? undefined : obj?.printed_ref?.oracle_id,
+      faceName: suppressArtLookup ? undefined : obj?.printed_ref?.face_name,
+      scryfallId: suppressArtLookup ? undefined : scryfallId,
+      sourcePrinting: suppressArtLookup ? undefined : sourcePrinting,
+      ownerPrinting: suppressArtLookup ? undefined : ownerPrinting,
+      ownerPrintedRef: suppressArtLookup ? undefined : ownerPrintedRef,
+    },
+  );
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -275,10 +419,10 @@ function CardPreviewInner({
       if (event.key === "Control") setCtrlHeld(false);
     }
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp);
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp);
     };
   }, []);
@@ -286,27 +430,50 @@ function CardPreviewInner({
   // Kamigawa flip cards print both halves in one image, the alternate half
   // rotated 180°. There's no second face to fetch, so Ctrl spins the same image
   // 180° (flip180) instead of swapping faces the way DFC/MDFC do (showOtherFace).
-  const flip180 = !isMobile && ctrlHeld && isFlip;
+  const flip180 = !isMobile && ctrlHeld && primaryImage.isFlip;
   // On desktop, Ctrl swaps to the other face (back face normally, front face if transformed)
-  const showOtherFace = !isMobile && ctrlHeld && backFaceName != null && !isFlip;
+  const showOtherFace =
+    !suppressArtLookup
+    && !isMobile
+    && ctrlHeld
+    && backFaceName != null
+    && !primaryImage.isFlip;
   // Fetch other face image when Ctrl is held (hook must always be called, but with empty
   // string when not needed so useCardImage short-circuits without a network request).
   // Battlefield path: the back_face's printed_ref carries the other face's
   // oracle_id (same as front for DFC/MDFC) and the other face's name. Deck-
   // builder path falls back to name + flipped faceIndex.
   const otherFaceIndex = isTransformed ? 0 : 1;
-  const otherFaceOracleId = obj?.back_face?.printed_ref?.oracle_id;
-  const otherFaceName = obj?.back_face?.printed_ref?.face_name;
+  const otherFaceOracleId = showOtherFace
+    ? obj?.back_face?.printed_ref?.oracle_id
+    : undefined;
+  const otherFaceName = showOtherFace
+    ? obj?.back_face?.printed_ref?.face_name
+    : undefined;
   const otherFaceImgResult = useCardImage(showOtherFace ? backFaceName! : "", {
     size: "normal",
     faceIndex: otherFaceIndex,
-    oracleId: showOtherFace ? otherFaceOracleId : undefined,
-    faceName: showOtherFace ? otherFaceName : undefined,
+    oracleId: otherFaceOracleId,
+    faceName: otherFaceName,
+    ownerPrinting: showOtherFace ? ownerPrinting : undefined,
   });
 
-  const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
-  const activeLoading = showOtherFace ? otherFaceImgResult.isLoading : isLoading;
-  const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
+  const activeImage = showOtherFace ? otherFaceImgResult : primaryImage;
+  const activeArt: CardPreviewArt = genericFaceDownBack
+    || (markerIsPrimary && !activeImage.isLoading && !activeImage.src)
+    ? { kind: "back" }
+    : {
+        kind: "face",
+        src: activeImage.src,
+        isLoading: activeImage.isLoading,
+        isRotated: activeImage.isRotated,
+        isFlip: activeImage.isFlip,
+        rungs: activeImage.rungs,
+        advanceFailedSource: activeImage.advanceFailedSource,
+      };
+  const activeRotated = activeArt.kind === "face" && activeArt.isRotated;
+  const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
+  const activeImageIsLoading = activeArt.kind === "face" && activeArt.isLoading;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
@@ -329,10 +496,16 @@ function CardPreviewInner({
   const viewportHeight = typeof window === "undefined" ? 900 : window.innerHeight;
   const gap = 20;
   const margin = 16;
-  const defaultDesktopStyle: React.CSSProperties = {
-    right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
-    top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 1rem)",
-  };
+  const defaultDesktopStyle: React.CSSProperties =
+    dockSide && dockPosition === "middle-right"
+      ? {
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          top: `calc(50% - ${previewHeight / 2}px)`,
+        }
+      : {
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 1rem)",
+        };
 
   useEffect(() => {
     // `dockSide` keeps the preview pinned to `defaultDesktopStyle` (the
@@ -401,7 +574,9 @@ function CardPreviewInner({
 
     // The preview grows when async content settles (image load, hint bars, face
     // swap); re-clamp on size change so a late-appearing hint bar can't leave the
-    // card hanging off the bottom.
+    // card hanging off the bottom. Source state is also a dependency below:
+    // changing an image's intrinsic content does not reliably notify
+    // ResizeObserver on every browser.
     const resizeObserver =
       previewRef.current != null
         ? new ResizeObserver(() => schedulePositionUpdate())
@@ -417,6 +592,8 @@ function CardPreviewInner({
       }
     };
   }, [
+    activeImageIsLoading,
+    activeImageSrc,
     altHeld,
     dockSide,
     gap,
@@ -440,7 +617,7 @@ function CardPreviewInner({
   // back-face identity would corrupt the misparse-vs-known-gap triage columns.
   const reportItems = showOtherFace ? backParseDetails : frontParseDetails;
   const reportContext: CardReportContext | undefined =
-    obj != null && gameId !== null && gameMode !== "spectate"
+    !suppressArtLookup && obj != null && gameId !== null && gameMode !== "spectate"
       ? {
           oracleId:
             (showOtherFace ? obj.back_face?.printed_ref?.oracle_id : obj.printed_ref?.oracle_id) ?? "",
@@ -452,21 +629,6 @@ function CardPreviewInner({
           total: (reportItems ?? []).length,
         }
       : undefined;
-
-  if (isMobile) {
-    return (
-      <MobilePreviewOverlay
-        cardName={cardName}
-        backFaceName={backFaceName}
-        faceIndex={defaultFaceIndex}
-        obj={obj}
-        onDismiss={onDismiss ?? dismissPreview}
-        sourcePrinting={sourcePrinting}
-        layout={mobileLayout ?? "modal"}
-        report={reportContext}
-      />
-    );
-  }
 
   const handPreviewLeft = handPreview
     ? Math.min(
@@ -512,11 +674,123 @@ function CardPreviewInner({
 
   const animatePreview = animationSpeedMultiplier > 0;
   const movePreview = animatePreview && !shouldReduceMotion;
+  const previewControls = useAnimationControls();
+  const previousHandSourceRef = useRef<number | null>(null);
   const transformOrigin = handPreview
     ? "50% 100%"
     : position && position.x <= viewportWidth / 2
       ? "0% 50%"
       : "100% 50%";
+  const activeMobileHandGesture =
+    handPreview
+      && mobileHandGesture?.phase === "preview"
+      && mobileHandGesture.objectId === previewObjectId
+      ? mobileHandGesture
+      : null;
+  const activeMobileHandDrag =
+    handPreview
+      && mobileHandGesture?.phase === "drag"
+      && mobileHandGesture.objectId === previewObjectId
+      ? mobileHandGesture
+      : null;
+  const activeMobileHandDragObjectId = activeMobileHandDrag?.objectId ?? null;
+  const mobileHandPreviewState = activeMobileHandGesture?.castReady
+    ? "cast-ready"
+    : activeMobileHandGesture?.playable
+      ? "playable"
+      : undefined;
+  const mobileHandHighlightClass = activeMobileHandGesture?.castReady
+    ? "ring-2 ring-amber-300 shadow-[0_0_22px_6px_rgba(251,191,36,0.72)]"
+    : activeMobileHandGesture?.playable
+      ? "ring-2 ring-cyan-400 shadow-[0_0_16px_4px_rgba(34,211,238,0.6)]"
+      : "";
+  const wobbleHeldPreview =
+    activeMobileHandGesture != null
+    && animatePreview
+    && !shouldReduceMotion;
+
+  useLayoutEffect(() => {
+    if (activeMobileHandDragObjectId != null) {
+      const duration = (
+        shouldReduceMotion ? 0.06 : 0.12
+      ) * animationSpeedMultiplier;
+      void previewControls.start({
+        opacity: 0,
+        rotate: 0,
+        scale: 1,
+        x: 0,
+        y: 0,
+        transition: {
+          duration,
+          ease: "easeOut",
+        },
+      });
+      return;
+    }
+
+    const duration = (
+      shouldReduceMotion ? 0.12 : handPreview ? 0.24 : 0.2
+    ) * animationSpeedMultiplier;
+    const handSourceChanged =
+      handPreview
+      && handOrigin.objectId !== previousHandSourceRef.current;
+
+    if (handSourceChanged && previousHandSourceRef.current != null && movePreview) {
+      // A scrubbed card becomes the preview itself: reset the one persistent
+      // layer to the new source card's exact fan geometry, then grow it into
+      // the bottom-pinned inspection size. Starting another scrub cancels this
+      // motion and restarts from the next source, so no exit clones accumulate.
+      previewControls.set({
+        left: handPreviewLeft,
+        opacity: 1,
+        rotate: handOrigin.rotation,
+        scale: handPreviewScale,
+        x: handPreviewX,
+        y: handPreviewY,
+      });
+    }
+
+    previousHandSourceRef.current = handPreview ? handOrigin.objectId : null;
+    void previewControls.start({
+      left: handPreview ? handPreviewLeft : undefined,
+      opacity: 1,
+      rotate: 0,
+      scale: 1,
+      x: 0,
+      y: 0,
+      transition: {
+        duration,
+        ease: [0.22, 1, 0.36, 1],
+      },
+    });
+  }, [
+    activeMobileHandDragObjectId,
+    animationSpeedMultiplier,
+    handOrigin,
+    handPreview,
+    handPreviewLeft,
+    handPreviewScale,
+    handPreviewX,
+    handPreviewY,
+    movePreview,
+    previewControls,
+    shouldReduceMotion,
+  ]);
+
+  // Generic mobile inspections use the blocking modal. A held hand card is the
+  // exception: it uses the same bottom-anchored Arena animation as desktop so
+  // the player can keep their finger down and scrub the stable fan beneath it.
+  if (isMobile && !handPreview) {
+    return (
+      <MobilePreviewOverlay
+        cardName={cardName}
+        art={activeArt}
+        onDismiss={onDismiss ?? dismissPreview}
+        layout={mobileLayout ?? "modal"}
+        report={reportContext}
+      />
+    );
+  }
 
   return (
     <motion.div
@@ -536,19 +810,7 @@ function CardPreviewInner({
             : { opacity: 0, scale: movePreview ? 0.975 : 1, y: movePreview ? 6 : 0 }
           : false
       }
-      animate={{
-        opacity: 1,
-        rotate: 0,
-        scale: 1,
-        x: 0,
-        y: 0,
-        transition: {
-          duration: (
-            shouldReduceMotion ? 0.12 : handPreview ? 0.24 : 0.2
-          ) * animationSpeedMultiplier,
-          ease: [0.22, 1, 0.36, 1],
-        },
-      }}
+      animate={previewControls}
       exit={{
         opacity: animatePreview && (!handPreview || !movePreview) ? 0 : 1,
         rotate: handPreview && movePreview ? handOrigin.rotation : 0,
@@ -568,39 +830,54 @@ function CardPreviewInner({
       }}
       data-card-preview
     >
-      {altHeld && (frontParseDetails || engineFrontFace) ? (
-        <ParsedAbilitiesPanel
-          name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
-          cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
-          keywords={showOtherFace ? undefined : obj?.keywords}
-          localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
-          parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
-          maxHeight={viewportHeight - margin * 2}
-          report={reportContext}
-        />
-      ) : (
-        <CardImagePreview
-          cardName={displayName}
-          classLevel={classLevel}
-          showInfoPanel={showInfoPanel}
-          showFooter={showCardPreviewFooter}
-          compactDesktop={handPreview}
-          obj={obj}
-          showOtherFace={showOtherFace}
-          otherFaceCost={obj?.back_face?.mana_cost ?? null}
-          isLoading={activeLoading}
-          src={activeSrc}
-          isRotated={activeRotated}
-          flip180={flip180}
-          backFaceHint={isFlip
-            ? (flip180 ? null : t("preview.holdCtrlFlip"))
-            : backFaceName != null && !showOtherFace
-              ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
-              : null}
-          altAvailable={Boolean(frontParseDetails || engineFrontFace)}
-          debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
-        />
-      )}
+      <motion.div
+        className={`rounded-[4%] transition-[box-shadow] motion-safe:duration-100 ${mobileHandHighlightClass}`}
+        style={{ transformOrigin: "50% 85%" }}
+        animate={wobbleHeldPreview ? { rotate: [0, -0.55, 0.55, 0] } : { rotate: 0 }}
+        transition={
+          wobbleHeldPreview
+            ? {
+                duration: 1.2 * animationSpeedMultiplier,
+                ease: "easeInOut",
+                repeat: Infinity,
+              }
+            : { duration: 0.08 * animationSpeedMultiplier }
+        }
+        data-mobile-hand-preview-state={mobileHandPreviewState}
+        data-mobile-hand-preview-wobble={wobbleHeldPreview || undefined}
+      >
+        {altHeld && !suppressArtLookup && (frontParseDetails || engineFrontFace) ? (
+          <ParsedAbilitiesPanel
+            name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
+            cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
+            keywords={showOtherFace ? undefined : obj?.keywords}
+            localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
+            parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
+            maxHeight={viewportHeight - margin * 2}
+            report={reportContext}
+          />
+        ) : (
+          <CardImagePreview
+            cardName={displayName}
+            classLevel={classLevel}
+            showInfoPanel={showInfoPanel}
+            showFooter={showCardPreviewFooter}
+            compactDesktop={handPreview}
+            obj={obj}
+            showOtherFace={showOtherFace}
+            otherFaceCost={showOtherFace ? obj?.back_face?.mana_cost ?? null : null}
+            art={activeArt}
+            flip180={flip180}
+            backFaceHint={primaryImage.isFlip
+              ? (flip180 ? null : t("preview.holdCtrlFlip"))
+              : !suppressArtLookup && backFaceName != null && !showOtherFace
+                ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
+                : null}
+            altAvailable={Boolean(frontParseDetails || engineFrontFace)}
+            debugObjectId={showDebugId && previewObjectId != null ? previewObjectId : null}
+          />
+        )}
+      </motion.div>
     </motion.div>
   );
 }
@@ -608,49 +885,34 @@ function CardPreviewInner({
 /** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
-  faceIndex,
-  obj,
+  art,
   onDismiss,
-  sourcePrinting,
   layout = "modal",
   report,
 }: {
   cardName: string;
-  backFaceName: string | null;
-  faceIndex?: number;
-  obj: GameObject | null;
+  /** The parent's RESOLVED art state (marker / generic back / peek already
+   *  applied). The overlay must never run its own lookup: a second
+   *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
+   *  hidden-information bypass the PR 7551 review flagged. */
+  art: CardPreviewArt;
   onDismiss: () => void;
-  sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
    *  layout hosts the button — the compact peek dismisses on any tap. */
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex,
-    isToken: obj?.display_source === "Token",
-    tokenFilters: obj?.display_source === "Token" ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: obj?.display_source === "Token" ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    sourcePrinting,
-  });
-
-  // Issue #6156 on the mobile path: both arms below used to gate the art on
-  // `src &&`, so an artless token (no official paper printing) opened an
-  // overlay containing nothing at all — the reported blank square, reproduced
-  // on phones. Track load failures too, so a resolved-but-404 URL degrades to
-  // the same named tile instead of the browser's broken-image glyph.
-  const [artError, setArtError] = useState(false);
-  useEffect(() => setArtError(false), [src]);
+  const src = art.kind === "face" ? art.src : null;
+  const isLoading = art.kind === "face" && art.isLoading;
+  const isRotated = art.kind === "face" && art.isRotated;
+  const isFlip = art.kind === "face" && art.isFlip;
   // `isLoading` is load-bearing, not decoration: `useCardImage` assigns `src`
   // in a post-render effect, so `src` is null on EVERY first paint. Deriving
   // the fallback from `!src` alone would flash the "no art" tile before every
   // normal card's art — the same conflation this PR fixed on the board
   // renderers. Only a settled lookup with no art gets the tile.
-  const showArtFallback = !isLoading && (!src || artError);
+  const showArtFallback = art.kind === "face" && !isLoading && !src;
 
   // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
   // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
@@ -687,7 +949,9 @@ function MobilePreviewOverlay({
         className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-4"
         data-card-preview
       >
-        {showArtFallback ? (
+        {art.kind === "back" ? (
+          <CardBackFallback className="pointer-events-auto max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl" />
+        ) : showArtFallback ? (
           <CardArtFallback
             name={cardName}
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
@@ -699,10 +963,11 @@ function MobilePreviewOverlay({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
             draggable={false}
             onPointerDown={onDismiss}
-            onError={() => setArtError(true)}
+            onError={() => art.advanceFailedSource?.(src)}
             className={
               isRotated
                 ? "pointer-events-auto max-h-[58vw] max-w-[80vh] rotate-90 rounded-xl border border-white/15 object-contain shadow-2xl"
@@ -728,7 +993,9 @@ function MobilePreviewOverlay({
           : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
         onPointerDown={(e) => e.stopPropagation()}
       >
-        {showArtFallback ? (
+        {art.kind === "back" ? (
+          <CardBackFallback className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg" />
+        ) : showArtFallback ? (
           <CardArtFallback
             name={cardName}
             className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
@@ -739,9 +1006,10 @@ function MobilePreviewOverlay({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
             draggable={false}
-            onError={() => setArtError(true)}
+            onError={() => art.advanceFailedSource?.(src)}
             className={isRotated
               ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
               : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
@@ -776,9 +1044,7 @@ function CardImagePreview({
   obj,
   showOtherFace,
   otherFaceCost,
-  isLoading,
-  src,
-  isRotated,
+  art,
   flip180,
   backFaceHint,
   altAvailable,
@@ -793,9 +1059,7 @@ function CardImagePreview({
   obj: GameObject | null;
   showOtherFace?: boolean;
   otherFaceCost?: ManaCost | null;
-  isLoading: boolean;
-  src: string | null;
-  isRotated: boolean;
+  art: CardPreviewArt;
   flip180?: boolean;
   backFaceHint: string | null;
   altAvailable: boolean;
@@ -803,13 +1067,9 @@ function CardImagePreview({
   debugObjectId?: number | null;
 }) {
   const { t } = useTranslation("game");
-  // Card art can 404 even when a URL resolves — future-dated sets whose images
-  // aren't on the CDN yet, or tokens whose preset (and image ref) is missing.
-  // Track the load failure so we render a named placeholder in the image slot
-  // instead of the browser's broken-image glyph, keeping the alt-view info
-  // panel usable. Reset whenever the src changes so navigating cards re-tries.
-  const [imgError, setImgError] = useState(false);
-  useEffect(() => setImgError(false), [src]);
+  const src = art.kind === "face" ? art.src : null;
+  const isLoading = art.kind === "face" && art.isLoading;
+  const isRotated = art.kind === "face" && art.isRotated;
   const frameClass = mobileMode
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
@@ -841,7 +1101,7 @@ function CardImagePreview({
       : compactDesktop
         ? "absolute left-1/2 top-1/2 h-[clamp(266px,25.2vw,420px)] w-[clamp(190px,18vw,300px)] max-h-[66vh] max-w-[36vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
         : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-    : `${frameClass} object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
+    : `h-full w-full object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
   // otherwise fall back to printed mana cost. When the user holds Ctrl to view the
@@ -850,6 +1110,10 @@ function CardImagePreview({
   // mana cost (e.g. The Prismatic Bridge's {W}{U}{B}{R}{G} instead of Esika's
   // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
+  // CR 709.3 + CR 712.11b: the other castable spell face's live cost, when
+  // the engine published one; only the cast-cost badge shows it, never the
+  // Ctrl "other face" view, which already IS that face.
+  const backFaceCost = useBackFaceSpellCost(obj?.id, obj?.back_face?.mana_cost);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const activateLabels = useMemo<ActivateLabel[]>(() => {
     if (!obj || obj.zone !== "Battlefield") return [];
@@ -859,7 +1123,11 @@ function CardImagePreview({
       if (action.type !== "ActivateAbility") continue;
       const ability = obj.abilities[action.data.ability_index];
       if (!ability) continue;
-      const rawLabel = abilityLabel(ability);
+      // CR 201.5: the engine ships `~` as the self-reference token; substitute the host
+      // object's name BEFORE the `seen` dedup below so the dedup key stays 1:1 with what
+      // renders. Today Pentad Prism's hover preview reads
+      // "Activate — Remove a charge counter from ~".
+      const rawLabel = renderDescription(abilityLabel(ability), obj.name);
       if (!rawLabel || seen.has(rawLabel)) continue;
       seen.add(rawLabel);
       // CR 606.1: a Loyalty ability cost renders as a mana-font badge; strip
@@ -882,23 +1150,19 @@ function CardImagePreview({
     showCastManaCost && obj ? spellCostDisplay(effectiveCost, obj.mana_cost) : null;
   const displayCost = showOtherFace ? otherFaceCost : (castCostDisplay?.displayCost ?? null);
   const displayCostReduced = castCostDisplay?.isReduced ?? false;
-
-  // Only a genuinely in-flight lookup pulses. A finished lookup with no art
-  // (issue #6156) falls through to the named placeholder below — previously it
-  // was collapsed in here, which left this component's own placeholder dead
-  // code for artless tokens and pulsed forever in the hover preview.
-  if (isLoading) {
-    return (
-      <div
-        className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
-      />
-    );
-  }
+  const displayBackFace = showOtherFace || castCostDisplay == null ? undefined : backFaceCost;
 
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${renderInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
-      <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        {imgError || !src ? (
+      <div className={`${frameClass} ${isRotated ? "" : "aspect-[488/680]"} relative rounded-[4%] overflow-hidden`}>
+        {art.kind === "back" ? (
+          <CardBackFallback className={`${frameClass} rounded-[4%] border border-gray-600 shadow-2xl`} />
+        ) : isLoading ? (
+          <div
+            className={`${frameClass} aspect-[488/680] animate-pulse rounded-[4%] bg-gray-700`}
+            aria-label={t("card.loading", { name: cardName })}
+          />
+        ) : !src ? (
           <div
             // `frameClass` is width-only when upright — the <img> normally
             // supplies the height, so without an aspect ratio this placeholder
@@ -914,14 +1178,20 @@ function CardImagePreview({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
             className={imageClass}
             draggable={false}
-            onError={() => setImgError(true)}
+            onError={() => art.advanceFailedSource?.(src)}
           />
         )}
         {displayCost && (
-          <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
+          // @container overlay sized to the frame so the pips scale with the
+          // preview's own width, which varies from a 300px hand hover to a
+          // 472px docked preview — a fixed px size can only be right at one end.
+          <div className="pointer-events-none absolute inset-0 z-10 @container">
+            <ManaCostPips cost={displayCost} isReduced={displayCostReduced} backFace={displayBackFace} size="fluid" />
+          </div>
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">
@@ -1130,9 +1400,6 @@ function CardInfoPanel({
 }) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).flatMap(([type, count]) =>
-    type === "loyalty" || count == null ? [] : [[type, count] as const],
-  );
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||
@@ -1148,10 +1415,53 @@ function CardInfoPanel({
   const transientContinuousEffects = useGameStore(
     (s) => s.gameState?.transient_continuous_effects,
   );
+  // CR 122.1 + CR 306.5c: the engine's complete counter projection for this object. Same channel
+  // PermanentCard's pill and ArtCropCard's badge read — every counter display mode must agree, or
+  // a row silently drops in one of them. The loyalty TOTAL is already partitioned out by the
+  // engine; this site renders no loyalty badge, so it takes the pills alone.
+  const counterDisplay = useCounterDisplay(obj.id);
+  const counters = pillsOf(counterDisplay);
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
   const chosenAttributes = obj.chosen_attributes ?? [];
+  // CR 506.3 + CR 508.1b: this creature's attack declaration, if it is attacking.
+  const attacker = useGameStore((s) =>
+    s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
+  );
+  // CR 506.4c: the engine's current target of this creature's attack; absent once that relation
+  // has ended, while the creature is still attacking.
+  const attackTarget = useGameStore((s) => s.gameState?.derived?.attack_targets?.[String(obj.id)]);
+  const myId = usePlayerId();
+  // `usePlayerId()` answers seat 0 in spectate mode, so the second-person arms are gated on
+  // `useSpectatorMode()`: a spectator reads the third-person copy, never "you".
+  const spectating = useSpectatorMode();
+
+  const formatAttackTarget = (target: AttackTarget | undefined, defendingPlayer: PlayerId): string => {
+    if (!target) return t("preview.attacking.nothing");
+    switch (target.type) {
+      case "Player":
+        return !spectating && target.data === myId
+          ? t("preview.attacking.you")
+          : t("preview.attacking.player", { player: getOpponentDisplayName(target.data) });
+      case "Planeswalker": {
+        const name = objects?.[String(target.data)]?.name;
+        // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
+        return !spectating && defendingPlayer === myId
+          ? t("preview.attacking.yourPlaneswalker", { name })
+          : t("preview.attacking.planeswalker", {
+              name,
+              player: getOpponentDisplayName(defendingPlayer),
+            });
+      }
+      case "Battle":
+        return t("preview.attacking.battle", { name: objects?.[String(target.data)]?.name });
+      default: {
+        const _exhaustive: never = target;
+        return _exhaustive;
+      }
+    }
+  };
 
   const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
     switch (attribute.type) {
@@ -1215,6 +1525,9 @@ function CardInfoPanel({
       <div className="font-semibold text-gray-300">
         <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
+      {attacker && (
+        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attackTarget, attacker.defending_player)}</div>
+      )}
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">
@@ -1247,10 +1560,15 @@ function CardInfoPanel({
       {(obj.blocked_abilities?.length ?? 0) > 0 && (
         <div className="mt-1 space-y-0.5 text-amber-300/90">
           {(obj.blocked_abilities ?? []).map((entry, i) => {
-            const abilityName =
+            // CR 201.5: same `~` binding as the activate read-out above — the blocked row
+            // shows the ability's own description, so it leaks the raw token otherwise.
+            const rawAbilityName =
               entry.ability_index < obj.abilities.length
                 ? obj.abilities[entry.ability_index]?.description
                 : undefined;
+            const abilityName = rawAbilityName
+              ? renderDescription(rawAbilityName, obj.name)
+              : undefined;
             const names = (entry.sources ?? [])
               .map((id) => objects?.[String(id)]?.name)
               .filter((n): n is string => !!n);
@@ -1310,13 +1628,20 @@ function CardInfoPanel({
       {/* Counters */}
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
-          {counters.map(([type, count]) => (
-            <CounterTooltip key={type} type={type} count={count}>
-              <span>
-                {formatCounterType(type)}: {count}
-              </span>
-            </CounterTooltip>
-          ))}
+          {counters.map((row) => {
+            const type = row.counter;
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count, and tell the
+            // tooltip so its summary can't contradict the row.
+            const unbounded = isUnbounded(row);
+            return (
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+                <span>
+                  {formatCounterType(type)}: {unbounded ? "∞" : row.count}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
 

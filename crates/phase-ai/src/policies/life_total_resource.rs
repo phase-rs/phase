@@ -40,14 +40,11 @@ impl LifeTotalResourcePolicy {
         // Calculate opponent total power
         let opp_total_power: i32 = opponents
             .iter()
-            .map(|&opp| {
-                let (_, power, _, _) = board_stats(ctx.state, opp);
-                power
-            })
+            .map(|&opp| board_stats(ctx.state, opp).power)
             .sum();
 
         // Calculate AI total power
-        let (_, ai_power, _, _) = board_stats(ctx.state, ctx.ai_player);
+        let ai_power = board_stats(ctx.state, ctx.ai_player).power;
 
         let min_opp_life = opponents
             .iter()

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyBackup, type PhaseBackup } from "./backup";
 import { getSupabaseSessionKey } from "./cloudSync/sessionKey";
 import { isBundledTauriOrigin, isTauri } from "./platform";
+import { withSavedDeckLibraryOrSkip } from "./savedDeckTransaction";
 
 /** Payload staged by the bundled shell for one-time remote-origin import. */
 export interface LegacyStorageStash {
@@ -45,7 +46,11 @@ export async function importLegacyStorage(): Promise<void> {
   if (!stash) return;
 
   try {
-    applyBackup(stash.backup, "merge");
+    const applied = await withSavedDeckLibraryOrSkip((txn) => applyBackup(txn, stash.backup, "merge"), "run-unguarded");
+    if (applied.status === "skipped") {
+      // Unconfirmed: the shell keeps the stash, so the next boot retries.
+      return;
+    }
     const sessionKey = getSupabaseSessionKey();
     if (
       sessionKey &&
@@ -65,11 +70,21 @@ export async function importLegacyStorage(): Promise<void> {
   }
 }
 
-let remoteLoadMarked = false;
+let remoteLoadMarkInFlight: Promise<boolean> | null = null;
 
 /** Mark a completed remote-shell app boot so future offline launches may navigate. */
-export function markRemoteLoadOk(): void {
-  if (remoteLoadMarked || !isRemoteTauriShell()) return;
-  remoteLoadMarked = true;
-  void invoke<void>("mark_remote_load_ok").catch(() => {});
+export function markRemoteLoadOk(): Promise<boolean> {
+  if (!isRemoteTauriShell()) return Promise.resolve(true);
+  if (remoteLoadMarkInFlight) return remoteLoadMarkInFlight;
+
+  try {
+    remoteLoadMarkInFlight = invoke<void>("mark_remote_load_ok")
+      .then(() => true, () => false)
+      .finally(() => {
+        remoteLoadMarkInFlight = null;
+      });
+  } catch {
+    return Promise.resolve(false);
+  }
+  return remoteLoadMarkInFlight;
 }

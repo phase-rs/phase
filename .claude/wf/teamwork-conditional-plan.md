@@ -267,9 +267,8 @@ predicate (the existing honest-refusal path, oracle_casting.rs:244-255); the Swa
 `Condition_If` detector continues to flag it. We add a guard test asserting **no** unconditional
 flash grant leaks. We do **not** ship a green-but-wrong flash grant.
 
-**mtgish-safety statement.** Zero edits to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`.
 No new `Effect`, `AbilityCondition`, `AdditionalCostOrigin`, or `SpecialClause` variant (all
-already exist), so no mtgish mirroring is implicated. Changes are confined to parser files
+already exist). Changes are confined to parser files
 (`conditions.rs`, `lower.rs`, `oracle_modal.rs`, `oracle_nom/condition.rs`) plus tests.
 
 ### Blast-radius bounding (mandatory — EMH + We Say Thee Nay! fixes)
@@ -297,11 +296,11 @@ already exist), so no mtgish mirroring is implicated. Changes are confined to pa
   and one representative **kicker-instead** card parse **identically** to current `card-data.json`.
 
 ### CR annotations (all grep-verified against `docs/MagicCompRules.txt`)
-- **CR 601.2b** (line 2457) — announcing intent to pay alternative/additional costs as the spell is
+- **CR 601.2b** — announcing intent to pay alternative/additional costs as the spell is
   cast. ✔
-- **CR 601.2f** (line 2466) — determining total cost including additional costs. ✔ → annotate the
+- **CR 601.2f** — determining total cost including additional costs. ✔ → annotate the
   trailing-teamwork recognizer and the Dig-instead teamwork arm.
-- **CR 608.2c** (line 2789) — later text modifies earlier text (the trailing conditional; the
+- **CR 608.2c** — later text modifies earlier text (the trailing conditional; the
   conditional Dig-selection alternative; the additive "Also" connector). ✔ → annotate the trailing
   recognizer, the Dig-instead arm, and the "Also " connector arm.
 - **CR 702.8a** (Flash; previously verified) — reference in the Quantum Reduction deferral note.

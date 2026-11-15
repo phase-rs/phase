@@ -1,11 +1,11 @@
+// engine-citation-gate: symbol anchors only
 //! P7 v3 (CR 732.2a): capture + drive a MULTI-ACTION mana-engine loop.
 //!
 //! Real-card acceptance: **Basalt Monolith + Power Artifact** — the canonical 2-card infinite-mana
 //! combo. Basalt's `{T}: Add {C}{C}{C}` (an off-stack mana ability, CR 605.3b) then its separate
 //! `{3}: Untap this artifact` (on-stack, reduced to `{1}` by Power Artifact, CR 118.9) form ONE
 //! loop period of TWO activations whose net progress is `+2 {C}` per cycle while the board returns
-//! to equality. This is the class OPTION 2 (multi-action) enables — a single `LoopAction` cannot
-//! represent it.
+//! to equality. This is the multi-action class: no single play represents it.
 //!
 //! Honesty bar: every card is loaded from the real `shared_card_db()` through the real
 //! parser+reducer; Power Artifact's cost reduction materializes through the LAYER system
@@ -25,9 +25,7 @@ use engine::game::zones::{add_to_zone, remove_from_zone};
 use engine::types::ability::{AbilityKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopAction, LoopActionContext, LoopDetectionMode, WaitingFor,
-};
+use engine::types::game_state::{CastPaymentMode, GameState, LoopDetectionMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
@@ -56,7 +54,7 @@ fn place_on_battlefield(
 }
 
 /// The layer-derived mana-ability index on `source` (`{T}: Add {C}{C}{C}`). Read OFF the object.
-fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
+pub(crate) fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
     state
         .objects
         .get(&source)?
@@ -68,7 +66,7 @@ fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
 /// The layer-derived NON-mana activated ability index on `source` (`{3}: Untap this artifact`).
 /// The static "doesn't untap during your untap step" ability is `Static`-kind, so the only
 /// non-mana `Activated` ability is the untap.
-fn untap_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
+pub(crate) fn untap_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
     state
         .objects
         .get(&source)?
@@ -94,6 +92,7 @@ fn tap_untapped_land(runner: &mut GameRunner, player: PlayerId) {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: mana_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("tap land for mana");
 }
@@ -108,14 +107,14 @@ fn colorless(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-struct Rig {
-    runner: GameRunner,
-    basalt: ObjectId,
+pub(crate) struct Rig {
+    pub(crate) runner: GameRunner,
+    pub(crate) basalt: ObjectId,
 }
 
 /// Build the 2-player rig: Basalt Monolith on P0's battlefield, optionally with Power Artifact
 /// attached (the cost-reduction that makes the untap net-positive). `mode` selects the detector.
-fn setup(with_power: bool, mode: LoopDetectionMode, db: &CardDatabase) -> Rig {
+pub(crate) fn setup(with_power: bool, mode: LoopDetectionMode, db: &CardDatabase) -> Rig {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let basalt = scenario.add_real_card(P0, BASALT, Zone::Battlefield, db);
@@ -140,6 +139,7 @@ fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation is legal");
     for _ in 0..60 {
@@ -156,7 +156,7 @@ fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_index:
 
 /// Drive one full loop period: the off-stack mana beat, then the on-stack untap beat, settling
 /// each. Returns with the CR 732.2a offer surfaced (if the loop is detected).
-fn drive_one_period(rig: &mut Rig, mana_idx: usize, untap_idx: usize) {
+pub(crate) fn drive_one_period(rig: &mut Rig, mana_idx: usize, untap_idx: usize) {
     activate_and_settle(&mut rig.runner, rig.basalt, mana_idx);
     activate_and_settle(&mut rig.runner, rig.basalt, untap_idx);
 }
@@ -177,9 +177,9 @@ fn mana_engine_basalt_power_offers_mana_advantage_shortcut() {
 
     drive_one_period(&mut rig, mana_idx, untap_idx);
 
-    // Positive reach-guard: BOTH beats accumulated (armed, non-vacuous) before the offer.
+    // Positive reach-guard: BOTH beats were traced (non-vacuous) before the offer.
     assert_eq!(
-        rig.runner.state().last_loop_action_sequence.len(),
+        plays(rig.runner.state()).len(),
         2,
         "the period is a 2-activation sequence (mana beat + untap beat)"
     );
@@ -197,7 +197,7 @@ fn mana_engine_basalt_power_offers_mana_advantage_shortcut() {
             );
             assert_eq!(
                 certificate.win_kind,
-                WinKind::Advantage,
+                Some(WinKind::Advantage),
                 "a pure mana engine is an Advantage loop (no lethal/poison/decking axis)"
             );
         }
@@ -205,9 +205,8 @@ fn mana_engine_basalt_power_offers_mana_advantage_shortcut() {
     }
 }
 
-/// T2 — the sequence ACCUMULATES both beats in order. After the mana beat `len==1`; after the
-/// untap beat `len==2`, both `Activate`, same controller. Revert-failing: removing the else-arm
-/// APPEND branch makes the untap CLEAR (pre-P7 behavior) ⇒ `len` never reaches 2 ⇒ no offer.
+/// T2 — the trace holds both beats in order: one play after the mana beat, two after the untap
+/// beat, both P0's.
 #[test]
 fn mana_engine_accumulates_both_beats() {
     let Some(db) = shared_card_db() else { return };
@@ -217,21 +216,20 @@ fn mana_engine_accumulates_both_beats() {
 
     activate_and_settle(&mut rig.runner, rig.basalt, mana_idx);
     assert_eq!(
-        rig.runner.state().last_loop_action_sequence.len(),
+        plays(rig.runner.state()).len(),
         1,
-        "the off-stack mana beat SEEDS a 1-step period"
+        "the off-stack mana beat is one play"
     );
     activate_and_settle(&mut rig.runner, rig.basalt, untap_idx);
-    let seq = rig.runner.state().last_loop_action_sequence.clone();
-    assert_eq!(seq.len(), 2, "the untap beat APPENDS ⇒ a 2-step period");
+    let seq = plays(rig.runner.state());
+    assert_eq!(seq.len(), 2, "the untap beat is the second play");
     assert!(
-        seq.iter()
-            .all(|c| matches!(c.action, LoopAction::Activate { .. }) && c.controller == P0),
-        "both steps are P0 Activate steps (homogeneous controller)"
+        seq.iter().all(|(seat, _)| *seat == P0),
+        "both plays are P0's"
     );
 }
 
-/// T3 — a PARTIAL period (only the mana beat) does NOT offer. The accumulator arms `[mana]`
+/// T3 — a PARTIAL period (only the mana beat) does NOT offer. The trace holds `[mana]`
 /// (non-vacuity), but driving `[mana]` twice re-taps the already-tapped Basalt on the 2nd
 /// iteration ⇒ `RecastAbort` ⇒ no offer. The drive+cover IS the period-boundary check. Paired
 /// positive = T1 (the full 2-beat period offers).
@@ -244,9 +242,9 @@ fn mana_engine_partial_period_does_not_offer() {
     activate_and_settle(&mut rig.runner, rig.basalt, mana_idx);
 
     assert_eq!(
-        rig.runner.state().last_loop_action_sequence.len(),
+        plays(rig.runner.state()).len(),
         1,
-        "reach-guard: the mana beat armed a 1-step accumulator (non-vacuous)"
+        "reach-guard: the mana beat is traced (non-vacuous)"
     );
     assert!(
         !matches!(
@@ -259,7 +257,7 @@ fn mana_engine_partial_period_does_not_offer() {
 
 /// T6 — Basalt WITHOUT Power Artifact does NOT offer. The untap costs the full `{3}`, exactly what
 /// the mana beat produced, so net mana per period is 0 ⇒ `net_progress_for` fails ⇒ no offer. The
-/// accumulator still arms both beats (non-vacuity), so rejection is the SIGN-CHECK, not a capture
+/// trace still holds both beats (non-vacuity), so rejection is the SIGN-CHECK, not a trace
 /// failure. Paired positive = T1 (with Power the untap is `{1}` ⇒ net `+2`).
 #[test]
 fn mana_engine_without_power_does_not_offer() {
@@ -271,9 +269,9 @@ fn mana_engine_without_power_does_not_offer() {
     drive_one_period(&mut rig, mana_idx, untap_idx);
 
     assert_eq!(
-        rig.runner.state().last_loop_action_sequence.len(),
+        plays(rig.runner.state()).len(),
         2,
-        "reach-guard: both beats armed even without Power (rejection is the sign-check, not capture)"
+        "reach-guard: both beats traced even without Power (rejection is the sign-check)"
     );
     assert!(
         !matches!(
@@ -284,13 +282,8 @@ fn mana_engine_without_power_does_not_offer() {
     );
 }
 
-/// T-HET — capture-level identity protection: a CONTROLLER CHANGE resets the accumulator to a
-/// fresh single-controller period, so a heterogeneous (multi-controller) sequence NEVER forms.
-/// P0 seeds `[mana(P0)]`; when P1 activates their OWN Basalt's mana beat the accumulator resets to
-/// `[mana(P1)]` (not `[mana(P0), mana(P1)]`). Revert-failing: dropping the controller-change reset
-/// in `accumulate_loop_action_step` grows a mixed `[P0, P1]` sequence. (The drive's per-step
-/// `src.controller != step.controller` re-find in `drive_loop_action_iteration` is the runtime
-/// backstop, byte-unchanged from the recast path and covered by the recast tests.)
+/// T-HET — CR 732.3: each play is traced under the seat that made it, so a window holding P0's and
+/// then P1's mana beat holds both, each under its own seat, and no offer stands for it.
 #[test]
 fn mana_engine_controller_change_resets_accumulator() {
     let Some(db) = shared_card_db() else { return };
@@ -301,23 +294,29 @@ fn mana_engine_controller_change_resets_accumulator() {
     let p1_mana = mana_ability_index(rig.runner.state(), p1_basalt).unwrap();
 
     activate_and_settle(&mut rig.runner, rig.basalt, p0_mana);
-    let seq = rig.runner.state().last_loop_action_sequence.clone();
-    assert_eq!(seq.len(), 1, "P0 seeds a 1-step period");
-    assert_eq!(seq[0].controller, P0);
+    let seq = plays(rig.runner.state());
+    assert_eq!(seq.len(), 1, "P0's beat is one play");
+    assert_eq!(seq[0].0, P0);
 
     // Hand priority to P1 and let P1 activate their own mana beat.
     rig.runner.act(GameAction::PassPriority).expect("P0 passes");
     activate_and_settle(&mut rig.runner, p1_basalt, p1_mana);
 
-    let seq = rig.runner.state().last_loop_action_sequence.clone();
+    let seats: Vec<PlayerId> = plays(rig.runner.state())
+        .into_iter()
+        .map(|(seat, _)| seat)
+        .collect();
     assert_eq!(
-        seq.len(),
-        1,
-        "the controller change RESET the accumulator (no [P0, P1] heterogeneous sequence)"
+        seats,
+        vec![P0, P1],
+        "each beat is traced under its own seat"
     );
-    assert_eq!(
-        seq[0].controller, P1,
-        "the reset re-seeded with P1's beat only"
+    assert!(
+        !matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "no offer stands for a two-seat window"
     );
 }
 
@@ -398,6 +397,7 @@ fn mana_engine_interruptibility_defused_opponent_responds_no_grant() {
         .act(GameAction::ActivateAbility {
             source_id: rig.basalt,
             ability_index: untap_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("untap activation is legal");
     // P0 passes ⇒ P1 gets priority with the untap on the stack (the real response window).
@@ -564,10 +564,9 @@ fn mana_engine_accept_writes_no_pile_but_marks_mana() {
     );
 }
 
-/// T5-analog — `Off` byte-identity (#4603). Under `LoopDetectionMode::Off` the mana engine NEVER
-/// arms the sequence (the `samples()` gate) and NEVER offers, while the game plays normally (Basalt
-/// untaps, mana is in the pool). Revert-failing: dropping the `samples()` gate on the mana-arm /
-/// else-arm capture writes the sequence under `Off`.
+/// T5-analog — `Off` byte-identity (#4603). Under `LoopDetectionMode::Off` the mana engine is
+/// NEVER traced (the `samples()` gate) and NEVER offers, while the game plays normally (Basalt
+/// untaps, mana is in the pool).
 #[test]
 fn mana_engine_off_mode_is_byte_identical() {
     let Some(db) = shared_card_db() else { return };
@@ -578,8 +577,8 @@ fn mana_engine_off_mode_is_byte_identical() {
     drive_one_period(&mut rig, mana_idx, untap_idx);
 
     assert!(
-        rig.runner.state().last_loop_action_sequence.is_empty(),
-        "Off (#4603): the mana engine must NOT arm the sequence"
+        engine::game::play_trace_view(rig.runner.state()).is_none(),
+        "Off (#4603): the mana engine must NOT be traced"
     );
     assert!(
         !matches!(
@@ -598,116 +597,67 @@ fn mana_engine_off_mode_is_byte_identical() {
     );
 }
 
-/// FIX-3 (CR 732.2a, CONDITIONAL load migration): `last_loop_action_sequence` deserializes NORMALLY
-/// (its `pins` round-trip — B2 restored), but the PRODUCTION restore hook
-/// `PersistedGameState::into_game_state` → `GameState::migrate_transient_loop_sequence` DROPS it on
-/// load UNLESS the save sits in an object-growth shortcut proposal/response window
-/// (`WaitingFor::LoopShortcut` / `RespondToShortcut`), whose pending accept→materialize resolution
-/// re-derives the ∞ pile from the sequence. This REPLACES the Design-A blanket `#[serde(skip)]`
-/// (always-drop) contract, which regressed the predecessor `combo_infinite_pile` offer-saves by
-/// starving accept→materialize of the pile.
+/// CR 732.2a: what a save carries of a loop. The window's trace is transient and never crosses a
+/// save, while a standing offer's confirmed period does, since its take replays it.
 ///
-/// DISCRIMINATING — the ONLY guard on the load migration + the B2 pins round-trip (the field is
-/// EXCLUDED from `impl PartialEq for GameState`). Parts (a) and (b) round-trip the SAME populated,
-/// PINNED sequence through the real production hook and differ ONLY in `waiting_for`, so the
-/// outcome FLIPS: a hook that ignored `waiting_for` (Design A, always-drop) fails (b); a hook that
-/// never dropped fails (a). Part (b) additionally asserts the pin survived (Design A dropped pins).
+/// (a) a save at priority with a traced beat restores with no trace; (b) a save at the offer
+/// restores with the same non-empty period; (c) an offer with no period writes no period key.
 #[test]
 fn loop_action_sequence_conditional_load_migration() {
-    use engine::analysis::decision_template::{
-        DecisionSlot, PinnedDecision, ShortcutDecisionSchema,
-    };
-    use engine::analysis::loop_check::LoopCertificate;
-    use engine::analysis::resource::BoardDelta;
-    use engine::types::game_state::{PersistedGameState, YieldTarget};
-    use engine::types::mana::ManaColor;
+    use engine::types::game_state::PersistedGameState;
 
-    let mana_color_pin = || PinnedDecision::ManaColor {
-        slot: DecisionSlot {
-            source: YieldTarget::ThisObject {
-                source_id: ObjectId(7),
-                incarnation: None,
-                trigger_description: None,
-            },
-            index: 1,
-        },
-        color: ManaColor::Blue,
+    let Some(db) = shared_card_db() else { return };
+    let restore = |state: &GameState| -> GameState {
+        let json = serde_json::to_string(state).expect("serialize");
+        let reloaded: GameState = serde_json::from_str(&json).expect("deserialize");
+        PersistedGameState::Raw(Box::new(reloaded))
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract")
     };
-    let pinned_step = || LoopActionContext {
-        card_id: CardId(4242),
-        controller: P0,
-        action: LoopAction::Activate {
-            source_id: ObjectId(7),
-            ability_index: 1,
-        },
-        convoke: None,
-        pins: vec![mana_color_pin()],
+    let period = |state: &GameState| match &state.waiting_for {
+        WaitingFor::LoopShortcut { period, .. } => period.clone(),
+        other => panic!("expected an offer, got {other:?}"),
     };
 
-    // (a) captured at empty-stack `Priority` (NOT a shortcut window) → the production hook DROPS the
-    //     sequence. It deserializes NON-EMPTY first, proving the drop is the migration hook, not the
-    //     `#[serde(skip)]` derive (which Design A used and which regressed the predecessor tests).
-    let mut at_priority = GameState::new_two_player(1);
-    at_priority.waiting_for = WaitingFor::Priority { player: P0 };
-    at_priority.last_loop_action_sequence = vec![pinned_step(), pinned_step()];
-    let raw = serde_json::to_string(&at_priority).expect("serialize");
-    assert!(
-        raw.contains("last_loop_action_sequence"),
-        "a populated sequence IS serialized (skip_serializing_if only skips the EMPTY case)"
-    );
-    let deserialized: GameState = serde_json::from_str(&raw).expect("deserialize");
+    // (a) a priority save drops the transient trace.
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    activate_and_settle(&mut rig.runner, rig.basalt, mana_idx);
     assert_eq!(
-        deserialized.last_loop_action_sequence.len(),
-        2,
-        "the sequence deserializes NORMALLY (len 2) — the drop is the load hook, not the derive"
-    );
-    let restored = PersistedGameState::Raw(Box::new(at_priority)).into_game_state();
-    assert!(
-        restored.last_loop_action_sequence.is_empty(),
-        "FIX-3: a Priority-captured save DROPS the transient sequence on load"
-    );
-
-    // (b) captured at a `LoopShortcut` offer window → the production hook KEEPS the sequence, and the
-    //     recorded pin round-trips (B2). SAME sequence as (a); ONLY `waiting_for` differs ⇒ the
-    //     keep/drop outcome flips, isolating the discriminator to `waiting_for`.
-    let mut at_offer = GameState::new_two_player(1);
-    at_offer.waiting_for = WaitingFor::LoopShortcut {
-        proposer: P0,
-        predicted_winner: None,
-        certificate: LoopCertificate {
-            unbounded: vec![ResourceAxis::TokensCreated],
-            win_kind: WinKind::Advantage,
-            mandatory: false,
-            residual_board_delta: BoardDelta::default(),
-        },
-        schema: ShortcutDecisionSchema::default(),
-    };
-    at_offer.last_loop_action_sequence = vec![pinned_step()];
-    let json = serde_json::to_string(&at_offer).expect("serialize offer save");
-    let reloaded: GameState = serde_json::from_str(&json).expect("deserialize offer save");
-    let restored_offer = PersistedGameState::Raw(Box::new(reloaded)).into_game_state();
-    assert_eq!(
-        restored_offer.last_loop_action_sequence.len(),
+        plays(rig.runner.state()).len(),
         1,
-        "FIX-3: a LoopShortcut-captured offer-save KEEPS the sequence on load (accept→materialize needs it)"
+        "reach: the beat is traced"
     );
-    assert_eq!(
-        restored_offer.last_loop_action_sequence[0].pins,
-        vec![mana_color_pin()],
-        "B2: the recorded pins round-trip for a kept offer-save (Design A's #[serde(skip)] dropped them)"
+    assert!(
+        engine::game::play_trace_view(&restore(rig.runner.state())).is_none(),
+        "a save at priority restores with no trace"
     );
 
-    // (c) an empty sequence is skipped on the wire and a missing field defaults to empty (UNCHANGED).
-    let empty = GameState::new_two_player(1);
-    let json = serde_json::to_string(&empty).expect("serialize empty");
+    // (b) an offer save keeps the period its take replays.
+    activate_and_settle(&mut rig.runner, rig.basalt, untap_idx);
+    let at_offer = rig.runner.state().clone();
+    let offered = period(&at_offer);
     assert!(
-        !json.contains("last_loop_action_sequence"),
-        "an empty sequence is skipped on the wire (skip_serializing_if)"
+        !offered.is_empty(),
+        "reach: the offer carries its confirmed period"
     );
-    let back: GameState = serde_json::from_str(&json).expect("deserialize missing field");
+    assert_eq!(
+        period(&restore(&at_offer)),
+        offered,
+        "an offer save restores with the same period"
+    );
+
+    // (c) an offer with no period writes no period key.
+    let mut bare = at_offer;
+    if let WaitingFor::LoopShortcut { period, .. } = &mut bare.waiting_for {
+        *period = Default::default();
+    }
+    let json = serde_json::to_value(&bare).expect("serialize");
     assert!(
-        back.last_loop_action_sequence.is_empty(),
-        "a missing field defaults to an empty Vec"
+        json["waiting_for"]["data"].get("period").is_none(),
+        "an empty period is skipped on the wire: {}",
+        json["waiting_for"]
     );
 }
 
@@ -780,6 +730,7 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
     let res = runner.act(GameAction::ActivateAbility {
         source_id: pyro,
         ability_index: dmg_idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         res.is_ok(),
@@ -803,4 +754,476 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
         "(iii)(a): the depletion action fully RESOLVED at exhaustion (no-op, no error, no abort) ⇒ \
          no finite opp-fuel loop exists ⇒ the break-on-err is a defensive guard (PATH-2)"
     );
+}
+
+/// R6a-2, RECLASSIFIED under option (B): a CHANNEL-LIVENESS row, no longer a discriminator.
+/// A mana engine registers NO deferred materialization — `current_period_fodder` finds no
+/// fodder, `current_period_counter_growth` / `current_period_life_growth` are empty — so
+/// nothing will ever collapse its `Mana(_)` axis at the CR 500.5 boundary. It is genuinely
+/// unbounded within the phase (`refill_infinite_mana` holds the pool at
+/// `INFINITE_MANA_PER_TYPE`) and MUST keep rendering its `∞` row on the wire. That claim is
+/// true, user-visible and revert-detectable (RP-6 below) — it is simply no longer the thing
+/// that distinguishes candidate implementations, because option (B) projects EVERY ∞ row.
+///
+/// WHY IT NO LONGER DISCRIMINATES: reach-guard (2) below asserts `pending_unbounded_
+/// materialization` is EMPTY on this rig, so no schedule-keyed hide filter — stash-keyed or
+/// count-keyed (`pending_materialization_count` is empty here too, asserted by the sibling
+/// `mana_engine_accept_records_no_collapse_bound`) — could fire against this row anyway. The
+/// schedule-independence discrimination therefore lives on rigs where a schedule IS present:
+/// `loop_shortcut::unregistered_axis_still_renders_its_infinity_badge`.
+///
+/// REVERT-PROBE (RP-6, RUN): append `views.unbounded_resources.clear();` at the END of
+/// `derive_views` (re-kill the row channel unconditionally) ⇒ this row FAILS while the ∞ PILE
+/// assertion in `loop_shortcut::scheduled_collapse_still_renders_the_unbounded_badge`
+/// stays green — a different channel.
+///
+/// The `shared_card_db()` guard below is DORMANT in a normal checkout: `integration_cards.json.gz`
+/// is tracked, so it only fires in a checkout without the card-data pipeline.
+#[test]
+fn mana_engine_accept_still_renders_its_infinity_badge() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    let state = rig.runner.state();
+    // (1) reach-guard: the accept ran and marked a Mana axis in the store.
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))),
+        "reach-guard: the mana-engine accept marks a Mana(_) ∞ axis"
+    );
+    // (2) reach-guard: it registered NOTHING — this is the unscheduled-axis shape.
+    assert!(
+        state.pending_unbounded_materialization.is_empty(),
+        "reach-guard: a mana engine registers no deferred materialization, got {:?}",
+        state.pending_unbounded_materialization
+    );
+
+    // (3) DISCRIMINATOR — on the WIRE, the Mana row still renders for every viewer.
+    for viewer in [None, Some(P0), Some(P1)] {
+        let rows = engine::game::derived_views::derive_views(state, viewer).unbounded_resources;
+        assert!(
+            rows.iter().any(|r| matches!(r.axis, ResourceAxis::Mana(_))),
+            "FAIL-CLOSED: nothing is scheduled to collapse the mana axis, so its ∞ row must \
+             still render (viewer {viewer:?}), got {rows:?}"
+        );
+    }
+}
+
+/// R6a FIX-ROUND-2 (CR 732.2c). MEASURED REGRESSION in the first cut of the collapse bound:
+/// `materialize_fixed_shortcut` wrote `pending_materialization_count` UNCONDITIONALLY, before
+/// either route ran. A mana engine reaches that function and registers NO deferred
+/// materialization (proved by
+/// [`mana_engine_accept_still_renders_its_infinity_badge`]'s reach-guard (2)) — so a
+/// `Fixed(1)` mana accept left a bound with NOTHING to bound.
+///
+/// That stray bound is UNCLEARABLE and PERSISTENT: all three clears
+/// (`take_pending_materialization`, `clear_collapsed_materializations`,
+/// `clear_unbounded_loop`) are keyed on the stash, `clear_unbounded_mana_loop` deliberately
+/// does not touch it, and the field is `#[serde(default)]`. It therefore survives the phase,
+/// the game and a save/load — and the NEXT accept that really does register a stash gets
+/// `min(1, N)` = 1. A table that unanimously agreed to `Fixed(500)` object growth would be
+/// offered `max: 1` at the CR 500.5 boundary and have `SubmitPayAmount { 500 }` REJECTED with
+/// `"[0, 1]"`. BASE offered `MAX_SHORTCUT_CYCLES` and honored the agreed 500, so this was a
+/// regression against BASE, not merely an incomplete fix.
+///
+/// REVERT-PROBE (RUN, MEASURED): hoist the write back out of the stash-gate in
+/// `materialize_fixed_shortcut` ⇒ assertion (3) FAILS with
+/// `pending_materialization_count = {PlayerId(0): 1}`. (3) short-circuits the run, so (5) is
+/// not reached in the same execution; a SECOND probe run with (3) temporarily downgraded to an
+/// `eprintln!` reached it and observed (5) FAIL with `left: Some(1) right: Some(1000)`.
+///
+/// HONEST SCOPE. Two real accepts — a stash-less one followed by a stash-bearing one — need a
+/// board carrying BOTH a mana engine and an object-growth loop; that is not this rig and is
+/// not reachable here without building a second combo. So the consequence at (4)/(5) is
+/// pinned on the REAL `turns.rs` `max` read instead: the stash is grafted through the same
+/// single-authority writer the accept path itself calls
+/// (`GameState::register_pending_materialization`), and the CR 500.5 boundary is then reached
+/// by passing priority through the real `apply()` reducer.
+#[test]
+fn mana_engine_accept_records_no_collapse_bound() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    // (1) REACH-GUARD: the accept really ran `materialize_fixed_shortcut` — it marked the
+    // Mana axis, which only the materialize path does. Without this the emptiness at (3)
+    // would be the vacuous "nothing happened" pass.
+    assert!(
+        rig.runner
+            .state()
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))),
+        "reach-guard: the mana-engine accept reaches materialize_fixed_shortcut and marks a \
+         Mana(_) ∞ axis"
+    );
+    // (2) REACH-GUARD: and it registered NOTHING — there is no stash for a bound to bound.
+    assert!(
+        rig.runner
+            .state()
+            .pending_unbounded_materialization
+            .is_empty(),
+        "reach-guard: a mana engine registers no deferred materialization, got {:?}",
+        rig.runner.state().pending_unbounded_materialization
+    );
+
+    // (3) DISCRIMINATOR: no bound is recorded either. Asserted on the SAME state the two
+    // reach-guards above measured as post-accept and stash-less.
+    assert!(
+        rig.runner.state().pending_materialization_count.is_empty(),
+        "CR 732.2c: a stash-less accept must record NO collapse bound (it would be \
+         unclearable and would cap the next accept), got {:?}",
+        rig.runner.state().pending_materialization_count
+    );
+
+    // (4) CONSEQUENCE, on the real `turns.rs` read. Graft a stash through the production
+    // single-authority writer (as if a later object-growth accept had registered one) and
+    // reach the CR 500.5 boundary through real priority passes.
+    rig.runner.state_mut().register_pending_materialization(
+        P0,
+        engine::types::game_state::PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 1,
+        },
+    );
+    let mut prompt_max = None;
+    for _ in 0..64 {
+        if let WaitingFor::PayAmountChoice {
+            resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+            max,
+            ..
+        } = rig.runner.state().waiting_for
+        {
+            prompt_max = Some(max);
+            break;
+        }
+        if rig.runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    // (5) The grafted stash carries NO accepted bound, so the prompt falls back to the
+    // engine-wide safety bound. Under the unconditional write the stray `Fixed(1)` mana
+    // bound is still sitting in the map and caps this prompt at 1.
+    // 1_000 is `game::engine::MAX_SHORTCUT_CYCLES`, spelled literally because the const is
+    // `pub(crate)` and this is an integration test.
+    assert_eq!(
+        prompt_max,
+        Some(1_000),
+        "CR 732.2c: a stash-less mana accept must not bound a LATER stash's collapse prompt"
+    );
+}
+
+/// CR 611.3a + CR 732.2a: Basalt Monolith + Power Artifact beside a Professor
+/// Hojo that isn't on the battlefield, in `zone`. Drives one period and
+/// returns whether the mana-engine shortcut was offered. Reach guards: Hojo
+/// (its Oracle text) carries its once-per-turn modifier in that zone, and the
+/// period's untap really was journaled.
+fn mana_engine_offered_beside_hojo_in(zone: Zone) -> bool {
+    use engine::types::statics::{CastFrequency, StaticMode};
+    // Scryfall Oracle text; the shared test database has no Hojo.
+    const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.\nWhenever one or more creatures you control become the target of an activated ability, draw a card. This ability triggers only once each turn.";
+    let db = shared_card_db().expect("the shared card database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let basalt = scenario.add_real_card(P0, BASALT, Zone::Battlefield, db);
+    let hojo = scenario
+        .add_creature_to_hand_from_oracle(P0, "Professor Hojo", 2, 2, HOJO)
+        .id();
+    let mut runner = scenario.build();
+    if zone != Zone::Hand {
+        remove_from_zone(runner.state_mut(), hojo, Zone::Hand, P0);
+        add_to_zone(runner.state_mut(), hojo, zone, P0);
+        runner.state_mut().objects.get_mut(&hojo).unwrap().zone = zone;
+    }
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let power = place_on_battlefield(runner.state_mut(), P0, POWER, db);
+    attach_to(runner.state_mut(), power, basalt);
+    assert_eq!(runner.state().objects[&hojo].zone, zone);
+    assert!(
+        runner.state().objects[&hojo]
+            .static_definitions
+            .iter_unchecked()
+            .any(|def| matches!(
+                def.mode,
+                StaticMode::ReduceAbilityCost {
+                    frequency: Some(CastFrequency::OncePerTurn),
+                    ..
+                }
+            )),
+        "reach guard: Hojo carries its first-activation modifier in {zone:?}"
+    );
+    let mut rig = Rig { runner, basalt };
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).expect("mana ability");
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).expect("untap ability");
+
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+
+    assert!(
+        rig.runner
+            .state()
+            .abilities_activated_this_turn_by_player
+            .get(&P0)
+            .is_some_and(|rows| rows.iter().any(|row| row.source == basalt)),
+        "reach guard: the untap was journaled"
+    );
+    matches!(
+        rig.runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    )
+}
+
+/// End-to-end guard for a HIDDEN library Hojo. The P7 cover compares frames
+/// built from `proposer_hidden_view`, which blanks the library card's statics,
+/// so its comparator never sees this Hojo (probed: the reader is live on the
+/// board and absent from every compared frame). This does not show the path
+/// ignores the journal; it pins that a hidden Hojo never withholds the offer.
+#[test]
+fn a_hidden_library_hojo_does_not_block_the_mana_engine_shortcut() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    assert!(mana_engine_offered_beside_hojo_in(Zone::Library));
+}
+
+/// CR 611.3a + CR 732.2a: a REVEALED Hojo (in the graveyard, which the cover's
+/// frames keep) is seen by the comparator, which does gate on the journal.
+/// Basalt's untap targets no creature, so no row qualifies for Hojo, the
+/// per-definition projection keeps none, and the shortcut is still offered.
+/// Keeping every row while any dormant reader exists (45fdbed7d's rule)
+/// withholds it.
+#[test]
+fn a_revealed_hojo_does_not_block_the_mana_engine_shortcut() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    assert!(mana_engine_offered_beside_hojo_in(Zone::Graveyard));
+}
+
+/// A source's latest mana producer is its most recent activation, before and after a reload.
+#[test]
+fn latest_producer_names_the_second_basalt_activation() {
+    let db = shared_card_db().expect("the integration card fixture loads");
+    let mut rig = setup(false, LoopDetectionMode::Off, db);
+    let mana = mana_ability_index(rig.runner.state(), rig.basalt)
+        .expect("Basalt publishes its mana ability");
+    let untap = untap_ability_index(rig.runner.state(), rig.basalt)
+        .expect("Basalt publishes its untap ability");
+    activate_and_settle(&mut rig.runner, rig.basalt, mana);
+    activate_and_settle(&mut rig.runner, rig.basalt, untap);
+    activate_and_settle(&mut rig.runner, rig.basalt, mana);
+
+    let live = rig.runner.state();
+    let reloaded: GameState =
+        serde_json::from_str(&serde_json::to_string(live).expect("the state serializes"))
+            .expect("the state reloads");
+    for (label, state) in [("live", live), ("reloaded", &reloaded)] {
+        let journal = &state.resolved_rules_journal;
+        let producers: Vec<_> = journal
+            .produced_mana()
+            .iter()
+            .filter(|record| record.unit.source_id == rig.basalt)
+            .map(|record| record.producer)
+            .collect();
+        assert!(
+            producers
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                >= 2,
+            "reach ({label}): two Basalt activations produced mana, got {producers:?}"
+        );
+        let latest = journal.latest_mana_producer_for_source(rig.basalt);
+        assert_eq!(
+            latest,
+            producers.last().copied(),
+            "{label}: the latest producer is the last record's"
+        );
+        assert_ne!(
+            latest,
+            producers.first().copied(),
+            "{label}: the latest producer is not the first activation's"
+        );
+    }
+}
+
+/// After `k` Basalt periods, the pool entries walked by a {1} payment pinned to the pool's last
+/// unit, and after Forest's {G} by an unpinned {1}{G} payment; each window is one direct payment
+/// call, so no action-boundary serialization is counted.
+fn payment_walks_after_periods(k: usize, db: &CardDatabase) -> (u64, u64) {
+    use engine::game::mana_payment::pay_cost_with_demand_and_choices;
+    use engine::game::perf_counters::take_cost_snapshot;
+    use engine::types::mana::{LifePaymentColors, ManaCost, ManaCostShard};
+
+    let mut rig = setup(true, LoopDetectionMode::Off, db);
+    let forest = place_on_battlefield(rig.runner.state_mut(), P0, "Forest", db);
+    let bears = place_in_hand(rig.runner.state_mut(), P0, "Grizzly Bears", db);
+    let mana_idx =
+        mana_ability_index(rig.runner.state(), rig.basalt).expect("Basalt taps for mana");
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).expect("Basalt untaps");
+    for _ in 0..k {
+        drive_one_period(&mut rig, mana_idx, untap_idx);
+    }
+
+    let mut pool = rig.runner.state().players[0].mana_pool.clone();
+    let last = pool.units().last().expect("Basalt's mana floats").pip_id;
+    let before = take_cost_snapshot();
+    let (paid, _) = pay_cost_with_demand_and_choices(
+        &mut pool,
+        &ManaCost::generic(1),
+        None,
+        None,
+        None,
+        None,
+        LifePaymentColors::EMPTY,
+        &[last],
+    )
+    .expect("the pinned {1} is payable");
+    let pinned_walk = take_cost_snapshot().since(before).pool_entries_walked;
+    assert_eq!(
+        paid.iter().map(|unit| unit.pip_id).collect::<Vec<_>>(),
+        [last],
+        "the pinned unit pays"
+    );
+
+    let forest_idx = mana_ability_index(rig.runner.state(), forest).expect("Forest taps for mana");
+    activate_and_settle(&mut rig.runner, forest, forest_idx);
+    let pool = &rig.runner.state().players[0].mana_pool;
+    let colorless_before = pool.count_color(ManaType::Colorless);
+    assert_eq!(
+        (pool.count_color(ManaType::Green), colorless_before),
+        (1, 2 * k),
+        "reach: Forest's {{G}} floats after Basalt's colorless"
+    );
+    assert_eq!(
+        pool.units().last().map(|unit| unit.color),
+        Some(ManaType::Green),
+        "reach: the {{G}} sits behind every {{C}} in pool order"
+    );
+
+    let mut unpinned_pool = pool.clone();
+    let before = take_cost_snapshot();
+    let (paid, _) = pay_cost_with_demand_and_choices(
+        &mut unpinned_pool,
+        &ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        },
+        None,
+        None,
+        None,
+        None,
+        LifePaymentColors::EMPTY,
+        &[],
+    )
+    .expect("the unpinned {1}{G} is payable");
+    let unpinned_walk = take_cost_snapshot().since(before).pool_entries_walked;
+    let mut paid_colors: Vec<ManaType> = paid.iter().map(|unit| unit.color).collect();
+    paid_colors.sort_by_key(|color| *color == ManaType::Colorless);
+    assert_eq!(
+        paid_colors,
+        [ManaType::Green, ManaType::Colorless],
+        "the {{G}} and one {{C}} pay the unpinned {{1}}{{G}}"
+    );
+
+    let card_id = rig.runner.state().objects[&bears].card_id;
+    rig.runner
+        .act(GameAction::CastSpell {
+            object_id: bears,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Grizzly Bears is castable from the pool");
+    for _ in 0..60 {
+        if rig.runner.state().stack.is_empty() {
+            break;
+        }
+        rig.runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+    let state = rig.runner.state();
+    assert!(state.battlefield.contains(&bears), "Grizzly Bears resolves");
+    assert_eq!(
+        (
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+        ),
+        (0, colorless_before - 1),
+        "the {{G}} and one {{C}} pay for Grizzly Bears"
+    );
+    (pinned_walk, unpinned_walk)
+}
+
+#[test]
+fn an_ineligible_shape_ahead_costs_a_payment_no_walk_per_unit() {
+    let db = shared_card_db().expect("the integration card fixture loads");
+    let (small_pinned, small_unpinned) = payment_walks_after_periods(3, db);
+    let (large_pinned, large_unpinned) = payment_walks_after_periods(40, db);
+    assert!(
+        small_pinned > 0 && small_unpinned > 0,
+        "reach: both payments walk the pool"
+    );
+    assert_eq!(
+        (large_unpinned, large_pinned),
+        (small_unpinned, small_pinned),
+        "(unpinned, pinned) payment walks grow with the colorless ahead of the {{G}}"
+    );
+}
+
+/// The window's plays, each with the seat that made it.
+fn plays(state: &GameState) -> Vec<(PlayerId, engine::game::PlayLocus)> {
+    engine::game::play_trace_view(state).map_or_else(Vec::new, |view| {
+        view.entries
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                engine::game::EntryKind::Play { locus, .. } => Some((entry.seat, locus)),
+                _ => None,
+            })
+            .collect()
+    })
 }

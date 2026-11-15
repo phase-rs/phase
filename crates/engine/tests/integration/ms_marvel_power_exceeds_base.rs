@@ -107,25 +107,11 @@ fn no_draw_when_creature_power_equals_base() {
     );
 }
 
-/// The source filter selects only the qualifying creature: with one pumped
-/// (power > base) and one unpumped (power == base) attacker dealing combat
-/// damage in the same combat, exactly one draw occurs — the pumped creature
-/// triggers, the unpumped one does not. This isolates the new
-/// `FilterProp::PowerExceedsBase` discrimination from the engine's
-/// once-per-turn batching (see module note). Revert the eval arm and neither
-/// attacker draws; revert the source-filter parse and the trigger never fires.
-///
-/// NOTE: the strict "only once each turn" cap is NOT asserted here. Two
-/// creatures dealing combat damage *simultaneously* each produce a matching
-/// trigger before `triggers_fired_this_turn` is updated, so the existing
-/// `TriggerConstraint::OncePerTurn` enforcement (game/triggers.rs) does not
-/// deduplicate within a single simultaneous batch — a general, pre-existing
-/// trigger-collection limitation independent of this card and out of scope for
-/// this change.
+/// Two pumped creatures both qualify for Ms. Marvel's source filter, but the
+/// printed once-per-turn limit admits exactly one combat-damage trigger.
 #[test]
-fn only_the_pumped_attacker_triggers_the_draw() {
-    // Attacker0 pumped (power > base), Attacker1 unpumped (power == base).
-    let (mut runner, attackers) = build_scenario(&[true, false]);
+fn only_one_of_two_pumped_attackers_triggers_the_draw() {
+    let (mut runner, attackers) = build_scenario(&[true, true]);
     let hand_before = hand_len(&runner, P0);
 
     run_combat(&mut runner, attackers, vec![]);
@@ -134,6 +120,6 @@ fn only_the_pumped_attacker_triggers_the_draw() {
     assert_eq!(
         hand_len(&runner, P0),
         hand_before + 1,
-        "only the power > base attacker fires the trigger → exactly one draw"
+        "two power > base attackers still fire Ms. Marvel's once-per-turn trigger only once"
     );
 }

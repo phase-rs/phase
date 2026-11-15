@@ -69,4 +69,26 @@ describe("useCanActForWaitingState — Assist payment routing (CR 702.132a)", ()
     const { result } = renderHook(() => useCanActForWaitingState());
     expect(result.current).toBe(false);
   });
+
+  it("authorizes the CR 723 turn controller for the active player's payment choice", () => {
+    const waitingFor: WaitingFor = {
+      type: "ResolutionOptionalPaymentChoice",
+      data: { player: 0, source_id: 7, costs: [] },
+    };
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: buildGameState({
+        active_player: 0,
+        players: buildPlayers([0, 1]),
+        priority_player: 0,
+        waiting_for: waitingFor,
+        turn_decision_controller: 1,
+      }),
+      waitingFor,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 1, isSpectator: false });
+
+    const { result } = renderHook(() => useCanActForWaitingState());
+    expect(result.current).toBe(true);
+  });
 });

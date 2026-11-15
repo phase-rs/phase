@@ -15,10 +15,8 @@
 //! mis-lowered the channel to `Total`, the exact-lethal leg would WRONGLY fire
 //! (total damage > 0), so the exact-lethal assertion is the revert-failing one.
 //!
-//! Oracle text source: `data/mtgish-cards.json` (Torch the Witness /
-//! Orbital Plunge Rules trees decode to the passive-voice excess-damage
-//! condition the parser doc-comments in `oracle_effect/conditions.rs` cite by
-//! name). Printed wording confirmed against the cards as printed.
+//! Printed wording was confirmed against the cards; the parser doc-comments in
+//! `oracle_effect/conditions.rs` cite the passive-voice excess-damage condition.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TargetRef;

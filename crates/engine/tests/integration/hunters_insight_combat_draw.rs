@@ -158,7 +158,7 @@ fn delayed_trigger_shape_covers_planeswalker_and_parent_target() {
     };
 
     // The delayed trigger condition is a WheneverEvent over a DamageDone trigger.
-    let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
         panic!("delayed trigger condition must be WheneverEvent, got {condition:?}");
     };
 

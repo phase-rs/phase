@@ -2,6 +2,12 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
+import {
+  formatLifeReadout,
+  lifeReadoutTitle,
+  lifeTierClass,
+  useDisplayedLife,
+} from "../../hooks/useDisplayedLife.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LandManaRail } from "../mana/LandManaRail.tsx";
@@ -48,17 +54,17 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
     };
   }, [gameState, playerId]);
 
+  // Ticks with the damage animation rather than at snapshot commit, so every
+  // seat in the strip moves on the same beat as the focused seat's `LifeTotal`.
+  const displayedLife = useDisplayedLife(playerId);
+
   if (!player) return null;
 
   const isEliminated = player.is_eliminated ?? false;
   const isPhasedOut = player.status?.type === "PhasedOut";
   const handCount = player.hand.length;
-  const lifeColor =
-    player.life >= 10
-      ? "text-green-400"
-      : player.life >= 5
-        ? "text-yellow-400"
-        : "text-red-400";
+  const lifeColor = lifeTierClass(displayedLife);
+  const lifeTitle = lifeReadoutTitle(t, displayedLife);
 
   return (
     <button
@@ -73,8 +79,8 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
           {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />}
           <span className={`text-xs ${isTheirTurn ? "text-red-300 font-semibold" : "text-gray-400"}`}>{t("player.opponent", { seat: playerId + 1 })}</span>
         </div>
-        <span className={`text-lg font-bold tabular-nums ${lifeColor}`}>
-          {player.life}
+        <span title={lifeTitle} aria-label={lifeTitle} className={`text-lg font-bold tabular-nums ${lifeColor}`}>
+          {formatLifeReadout(displayedLife)}
         </span>
       </div>
 

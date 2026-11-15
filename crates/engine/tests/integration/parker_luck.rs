@@ -28,7 +28,8 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
-    AbilityDefinition, Effect, ObjectScope, QuantityExpr, QuantityRef, TargetRef,
+    AbilityDefinition, ControllerRef, Effect, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -119,38 +120,68 @@ fn parker_luck_lose_parses_to_other_revealed_card_mana_value() {
     );
 }
 
-/// §6.5 HONEST-RED PIN (Daretti-INVERSE): Keen Duelist's reveal is single-subject
-/// (`RevealTop { player: Any }`, no `multi_target`), so the B3 anchor-precondition
-/// gate rewrites its `OtherRevealedCard`-bearing lose back to `Effect::Unimplemented`
-/// (coverage `supported == false`) EVEN after the §2.5 combinator lands. Revert-red:
-/// remove the §2.6 gate → the combinator makes this lose parse to `LoseLife` → KD
-/// flips supported → this test reds. Reach-guards: the root is a RevealTop with NO
-/// multi_target and the lose still chains the `put`, so the Unimplemented assertion
-/// is not vacuous on a parse failure.
+/// §6.5 HONEST-RED PIN, deepened by #6965 and the coordinated player set. "you and
+/// target opponent each reveal the top card of your library" binds through a
+/// `TargetOnly { opponent }` head over ONE `RevealTop` scoped to
+/// `AnyOf[Controller, TargetPlayer]`: exactly the caster and the declared opponent
+/// reveal (`PlayerFilter::Opponent` would make EVERY opponent reveal in
+/// multiplayer, and the pre-#6965 `RevealTop { player: Any }` matched anyone).
+///
+/// Sentences 2–3 ("You each …") have no coordinated antecedent the parser carries
+/// across a sentence, so they stay honest `unbound_subject` gaps and the card stays
+/// unsupported.
 #[test]
-fn keen_duelist_lose_stays_unimplemented_without_multiplayer_reveal() {
+fn keen_duelist_binds_its_first_sentence_and_stays_unsupported() {
     let parsed = parse_keen_duelist();
-    let root = parsed.triggers[0].execute.as_ref().unwrap();
+    let root = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("reach-guard: KD's upkeep trigger must still carry an execute chain");
     assert!(
         root.multi_target.is_none(),
         "reach-guard: Keen Duelist's single-subject reveal carries no multi_target"
     );
-    let lose = lose_node(&parsed);
-    assert!(
-        matches!(&*lose.effect, Effect::Unimplemented { name, .. } if name == "lose"),
-        "the gate must keep KD's lose an honest Unimplemented gap, got {:?}",
-        lose.effect
+    assert_eq!(
+        *root.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        },
+        "the head declares the targeted opponent"
     );
+    let reveal = root.sub_ability.as_deref().expect("the coordinated reveal");
     assert!(
-        matches!(
-            &*lose.sub_ability.as_ref().unwrap().effect,
-            Effect::ChangeZone {
-                destination: Zone::Hand,
-                ..
-            }
-        ),
-        "reach-guard: the chain still parsed the 'put into hand' sub (only the lose is gapped)"
+        matches!(&*reveal.effect, Effect::RevealTop { .. }),
+        "the body reveals, got {:?}",
+        reveal.effect
     );
+    assert_eq!(
+        reveal.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+        }),
+        "exactly the caster and the targeted opponent reveal"
+    );
+    let gaps: Vec<&AbilityDefinition> =
+        std::iter::successors(reveal.sub_ability.as_deref(), |link| {
+            link.sub_ability.as_deref()
+        })
+        .collect();
+    assert_eq!(gaps.len(), 2, "sentences 2 and 3 follow the reveal");
+    for gap in gaps {
+        let Effect::Unimplemented { name, description } = &*gap.effect else {
+            panic!(
+                "a \"You each\" sentence must stay a gap, got {:?}",
+                gap.effect
+            );
+        };
+        assert_eq!(name, "unbound_subject");
+        assert!(
+            description
+                .as_deref()
+                .is_some_and(|text| text.contains("You each")),
+            "reach-guard: the gap quotes its own subject, got {description:?}"
+        );
+    }
 }
 
 /// §6.2 ISOLATION: the new combinator does not shadow the bare possessive path —

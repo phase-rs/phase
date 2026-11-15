@@ -1,0 +1,64 @@
+{{- if .Values.autoscaling.enabled }}
+{{- if not .Values.scaleOut.enabled }}
+{{- fail "autoscaling.enabled requires scaleOut.enabled: the plain Deployment is pinned to one replica because a second process on the same games.db is destructive." }}
+{{- end }}
+{{- if lt (int .Values.autoscaling.minReplicas) 1 }}
+{{- fail (printf "autoscaling.minReplicas must be at least 1; got %v. An HPA cannot scale a workload it is allowed to take to zero replicas." .Values.autoscaling.minReplicas) }}
+{{- end }}
+{{- if gt (int .Values.autoscaling.minReplicas) (int .Values.scaleOut.replicaMax) }}
+{{- fail (printf "autoscaling.minReplicas (%v) exceeds scaleOut.replicaMax (%v), which becomes the HPA's maxReplicas: the API server rejects an HPA whose minReplicas is above its maxReplicas, so the release installs and the autoscaler never appears." .Values.autoscaling.minReplicas .Values.scaleOut.replicaMax) }}
+{{- end }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "autoscaling.enabled requires metrics.enabled: the recording rule reads phase_games_active and friends, so without the metrics port the HPA reports FailedGetExternalMetric forever and never scales." }}
+{{- end }}
+{{- /* `AverageValue`, not `Value`, and the difference is not cosmetic.
+
+     The external-metric path for `Value` computes
+     `ceil(metric / target * currentReplicas)` — it multiplies by the replica
+     count, so a metric that already IS the desired replica count compounds
+     (1 replica wanting 2 -> 2, then 2 wanting 2 -> 4). `AverageValue` uses the
+     per-pod calculator, `ceil(metric / targetPerPod)`, which ignores the
+     current count. With a target of 1 the HPA therefore follows
+     `phase:wanted_replicas` exactly, and all the policy stays in the rule.
+
+     Caveat worth knowing: the HPA's ~10% tolerance means it acts on the metric
+     only outside that band, so treat the rule as authoritative for real moves
+     rather than for exact equality at every instant. */}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "phase-server.fullname" . }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "phase-server.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.scaleOut.replicaMax }}
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: {{ .Values.autoscaling.metricName }}
+          selector:
+            matchLabels:
+              service: {{ include "phase-server.fullname" . }}
+        target:
+          type: AverageValue
+          averageValue: "1"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

@@ -9,11 +9,34 @@ Produce an implementation plan for the phase.rs engine. Design for the class, no
 
 This skill produces the plan only. The plan-review loop belongs to the caller — when invoked from `/engine-implementer`, the orchestrator owns the loop. When invoked standalone, run `/review-engine-plan` against the plan yourself and iterate until clean.
 
-> **⚠️ `mtgish` is dormant — out of scope for ALL plans.** Never plan changes to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`. The import pipeline is not a live consumer of the engine or parser; new variants, parser patterns, and effects do NOT need to be mirrored there. If a task description references mtgish, surface the contradiction and stop — do not silently include mtgish in the plan.
-
 ## Input
 
 A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
+
+A **scout fact pack** may accompany the task (the [engine-implementer scout](../engine-implementer/scout.md) produces it; standalone, you may run it yourself). Its facts are located, quoted lines, and its unknowns are things the scout looked for and did not find. Use both as leads for Steps 2 and 3. The pack may be incomplete or misleading: verify what you rely on, explore beyond it, and never treat a missing fact as evidence of absence. It discharges no step: you still verify the premise, trace the analogous feature, read every file you will touch, and probe.
+
+On a revision, prior reviewer findings arrive as constraints. Apply a finding's supplied replacement text verbatim and add no sentence beyond it; anything else you believe is wrong goes in your report, not into the plan.
+
+## Modes
+
+Ordinary mode is the default and produces a full single plan via the Process below. Three additional modes are activated when the caller's spawn inputs name them (the `/engine-implementer` phase-fit pipeline is the caller). Each mode scopes this file's mandatory language explicitly here, in this file — a spawn prompt never overrides this file's text; this section does.
+
+### Charter mode (spawn inputs: a plan or draft plus the phase-fit firing context)
+
+Output contract: a **phase charter**, not a plan.
+
+- **Input mapping (three shapes):** a decomposition proposed at an orchestrator stop runs only through an accepted expansion case; T1/T2 decomposition remains subject to the shared run limits. A *draft plan*, with whatever findings have accumulated (the initial gate firing on a fresh draft carries none; a mid-loop firing or a stop-proposed decomposition carries the round history) → derive the charter from the draft. A *review-clean plan* (scope-freeze or pre-existing-clean firing) → **partition, not re-plan**: carve the converged content into phases; nothing is rewritten, so the split does not invalidate the reviewed artifact. A *review-clean plan with landed candidates* (a decomposition proposed from the implementation-review loop) → derive phase 1 from the stabilized current candidate and partition the remainder.
+- **Step survival (enumerated):** Step 0 (premise verification) survives — a fabricated premise poisons every phase. Step 0.5 (class enumeration) survives — its record is the charter's class attribution, which each phase plan cites instead of re-running the query. Step 1 (identify applicable skills) survives — the checklist inventory informs unit boundaries and seams. Step 2 (analogous trace) survives — it informs seam choice. Step 3 (read every file) survives, scoped to the files the charter's phases will touch. Steps 4 and 5 (the architectural sections and the step-by-step plan) are replaced by the charter output contract below — they apply later, to each phase plan in phase-plan mode.
+- **Charter output contract:** linearly ordered phases; per phase, a goal statement, a **scope rule** — the subsystems and anchor paths the phase owns, as literal paths or directories, **no globs** (T2 directory expansion and the orchestrator's `SCOPE_PATHS` materialization consume concrete paths), with the standing inclusion classes `/engine-implementer` defines (compiler-forced sites, shared registration files, comment-only edits) implied rather than enumerated; the orchestrator materializes the list at scope-freeze; the **architecture decisions** the phase carries out (the charter is a contract about architecture and sequencing, not a snapshot of the code: acceptance rows, verification and the claims a phase must establish about today's code belong to its phase plan); its addenda file, `<run-root>/addenda/phase-<k>`; and a **deferral list** — everything the full task needs that the phase intentionally omits, attributed to the phase that will land it, including a discriminating test that structurally cannot exist until a consumer phase lands (`DEFERRED(phase n)`, the defining property of a dependency seam; that phase's interim verification is structural: green tree, existing suites, unit-level assertions); seam notes (shared files such as `effects/mod.rs`, surfaces held green via strict-failure tags); and a recursive check that no individual phase itself trips the T1∧T2 phase-fit conjunction defined in `/engine-implementer`.
+- **Feasibility exit:** if no green-tree seam exists, report that instead of a charter — name every candidate split point and show why each leaves the tree non-compiling or tests red.
+
+### Phase-plan mode (spawn inputs: charter + one phase's entry + its deferral allowlist)
+
+Produce the plan for one chartered phase. Three mandatory sentences in this file are scoped to the phase's chartered content: "Complete every step. Do not skip any."; Step 1's "Every checklist step must appear" — checklist steps belonging to later phases appear as `DEFERRED(phase n)` entries rather than being omitted; and Step 4's Pattern Coverage stop ("If the answer is 1, stop and find the general pattern") — assessed against the **charter's** class attribution, not the phase's own diff, since an infrastructure phase covers zero cards by itself by construction. Verification Matrix rows whose discriminating test structurally cannot exist until a later phase lands are written `DEFERRED(phase n)` with the landing phase named — the same vocabulary the executor authors and both reviewers audit. Phase-plan mode emits the Sizing section for the phase (the measured input for the orchestrator's per-phase re-adjudication).
+
+### Sizing-only mode (spawn input: an existing plan lacking a Sizing section)
+
+Produce the Sizing section alone, derived from the plan body. "Complete every step. Do not skip any." and the mandatory Output contract are scoped to the Sizing output; only the unit-enumeration analysis survives. Used by `/engine-implementer` for pre-existing plans reaching its phase-fit gate.
 
 ## Process
 
@@ -26,6 +49,45 @@ Complete every step. Do not skip any.
 A downloaded game-state's stored ability `description` field is a second, usually-reliable source, but it is not a substitute for checking Scryfall — a game state only reflects abilities the parser already produced (correctly or not), and can be silent about clauses that don't exist at all.
 
 **Why this is a hard gate:** a wrong premise about what a card does invalidates every subsequent step even if plan review, implementation review, and CI all pass — those loops verify that a design is *executed correctly*, not that its starting premise is *real*. A fabricated ability can survive multiple rounds of architectural review because reviewers by default trust the task brief's description of what the card does; they are not designed to fact-check the card itself. If the plan or implementation review process turns up something that looks off (e.g. a clause with no analogous card, or a CR citation that doesn't fit any existing rule), re-verify the premise before re-deriving the design.
+
+### Step 0.5: Enumerate the class and read every ruling
+
+**Hard gate, in ordinary and charter modes.** Answer "how many cards does this cover?" (CLAUDE.md "Build for the class, not the card") with a query over every printed card, not an estimate, and read all of those cards' official rulings before designing. In phase-plan mode, cite the charter's record instead of re-running the query. When the task concerns a rule that applies without appearing in card text (summoning sickness, a state-based action), no Oracle-text regex enumerates the class: identify the class from the Comprehensive Rules section instead, select its cards by the property that rule keys on, and record the CR section, that selection and its count in place of the regex. The rulings step applies to those cards unchanged.
+
+- **Data.** `data/mtgjson/AtomicCards.json` is gitignored; `./scripts/setup.sh --agent` downloads it. A worktree without it points the query at the canonical checkout's copy, read-only. With neither, fetch only that file: `bash -c 'source scripts/lib/mtgjson-fetch.sh && mkdir -p data/mtgjson && mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json'`. Each card face carries MTGJSON's copy of the official rulings in `rulings`. Record `jq -r .meta.version <the AtomicCards.json path you query>` (the query's output carries the same value as `version`): the file is refreshed weekly, and the result reproduces only at that version.
+- **Query.** Write the class as a regex over Oracle text, and name the class's keyword when it has one (`kw`, else empty). The query matches each face twice: as printed, and with the face's own name masked to `~`. The masked matches are the selection, so a card named after the mechanic does not join it. `masked_only` lists the cards only the printed text matches, which includes a card whose name is the mechanic's own word. `keyword_missing` lists cards that have the keyword but are not selected; text matching still finds the cards that grant a keyword, which `.keywords` misses. Start with `add` and `drop` as `[]`, and save the output beside the plan (in an `/engine-implementer` run, under its run-artifact root):
+
+  ```bash
+  jq --arg re '<class regex>' --arg kw '<keyword, or empty>' \
+     --argjson add '<JSON array: masked_only cards admitted>' --argjson drop '<JSON array: cards excluded>' '
+    def hits($mask): [.data | to_entries[]
+      | select(any(.value[]; . as $f | ($f.text // "")
+          | if $mask then split($f.faceName // $f.name) | join("~") else . end
+          | test($re; "i")))
+      | .key];
+    .meta.version as $version
+    | .data as $data
+    | hits(false) as $unmasked
+    | hits(true) as $masked
+    | ($unmasked - $masked) as $masked_only
+    | (($masked + ($add - ($add - $masked_only))) | unique) - $drop
+    | . as $cards
+    | {version: $version, regex: $re, keyword: $kw, add: $add, drop: $drop,
+       count: length, cards: .,
+       masked_only: $masked_only,
+       rejected_add: ($add - $masked_only),
+       rejected_drop: ($drop - $masked - $add),
+       keyword_missing: (if $kw == "" then [] else
+         [$data | to_entries[] | select(any(.value[]; (.keywords // []) | index($kw))) | .key] - $cards end),
+       rulings: ([$cards[] as $card | $data[$card][].rulings[]? | {text, card: $card}]
+                 | group_by(.text)
+                 | map({text: .[0].text, cards: (map(.card) | unique)})
+                 | sort_by(-(.cards | length)))}' data/mtgjson/AtomicCards.json > class.json
+  ```
+
+- **Review the census.** Read every selected card and every `masked_only` card. Put each `masked_only` card that belongs to the class in `add`. Tighten the regex, or put a card in `drop`, until every selected card is in the class. Re-run until `rejected_add` and `rejected_drop` are empty and each `keyword_missing` card that belongs to the class is selected, through the regex or `add`. One left unselected needs a reason that shows it is outside the class; "the regex missed it" is not one. The final command, with its `add` and `drop` lists, regenerates the selection.
+- **Rulings.** `rulings` holds each distinct ruling text once, with the cards that carry it, shared rulings first. Read all of them, however large the class, in batches of 50 (`jq '.rulings[0:50]' class.json`, then `[50:100]`, and so on). Do not filter by keyword, card or date first: a ruling that never names the mechanic can still bind the design. After each batch, append the rulings that bear on the design, with their numbers, to a notes file beside `class.json`, so the reading survives a context compaction.
+- **Record** in Pattern Coverage: the MTGJSON version and the output of `jq --version`; the final command verbatim, with a reason for each `add` and `drop` entry and each unselected `keyword_missing` card; the count; the ruling instances and distinct rulings; the saved file's path; and its hash, `jq -cS . class.json | shasum -a 256`. Quote every distinct ruling verbatim when there are at most 30. Above 30, quote every ruling that bears on the design, with the cards that carry it. Name the Verification Matrix row each bearing ruling drives.
 
 ### Step 1: Identify applicable skills
 
@@ -45,7 +107,7 @@ Determine which skill(s) apply and read each that does:
 | `/add-frontend-component` | React components for WaitingFor overlays, board elements, or any UI that dispatches `GameAction`s |
 | `/add-card-data-pipeline` | Card export shape changes, synthesis functions, coverage-report changes |
 | `/add-engine-variant` | Any new enum variant on engine types (mandatory gate) |
-| `/card-test` | Any plan whose verification matrix includes a cast-pipeline runtime test (canonical GameScenario/GameRunner recipe + the six test foot-guns) |
+| `/card-test` | Runtime tests for spells, activations, triggers, or interactive continuations; choose the production entry and completion boundary |
 
 Use the skill checklist(s) as the skeleton of the final plan. Every checklist step must appear.
 
@@ -57,22 +119,78 @@ Find the existing feature most similar to what you're implementing. Trace it end
 
 Before proposing changes, read every file you plan to modify. Understand existing patterns, abstractions, and conventions in each.
 
+### Step 3.5: Probe design-relevant uncertainties
+
+For each probe, name the design decision its result could change and prefer existing tests, fixtures, commands or supported tool APIs. Small probes and ordinary regression fixtures are in scope; a new verification framework is not implied by an engine task. Honor the caller's execution constraints. In the engine-implementer pipeline, use the supplied original task and scope/attempt history and obey its [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); machinery, before or after measurement, needs an accepted expansion case. If evidence requires machinery beyond those bounds, return the missing evidence to the orchestrator. Standalone planning has the same task boundary without inventing pipeline counters.
+
+Steps 2 and 3 tell you what the code *looks like*. Only a probe that compiles and runs tells you what it
+*does*. For a rules engine this intricate, plans built by tracing repeatedly encode plausible-but-wrong
+assertions that survive plan review and break at implementation — or ship a predicate that is true for
+the wrong reason. Probing early is also the cheap path: a reviewer handed no fresh evidence has nothing
+to do but audit your prose, and that loop does not converge.
+
+So probe. A throwaway `#[test]` or scratch driver, compiled and run, is worth more than any amount of
+re-reading. Probe whatever the design would change if it turned out false: a predicate's runtime
+verdict, which branch is actually taken, an observed count or delta, "X never happens", "this conjunct
+is what refuses". Assertions that look obvious from the source are exactly where this pays — the classic
+failure is a predicate whose body reads correctly and whose verdict is decided by inputs the source
+never mentions. Say plainly which assertions you probed and which you didn't; an unprobed assertion is
+fine as long as it is labelled, and dangerous the moment it is quietly promoted to fact.
+
+Three things make a probe worth believing:
+
+- **It reached the code under test.** Print a positive marker beside the verdict — a nonzero count, a
+  hit on the production branch, the value at the seam. A zero with no positive control showing the
+  instrument fires at all is not a negative result; it is a probe that told you nothing. This is Step
+  4's paired-positive-reach-guard rule one step earlier, applied to evidence rather than to tests.
+- **It ran against a real board.** Prefer committed fixtures and dumps over synthetic state. Synthetic
+  input proves the predicate reads a field; a real board proves what it answers in production.
+- **It finished.** A run that died partway still printed everything up to the point it died. If it
+  didn't exit cleanly, you didn't measure it.
+
+**Write claims in the form that survives the next edit.** A probe yields a snapshot — a count, a
+coordinate, a cardinality. Transcribing it is fragile: the next edit falsifies it, review correctly
+flags it, and the repair mints a fresh snapshot for the round after. Prefer the formulation that stays
+true — a symbol name over a line number, "every case in §Y" over "the four cases". Where only the figure
+carries the information, name the command that regenerates it. **A falsified snapshot is repaired by
+reformulating it, not by refreshing it.**
+
+**Probing needs the cargo target lock and a stable tree.** Use an isolated `CARGO_TARGET_DIR` and the
+worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns. Serialize probe
+activity behind any active implementation executor on a shared worktree — read-only discovery may run
+concurrently. Never put a scratch target dir on tmpfs. Keep one isolated target dir per worktree and
+*reuse* it across probes — deleting it between runs buys nothing and re-imposes the full dependency
+rebuild that talks planners out of probing in the first place. Isolation does not override a caller's no-build constraint or authorize new tooling; if a required probe cannot run within those constraints,
+report the missing evidence. Shared `CARGO_HOME` registry/package-
+cache locks are a separate lock domain that target-dir isolation doesn't touch, and can still delay a
+build. Capacity is the one thing isolation cannot fix — a fresh target dir costs disk rather than saving
+it — so a genuinely full or saturated box is worth naming, and worth probing once it clears.
+
 ### Step 4: Answer architectural questions
 
 The plan MUST include these sections with substantive, specific answers:
 
-- **Pattern Coverage** — What class of cards/patterns does this cover? Estimate card count. If the answer is 1, stop and find the general pattern.
-- **Building Blocks** — Which existing modules and helpers will you compose from? Reference specific functions by name from `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, etc. Justify any new helper.
-- **Logic Placement** — Where does each piece of logic belong (parser vs game vs effects vs types)? Justify each choice.
+- **Pattern Coverage** — What class of cards/patterns does this cover? Give the Step 0.5 record and name printed cards in the class with their verbatim Oracle text ([real cards](../engine-implementer/SKILL.md#real-cards)). If the answer is 1, stop and find the general pattern. (In phase-plan mode this stop is assessed against the charter's class attribution — see Modes.)
+- **Sizing** (mandatory in ordinary and phase-plan modes) — The unit list, where one *unit* = one coherent mechanic/behavior implementable by a single skill-checklist pass regardless of how many lockstep layers it touches; each unit's registration surfaces and discriminating test; inter-unit dependency edges (infrastructure→consumer); and the expected scope-path count under the phase-fit counting rule (test fixtures, regenerated pipeline data, and protocol-version surfaces — files whose only change moves a protocol/wire version number, not ones that also change a serialized type or its handling — excluded outright; committed generated artifacts and translation mirrors group with their authored source as one path; directory entries expanded to expected changed files before grouping). The `/engine-implementer` phase-fit gate adjudicates its triggers against this section, and `/review-engine-plan` checks it for consistency with the plan body — a plan whose body names N independently tested behaviors must not report fewer units.
+- **Building Blocks** — Which existing modules and helpers will you compose from? Reference specific functions by name from `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, etc. For a proposed helper, name the closest existing authority and explain why extending it does not fit; otherwise extend that authority.
+- **Logic Placement** — Name the owning function for each changed behavior and the callers that should delegate to it, not just its layer or file. Identify consumers affected by changed cardinality, scope, or binding even when the type signature stays the same.
 - **Rust Idioms** — Most idiomatic representation. Typed enums not bools. Exhaustive match not wildcards. Existing type reuse over new types.
-- **Nom Compliance** (mandatory if any file under `crates/engine/src/parser/` changes) — For every detection, dispatch, or classification step, specify the exact nom combinator or existing parser function. If the plan describes `contains()`/`starts_with()`/`find()` for parsing dispatch, **STOP and redesign**. The parser IS the detector — try `parse_static_line(text).is_some()` instead of `text.contains("gets ")`.
+- **Nom Compliance** (mandatory if any file under `crates/phase-parser/src/parser/` changes) — For every detection, dispatch, or classification step, specify the exact nom combinator or existing parser function. If the plan describes `contains()`/`starts_with()`/`find()` for parsing dispatch, **STOP and redesign**. The parser IS the detector — try `parse_static_line(text).is_some()` instead of `text.contains("gets ")`.
 - **Extension vs Creation** — Does this extend an existing pattern or create a new one? Justify any new pattern.
 - **Analogous Trace** — Name the traced feature and the full file path (e.g., "Traced `Scry` through `types/ability.rs` → `parser/oracle_effect/imperative.rs` → `game/effects/scry.rs` → `game/effects/mod.rs`").
 - **Variant Discoverability** (if adding any enum variant) — Confirm `cargo engine-inventory` was consulted and run the `/add-engine-variant` checklist.
-- **Verification Matrix** — For every behavioral claim, specify the changed seam/function, production entry point, runtime test to add or update, revert-failing assertion, sibling/negative cases, hostile fixtures, and coverage status impact. Cast-pipeline runtime tests must follow the `/card-test` recipe (GameScenario + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas, verbatim Oracle text). Every planned negative assertion must name its paired positive reach-guard — a bare negative that an upstream short-circuit (e.g. `Effect::Unimplemented` early-return) can satisfy vacuously is not a test. Hostile fixtures are per-claim/per-seam, not a single global negative test: include the applicable negative sibling / adjacent grammar or enum variant, empty/decline/no-legal-choice path, multi-authority case (two permissions/sources/costs, source or controller change, owner vs controller, prior tracked-set producer, etc.), and the first production branch the fixture reaches (`is_empty`, `is_none`, enum match arm, variant guard). If a hostile row is unreachable, prove why from code. For parser changes, explicitly state whether any Oracle text is accepted while semantics remain deferred; if yes, plan how coverage remains red/honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
+- **Verification Matrix** — For every behavioral claim, specify the changed seam/function, production entry point, runtime test to add or update, revert-failing assertion, sibling/negative cases, hostile fixtures, and coverage status impact. Runtime tests must use the matching production entry point and completion boundary from `/card-test`, with verbatim Oracle text. Every planned negative assertion must name its paired positive reach-guard — a bare negative that an upstream short-circuit (e.g. `Effect::Unimplemented` early-return) can satisfy vacuously is not a test. Hostile fixtures are per-claim/per-seam, not a single global negative test: include the applicable negative sibling / adjacent grammar or enum variant, empty/decline/no-legal-choice path, multi-authority case (two permissions/sources/costs, source or controller change, owner vs controller, prior tracked-set producer, etc.), and the first production branch the fixture reaches (`is_empty`, `is_none`, enum match arm, variant guard). If a hostile row is unreachable, prove why from code. For parser changes, explicitly state whether any Oracle text is accepted while semantics remain deferred; if yes, plan how coverage remains red/honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
+- **Reference Readings** — List every row whose expected value comes from another reading instead of stating one. This covers parity ("the unprompted completion reads what the prompted cast reads"), preservation ("equals base") and any row that copies a sibling route's result.
+  - For each row, derive the expected value from the card's verbatim Oracle text and the CR, clause by clause (CLAUDE.md "Read the card before the code").
+  - Then measure the reference reading and compare it with the derived one. Name the command that produced it.
+  - A reference that disagrees with its derivation is a **pre-existing defect**. Parity would copy it onto a new route, and a preservation row would lock it in. The plan never asserts parity with, or preservation of, a reading it has not derived.
+  - The defect takes the [defective-reference route](../engine-implementer/SKILL.md#defective-reference-route): this plan fixes the reference in its own work, and its rows assert the derived value.
+  - A reference that can't be derived (the card doesn't determine it) is labelled so, with the reason. It never passes as derived.
 - **Identity / Provenance Contract** — For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, replacement predicate, duration-bound effect, or controller/owner-relative text, specify the source phrase/rules concept, selected authority type and id/value, binding time, live vs snapshotted/latched semantics, storage location, consuming function, invalidation/expiration behavior, and the multi-authority hostile fixture that proves the binding.
 
 ### Step 5: Write the plan
+
+Use one table for the Verification Matrix and applicable Identity / Provenance Contract details. The executor completes these same rows as its production-path coverage map / maintainer-simulation matrix; do not request duplicate artifacts. Use [card-test](../card-test/SKILL.md) to select the entry point and completion assertion for each runtime row, including triggers and activations.
 
 Step-by-step implementation plan using the skill checklist as your guide. For each step:
 

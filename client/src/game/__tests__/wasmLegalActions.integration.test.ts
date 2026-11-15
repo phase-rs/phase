@@ -29,8 +29,9 @@ describe("WASM legal actions integration", () => {
   });
 
   it("get_legal_actions_js returns actions with correct shape after game init", () => {
-    initialize_game(null);
-    const actions = get_legal_actions_js();
+    initialize_game(null, undefined, null, null, 2, 0);
+    const legalResult = get_legal_actions_js() as { actions: Array<{ type: string; data: Record<string, unknown> }> };
+    const { actions } = legalResult;
 
     expect(Array.isArray(actions)).toBe(true);
     expect(actions.length).toBeGreaterThan(0);
@@ -48,9 +49,10 @@ describe("WASM legal actions integration", () => {
   });
 
   it("PlayLand/CastSpell object_ids can be matched to hand objects via Number() coercion", () => {
-    initialize_game(null);
+    initialize_game(null, undefined, null, null, 2, 0);
     const state = get_game_state();
-    const actions = get_legal_actions_js();
+    const legalResult = get_legal_actions_js() as { actions: Array<{ type: string; data: Record<string, unknown> }> };
+    const { actions } = legalResult;
 
     // Build playable set the same way PlayerHand does (by object_id)
     const playableObjectIds = new Set<number>();

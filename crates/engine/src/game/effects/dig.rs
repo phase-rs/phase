@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
-    TargetFilter,
+    DigRestOrder, DigRestRemainder, DigSource, Effect, EffectError, EffectKind,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -23,8 +23,12 @@ pub fn resolve(
         filter,
         kept_dest,
         rest_dest,
+        rest_remainder,
+        rest_split_top,
+        rest_order,
         is_reveal,
         enter_tapped,
+        enters_attacking,
         dig_source,
     ) = match &ability.effect {
         Effect::Dig {
@@ -36,8 +40,12 @@ pub fn resolve(
             filter,
             destination,
             rest_destination,
+            rest_remainder,
+            rest_split_top_count,
+            rest_order,
             reveal,
             enter_tapped,
+            enters_attacking,
             source,
         } => {
             let resolved_count =
@@ -63,8 +71,17 @@ pub fn resolve(
                 filter.clone(),
                 *destination,
                 *rest_destination,
+                *rest_remainder,
+                // CR 608.2c + CR 107.1b: the split size is fixed as the effect
+                // is applied (and clamped non-negative), exactly like the
+                // sibling `keep_count_expr` above.
+                rest_split_top_count
+                    .as_ref()
+                    .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize),
+                *rest_order,
                 *reveal,
                 *enter_tapped,
+                *enters_attacking,
                 *source,
             )
         }
@@ -76,15 +93,25 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            DigRestRemainder::Route,
+            None,
+            DigRestOrder::Preserve,
+            false,
             false,
             false,
             DigSource::Library,
         ),
     };
 
-    let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
+    let Some(library_owner) =
+        super::resolve_player_for_context_ref(state, ability, library_owner_filter)
+    else {
+        super::publish_reveal_result(state, Vec::new());
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        return Ok(());
+    };
 
-    // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
+    // CR 608.2c: This Dig's own outcome — not a stale value from an
     // earlier link in the same chain — is what `apply_parent_chain_context`
     // relays to this Dig's immediate sub_ability. Reset here; the two "found
     // nothing" returns below (and in `resolve_from_prior_look`) set it back
@@ -107,7 +134,11 @@ pub fn resolve(
             filter,
             kept_dest,
             rest_dest,
+            rest_remainder,
+            rest_split_top,
+            rest_order,
             enter_tapped,
+            enters_attacking,
         );
     }
 
@@ -117,13 +148,14 @@ pub fn resolve(
         .find(|p| p.id == library_owner)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // CR 401.5: If a library has fewer cards than required, use as many as available.
-    let count = dig_num.min(player.library.len());
+    // CR 609.3: If a library has fewer cards than required, use as many as available.
+    let count = dig_num.min(state.library_of(player.id).len());
     if count == 0 {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
         // ("put up to one of them on top … the rest on the bottom") has no
         // cards to act on and must not fall back to acting on this ability's
         // own source (issue #1365).
+        super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
@@ -133,29 +165,51 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()
         .collect::<Vec<_>>();
     let raw_keep_count = raw_keep_num.min(cards.len());
 
-    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
-    // player selection — the sub_ability condition decides whether to take it. Set
-    // last_revealed_ids so RevealedHasCardType can evaluate, then return without
-    // creating a DigChoice interaction.
-    if raw_keep_count == 0 && !is_reveal {
-        state.last_revealed_ids = cards.clone();
-        // CR 701.20e: "look at" privately reveals the cards to the looking
-        // player. The looker is the ability controller (e.g. Delver of Secrets'
-        // "look at the top card of your library"). Record the looker-scoped peek
-        // window so `filter_state_for_viewer` keeps these cards visible to the
-        // looker — and only the looker — through any subsequent "you may reveal
-        // that card" optional decision, instead of leaving the looking player to
-        // choose blind.
-        state.private_look_ids = cards.clone();
-        state.private_look_player = Some(ability.controller);
+    // CR 701.20e / CR 701.20a: Pure-peek pattern (keep_count = 0): "look at" /
+    // "reveal the top N" with no player selection on this step — a following
+    // ForEachCategory / LastRevealed move decides disposition (Portent of
+    // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
+    // reveals) then return without creating a DigChoice interaction.
+    if raw_keep_count == 0 {
+        super::publish_reveal_result(state, cards.clone());
+        if is_reveal {
+            // CR 701.20a: public reveal — show to all players.
+            for &card_id in &cards {
+                state.revealed_cards.insert(card_id);
+            }
+            let card_names: Vec<String> = cards
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player: ability.controller,
+                occurrences: state.disclosed_occurrences(&cards),
+                card_ids: cards.clone(),
+                card_names,
+            });
+        } else {
+            // CR 701.20e: "look at" privately reveals the cards to the looking
+            // player. The looker is the ability controller (e.g. Delver of Secrets'
+            // "look at the top card of your library"). Record the looker-scoped peek
+            // window so `filter_state_for_viewer` keeps these cards visible to the
+            // looker — and only the looker — through any subsequent "you may reveal
+            // that card" optional decision, instead of leaving the looking player to
+            // choose blind.
+            state.remember_card_identities(
+                crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+                &cards,
+            );
+            state.private_look_ids = cards.clone();
+            state.private_look_player = Some(ability.controller);
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -170,16 +224,23 @@ pub fn resolve(
         for &card_id in &cards {
             state.revealed_cards.insert(card_id);
         }
-        state.last_revealed_ids = cards.clone();
+        super::record_revealed_result(state, cards.clone());
         let card_names: Vec<String> = cards
             .iter()
             .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&cards),
             card_ids: cards.clone(),
             card_names,
         });
+    }
+    if !is_reveal {
+        state.remember_card_identities(
+            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            &cards,
+        );
     }
 
     // Pre-compute selectable cards by evaluating the filter against each card.
@@ -214,7 +275,10 @@ pub fn resolve(
                 &selectable_cards,
                 dest,
                 rest_dest,
+                rest_remainder,
+                rest_order,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             return Ok(());
@@ -236,8 +300,12 @@ pub fn resolve(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_remainder,
+        rest_split_top_count: rest_split_top,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -273,13 +341,26 @@ fn resolve_from_prior_look(
     filter: TargetFilter,
     kept_dest: Option<Zone>,
     rest_dest: Option<Zone>,
+    rest_remainder: DigRestRemainder,
+    rest_split_top: Option<usize>,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
 ) -> Result<(), EffectError> {
+    // CR 701.20e: a silent remainder was only looked at, so nothing is routed —
+    // the two "route the rest" branches below take no destination and therefore
+    // leave those cards exactly where they are.
+    let rest_dest = if rest_remainder.is_route() {
+        rest_dest
+    } else {
+        None
+    };
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
         // CR 608.2c: mirrors the empty-library branch in `resolve` (issue
         // #1365) — no cards were looked at, so a chained `ParentTarget`
         // consumer must not self-fallback.
+        super::publish_reveal_result(state, Vec::new());
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
@@ -296,10 +377,25 @@ fn resolve_from_prior_look(
     // cards to rest_dest without any interactive prompt.
     if raw_keep_count == 0 {
         if let Some(dest) = rest_dest {
+            // CR 701.20e + CR 608.2c: If the rest cards are being placed on the
+            // bottom of the library in any order (PlayerChoice) and there are 2
+            // or more cards, pause for the controller to announce their
+            // permutation. This handles cards like Petals of Insight where the
+            // player chooses "put on bottom in any order" as one of the options.
+            if dest == Zone::Library && rest_order == DigRestOrder::PlayerChoice && cards.len() >= 2
+            {
+                state.waiting_for = WaitingFor::DigBottomOrder {
+                    player: ability.controller,
+                    source_id: ability.source_id,
+                    cards: cards.clone(),
+                };
+                return Ok(());
+            }
             match crate::game::engine_resolution_choices::route_rest_partition(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -347,6 +443,7 @@ fn resolve_from_prior_look(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -390,8 +487,12 @@ fn resolve_from_prior_look(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_remainder,
+        rest_split_top_count: rest_split_top,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -423,14 +524,38 @@ fn resolve_mass_put_all(
     selectable: &[crate::types::identifiers::ObjectId],
     dest: Zone,
     rest_destination: Option<Zone>,
+    rest_remainder: DigRestRemainder,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    let rest: Vec<_> = cards
-        .iter()
-        .filter(|id| !selectable.contains(id))
-        .copied()
-        .collect();
+    let rest: Vec<_> = if rest_remainder.is_route() {
+        cards
+            .iter()
+            .filter(|id| !selectable.contains(id))
+            .copied()
+            .collect()
+    } else {
+        // CR 701.20e: the instruction never sent the unkept cards anywhere, so
+        // there is no rest pile to move — they stay in the library untouched.
+        Vec::new()
+    };
+
+    if !rest_remainder.is_route() {
+        // CR 701.20a + CR 701.20e: the mass-put form leaves its unchosen
+        // looked-at cards in the library, so their reveal ends with the
+        // instruction that caused it instead of publishing the positions a
+        // later shuffle gives them (CR 401.2).
+        let unkept: Vec<_> = cards
+            .iter()
+            .filter(|id| !selectable.contains(id))
+            .copied()
+            .collect();
+        crate::game::engine_resolution_choices::end_reveal_for_cards_left_in_library(
+            state, &unkept,
+        );
+    }
 
     // Route the (deterministic) rest pile first so a kept-card pause cannot
     // strand it. None => bottom of library (CR 701.20a "in a random order").
@@ -438,6 +563,7 @@ fn resolve_mass_put_all(
         state,
         &rest,
         rest_destination.unwrap_or(Zone::Library),
+        rest_order,
         Some(ability.source_id),
         events,
     ) {
@@ -448,6 +574,7 @@ fn resolve_mass_put_all(
             selectable.to_vec(),
             dest,
             EtbTapState::from_legacy_bool(enter_tapped),
+            enters_attacking,
             events,
         ),
         crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -459,6 +586,7 @@ fn resolve_mass_put_all(
                     selected: selectable.to_vec(),
                     destination: dest,
                     enter_tapped: EtbTapState::from_legacy_bool(enter_tapped),
+                    enters_attacking,
                 },
             );
         }
@@ -469,6 +597,7 @@ fn resolve_mass_put_all(
 /// mass Dig. The typed batch completion is the single authority for publication
 /// and the parent result, so a replacement pause cannot expose a pre-redirect
 /// selected set to a chained instruction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_mass_put_all_selected(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -476,6 +605,7 @@ pub(crate) fn move_mass_put_all_selected(
     selected: Vec<crate::types::identifiers::ObjectId>,
     destination: Zone,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let requests = selected
@@ -485,8 +615,10 @@ pub(crate) fn move_mass_put_all_selected(
                 object_id,
                 destination,
                 source_id,
-            );
+            )
+            .hand_taker(player);
             request.mods.enter_tapped = enter_tapped;
+            request.mods.enters_attacking = enters_attacking;
             request
         })
         .collect();
@@ -523,6 +655,7 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+    use rand::seq::SliceRandom;
 
     fn make_dig_ability(dig_num: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -537,14 +670,94 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 701.20a + CR 701.20e: the deterministic "put ALL matching cards" form
+    /// resolves with no choice prompt. With a silent remainder its unchosen
+    /// looked-at cards never move, so the reveal has to end here too — a marker
+    /// left on a library card pairs its name with the position any later shuffle
+    /// gives it, disclosing library order (CR 401.2).
+    #[test]
+    fn mass_put_all_with_a_silent_remainder_ends_the_reveal_of_the_unkept_cards() {
+        let mut state = GameState::new_two_player(42);
+        let mut cards = Vec::new();
+        for i in 0..3u64 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+            if i == 0 {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+            }
+            cards.push(id);
+        }
+        // A reveal-dig makes every looked-at card public while it runs.
+        for &card in &cards {
+            state.revealed_cards.insert(card);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Battlefield),
+                keep_count: Some(u32::MAX),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::StayInLibrary,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
+                reveal: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                source: DigSource::Library,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Positive reach guards: the deterministic form really resolved (no
+        // prompt) and the matching land really moved.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "the deterministic mass form must not prompt, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&cards[0]].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&cards[1]].zone, Zone::Library);
+        assert_eq!(state.objects[&cards[2]].zone, Zone::Library);
+        assert!(
+            !state.revealed_cards.contains(&cards[1]) && !state.revealed_cards.contains(&cards[2]),
+            "the reveal ends with the instruction that caused it, got {:?}",
+            state.revealed_cards
+        );
     }
 
     #[test]
@@ -631,8 +844,12 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
@@ -684,8 +901,12 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -737,8 +958,12 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -807,8 +1032,12 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -888,8 +1117,12 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut events = Vec::new();
 
@@ -948,8 +1181,12 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -1019,8 +1256,12 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1082,8 +1323,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1142,8 +1387,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1211,8 +1460,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1283,8 +1536,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1349,8 +1606,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1426,8 +1687,12 @@ mod tests {
                 up_to: false,
                 filter,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1502,8 +1767,12 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1597,6 +1866,12 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.mana_cost = ManaCost::generic(3);
         }
+        // CR 608.2h: this fixture exercises the LKI-only
+        // `ObjectScope::CostPaidObject` reader, which reads `snapshot.lki` and
+        // never validates currentness — so the literal `incarnation: 0` here is
+        // legacy/LKI compatibility coverage, not a live-reference binding. A
+        // live-object consumer would instead capture through
+        // `CostPaidObjectSnapshot::capture`.
         let sac_snapshot = CostPaidObjectSnapshot {
             object_id: sacrificed,
             lki: state
@@ -1604,6 +1879,7 @@ mod tests {
                 .get(&sacrificed)
                 .unwrap()
                 .snapshot_for_mana_spent(),
+            incarnation: 0,
         };
 
         // The looked-at set (normally populated by the look-only Dig): a
@@ -1807,8 +2083,12 @@ mod tests {
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1863,8 +2143,12 @@ mod tests {
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1930,8 +2214,12 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -1999,6 +2287,7 @@ mod tests {
                 up_to,
                 destination,
                 rest_destination,
+                rest_order,
                 ..
             } => {
                 assert_eq!(
@@ -2013,6 +2302,11 @@ mod tests {
                     Some(Zone::Library),
                     "the in-clause 'and the rest on the bottom' rider must set rest=Library, \
                      not fall through to the graveyard default"
+                );
+                assert_eq!(
+                    *rest_order,
+                    DigRestOrder::Random,
+                    "Muxus's exact random-order rider must reach the mass Dig resolver"
                 );
             }
             other => panic!("expected a Dig effect, got {other:?}"),
@@ -2056,6 +2350,9 @@ mod tests {
 
         let ability =
             ResolvedAbility::new((*def.effect).clone(), vec![], ObjectId(100), PlayerId(0));
+        let mut expected_rest = rest.clone();
+        let mut expected_rng = state.rng.clone();
+        expected_rest.shuffle(expected_rng.draw(crate::types::game_state::RandomDraw::Placement));
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -2088,6 +2385,15 @@ mod tests {
                 "non-matching card {id:?} must remain in the library"
             );
         }
+        assert_eq!(
+            library, expected_rest,
+            "Muxus's random-order rest pile must use the seeded shuffle before bottom placement"
+        );
+        assert_eq!(
+            state.rng.get_word_pos(),
+            expected_rng.get_word_pos(),
+            "the deterministic mass path must consume exactly its rest-pile shuffle"
+        );
         let bottom: Vec<_> = library
             .iter()
             .rev()
@@ -2256,7 +2562,7 @@ mod tests {
     }
 
     /// Issue #1365 (Thassa's Oracle reanimated via Dread Return with an empty
-    /// library — Hermit Druid milled the whole deck first). CR 401.5: a Dig
+    /// library — Hermit Druid milled the whole deck first). CR 609.3: a Dig
     /// against an empty library looks at zero cards. The chained "put up to
     /// one of them on top … the rest on the bottom" instruction has nothing to
     /// place, but the trailing `WinTheGame` gate (devotion >= library size)
@@ -2264,7 +2570,8 @@ mod tests {
     /// Oracle must still be on the battlefield and the library must still be
     /// empty when the condition is checked.
     ///
-    /// Pre-fix, the `PutAtLibraryPosition` link's `ParentTarget` resolution
+    /// The current parser folds placement into `Dig`. The historical chain
+    /// used a separate `PutAtLibraryPosition` link. Its `ParentTarget` resolution
     /// fell back to "self" (no prior Dig selection, empty `ability.targets`),
     /// moving Thassa's Oracle itself from the battlefield onto its own
     /// library — corrupting devotion (no longer on the battlefield) and the

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::activation_patience::ActivationPatiencePolicy;
 use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
@@ -8,14 +9,21 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
+use super::commander_zone_return::CommanderZoneReturnPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::creature_type_choice::CreatureTypeChoicePolicy;
+use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_authority::GraveyardAuthorityPolicy;
+use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
@@ -23,16 +31,19 @@ use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
 use super::loop_shortcut::LoopShortcutPolicy;
+use super::momir_curve::MomirCurvePolicy;
 use super::payment_selection::PaymentSelectionPolicy;
 use super::payoff::{
     PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
     EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
 };
 use super::plus_one_counters::PlusOneCountersPolicy;
+use super::poison::PoisonClockPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_cost_mana_gate::SacrificeCostManaGatePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::self_cost_value::SelfCostValuePolicy;
@@ -57,6 +68,7 @@ use engine::types::player::PlayerId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyId {
     AntiSelfHarm,
+    MomirCurve,
     ArtifactSynergyTactical,
     BoardDevelopment,
     EtbValue,
@@ -95,6 +107,7 @@ pub enum PolicyId {
     SweeperTiming,
     FreeOutletActivation,
     FetchLandPatience,
+    ActivationPatience,
     AristocratsKeepablesMulligan,
     AggroPressure,
     AggroKeepablesMulligan,
@@ -105,13 +118,21 @@ pub enum PolicyId {
     PlusOneCountersMulligan,
     SpellslingerCasting,
     SpellslingerKeepablesMulligan,
-    CombatTaxPayment,
     ReactiveSelfProtection,
+    /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
+    /// additional cost, or a flashback alternative cost — could only be paid by
+    /// spending mana sources the plan still needs.
+    SacrificeCostManaGate,
     SacrificeLandProtection,
     SelfCostValue,
+    /// CR 605.3a + CR 106.4: activating "{N}: Untap this" on an already-untapped
+    /// mana rock (Basalt Monolith class) — a self-funded, net-zero loop.
+    SelfUntapLoop,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
+    /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
+    MulliganCardFloor,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
@@ -129,6 +150,40 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
+    /// CR 104.3d: the alternate poison win clock.
+    PoisonClock,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
+    CommanderZoneReturn,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
+    /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
+    /// it discounts.
+    CostReduction,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    DrawPayoff,
+    /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
+    /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
+    DiscardPayoff,
+    /// CR 702.122a: cast a Vehicle when the board can actually crew it.
+    VehicleDeployment,
+    /// CR 205.3m: pick a creature type the AI actually has members of, instead
+    /// of the alphabetically first option the engine offers.
+    CreatureTypeChoice,
+    /// CR 601.2a + CR 601.2b: announce the graveyard permission whose
+    /// commitments (slot, extra cost, counter) give up least.
+    GraveyardAuthority,
+    /// CR 700.3a: every eligible object goes in exactly one pile; split them
+    /// into two piles of equal value, since the adversary chooses which pile
+    /// the AI ends up with.
+    PilePartition,
+    /// CR 106.4: a ritual's mana empties at end of step/phase — don't cast one
+    /// when nothing in reach can spend it in this window.
+    RitualSink,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -320,6 +375,9 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(DevotionPolicy),
+            Box::new(PoisonClockPolicy),
+            Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
             Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
@@ -348,16 +406,20 @@ impl Default for PolicyRegistry {
             Box::new(HoldManaUpForInteractionPolicy),
             Box::new(SweeperTimingPolicy),
             Box::new(FreeOutletActivationPolicy),
+            Box::new(MomirCurvePolicy),
             Box::new(FetchLandPatiencePolicy),
+            Box::new(ActivationPatiencePolicy),
             Box::new(AggroPressurePolicy),
             Box::new(TokensWidePolicy),
             Box::new(AnthemPriorityPolicy),
             Box::new(PlusOneCountersPolicy),
             Box::new(SpellslingerCastingPolicy),
-            Box::new(super::combat_tax::CombatTaxPaymentPolicy),
+            Box::new(CommanderZoneReturnPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
             Box::new(SelfCostValuePolicy),
+            Box::new(super::self_untap_loop::SelfUntapLoopPolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
@@ -374,11 +436,37 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::cost_reduction::CostReductionPolicy),
+            Box::new(super::draw_payoff::DrawPayoffPolicy),
+            Box::new(super::discard_payoff::DiscardPayoffPolicy),
+            Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
+            Box::new(CreatureTypeChoicePolicy),
+            Box::new(GraveyardAuthorityPolicy),
+            Box::new(super::pile_partition::PilePartitionPolicy),
+            Box::new(super::ritual_sink::RitualSinkPolicy),
         ];
+        Self::from_policies(policies)
+    }
+}
+
+/// A registry total split around one held-out policy ([`PolicyRegistry::score_holding_out`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PolicyScore {
+    /// Every other policy's summed delta, or `NEG_INFINITY` when any policy rejects.
+    pub rest: f64,
+    /// The held-out policy's delta.
+    pub held: f64,
+}
+
+impl PolicyRegistry {
+    fn from_policies(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
             for kind in policy.decision_kinds() {
@@ -387,9 +475,26 @@ impl Default for PolicyRegistry {
         }
         Self { policies, by_kind }
     }
-}
 
-impl PolicyRegistry {
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn for_tests(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
+        Self::from_policies(policies)
+    }
+
+    /// The default registry's policies whose id is in `ids`, in default order: a test registry
+    /// holding real policies that modules private to `policies` define.
+    #[cfg(test)]
+    pub(crate) fn default_subset_for_tests(ids: &[PolicyId]) -> Self {
+        Self::from_policies(
+            Self::default()
+                .policies
+                .into_iter()
+                .filter(|policy| ids.contains(&policy.id()))
+                .collect(),
+        )
+    }
+
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
     /// access. Policies are stateless (`TacticalPolicy: Send + Sync`, no
     /// interior mutability by construction), so a single instance safely
@@ -487,15 +592,36 @@ impl PolicyRegistry {
     /// `f64::NEG_INFINITY` so the candidate is excluded by downstream
     /// softmax/argmax.
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
+        self.fold_scores(ctx, None).rest
+    }
+
+    /// [`Self::score`] split in two: `held` is the `Score` delta policy `held` contributed
+    /// (0.0 when it is absent or abstains), `rest` the sum of every other policy's, in the same
+    /// order. A `Reject` from any policy, the held one included, gives
+    /// `{ rest: NEG_INFINITY, held: 0.0 }`, so `rest + held` is always `score()`.
+    pub(crate) fn score_holding_out(&self, ctx: &PolicyContext<'_>, held: PolicyId) -> PolicyScore {
+        self.fold_scores(ctx, Some(held))
+    }
+
+    fn fold_scores(&self, ctx: &PolicyContext<'_>, held: Option<PolicyId>) -> PolicyScore {
         let verdicts = self.verdicts(ctx);
-        let mut total = 0.0;
-        for (_id, verdict) in verdicts {
+        let mut score = PolicyScore {
+            rest: 0.0,
+            held: 0.0,
+        };
+        for (id, verdict) in verdicts {
             match verdict {
-                PolicyVerdict::Reject { .. } => return f64::NEG_INFINITY,
-                PolicyVerdict::Score { delta, .. } => total += delta,
+                PolicyVerdict::Reject { .. } => {
+                    return PolicyScore {
+                        rest: f64::NEG_INFINITY,
+                        held: 0.0,
+                    }
+                }
+                PolicyVerdict::Score { delta, .. } if Some(id) == held => score.held += delta,
+                PolicyVerdict::Score { delta, .. } => score.rest += delta,
             }
         }
-        total
+        score
     }
 
     /// Returns `true` if any registered policy has the given `PolicyId`.
@@ -540,7 +666,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
         let shifted: Vec<f64> = raw_scores
@@ -564,7 +694,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
 
@@ -575,6 +709,7 @@ impl PolicyRegistry {
             .map(|(candidate, prior)| PolicyPrior {
                 candidate,
                 prior: prior / total,
+                payment_successor: None,
             })
             .collect()
     }
@@ -781,6 +916,7 @@ mod shared_invariant_tests {
         let action = GameAction::ActivateAbility {
             source_id: ObjectId(1),
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
         let cand = candidate(action, TacticalClass::Ability);
         let decision = priority_decision(vec![cand.clone()]);
@@ -808,6 +944,113 @@ mod shared_invariant_tests {
             "critical delta x activation 2.6 must clamp to -CRITICAL_MAX ({}), got {delta}",
             -CRITICAL_MAX
         );
+    }
+
+    /// A policy with a fixed verdict on activations: `Some(delta)` scores, `None` rejects.
+    struct FixedVerdictPolicy {
+        id: PolicyId,
+        delta: Option<f64>,
+    }
+
+    impl TacticalPolicy for FixedVerdictPolicy {
+        fn id(&self) -> PolicyId {
+            self.id
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _features: &DeckFeatures,
+            _state: &GameState,
+            _player: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, _ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            match self.delta {
+                Some(delta) => PolicyVerdict::score(delta, PolicyReason::new("fixed_score")),
+                None => PolicyVerdict::reject(PolicyReason::new("fixed_reject")),
+            }
+        }
+    }
+
+    fn fixed_registry(verdicts: &[(PolicyId, Option<f64>)]) -> PolicyRegistry {
+        PolicyRegistry::for_tests(
+            verdicts
+                .iter()
+                .map(|&(id, delta)| {
+                    Box::new(FixedVerdictPolicy { id, delta }) as Box<dyn TacticalPolicy>
+                })
+                .collect(),
+        )
+    }
+
+    /// `score_holding_out` splits `score()` around one policy: the held policy's delta in
+    /// `held`, every other policy's in `rest`, summing back to `score()`. An absent id leaves
+    /// `rest` bit-equal to `score()`, and a `Reject` from any policy, the held one included,
+    /// is `{ NEG_INFINITY, 0.0 }`.
+    #[test]
+    fn score_holding_out_partitions_the_registry_total() {
+        let action = GameAction::ActivateAbility {
+            source_id: ObjectId(1),
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+        let cand = candidate(action, TacticalClass::Ability);
+        let decision = priority_decision(vec![cand.clone()]);
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &cand,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        let held = PolicyId::ActivationPatience;
+
+        let registry = fixed_registry(&[
+            (PolicyId::AntiSelfHarm, Some(0.3)),
+            (held, Some(-0.8)),
+            (PolicyId::CopyValue, Some(0.2)),
+        ]);
+        let total = registry.score(&ctx);
+        let split = registry.score_holding_out(&ctx, held);
+        assert!(
+            (split.rest + split.held - total).abs() < 1e-12,
+            "rest + held must be score(): {split:?} vs {total}"
+        );
+        assert!((split.held + 0.8).abs() < 1e-12, "held: {split:?}");
+        assert!((split.rest - 0.5).abs() < 1e-12, "rest: {split:?}");
+
+        let absent = registry.score_holding_out(&ctx, PolicyId::EffectTiming);
+        assert_eq!(
+            absent,
+            PolicyScore {
+                rest: total,
+                held: 0.0,
+            },
+            "an absent id holds nothing out"
+        );
+
+        let rejected = PolicyScore {
+            rest: f64::NEG_INFINITY,
+            held: 0.0,
+        };
+        let other_rejects = fixed_registry(&[(PolicyId::AntiSelfHarm, None), (held, Some(-0.8))]);
+        assert_eq!(other_rejects.score(&ctx), f64::NEG_INFINITY);
+        assert_eq!(other_rejects.score_holding_out(&ctx, held), rejected);
+        let held_rejects = fixed_registry(&[(PolicyId::AntiSelfHarm, Some(0.3)), (held, None)]);
+        assert_eq!(held_rejects.score(&ctx), f64::NEG_INFINITY);
+        assert_eq!(held_rejects.score_holding_out(&ctx, held), rejected);
     }
 
     /// Regression for the #5478 review (copy_value saturation): rescaling a wide

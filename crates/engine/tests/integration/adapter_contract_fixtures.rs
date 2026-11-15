@@ -1,7 +1,69 @@
+use engine::game::dungeon::DungeonId;
 use engine::game::game_object::GameObject;
+use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::types::ability::{TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::interaction::{
+    InteractionResponse, InteractionSessionId, InteractionShortcutDecision, InteractionSubmission,
+};
+
+/// U8 byte-linkage: the Rust end of the one fixture the TS row also reads. The
+/// variant is asserted before the values, so a fixture that parsed into the
+/// wrong response variant cannot pass on the values alone.
+///
+/// The same payload is then driven through the production submission entry
+/// point on the board it was curated from — `i-1` is that board's interaction
+/// session, so every id in the fixture is one the engine itself minted. Parsing
+/// alone accepted a payload production refuses, which is the gap this leg
+/// closes: mutate an id, a group, or an `amount` and the submission is refused
+/// rather than silently pinning a contract no adapter can use.
+#[test]
+fn shortcut_allocation_submission_fixture_matches_curated_client_contract() {
+    let parsed: InteractionSubmission = serde_json::from_str(include_str!(
+        "../../../../fixtures/adapter-contract/shortcut_allocation_submission.json"
+    ))
+    .unwrap();
+    assert_eq!(parsed.interaction_id.0, "i-1.0.1");
+    let InteractionResponse::Shortcut { decision, pins } = &parsed.response else {
+        panic!("wrong variant: {:?}", parsed.response);
+    };
+    assert_eq!(
+        *decision,
+        InteractionShortcutDecision::Fixed { iterations: 18 }
+    );
+    let allocation = pins
+        .iter()
+        .find(|pin| pin.group == 2)
+        .unwrap_or_else(|| panic!("the allocation pin is stated over group 2: {pins:?}"));
+    assert_eq!(
+        allocation
+            .choice_ids
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>(),
+        ["i-1.0.1.k4", "i-1.0.1.k5", "i-1.0.1.k6"]
+    );
+    assert_eq!(
+        allocation
+            .amounts
+            .iter()
+            .map(|assignment| (assignment.choice_id.0.as_str(), assignment.amount))
+            .collect::<Vec<_>>(),
+        [("i-1.0.1.k4", 6), ("i-1.0.1.k5", 6), ("i-1.0.1.k6", 6)]
+    );
+
+    let (mut state, proposer) = crate::interaction_contract::f4_offer_board();
+    bind_interaction_authority(&mut state, InteractionSessionId("i-1".to_string()))
+        .expect("the fixture's own session binds over the live offer");
+    submit_interaction(&mut state, proposer, parsed)
+        .expect("the curated submission is one the production entry point accepts");
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "an accepted submission moves the pending interaction off the offer, so the leg above \
+         is acceptance rather than an inert payload"
+    );
+}
 
 #[test]
 fn game_action_fixture_matches_curated_client_contract() {
@@ -33,6 +95,48 @@ fn waiting_for_fixture_matches_curated_client_contract() {
             assert_eq!(cards.len(), 2);
             assert_eq!(count, 1);
             assert_eq!(source_id.0, 99);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn waiting_for_choose_dungeon_fixture_matches_curated_client_contract() {
+    let parsed: WaitingFor = serde_json::from_str(include_str!(
+        "../../../../fixtures/adapter-contract/waiting_for_choose_dungeon.json"
+    ))
+    .unwrap();
+    match parsed {
+        WaitingFor::ChooseDungeon { player, options } => {
+            assert_eq!(player.0, 0);
+            // Normal venture offers the AFR trio (CR 701.49a).
+            assert_eq!(options.len(), 3);
+            let lost_mine = options
+                .iter()
+                .find(|option| option.dungeon == DungeonId::LostMineOfPhandelver)
+                .expect("Lost Mine offered");
+            // CR 309.4a: each option previews the topmost room it enters.
+            assert_eq!(lost_mine.entry_room.index, 0);
+            assert_eq!(lost_mine.entry_room.name, "Cave Entrance");
+            assert_eq!(lost_mine.entry_room.text, "Scry 1.");
+            // The choice preview carries the whole dungeon behind the entry:
+            // the card identity, every room with its edges and card geometry,
+            // and the room count placing the entry within the whole.
+            assert_eq!(lost_mine.room_count, 7);
+            assert_eq!(lost_mine.rooms.len(), 7);
+            assert_eq!(
+                lost_mine.card.oracle_id,
+                "5c446a7f-0301-4343-b0df-146cf2db605b"
+            );
+            assert_eq!(
+                lost_mine.card.scryfall_id,
+                "59b11ff8-f118-4978-87dd-509dc0c8c932"
+            );
+            assert_eq!(lost_mine.card.face_name, "Lost Mine of Phandelver");
+            assert_eq!(lost_mine.rooms[0].room.name, "Cave Entrance");
+            assert_eq!(lost_mine.rooms[0].next_rooms, vec![1, 2]);
+            assert_eq!(lost_mine.rooms[0].marker.x_permille, 500);
+            assert_eq!(lost_mine.rooms[0].marker.y_permille, 215);
         }
         other => panic!("wrong variant: {other:?}"),
     }

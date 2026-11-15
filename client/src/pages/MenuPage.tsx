@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
-import type { GameState } from "../adapter/types";
+import { persistedGameStateView, type PersistedGameState } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { PreviewBadge } from "../components/chrome/PreviewBadge";
 import { LoadGameStateModal } from "../components/menu/LoadGameStateModal";
 import { HomeDashboard } from "../components/menu/home/HomeDashboard";
-import { isTauri } from "../services/platform";
+import { isDesktopTauri } from "../services/platform";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { saveActiveGame, saveGame, useGameStore } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -45,15 +45,15 @@ export function MenuPage() {
     }).catch(() => {/* prewarm is best-effort */});
   }, [cardStatus, lastFormat, lastMatchType]);
 
-  // Load an externally-provided GameState (pasted JSON / exported .zip): persist
+  // Load an externally-provided state (pasted JSON / exported .zip): persist
   // under a fresh gameId, record AI active-game meta, navigate into the game.
   const handleLoadState = useCallback(
-    async (state: GameState) => {
+    async (state: PersistedGameState) => {
       const gameId = crypto.randomUUID();
       await saveGame(gameId, state);
       saveActiveGame({ id: gameId, mode: "ai", difficulty: "Medium" });
       useGameStore.setState({ gameId });
-      const playerCount = state.players?.length ?? 0;
+      const playerCount = persistedGameStateView(state).players.length;
       const playersParam = playerCount > 2 ? `&players=${playerCount}` : "";
       navigate(`/game/${gameId}?mode=ai&difficulty=Medium${playersParam}`);
     },
@@ -81,7 +81,7 @@ export function MenuPage() {
           {t("home.alpha.message")}
         </div>
 
-        {isTauri() && (
+        {isDesktopTauri() && (
           <button
             onClick={() => {
               import("@tauri-apps/plugin-process").then((m) => m.exit(0));

@@ -29,7 +29,10 @@ fn blight_cost(state: &GameState, obj_id: ObjectId, penalties: &PolicyPenalties)
     let base = sacrifice_cost(state, obj_id, penalties);
     let toughness = obj.toughness.unwrap_or(0);
     if toughness <= 1 {
-        // Creature dies to SBA when it receives a -1/-1 counter.
+        // CR 704.5f: at toughness <= 1 the counter kills the creature, so this
+        // really is a surrender and `sacrifice_cost` is right; above that the
+        // divisor damps the residual. A branch-level split is task #38. Pinned
+        // by F3(e).
         return base;
     }
     base / (toughness as f64)
@@ -199,6 +202,49 @@ mod tests {
             "Should prefer blighting the 3/5 ({big_score}) over the 3/1 ({small_score}) — \
              the 3/1 dies to its -1/-1 counter"
         );
+    }
+
+    /// F3(e): the lethal branch intentionally carries the full commander
+    /// premium; the surviving branch keeps the documented damped residual.
+    #[test]
+    fn blight_keeps_the_partial_surrender_commander_premium() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config.command_zone = true;
+        let commander = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        let bear_card = CardId(state.next_object_id);
+        let bear = create_object(
+            &mut state,
+            bear_card,
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [commander, bear] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.mana_cost = ManaCost::generic(4);
+            obj.base_mana_cost = ManaCost::generic(4);
+        }
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.commander_cast_count.insert(commander, 1);
+        let penalties = PolicyPenalties::default();
+
+        for (toughness, expected_delta) in [(1, 6.0), (4, 1.5)] {
+            state.objects.get_mut(&commander).unwrap().toughness = Some(toughness);
+            state.objects.get_mut(&bear).unwrap().toughness = Some(toughness);
+            assert_eq!(
+                blight_cost(&state, commander, &penalties) - blight_cost(&state, bear, &penalties),
+                expected_delta,
+                "toughness {toughness}: task #38's partial-surrender behavior"
+            );
+        }
     }
 
     /// Regression for #4282 (sibling of SacrificeValuePolicy): blighting a

@@ -1,25 +1,107 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 
+import { useCardImage } from "../../hooks/useCardImage.ts";
 import { getCardPrintings } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
+import type { CardHoverHandler } from "./hoverPreview";
 
 interface PrintingPickerModalProps {
   cardName: string;
   oracleId: string;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onClose: () => void;
+  returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }
 
 const INITIAL_PAGE_SIZE = 30;
+
+function PrintingTile({
+  cardName,
+  oracleId,
+  printing,
+  selected,
+  onSelect,
+  onHover,
+}: {
+  cardName: string;
+  oracleId: string;
+  printing: PrintingEntry;
+  selected: boolean;
+  onSelect: (printing: PrintingEntry) => void;
+  onHover?: CardHoverHandler;
+}) {
+  const { t } = useTranslation("deck-builder");
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, {
+    oracleId,
+    scryfallId: printing.id,
+    size: "normal",
+  });
+  const isBorderless = printing.border_color === "borderless";
+  const isExtended = printing.frame_effects.includes("extendedart");
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(printing)}
+      onMouseEnter={() => onHover?.({ name: cardName, scryfallId: printing.id })}
+      onMouseLeave={() => onHover?.(null)}
+      className={`group relative overflow-hidden rounded-xl border transition-all ${
+        selected
+          ? "border-sky-400 ring-2 ring-sky-400/40"
+          : "border-white/10 hover:border-white/25"
+      }`}
+    >
+      {src ? (
+        <img
+          src={src}
+          {...getCardImageSrcSetProps(src, rungs)}
+          alt={`${cardName} — ${printing.set_name} #${printing.collector_number}`}
+          className="aspect-[5/7] w-full object-cover"
+          loading="lazy"
+          onError={() => advanceFailedSource?.(src)}
+        />
+      ) : (
+        <div className={`flex aspect-[5/7] w-full items-center justify-center bg-slate-800 text-xs text-slate-500 ${isLoading ? "animate-pulse" : ""}`}>
+          {t("printingPicker.noImage")}
+        </div>
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/80 to-transparent px-2 pb-2 pt-6">
+        <div className="truncate text-[10px] font-medium text-white">{printing.set_name}</div>
+        <div className="flex items-center gap-1 text-[9px] text-slate-400">
+          <span className="uppercase">{printing.set}</span>
+          <span>#{printing.collector_number}</span>
+          {(isBorderless || isExtended) && (
+            <span className="ml-auto rounded bg-fuchsia-500/20 px-1 text-fuchsia-300">
+              {isBorderless ? "Borderless" : "Extended"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {selected && (
+        <div className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-sky-500 text-xs text-white">✓</div>
+      )}
+    </button>
+  );
+}
 
 export function PrintingPickerModal({
   cardName,
   oracleId,
   onCardHover,
   onClose,
+  returnFocusRef,
 }: PrintingPickerModalProps) {
   const { t } = useTranslation("deck-builder");
   const [printings, setPrintings] = useState<PrintingEntry[] | null>(null);
@@ -81,6 +163,7 @@ export function PrintingPickerModal({
       title={t("printingPicker.title")}
       subtitle={cardName}
       onClose={onClose}
+      returnFocusRef={returnFocusRef}
       maxWidthClassName="max-w-4xl"
       bodyClassName="overflow-y-auto p-4 sm:p-6"
     >
@@ -131,57 +214,16 @@ export function PrintingPickerModal({
           <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
             {visiblePrintings.map((printing) => {
               const isSelected = currentOverride?.scryfallId === printing.id;
-              const imgUrl = printing.faces[0]?.normal;
-              const isBorderless = printing.border_color === "borderless";
-              const isExtended = printing.frame_effects.includes("extendedart");
-
               return (
-                <button
+                <PrintingTile
                   key={printing.id}
-                  type="button"
-                  onClick={() => handleSelect(printing)}
-                  onMouseEnter={() => onCardHover?.(cardName, printing.id)}
-                  onMouseLeave={() => onCardHover?.(null)}
-                  className={`group relative overflow-hidden rounded-xl border transition-all ${
-                    isSelected
-                      ? "border-sky-400 ring-2 ring-sky-400/40"
-                      : "border-white/10 hover:border-white/25"
-                  }`}
-                >
-                  {imgUrl ? (
-                    <img
-                      src={imgUrl}
-                      alt={`${cardName} — ${printing.set_name} #${printing.collector_number}`}
-                      className="aspect-[5/7] w-full object-cover"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <div className="flex aspect-[5/7] w-full items-center justify-center bg-slate-800 text-xs text-slate-500">
-                      {t("printingPicker.noImage")}
-                    </div>
-                  )}
-
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/80 to-transparent px-2 pb-2 pt-6">
-                    <div className="truncate text-[10px] font-medium text-white">
-                      {printing.set_name}
-                    </div>
-                    <div className="flex items-center gap-1 text-[9px] text-slate-400">
-                      <span className="uppercase">{printing.set}</span>
-                      <span>#{printing.collector_number}</span>
-                      {(isBorderless || isExtended) && (
-                        <span className="ml-auto rounded bg-fuchsia-500/20 px-1 text-fuchsia-300">
-                          {isBorderless ? "Borderless" : "Extended"}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {isSelected && (
-                    <div className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-sky-500 text-xs text-white">
-                      ✓
-                    </div>
-                  )}
-                </button>
+                  cardName={cardName}
+                  oracleId={oracleId}
+                  printing={printing}
+                  selected={isSelected}
+                  onSelect={handleSelect}
+                  onHover={onCardHover}
+                />
               );
             })}
           </div>

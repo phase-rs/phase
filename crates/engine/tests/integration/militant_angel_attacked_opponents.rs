@@ -20,7 +20,9 @@
 use engine::game::combat::AttackTarget;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{AttackScope, AttackSubject, PlayerFilter, QuantityExpr, QuantityRef};
+use engine::types::ability::{
+    AttackSubject, CombatHistoryScope, PlayerFilter, QuantityExpr, QuantityRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -55,7 +57,7 @@ fn opponents_attacked_this_turn_counts_declared_defender() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
             },
         },
@@ -85,7 +87,7 @@ fn opponents_attacked_this_turn_is_zero_without_combat() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
             },
         },
@@ -137,7 +139,7 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
             },
         },
@@ -186,7 +188,7 @@ fn opponents_attacked_this_combat_counts_current_combat_defenders() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisCombat,
+                    scope: CombatHistoryScope::ThisCombat,
                 },
             },
         },
@@ -241,7 +243,7 @@ fn opponents_attacked_this_combat_survives_attackers_leaving_combat() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisCombat,
+                    scope: CombatHistoryScope::ThisCombat,
                 },
             },
         },
@@ -294,7 +296,7 @@ fn opponents_attacked_this_combat_counts_eliminated_defender() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisCombat,
+                    scope: CombatHistoryScope::ThisCombat,
                 },
             },
         },
@@ -357,7 +359,7 @@ fn opponents_attacked_this_turn_excludes_eliminated_defender() {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
             },
         },

@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCost, QuantityExpr, TargetFilter};
+use crate::types::ability::{AbilityCost, QuantityExpr, SacrificeCost, TargetFilter};
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 use super::filter::translate_filter;
@@ -31,7 +31,7 @@ pub(crate) fn translate_cost(cost_str: &str) -> Result<AbilityCost, ForgeTransla
                     .strip_prefix("Sac<")
                     .and_then(|s| s.strip_suffix('>'))
                     .unwrap_or("");
-                let (count, filter) = parse_count_filter(inner)?;
+                let (_, filter) = parse_count_filter(inner)?;
                 costs.push(AbilityCost::Sacrifice(SacrificeCost::count(filter, 1)));
             }
 
@@ -64,7 +64,9 @@ pub(crate) fn translate_cost(cost_str: &str) -> Result<AbilityCost, ForgeTransla
                     Some(filter)
                 };
                 costs.push(AbilityCost::Discard {
-                    count,
+                    count: crate::types::ability::QuantityExpr::Fixed {
+                        value: count as i32,
+                    },
                     filter,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     self_scope: crate::types::ability::DiscardSelfScope::FromHand,

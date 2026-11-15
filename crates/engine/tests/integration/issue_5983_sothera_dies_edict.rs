@@ -106,6 +106,7 @@ fn push_sothera_dies_trigger(
             source_name: "Sothera, the Supervoid".into(),
             subject_match_count: None,
             die_result: None,
+        provenance: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);

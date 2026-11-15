@@ -18,23 +18,25 @@
 //!    rest-of-game trigger before its first upkeep ever arrived.
 //! 2. **Synthesized firing.** At the beginning of each of the controller's
 //!    upkeeps, [`epic_upkeep_trigger`] synthesizes an [`Effect::EpicCopy`]
-//!    triggered ability from the stored snapshot, fired through the normal
-//!    delayed-trigger path (`triggers::check_delayed_triggers`). Resolving that
-//!    body puts a copy of the spell onto the stack (CR 707.10).
+//!    triggered ability that names the stored snapshot by handle
+//!    ([`EpicEffectId`]), fired through the normal delayed-trigger path
+//!    (`triggers::check_delayed_triggers`). Resolving that body reads the
+//!    snapshot through [`GameState::epic_effect`] and puts a copy of the spell
+//!    onto the stack (CR 707.10).
 //!
 //! The copy keeps the snapshot's declared targets: CR 702.50a's "you may choose
 //! new targets" is an optional permission whose default — keeping the original
 //! (still-legal) targets — is itself a legal choice.
 
-use crate::game::effects::copy_spell::{open_copy_retarget_choice, set_resolved_source_recursive};
+use crate::game::effects::copy_spell::set_resolved_source_recursive;
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility,
+    DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, DelayedTrigger, EpicEffect, GameState, StackEntry, StackEntryKind,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{EpicEffectId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -53,45 +55,52 @@ pub(crate) fn is_epic_locked(state: &GameState, player: PlayerId) -> bool {
 /// [`EpicEffect`]: its presence locks `controller` out of casting (CR 702.50b)
 /// and drives the recurring upkeep copies (CR 702.50a). `source_id` is the
 /// resolved Epic card whose characteristics each copy clones; `spell_ability`
-/// is the snapshot each copy resolves.
+/// is the snapshot each copy resolves. Returns the handle naming the new
+/// entry: its position in the append-only `epic_effects`.
 pub(crate) fn arm_epic(
     state: &mut GameState,
     source_id: ObjectId,
     controller: PlayerId,
     spell_ability: ResolvedAbility,
-) {
+) -> EpicEffectId {
+    let id = EpicEffectId(state.epic_effects.len() as u64);
     state.epic_effects.push(EpicEffect {
         controller,
         prototype_id: source_id,
         spell: Box::new(spell_ability),
     });
+    id
 }
 
 /// CR 702.50a: Build the recurring upkeep trigger for `effect`, fired through
 /// the normal delayed-trigger path. Keyed on the controller's upkeep with an
-/// [`Effect::EpicCopy`] body carrying a fresh clone of the stored snapshot.
+/// [`Effect::EpicCopy`] body naming the stored snapshot by handle (`epic`).
 /// The returned trigger is synthesized on demand each upkeep — it is never
 /// stored in `delayed_triggers`, so cleanup can't purge it.
-pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
+pub(crate) fn epic_upkeep_trigger(epic: EpicEffectId, effect: &EpicEffect) -> DelayedTrigger {
     DelayedTrigger {
         condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: effect.controller,
             gate: crate::types::ability::TurnGate::None,
+            // Already-concrete `player` (synthesized fresh each upkeep, never
+            // passed through the placeholder-resolving `resolve()` path), so
+            // `binding` is unread here; `Controller` is the accurate label.
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         },
-        ability: ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: effect.spell.clone(),
-            },
+        ability: Box::new(ResolvedAbility::new(
+            Effect::EpicCopy { epic },
             Vec::new(),
             effect.prototype_id,
             effect.controller,
-        ),
+        )),
         controller: effect.controller,
         source_id: effect.prototype_id,
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        kind: DelayedTriggerKind::Ordinary,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }
 
@@ -103,9 +112,17 @@ pub(crate) fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Effect::EpicCopy { spell } = &ability.effect else {
+    let Effect::EpicCopy { epic } = &ability.effect else {
         return Err(EffectError::MissingParam("EpicCopy".to_string()));
     };
+    // CR 702.50a: the handle names the stored snapshot; a miss is an invariant
+    // violation (live play and decode only ever produce in-range handles).
+    let spell = state
+        .epic_effect(*epic)
+        .map(|effect| effect.spell.clone())
+        .ok_or_else(|| {
+            EffectError::InvalidParam(format!("EpicCopy names no Epic effect: {epic:?}"))
+        })?;
 
     // The resolved Epic card supplies the copy's characteristics. If it has
     // left the game (no last-known object), the copy can't be built — resolve
@@ -128,6 +145,8 @@ pub(crate) fn resolve(
     // Epic ("except for its epic ability") so the copy's own resolution does
     // not arm a second Epic effect. The copy is a token spell on the stack.
     let mut copy_obj = source_obj.clone();
+    // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
+    crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
     copy_obj.id = copy_id;
     copy_obj.controller = controller;
     // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
@@ -135,27 +154,36 @@ pub(crate) fn resolve(
     copy_obj.is_token = true;
     copy_obj.additional_cost_payment_count = 0;
     copy_obj.kickers_paid.clear();
+    // CR 707.10 (+ CR 702.50a context: the upkeep copy is put on the stack,
+    // not cast): no mana was spent on the copy — reset the cast-payment
+    // stamps inherited from the original Epic cast.
+    copy_obj.clear_cast_payment_stamps();
     copy_obj.keywords.retain(|k| !matches!(k, Keyword::Epic));
     let card_id = copy_obj.card_id;
     state.objects.insert(copy_id, copy_obj);
 
     // CR 707.10: the copy resolves the snapshotted ability, re-sourced to the
     // copy so every SelfRef resolves to the copy rather than the original.
-    let mut copy_ability = (**spell).clone();
+    let mut copy_ability = *spell;
     set_resolved_source_recursive(&mut copy_ability, copy_id);
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(copy_ability.clone()),
-            casting_variant: CastingVariant::default(),
-            actual_mana_spent: 0,
+    // CR 707.10 + CR 702.50a: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(Box::new(copy_ability.clone())),
+                casting_variant: CastingVariant::default(),
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        None,
+        events,
+    );
 
     // CR 707.10: a copy is put on the stack but not cast — `SpellCopied` (not
     // `SpellCast`) so copy-sensitive triggers fire without cast-only triggers.
@@ -169,17 +197,14 @@ pub(crate) fn resolve(
     // CR 702.50a + CR 707.10c: Epic grants "you may choose new targets for the
     // copy." Reuse the same CopyRetarget choice path as other spell-copy
     // effects so the player may keep the old targets or choose legal new ones.
-    let copy_targets = copy_ability.targets.clone();
-    if !copy_targets.is_empty() {
-        open_copy_retarget_choice(
-            state,
-            controller,
-            copy_id,
-            &copy_targets,
-            &copy_ability,
-            EffectKind::EpicCopy,
-            ability.source_id,
-        );
+    // B5: the chain census decides whether there is anything to choose.
+    if crate::game::effects::copy_choice::open_copy_retarget_walk(
+        state,
+        controller,
+        copy_id,
+        EffectKind::EpicCopy,
+        ability.source_id,
+    ) {
         // EffectResolved is deferred until the retarget choice completes.
         return Ok(());
     }
@@ -190,4 +215,86 @@ pub(crate) fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    /// CR 707.10 + CR 702.50a (issue #5943): the upkeep Epic copy is put on
+    /// the stack, not cast — it must carry NO cast-payment record even though
+    /// it clones the original Epic card's object. The prototype keeps its own
+    /// record (reach-guard).
+    #[test]
+    fn epic_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let prototype = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Epic Prototype".to_string(),
+            Zone::Graveyard,
+        );
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&prototype].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: prototype,
+                    lki,
+                },
+            );
+        }
+
+        let inner = ResolvedAbility::new(
+            Effect::unimplemented("epic test spell", "epic test spell body"),
+            vec![],
+            prototype,
+            owner,
+        );
+        let epic = arm_epic(&mut state, prototype, owner, inner);
+        let ability = ResolvedAbility::new(Effect::EpicCopy { epic }, vec![], prototype, owner);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("EpicCopy resolves");
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, prototype, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the prototype keeps its payment record.
+        assert_eq!(
+            state.objects[&prototype].mana_spent_to_cast_amount, 2,
+            "prototype keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&prototype].phyrexian_life_paid, 1,
+            "prototype keeps its own Phyrexian life-payment record"
+        );
+    }
 }

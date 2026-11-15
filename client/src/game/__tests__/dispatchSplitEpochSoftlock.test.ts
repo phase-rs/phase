@@ -114,12 +114,11 @@ function seedStore(adapter: EngineAdapter): void {
 
 const baseAdapter = (): Pick<
   EngineAdapter,
-  "initialize" | "initializeGame" | "restoreState" | "getAiAction" | "estimateBracket" | "dispose"
+  "initialize" | "initializeGame" | "restoreState" | "estimateBracket" | "dispose"
 > => ({
   initialize: vi.fn().mockResolvedValue(undefined),
   initializeGame: vi.fn().mockResolvedValue({ events: [] } as SubmitResult),
   restoreState: vi.fn(),
-  getAiAction: vi.fn().mockReturnValue(null),
   estimateBracket: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
 });

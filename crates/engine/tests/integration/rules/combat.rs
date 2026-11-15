@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
+use engine::types::ability::{DelayedTriggerCondition, Effect};
 
 fn tap_land_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
     engine::game::mana_sources::activatable_mana_actions_for_player(
@@ -233,8 +234,6 @@ fn becomes_blocked_by_creature_fires_for_each_blocker() {
 /// `trigger_blocks_or_becomes_blocked_venom_parses_delayed_destroy`.)
 #[test]
 fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
-    use engine::types::ability::{DelayedTriggerCondition, Effect};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario
@@ -311,6 +310,227 @@ fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
         Some(Zone::Battlefield),
         "the Venom host (attacker) must survive — Venom destroys the OTHER creature, \
          never its own host"
+    );
+}
+
+/// CR 509.1h + CR 509.1 + CR 603.7c + CR 608.2c: Tangle Asp's
+/// "Whenever this creature blocks or becomes blocked by a creature, destroy that creature at end of combat."
+/// When Tangle Asp BLOCKS an attacking creature, the delayed trigger created must target and destroy
+/// the attacking creature it blocked, and Tangle Asp must survive.
+#[test]
+fn tangle_asp_destroys_creature_it_blocks_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacking Bear", 1, 5).id();
+    let asp = scenario
+        .add_creature(P1, "Tangle Asp", 1, 5)
+        .from_oracle_text(
+            "Whenever this creature blocks or becomes blocked by a creature, \
+             destroy that creature at end of combat.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Bear should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(asp, attacker)],
+        })
+        .expect("Tangle Asp should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_destroy = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(&dt.ability.effect, Effect::Destroy { .. })
+    });
+    assert!(
+        scheduled_destroy,
+        "Tangle Asp must schedule an end-of-combat destroy when blocking; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    // Advance through combat damage into End of Combat so the delayed trigger fires.
+    for _ in 0..40 {
+        if runner.state().objects[&attacker].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&attacker).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the attacking creature blocked by Tangle Asp must be destroyed at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&asp).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Tangle Asp must survive — it destroys the creature it blocked, not itself"
+    );
+}
+
+/// CR 509.1 + CR 603.7c + CR 608.2c: Wall of Tears
+/// "Defender (This creature can't attack.)
+/// Whenever this creature blocks a creature, return that creature to its owner's hand at end of combat."
+/// When Wall of Tears blocks an attacking creature, the delayed trigger created must target and return
+/// the attacking creature it blocked to its owner's hand, and Wall of Tears must remain on the battlefield.
+#[test]
+fn wall_of_tears_returns_blocked_creature_to_hand_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacking Bear", 1, 5).id();
+    let wall = scenario
+        .add_creature(P1, "Wall of Tears", 0, 4)
+        .from_oracle_text(
+            "Defender (This creature can’t attack.)\n\
+             Whenever this creature blocks a creature, \
+             return that creature to its owner’s hand at end of combat.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Bear should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(wall, attacker)],
+        })
+        .expect("Wall of Tears should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_bounce = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(
+            &dt.ability.effect,
+            Effect::Bounce { .. }
+                | Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    ..
+                }
+        )
+    });
+    assert!(
+        scheduled_bounce,
+        "Wall of Tears must schedule an end-of-combat bounce when blocking; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    // Advance through combat damage into End of Combat so the delayed trigger fires.
+    for _ in 0..40 {
+        if runner.state().objects[&attacker].zone == Zone::Hand {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&attacker).map(|o| o.zone),
+        Some(Zone::Hand),
+        "the attacking creature blocked by Wall of Tears must be returned to hand at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&wall).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Wall of Tears must remain on the battlefield — it returns the creature it blocked, not itself"
+    );
+}
+
+/// CR 509.1h + CR 509.3d + CR 603.7c + CR 608.2c: Tangle Asp's
+/// "Whenever this creature blocks or becomes blocked by a creature, destroy that creature at end of combat."
+/// When Tangle Asp ATTACKS and is blocked by a creature, the delayed trigger created must target and destroy
+/// the blocking creature, and Tangle Asp must survive.
+#[test]
+fn tangle_asp_destroys_creature_that_blocks_it_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let asp = scenario
+        .add_creature(P0, "Tangle Asp", 1, 5)
+        .from_oracle_text(
+            "Whenever this creature blocks or becomes blocked by a creature, \
+             destroy that creature at end of combat.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Blocking Bear", 1, 5).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(asp, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Tangle Asp should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, asp)],
+        })
+        .expect("Bear should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_destroy = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(&dt.ability.effect, Effect::Destroy { .. })
+    });
+    assert!(
+        scheduled_destroy,
+        "Tangle Asp must schedule an end-of-combat destroy when blocked; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    for _ in 0..40 {
+        if runner.state().objects[&blocker].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the blocking creature that blocked Tangle Asp must be destroyed at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&asp).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Tangle Asp must survive — it destroys the creature that blocked it, not itself"
     );
 }
 
@@ -815,6 +1035,241 @@ fn add_sphere_of_safety(scenario: &mut GameScenario, player: PlayerId) -> Object
     let mut builder = scenario.add_creature(player, "Sphere of Safety", 2, 2);
     builder.as_enchantment().with_static_definition(def);
     builder.id()
+}
+
+/// Build the exact static ability of Onakke Oathkeeper. The test fixture uses a
+/// creature shell because its combat-tax behavior, rather than printed P/T, is
+/// the behavior under test.
+fn add_onakke_oathkeeper(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    let def = parse_static_line(
+        "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.",
+    )
+    .expect("Onakke Oathkeeper should parse");
+    let mut builder = scenario.add_creature(player, "Onakke Oathkeeper", 2, 2);
+    builder.with_static_definition(def);
+    builder.id()
+}
+
+/// Park a three-player combat at declaration with two legal planeswalker
+/// targets: one controlled by Onakke Oathkeeper's controller (P1), and one
+/// controlled by a different defending player (P2).
+fn build_3p_onakke_oathkeeper_scenario(
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
+    const P2: PlayerId = PlayerId(2);
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let oathkeeper = add_onakke_oathkeeper(&mut scenario, P1);
+    let protected = scenario
+        .add_creature(P1, "Protected Jace", 2, 2)
+        .as_planeswalker_with_loyalty("Jace", 4)
+        .id();
+    let other = scenario
+        .add_creature(P2, "Other Chandra", 2, 2)
+        .as_planeswalker_with_loyalty("Chandra", 4)
+        .id();
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let second_attacker = scenario.add_creature(P0, "Wolf", 2, 2).id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker, second_attacker],
+        valid_attack_targets: vec![
+            AttackTarget::Player(P1),
+            AttackTarget::Planeswalker(protected),
+            AttackTarget::Planeswalker(other),
+        ],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    (
+        runner,
+        oathkeeper,
+        attacker,
+        second_attacker,
+        protected,
+        other,
+    )
+}
+
+/// CR 506.3 + CR 508.1b + CR 508.1h: Onakke Oathkeeper taxes an attack at a
+/// planeswalker controlled by its controller, but not an attack at that player
+/// or a planeswalker controlled by another player. The three assertions drive
+/// the real declaration pipeline and fail if either the type or controller
+/// component of the parsed `Planeswalker` scope is lost.
+#[test]
+fn onakke_oathkeeper_taxes_only_planeswalkers_controlled_by_its_controller() {
+    let (mut protected_runner, _, attacker, _, protected, _) =
+        build_3p_onakke_oathkeeper_scenario();
+    protected_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(protected))],
+            bands: vec![],
+        })
+        .expect("attack at Onakke controller's planeswalker should enter tax payment");
+    match &protected_runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player,
+            context,
+            total_cost,
+            per_creature,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(matches!(context, CombatTaxContext::Attacking));
+            assert_eq!(total_cost.mana_value(), 1);
+            assert_eq!(per_creature.len(), 1);
+        }
+        other => panic!("expected CombatTaxPayment for protected planeswalker, got {other:?}"),
+    }
+
+    let (mut player_runner, _, attacker, _, _, _) = build_3p_onakke_oathkeeper_scenario();
+    player_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("attack at Onakke controller should be legal without a tax");
+    assert!(
+        !matches!(
+            player_runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "Onakke Oathkeeper must not tax attacks at its controller directly",
+    );
+
+    let (mut other_runner, _, attacker, _, _, other) = build_3p_onakke_oathkeeper_scenario();
+    other_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("attack at another player's planeswalker should be legal without a tax");
+    assert!(
+        !matches!(
+            other_runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "Onakke Oathkeeper must not tax planeswalkers its controller does not control",
+    );
+}
+
+/// CR 508.1h: the relative clause counts every creature that controller has
+/// attacking the protected planeswalker. Its defended-player provenance is
+/// live while the source remains on the battlefield, then disappears when the
+/// source leaves.
+#[test]
+fn onakke_oathkeeper_scales_per_attacker_and_tracks_live_source_controller() {
+    const P2: PlayerId = PlayerId(2);
+    let (mut runner, _oathkeeper, attacker, second_attacker, protected, _other) =
+        build_3p_onakke_oathkeeper_scenario();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker, AttackTarget::Planeswalker(protected)),
+                (second_attacker, AttackTarget::Planeswalker(protected)),
+            ],
+            bands: vec![],
+        })
+        .expect("two protected-planeswalker attackers should enter tax payment");
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(
+                total_cost.mana_value(),
+                2,
+                "two attackers scale {{1}} to {{2}}"
+            );
+        }
+        other => panic!("expected CombatTaxPayment for two attackers, got {other:?}"),
+    }
+
+    // Start a fresh declaration for the provenance assertions: the first
+    // declaration has intentionally committed two attackers to its tax window.
+    let (mut runner, oathkeeper, attacker, _, _, other) = build_3p_onakke_oathkeeper_scenario();
+
+    // A static source's controller is queried live. Give the Oathkeeper to P2
+    // through the production Layer 2 control-change path: P1 is now untaxed
+    // directly, while P2's planeswalker is protected.
+    runner.state_mut().add_transient_continuous_effect(
+        oathkeeper,
+        P2,
+        engine::types::ability::Duration::Permanent,
+        engine::types::ability::TargetFilter::SpecificObject { id: oathkeeper },
+        vec![engine::types::ability::ContinuousModification::ChangeController],
+        None,
+    );
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("P1 is no longer the static source controller");
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("P2's planeswalker should now be taxed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), oathkeeper, Zone::Graveyard, &mut events);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("removing Oathkeeper removes its static tax");
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
 }
 
 fn add_enchantment(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
@@ -1538,13 +1993,13 @@ fn tap_all_p0_lands(runner: &mut GameRunner) {
     }
 }
 
-/// CR 508.1d flagship: two INCOMPATIBLE `MustAttackPlayer` requirements on one
+/// CR 508.1d flagship: two INCOMPATIBLE `MustAttackDefender` requirements on one
 /// creature (it can attack only one player). The maximum attainable requirement
 /// count is 1, so a declaration attacking one required player is legal even
 /// though the other requirement is unmet — this is exactly the incompatible-
 /// requirements bug the CR 508.1d solver fixes.
 ///
-/// Revert guard: the old validator required EVERY `MustAttackPlayer` target
+/// Revert guard: the old validator required EVERY `MustAttackDefender` target
 /// individually, so attacking only P1 was rejected (P2's lure unmet). Reverting
 /// `score >= max_no_payment` flips `attack_one_is_legal` back to an error.
 #[test]
@@ -1553,11 +2008,11 @@ fn incompatible_must_attack_player_accepts_max_score_declaration() {
         let mut scenario = GameScenario::new_n_player(3, 42);
         let attacker = {
             let mut b = scenario.add_creature(P0, "Doubly Lured Bear", 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P2,
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P2.into(),
             }));
             b.id()
         };
@@ -2028,7 +2483,7 @@ fn legacy_object_incarnation_ref_deserializes_to_sentinel() {
 
 /// CR 508.1d (final sentence): "If a creature can't attack unless a player pays a
 /// cost, that player is not required to pay that cost." A creature whose only way
-/// to satisfy its `MustAttackPlayer` lure is a TAXED attack does not raise the
+/// to satisfy its `MustAttackDefender` lure is a TAXED attack does not raise the
 /// no-payment maximum — so declaring NO attackers is legal (the player is never
 /// forced to pay the tax to satisfy the requirement).
 ///
@@ -2046,8 +2501,8 @@ fn must_attack_whose_only_target_is_taxed_does_not_force_payment() {
         // and it is taxed, so no FREE declaration satisfies the lure.
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
             b.id()
         };
@@ -2251,8 +2706,8 @@ fn shared_scaled_tax_taxes_each_attacker_independently() {
         let _sphere = add_sphere_of_safety(&mut scenario, P1);
         let lure = |scenario: &mut GameScenario, name: &str| {
             let mut b = scenario.add_creature(P0, name, 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
             b.id()
         };
@@ -2461,6 +2916,7 @@ fn temporary_attack_prohibition_bars_only_the_protected_player() {
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                    protected_player: None,
                 },
             });
         park_3p_declare(&mut runner, &[attacker]);

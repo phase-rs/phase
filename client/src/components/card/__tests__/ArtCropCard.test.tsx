@@ -7,7 +7,14 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { ArtCropCard } from "../ArtCropCard.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
   useCardImage: vi.fn(() => ({ src: null, isLoading: true })),
+}));
+
+const localizedNames = vi.hoisted(() => new Map<string, string>());
+
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
 }));
 
 const mockUseCardImage = vi.mocked(useCardImage);
@@ -66,6 +73,7 @@ function transformedPermanent(): GameObject {
 describe("ArtCropCard", () => {
   beforeEach(() => {
     const permanent = transformedPermanent();
+    localizedNames.clear();
     mockUseCardImage.mockClear();
     useGameStore.setState({
       gameState: {
@@ -118,6 +126,9 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [token.id]: token },
+        // The counter badge is engine-projected, so the frame must carry the projection to have
+        // a badge at all — this site renders `counter_display`, never `obj.counters`.
+        derived: { counter_display: { [token.id]: { pills: [{ counter: "p1p1", count: 1 }] } } },
       } as never,
     });
 
@@ -144,12 +155,10 @@ describe("ArtCropCard", () => {
     expect(screen.getAllByText("Banana").length).toBeGreaterThan(0);
   });
 
-  it("falls back to the tile when resolved art fails to load", () => {
-    // A URL that resolves but 404s (future-dated set, stale token image ref).
-    // Without an onError handler the default renderer would show the browser's
-    // broken-image glyph — the same defect issue #6156 reports.
+  it("localizes the visible battlefield name without changing the art lookup key", () => {
+    localizedNames.set("Kuruk, the Mastodon", "クルーク・巨象");
     mockUseCardImage.mockReturnValue({
-      src: "https://example.invalid/kuruk.png",
+      src: null,
       isLoading: false,
       isRotated: false,
       isFlip: false,
@@ -157,9 +166,47 @@ describe("ArtCropCard", () => {
 
     render(<ArtCropCard objectId={101} />);
 
+    expect(screen.getAllByText("クルーク・巨象").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Kuruk, the Mastodon")).toBeNull();
+    expect(mockUseCardImage).toHaveBeenCalledWith(
+      "The Legend of Kuruk",
+      expect.objectContaining({ faceIndex: 1 }),
+    );
+  });
+
+  it("falls back to the tile when resolved art fails to load", () => {
+    // A URL that resolves but 404s (future-dated set, stale token image ref).
+    // Without an onError handler the default renderer would show the browser's
+    // broken-image glyph — the same defect issue #6156 reports.
+    const advanceFailedSource = vi.fn();
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/kuruk.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      advanceFailedSource,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
     fireEvent.error(img!);
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/kuruk.png");
+
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...transformedPermanent(), timestamp: 2 } },
+        } as never,
+      });
+    });
 
     expect(screen.getByRole("img", { name: "Kuruk, the Mastodon" })).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
@@ -168,19 +215,20 @@ describe("ArtCropCard", () => {
   });
 
   it("re-tries the art when the source changes after a load failure", () => {
-    // Mirrors CardImage's equivalent. Without the reset effect a permanent
-    // whose front-face art 404s would stay latched on the text tile across a
-    // DFC transform forever, even once a loadable face arrives.
+    // Mirrors CardImage's equivalent. A permanent whose front-face source
+    // fails must still render the new source supplied after a DFC transform.
+    const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "https://example.invalid/front.png",
       isLoading: false,
       isRotated: false,
       isFlip: false,
+      advanceFailedSource,
     });
 
     render(<ArtCropCard objectId={101} />);
     fireEvent.error(document.querySelector("img")!);
-    expect(document.querySelector("img")).toBeNull();
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/front.png");
 
     // ArtCropCard is memo()'d on `objectId`, so re-rendering with identical
     // props bails out before the hook is re-read. Push a fresh object identity
@@ -239,7 +287,7 @@ describe("ArtCropCard", () => {
 
     render(<ArtCropCard objectId={101} />);
 
-    expect(screen.getByAltText("Face-down card")).toBeInTheDocument();
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
     expect(mockUseCardImage).toHaveBeenCalledWith(
       "",
       expect.objectContaining({
@@ -248,6 +296,92 @@ describe("ArtCropCard", () => {
         faceName: undefined,
       }),
     );
+  });
+
+  it("backs the tile of the viewer's OWN face-down permanent with its marker (#7547)", () => {
+    // The engine blanks a face-down permanent's live face (CR 708.2a), so the
+    // TILE always shows the cause marker — the controller's peek lives in the
+    // hover preview, not here. The stored real face must not raise the DFC
+    // badge either: a face-down permanent cannot be a DFC (CR 712.16).
+    mockUseCardImage.mockReturnValue({
+      src: "morph-marker.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      face_down_cause: "Morph" as const,
+      display_visible_to_viewer: true,
+      name: "",
+      transformed: false,
+      back_face: { name: "Hooded Hydra", layout_kind: null } as never,
+    };
+
+    useGameStore.setState({
+      gameState: { objects: { [permanent.id]: permanent } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByAltText("Morph")).toHaveAttribute("src", "morph-marker.png");
+    expect(screen.queryByText("DFC")).toBeNull();
+  });
+
+  it("falls back to the card back when face-down marker art fails to load", () => {
+    // ArtCropCard is the default battlefield renderer. Keep its marker failure
+    // path covered separately from CardImage: it must advance the hook-owned
+    // source chain and never leave a face-down permanent as a broken image.
+    const advanceFailedSource = vi.fn();
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      advanceFailedSource,
+    });
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      face_down_cause: "Manifest" as const,
+      transformed: false,
+      back_face: null,
+      color: [],
+      base_color: [],
+    };
+    useGameStore.setState({
+      gameState: { objects: { [permanent.id]: permanent } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    const marker = screen.getByAltText("Manifest");
+    expect(marker).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+
+    fireEvent.error(marker);
+
+    expect(advanceFailedSource).toHaveBeenCalledWith(
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...permanent, timestamp: 2 } },
+        } as never,
+      });
+    });
+
+    expect(screen.getByAltText("Card back")).toHaveAttribute("src", "card-back.png");
   });
 
   it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {
@@ -320,7 +454,11 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }] },
+          },
+        },
       } as never,
     });
 
@@ -331,13 +469,39 @@ describe("ArtCropCard", () => {
     expect(screen.queryByText("2")).not.toBeInTheDocument();
   });
 
+  // CR 122.1: a ZERO-count unbounded row is a shape the engine really emits — the unbounded pass
+  // of `counter_display_views` publishes its live count with no zero filter (only the finite pass
+  // runs `positive_counter_entries`). That is the `0 → 1` case, so it must still render as ∞; a
+  // `count > 0` filter over the projected rows here would silently delete real ∞ badges.
+  it("renders ∞ for a zero-count unbounded counter (CR 122.1 art-crop mode)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 0, magnitude: "Unbounded" }] },
+          },
+        },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+  });
+
   it("renders the finite count when the counter is NOT marked unbounded (discriminator)", () => {
     mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
     const permanent = pentadWithCharge();
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: {} },
+        // `magnitude` omitted exactly as the engine omits the serde default.
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
       } as never,
     });
 
@@ -356,7 +520,11 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }] },
+          },
+        },
       } as never,
     });
 
@@ -373,7 +541,10 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: {} },
+        // `magnitude` omitted exactly as the engine omits the serde default.
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
       } as never,
     });
 
@@ -381,5 +552,42 @@ describe("ArtCropCard", () => {
 
     expect(screen.getByText(/2 \S+ counters/i)).toBeInTheDocument();
     expect(screen.queryByText(/∞ \S+ counters/i)).not.toBeInTheDocument();
+  });
+
+  // THE NO-FALLBACK MATCHED PAIR. `counter_display` is the SINGLE authority: an object carrying
+  // real counters with no projection entry renders NO badge. This is what catches this render
+  // site re-introducing `Object.entries(obj.counters)`, and it is worthless without its positive
+  // twin — alone it would also pass on a component that rendered nothing at all.
+  it("renders no counter badge for an object with counters but no projection entry", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {}, // a frame that arrived without `derived.counter_display`
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(screen.queryByText("∞")).not.toBeInTheDocument();
+  });
+
+  it("renders the badge for that SAME object once the projection carries it", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
   });
 });

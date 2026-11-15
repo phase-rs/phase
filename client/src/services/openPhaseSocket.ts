@@ -1,9 +1,22 @@
 import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  MIN_SUPPORTED_SERVER_PROTOCOL,
+  LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  serverProtocolRejection,
+  type ProtocolSurface,
   type ServerInfo,
 } from "../adapter/ws-adapter";
+import { supportsGzipEnvelope, type WireFormat } from "../network/wireEnvelope";
+import { authorizeLanServer, canUseLanBridge, initializeLanCapabilities, isLanEndpoint } from "./lan";
+import { NativeEngineSocket } from "./nativeEngineSocket";
+import { GzipEnvelopeSocket } from "./gzipEnvelopeSocket";
+import {
+  STATE_CODEC_V1,
+  StateCodecSocket,
+  type StateCodecBootstrap,
+  type StateCodecName,
+  type StateCodecRecoveryNotice,
+} from "./stateCodecSocket";
+import type { StateCodecSession } from "../adapter/state-codec-runtime";
 
 /**
  * Result of a successful handshake with `phase-server`. Wraps the live
@@ -14,7 +27,13 @@ import {
 export interface PhaseSocketTransport {
   readonly readyState: number;
   onopen: ((event: Event) => void) | null;
-  onmessage: ((event: MessageEvent<string>) => void) | null;
+  /**
+   * The owning application returns true only after committing this message's
+   * snapshot. A codec recovery Full requires that synchronous receipt; an old
+   * accepted bootstrap or an observer's return value cannot authorize it.
+   * Ordinary delivery and native WebSockets ignore the return value.
+   */
+  onmessage: ((event: MessageEvent<string>) => boolean | void) | null;
   onerror: ((event: Event) => void) | null;
   onclose: ((event: CloseEvent) => void) | null;
   addEventListener(
@@ -22,18 +41,67 @@ export interface PhaseSocketTransport {
     listener: (event: CloseEvent) => void,
     options?: AddEventListenerOptions | boolean,
   ): void;
-  removeEventListener(type: "close", listener: (event: CloseEvent) => void): void;
+  addEventListener(
+    type: "message",
+    listener: (event: MessageEvent<string>) => void,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  removeEventListener(
+    type: "close",
+    listener: (event: CloseEvent) => void,
+    options?: EventListenerOptions | boolean,
+  ): void;
+  removeEventListener(type: "message", listener: (event: MessageEvent<string>) => void): void;
   send(data: string): void;
+  /**
+   * Optional ordered write receipt: resolves once `data` has been written to
+   * the underlying socket (after any encoding), rejects when that write fails
+   * or never happens. Resolution is final: the frame is on the wire even if the
+   * caller's `signal` aborts afterwards. Adapters use it to keep an incumbent
+   * transport until a candidate's setup frame is actually written, rather
+   * than only queued. A transport without this method writes synchronously
+   * within `send` (throwing on failure).
+   */
+  sendReceipt?(data: string, signal?: AbortSignal): Promise<void>;
   close(): void;
 }
 
 export type PhaseSocketFactory<T extends PhaseSocketTransport = PhaseSocketTransport> =
   (url: string) => T;
 
-export interface PhaseSocket<T extends PhaseSocketTransport = WebSocket> {
+export interface PhaseSocket<T extends PhaseSocketTransport = PhaseSocketTransport> {
   readonly ws: T;
   readonly serverInfo: ServerInfo;
   close(): void;
+}
+
+/**
+ * Writes a candidate's setup frame and reports whether it was written. The one
+ * owner of "was the setup frame written": both server adapters decide whether
+ * to retire their incumbent from this answer.
+ *
+ * `true` means the frame is on the wire, and stays `true` if `signal` aborts
+ * while the receipt is in flight or afterwards: a resolved receipt cannot be
+ * undone, and the server may already have replaced the seat's sender, so the
+ * caller must treat the setup as committed. `false` means it was not written
+ * (aborted first, socket not open, or the write failed). A transport without a
+ * receipt writes synchronously through `sendSync`.
+ */
+export async function writeSetupFrame(
+  socket: PhaseSocketTransport,
+  frame: unknown,
+  signal: AbortSignal | undefined,
+  sendSync: (frame: unknown, socket: PhaseSocketTransport) => boolean,
+): Promise<boolean> {
+  if (signal?.aborted === true) return false;
+  if (socket.sendReceipt === undefined) return sendSync(frame, socket);
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    await socket.sendReceipt(JSON.stringify(frame), signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
@@ -47,9 +115,52 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
   timeoutMs?: number;
   /**
    * Creates the transport used for the handshake. Omitted callers retain the
-   * browser's direct `new WebSocket(url)` behavior.
+   * default transport: desktop LAN IPC for supported local endpoints, otherwise
+   * the browser WebSocket. Explicit factories always take precedence.
    */
   socketFactory?: PhaseSocketFactory<T>;
+  /** Observe the raw transport, including failures before ServerHello. */
+  onSocketCreated?: (socket: PhaseSocketTransport) => void;
+  onFrameSent?: () => void;
+  /**
+   * Which protocol surface this socket will carry. Defaults to `"full"`, the
+   * conservative choice: a caller that has not thought about it gets the
+   * exact-match full-game window.
+   *
+   * Pass `"lobby"` ONLY for a socket that can never elicit a full-game reply.
+   * Sending `LobbyClientMessage` variants is necessary but NOT sufficient: a
+   * `Full` server answers `JoinGameWithPassword` and `CreateGameWithSettings`
+   * from its server-run game path with `SessionAttached`/`StateUpdate`, which
+   * are not `LobbyServerMessage` variants at all. Those two frames are gated in
+   * `brokerClient.ts` — `resolveGuestOver` refuses every `Full` server, and
+   * `openBrokerClient` accepts only `LobbyOnly` ones. Server-run hosting,
+   * joining, drafts and spectating each open their own socket and must keep the
+   * default.
+   */
+  surface?: ProtocolSurface;
+  /**
+   * Prepared StateCodecV1 decoder session, or a best-effort pending lease.
+   * Pending leases never delay dialing: only a lease ready at the first
+   * ServerHello can negotiate; a later lease is released without upgrading.
+   * Ownership transfers to `openPhaseSocket` on call, including pending leases.
+   * The helper releases unused leases on every failure/non-negotiation path,
+   * and transfers a negotiated lease to the codec transport.
+   * `null`/absent selects snapshot-only delivery.
+   */
+  stateCodecSession?: StateCodecSession | Promise<StateCodecSession | null> | null;
+  /**
+   * Ordered notification from the negotiated codec transport: recovery
+   * progress (`recovering`, `ready`) and, terminally, `failed` with its typed
+   * reason, published once before the close notification. Absent for snapshot
+   * sockets, which never report codec failures.
+   */
+  onStateCodecRecovery?: (state: StateCodecRecoveryNotice) => void;
+  /**
+   * Attachment-local application-bootstrap authority for the codec transport.
+   * Absence is treated as `"pending"`, which makes a rejection before
+   * GameStarted fatal instead of pretending the resync restored bootstrap.
+   */
+  stateCodecBootstrap?: () => StateCodecBootstrap;
 }
 
 export class HandshakeError extends Error {
@@ -80,7 +191,8 @@ export class HandshakeError extends Error {
  * Opens a WebSocket to `wsUrl`, waits for `ServerHello`, sends `ClientHello`,
  * and resolves with a ready-to-use `PhaseSocket`. Mode-agnostic: works for
  * both `Full` and `LobbyOnly` servers — callers that need to gate on mode
- * inspect `serverInfo.mode` themselves.
+ * inspect `serverInfo.mode` themselves. `opts.surface` selects which protocol
+ * window the handshake is held to; see {@link OpenOptions.surface}.
  *
  * Failure modes (all result in the returned promise rejecting with a
  * `HandshakeError` and the underlying socket being closed):
@@ -93,19 +205,102 @@ export class HandshakeError extends Error {
 export function openPhaseSocket(
   wsUrl: string,
   opts?: OpenOptions<WebSocket>,
-): Promise<PhaseSocket<WebSocket>>;
+): Promise<PhaseSocket<PhaseSocketTransport>>;
 export function openPhaseSocket<T extends PhaseSocketTransport>(
   wsUrl: string,
   opts: OpenOptions<T>,
-): Promise<PhaseSocket<T>>;
+): Promise<PhaseSocket<PhaseSocketTransport>>;
 export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
-  const { signal, timeoutMs = 5000 } = opts;
+  // This call owns both ready and pending leases. Preflight transfers that
+  // ownership to its recursive handshake; capability discovery ends readiness
+  // sampling, so every result arriving after that decision is closed.
+  let lease: StateCodecSession | null = null;
+  let pendingLease: Promise<StateCodecSession | null> | null = null;
+  let acceptingLease = true;
+  const offered = opts.stateCodecSession;
+  if (offered && "then" in offered) {
+    const pending = offered;
+    pendingLease = pending;
+    void pending.then((session) => {
+      // A LAN preflight may already have transferred this promise to the
+      // recursive handshake. Only its current owner may adopt or release it.
+      if (pendingLease !== pending) return;
+      pendingLease = null;
+      if (acceptingLease) lease = session;
+      else session?.close();
+    }, () => {
+      if (pendingLease === pending) pendingLease = null;
+    });
+  } else {
+    lease = offered ?? null;
+  }
+  const handOffLease = (): OpenOptions["stateCodecSession"] => {
+    const held = lease ?? pendingLease;
+    lease = null;
+    pendingLease = null;
+    acceptingLease = false;
+    return held;
+  };
+  const releaseLease = (): void => {
+    acceptingLease = false;
+    const held = lease;
+    lease = null;
+    held?.close();
+  };
+
+  if (!opts.socketFactory && isLanEndpoint(wsUrl)) {
+    return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
+      const { signal } = opts;
+      const onAbort = () => {
+        releaseLease();
+        reject(new HandshakeError("aborted", "Handshake aborted"));
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const preflight = async () => {
+        await initializeLanCapabilities();
+        if (signal?.aborted) return;
+        const useLanBridge = canUseLanBridge(wsUrl);
+        if (useLanBridge) await authorizeLanServer(wsUrl);
+        if (signal?.aborted) return;
+        // The handshake installs its own abort listener synchronously.
+        const handed = handOffLease();
+        try {
+          resolve(openPhaseSocket(wsUrl, {
+            ...opts,
+            stateCodecSession: handed,
+            socketFactory: (url) => useLanBridge
+              ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
+              : new WebSocket(url),
+          }));
+        } catch (error) {
+          if (handed && "then" in handed) {
+            void handed.then((session) => session?.close(), () => undefined);
+          } else {
+            handed?.close();
+          }
+          throw error;
+        }
+      };
+      void preflight().catch((error) => {
+        releaseLease();
+        reject(error);
+      }).finally(() => {
+        signal?.removeEventListener("abort", onAbort);
+      });
+    });
+  }
+  const { signal, timeoutMs = 5000, surface = "full" } = opts;
 
   return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
     if (signal?.aborted) {
+      releaseLease();
       reject(new HandshakeError("aborted", "Handshake aborted before start"));
       return;
     }
@@ -114,12 +309,21 @@ export function openPhaseSocket(
     try {
       ws = opts.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl);
     } catch (err) {
+      releaseLease();
       reject(
         new HandshakeError(
           "invalid_url",
           err instanceof Error ? err.message : String(err),
         ),
       );
+      return;
+    }
+    try {
+      opts.onSocketCreated?.(ws);
+    } catch (error) {
+      releaseLease();
+      ws.close();
+      reject(new HandshakeError("ws_error", error instanceof Error ? error.message : String(error)));
       return;
     }
 
@@ -133,6 +337,7 @@ export function openPhaseSocket(
 
     const timer = setTimeout(() => {
       settle(() => {
+        releaseLease();
         ws.close();
         reject(
           new HandshakeError(
@@ -148,6 +353,7 @@ export function openPhaseSocket(
         // Close synchronously so the caller cannot observe a half-open
         // socket after the promise rejects. Covered by the
         // `aborted signal closes the in-flight socket` unit test.
+        releaseLease();
         ws.close();
         reject(new HandshakeError("aborted", "Handshake aborted"));
       });
@@ -171,6 +377,7 @@ export function openPhaseSocket(
 
     ws.onerror = () => {
       settle(() => {
+        releaseLease();
         ws.close();
         reject(new HandshakeError("ws_error", "WebSocket error during handshake"));
       });
@@ -178,6 +385,7 @@ export function openPhaseSocket(
 
     ws.onclose = () => {
       settle(() => {
+        releaseLease();
         reject(
           new HandshakeError(
             "closed_before_hello",
@@ -211,66 +419,173 @@ export function openPhaseSocket(
         build_commit: string;
         protocol_version: number;
         mode: "Full" | "LobbyOnly";
+        lobby_protocol_version?: number;
         public_url?: string;
+        wire_formats?: WireFormat[];
+        heartbeat?: { ping_interval_ms?: unknown; silence_budget_ms?: unknown };
+        command_correlation?: unknown;
+        state_codecs?: unknown;
       };
       const info: ServerInfo = {
         version: data.server_version,
         buildCommit: data.build_commit,
         protocolVersion: data.protocol_version,
         mode: data.mode,
+        lobbyProtocolVersion: data.lobby_protocol_version,
         publicUrl: data.public_url,
+        wireFormats: data.wire_formats ?? [],
+        heartbeat: parseHeartbeat(data.heartbeat),
+        commandCorrelation: data.command_correlation === "CommandIdV1" ? "CommandIdV1" : undefined,
+        stateCodecs: parseStateCodecs(data.state_codecs),
       };
 
-      const minAcceptedProtocol =
-        info.mode === "LobbyOnly"
-          ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-          : MIN_SUPPORTED_SERVER_PROTOCOL;
-
-      // Accept any server in [minAcceptedProtocol, PROTOCOL_VERSION]. Full
-      // servers are current-only for breaking game protocol releases; LobbyOnly
-      // brokers keep a one-version rollout window because they do not carry
-      // game-state/action payloads.
-      if (
-        info.protocolVersion < minAcceptedProtocol ||
-        info.protocolVersion > PROTOCOL_VERSION
-      ) {
-        const reason =
-          info.protocolVersion < minAcceptedProtocol
-            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAcceptedProtocol}). Please wait for the lobby to finish rolling out.`
-            : `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
+      const rejection = serverProtocolRejection(info, surface);
+      if (rejection) {
         settle(() => {
+          releaseLease();
           ws.close();
-          reject(new HandshakeError("protocol_mismatch", reason, info));
+          reject(new HandshakeError("protocol_mismatch", rejection, info));
         });
         return;
       }
 
-      const clientProtocolVersion =
-        info.mode === "LobbyOnly" ? info.protocolVersion : PROTOCOL_VERSION;
+      const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+      const clientProtocolVersion = onLobbySurface
+        ? info.protocolVersion
+        : PROTOCOL_VERSION;
 
-      // Send our ClientHello back. For LobbyOnly brokers in the rollout
-      // window, echo the accepted broker protocol so an older deployed worker
-      // does not reject a newer local-dev client as a future protocol.
-      ws.send(
-        JSON.stringify({
-          type: "ClientHello",
-          data: {
-            client_version: __APP_VERSION__,
-            build_commit: __BUILD_HASH__,
-            protocol_version: clientProtocolVersion,
-          },
-        }),
-      );
+      // Send our ClientHello back.
+      //
+      // `protocol_version` echoes the server's own number on the lobby surface.
+      // `ClientHello` carries no surface field, so `HelloAcceptance::FullGame`
+      // in `crates/phase-server/src/main.rs` holds every socket a `Full` server
+      // accepts to `MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION` — the echo is
+      // therefore this client's only way to declare the socket lobby-only, and
+      // the one that reaches servers already deployed. Sound only because the
+      // caller keeps its side of {@link OpenOptions.surface} — a `Full` server
+      // will still answer a game frame sent over this socket.
+      //
+      // `lobby_protocol_version` is always our own: a server that understands
+      // it gates on that instead, which is what decouples the lobby handshake
+      // from full-game churn. Servers that predate the field ignore it (nothing
+      // sets `deny_unknown_fields`).
+      const localWireFormats: WireFormat[] = supportsGzipEnvelope() && "binaryType" in ws
+        ? ["GzipEnvelopeV1"]
+        : [];
+      // Mutual opt-in needs all three: a prepared decoder, the full-game
+      // surface, and a Full server that offered the codec. Initial
+      // advertisement is not confirmation; the codec transport waits for the
+      // server's second, plain-text `ServerHello`.
+      acceptingLease = false;
+      const prepared = lease;
+      // The desktop shell's bridge carries text frames to its own wire contract
+      // and has no codec route: it never offers the codec, so its hello and
+      // framing stay exactly what they were before the codec existed.
+      const negotiatesCodec = prepared !== null
+        && !(ws instanceof NativeEngineSocket)
+        && surface === "full"
+        && info.mode === "Full"
+        && info.stateCodecs?.includes(STATE_CODEC_V1) === true;
 
       settle(() => {
-        resolve({
-          ws,
-          serverInfo: info,
-          close: () => ws.close(),
-        });
+        let outer: PhaseSocketTransport = ws;
+        try {
+          // Handshake handlers are already detached by `settle`. Install the
+          // wrappers synchronously, in wire order: raw → optional gzip → codec.
+          // The codec transport is outermost so it always sees decoded text.
+          const useGzipEnvelope = localWireFormats.includes("GzipEnvelopeV1")
+            && info.wireFormats?.includes("GzipEnvelopeV1") === true;
+          const gzip = useGzipEnvelope
+            ? new GzipEnvelopeSocket(ws, opts.onFrameSent)
+            : null;
+          const inner: PhaseSocketTransport = gzip ?? ws;
+          outer = inner;
+          if (negotiatesCodec && prepared) {
+            outer = new StateCodecSocket({
+              raw: ws,
+              inner,
+              session: prepared,
+              bootstrap: opts.stateCodecBootstrap ?? (() => "pending" as StateCodecBootstrap),
+              onRecovery: opts.onStateCodecRecovery,
+              onFrameSent: gzip ? undefined : opts.onFrameSent,
+              // Recovery shares the handshake timeout. Confirmation has no
+              // deadline: the server queues it before application frames.
+              // Heartbeat does not close on silence; an absent confirmation
+              // can wait until transport close.
+              recoveryTimeoutMs: timeoutMs,
+            });
+            // Ownership moved into the transport; it releases exactly once.
+            lease = null;
+          } else {
+            releaseLease();
+          }
+
+          try {
+            ws.send(
+              JSON.stringify({
+                type: "ClientHello",
+                data: {
+                  client_version: __APP_VERSION__,
+                  build_commit: __BUILD_HASH__,
+                  protocol_version: clientProtocolVersion,
+                  lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+                  wire_formats: localWireFormats,
+                  ...(negotiatesCodec ? { state_codecs: [STATE_CODEC_V1] } : {}),
+                },
+              }),
+            );
+          } catch (error) {
+            outer.close();
+            reject(
+              new HandshakeError(
+                "ws_error",
+                error instanceof Error ? error.message : String(error),
+              ),
+            );
+            return;
+          }
+          opts.onFrameSent?.();
+
+          resolve({
+            ws: outer,
+            serverInfo: info,
+            close: () => outer.close(),
+          });
+        } catch (error) {
+          releaseLease();
+          outer.close();
+          reject(
+            new HandshakeError(
+              "ws_error",
+              error instanceof Error ? error.message : String(error),
+            ),
+          );
+        }
       });
     };
   });
+}
+
+/**
+ * `state_codecs` is untrusted input: only the exact member this client
+ * implements counts, unknown names and malformed values are ignored. An empty
+ * result is reported as absent so `ServerInfo` stays inert for callers that
+ * never negotiated a codec.
+ */
+function parseStateCodecs(raw: unknown): StateCodecName[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const known = raw.filter((value): value is StateCodecName => value === STATE_CODEC_V1);
+  return known.length > 0 ? known : undefined;
+}
+
+/** A malformed contract is treated as absent: no advertised budget, no silence close. */
+function parseHeartbeat(
+  raw: { ping_interval_ms?: unknown; silence_budget_ms?: unknown } | undefined,
+): ServerInfo["heartbeat"] {
+  const positive = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+  if (!raw || !positive(raw.ping_interval_ms) || !positive(raw.silence_budget_ms)) return undefined;
+  return { pingIntervalMs: raw.ping_interval_ms, silenceBudgetMs: raw.silence_budget_ms };
 }
 
 // ── withReconnect ───────────────────────────────────────────────────────

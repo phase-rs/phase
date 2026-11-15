@@ -1,17 +1,21 @@
+use engine::ai_support::legal_actions_full;
 use engine::database::synthesis::synthesize_plot;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::AttachTarget;
 use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardPlayMode, CardSelectionMode,
     CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser,
-    ContinuousModification, DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp,
-    ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    ContinuousModification, DelayedTriggerCondition, DelayedTriggerLifetime, DigRestOrder,
+    DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp, ForEachCategoryAction,
+    IterationCategory, ManaContribution, ManaProduction, ManaSpendRestriction, ModalChoice,
+    OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
+    TargetSelectionMode, TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter,
+    TypedFilter, UnlessPayModifier, WheneverEventExpiry,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -19,18 +23,25 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    BatchCompletion, CastPaymentMode, CollectEvidenceResume, GameState,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind,
-    PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind, WaitingFor,
+    BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
+    LoopDetectionMode, ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode,
+    ManaAbilityResume, ManaChoice, PayCostKind, PendingCast, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingReplacement, PersistedGameState, StackEntryKind, WaitingFor,
+    ZoneDeliveryExileTracking,
 };
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::{ProposedEvent, ReplacementId};
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::ResolutionStateWire;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
+use serde_json::Value;
 use std::sync::Arc;
+
+const MODES: [LoopDetectionMode; 2] = [LoopDetectionMode::Off, LoopDetectionMode::Interactive];
 
 fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -38,6 +49,8 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -55,9 +68,57 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         ))
 }
 
-/// W-R1 (red first): a Dig rest pile sent to the library bottom is an
-/// effect-owned batch. Competing Library-destination `Moved` replacements must
-/// pause before the kept tracked set is published, then re-pause safely while
+/// CR 616.1: source-linked exile tracking is part of the parked zone-move
+/// request and must survive an optional replacement choice.
+#[test]
+fn exile_tracking_parked_resume_preserves_source_link() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Exile Source", 1, 1).id();
+    scenario
+        .add_creature(P0, "Optional Exile Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            redirect_moved_to(Zone::Exile, Zone::Graveyard)
+                .mode(ReplacementMode::Optional { decline: None }),
+        );
+    let exiled = scenario
+        .add_creature_to_graveyard(P0, "Tracked Card", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    let paused = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(exiled, Zone::Exile, source).track_exiled_by_source(),
+        &mut events,
+    );
+    assert!(paused);
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .map(|pending| pending.exile_tracking),
+        Some(ZoneDeliveryExileTracking::TrackBySource)
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline optional redirect");
+
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+    assert!(runner.state().exile_links.iter().any(|link| {
+        link.exiled_id == exiled
+            && link.source_id == source
+            && matches!(link.kind, ExileLinkKind::TrackedBySource)
+    }));
+}
+
+/// W-R1 (red first): a Dig rest pile sent to a zone other than the library
+/// (a card already in the library reordered within it is not a zone change,
+/// CR 701.20b) is an effect-owned batch. Competing hand-destination `Moved`
+/// replacements must pause before the kept tracked set is published, then re-pause safely while
 /// the rest pile drains.
 #[test]
 fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
@@ -79,12 +140,12 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -99,9 +160,13 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -180,8 +245,128 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("first attempted rest card is outside the parked suffix");
-    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
-    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Hand);
+}
+
+/// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
+/// kept set after a deferred rest-pile delivery; it must not publish the cards
+/// that merely completed the rest route.
+#[test]
+fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Zero-Kept Dig Source", 1, 1).id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Zero-Kept Rest A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Zero-Kept Rest B", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
+            .id(),
+        scenario
+            .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: true,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Hand),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
+            reveal: true,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Dig reaches its up-to selection");
+
+    let paused = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("an empty up-to selection reaches the rest-pile replacement choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let reparking = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first rest redirect reaches the remaining rest card");
+    assert!(matches!(
+        reparking.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    for redirect_source in redirect_sources {
+        let redirect_source = runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
+    }
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the remaining rest-pile delivery completes");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let redirected_rest = [rest_a, rest_b]
+        .into_iter()
+        .find(|id| {
+            matches!(
+                runner.state().objects[id].zone,
+                Zone::Graveyard | Zone::Exile
+            )
+        })
+        .expect("one rest-pile card must take the configured redirect");
+    let returned_rest = [rest_a, rest_b]
+        .into_iter()
+        .find(|id| runner.state().objects[id].zone == Zone::Hand)
+        .expect("the other rest-pile card must complete its hand placement");
+    assert_ne!(redirected_rest, returned_rest);
+    assert!(
+        runner.state().players[P0.0 as usize]
+            .hand
+            .contains(&returned_rest),
+        "the unredirected rest-pile card must be present in P0's hand"
+    );
+
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("the deferred Dig completion publishes a tracked set"),
+        )
+        .expect("the freshly-published Dig tracked set exists");
+    assert!(
+        tracked.is_empty(),
+        "the rest-pile delivery must not replace an empty kept selection"
+    );
 }
 
 /// W-R3 (red first): deterministic Dig's nonbattlefield kept batch must defer
@@ -229,8 +414,12 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -387,8 +576,12 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -443,8 +636,12 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -474,9 +671,10 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
     assert_eq!(mass_tracked, &vec![selected_a, selected_b]);
 }
 
-/// W-R2: A `RevealRestPile` already deferred behind a kept-card replacement can
-/// itself start a Library-bottom batch that re-pauses while draining. Its cleanup
-/// must survive both pause boundaries and publish exactly once at the true end.
+/// W-R2: A Dig's deferred completion can itself start a Library-bottom batch
+/// that re-pauses while draining. Its cleanup must survive both pause boundaries
+/// and publish exactly once at the true end, regardless of which completion
+/// carrier owns the kept-card delivery.
 #[test]
 fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     let mut scenario = GameScenario::new();
@@ -506,12 +704,12 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -526,9 +724,13 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -546,13 +748,19 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         kept_pause.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(matches!(
-        runner
-            .state()
-            .active_batch_delivery()
-            .and_then(|pending| pending.completion.as_ref()),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+    assert!(
+        matches!(
+            runner
+                .state()
+                .active_batch_delivery()
+                .and_then(|pending| pending.completion.as_ref()),
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Kept,
+                ..
+            })
+        ),
+        "the kept-card pause must retain a RevealRestPile completion for the deferred rest pile"
+    );
 
     let rest_pause = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -566,10 +774,16 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
     assert_eq!(first_rest_park.remaining.len(), 1);
-    assert!(matches!(
-        first_rest_park.completion.as_ref(),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+    assert!(
+        matches!(
+            first_rest_park.completion.as_ref(),
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Rest,
+                ..
+            })
+        ),
+        "the first rest redirect must retain the RevealRestPile completion"
+    );
     assert!(runner.state().chain_tracked_set_id.is_none());
 
     let reparking = runner
@@ -579,13 +793,19 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         reparking.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(matches!(
-        runner
-            .state()
-            .active_batch_delivery()
-            .and_then(|pending| pending.completion.as_ref()),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+    assert!(
+        matches!(
+            runner
+                .state()
+                .active_batch_delivery()
+                .and_then(|pending| pending.completion.as_ref()),
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Rest,
+                ..
+            })
+        ),
+        "the re-parked rest delivery must retain its RevealRestPile completion"
+    );
     assert!(runner.state().chain_tracked_set_id.is_none());
 
     for redirect_source in library_redirect_sources {
@@ -601,6 +821,13 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the final rest placement drains the deferred completion");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        matches!(
+            runner.state().objects[&kept].zone,
+            Zone::Graveyard | Zone::Exile
+        ),
+        "the kept battlefield entry must take one configured redirect"
+    );
     let tracked = runner
         .state()
         .tracked_object_sets
@@ -611,7 +838,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
                 .expect("the Dig completion publishes after the true batch end"),
         )
         .expect("the tracked set exists");
-    assert_eq!(tracked, &vec![kept]);
+    assert!(
+        tracked.is_empty(),
+        "the kept delivery was redirected away from the requested battlefield destination"
+    );
 }
 
 fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
@@ -682,6 +912,7 @@ fn redirect_moved_to_with_post_effect(
         .sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: engine::types::ability::ControllerRef::You,
             choice_type: ChoiceType::Labeled {
                 options: vec!["first".to_string(), "second".to_string()],
             },
@@ -760,18 +991,28 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
+        choice_player: None,
         library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
         candidate_count: 1,
         candidates: vec![],
+        kind: Default::default(),
+        last_applied_decides: false,
+        remember_identity: None,
     };
 }
 
@@ -855,6 +1096,7 @@ fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() 
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -933,6 +1175,7 @@ fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -1704,6 +1947,7 @@ fn count_two_sacrifice_cost_resumes_at_second_object_and_activates_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the count-two sacrifice activation");
 
@@ -1763,6 +2007,7 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the observed count-two sacrifice activation");
     let initial = runner
@@ -1809,6 +2054,103 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
 }
 
 #[test]
+fn target_activation_replacement_paused_sacrifice_stages_cost_triggers_until_commit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Sacrifice Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Targeted Sacrifice Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Targeted Sacrifice Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let target = scenario.add_creature(P1, "Target", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("targeted activation starts with target selection");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("target is declared before the sacrifice cost");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("second sacrifice reaches the replacement pipeline");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the first sacrifice event stays inside the pending activation session"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement completion commits the activation");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == first
+            ))
+            .count(),
+        1,
+        "the replacement-paused sacrifice trigger is collected once at activation commit"
+    );
+}
+
+#[test]
 fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1842,6 +2184,7 @@ fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the self-sacrifice mana ability reaches its replacement choice");
     assert!(matches!(
@@ -1875,6 +2218,261 @@ fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
             .count(),
         1,
         "the resumed self-sacrifice cost produces mana exactly once"
+    );
+}
+
+/// Give `player` a creature whose only ability sacrifices itself for {G}. With
+/// `competing_redirects`, two replacements race for the sacrifice, so auto-tapping
+/// it pauses mid-payment for a replacement choice.
+fn add_self_sacrifice_mana_source(
+    scenario: &mut GameScenario,
+    player: engine::types::player::PlayerId,
+    competing_redirects: bool,
+) -> ObjectId {
+    let mut source = scenario.add_creature(player, "Self-Sacrifice Mana Source", 0, 1);
+    source.with_ability_definition(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        ))),
+    );
+    if competing_redirects {
+        source
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand));
+    }
+    source.id()
+}
+
+/// P0's only mana source is the self-sacrificing creature; P1 has an untapped
+/// Archangel of Tithes-style {1} attack tax (verified Oracle text,
+/// client/public/card-data.json 2026-05-10).
+fn self_sacrifice_mana_vs_attack_tax(
+    competing_redirects: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
+    use engine::parser::oracle_static::parse_static_line;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let attack_tax = parse_static_line(
+        "As long as this creature is untapped, creatures can't attack you or planeswalkers you \
+         control unless their controller pays {1} for each of those creatures.",
+    )
+    .expect("the attack-tax static should parse");
+    scenario
+        .add_creature(P1, "Tithe Collector", 3, 5)
+        .with_static_definition(attack_tax);
+    (scenario.build(), attacker, source)
+}
+
+/// CR 508.1i-j + CR 605.3b + CR 616.1: a combat tax pays through the resumable
+/// declaration root, so a mana source whose own cost pauses for a replacement
+/// choice is payable. Accepting the tax surfaces that choice with the
+/// declaration still uncommitted; the answer completes the payment and commits
+/// the exact frozen proposal exactly once.
+#[test]
+fn paused_mana_source_funds_a_combat_tax_through_the_resumable_root() {
+    use engine::game::combat::{attack_tax_is_affordable, AttackTarget};
+
+    // Control: with no competing replacement the sacrifice never pauses, and
+    // auto-tap funds the {1} tax from this very source.
+    let (mut runner, attacker, _source) = self_sacrifice_mana_vs_attack_tax(false);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        attack_tax_is_affordable(runner.state(), &attacks),
+        "premise: auto-tap reaches the self-sacrificing source when nothing pauses"
+    );
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        })
+        .expect("the affordable taxed proposal opens the combat-tax prompt");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { player: P0, .. }
+        ),
+        "the taxed declaration must lock its price, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("the unpaused source funds the accepted tax");
+    assert_eq!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .map(|combat| combat.attackers.len()),
+        Some(1),
+        "premise: Accept commits the declaration when the source never pauses"
+    );
+
+    // Resumable contract: two competing redirects make the source's own
+    // sacrifice cost pause for a replacement choice.
+    let (mut runner, attacker, source) = self_sacrifice_mana_vs_attack_tax(true);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        attack_tax_is_affordable(runner.state(), &attacks),
+        "the resumable probe counts a source that will pause before producing mana"
+    );
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        })
+        .expect("the resumable proposal opens the combat-tax prompt");
+
+    let accepted = runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("Accept starts the tax payment and reaches the source's replacement choice");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the paused source owns the prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attackers.is_empty()),
+        "the declaration stays uncommitted while the tax payment is paused"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "no mana is produced before the replacement choice is answered"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answering the replacement resumes the tax payment and declaration");
+
+    let state = runner.state();
+    let combat = state
+        .combat
+        .as_ref()
+        .expect("combat state exists once the tax is paid");
+    assert_eq!(combat.attackers.len(), 1, "the attack must commit");
+    assert_eq!(
+        combat.attackers[0].object_id, attacker,
+        "the frozen proposal is the one committed"
+    );
+    assert_ne!(
+        state.objects[&source].zone,
+        engine::types::zones::Zone::Battlefield,
+        "the source paid its own sacrifice cost"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "the produced {{G}} exactly pays the {{1}} tax"
+    );
+    assert!(
+        !state.withholds_priority(),
+        "no payment continuation survives the completed declaration"
+    );
+    assert_eq!(
+        accepted
+            .events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::ManaAdded { source_id, .. } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the resumed cost produces mana exactly once"
+    );
+}
+
+/// Well of Lost Dreams ("Whenever you gain life, you may pay {X}, where X is less
+/// than or equal to the amount of life you gained. If you do, draw X cards.")
+/// with the self-sacrificing mana source as P0's only mana. Returns the
+/// `PayAmountChoice` maximum the engine offers after P0 gains 3 life and accepts.
+fn well_of_lost_dreams_x_max(competing_redirects: bool) -> u32 {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P0, "Plains", Zone::Library, db);
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mut events = Vec::new();
+    engine::game::effects::life::apply_life_gain(runner.state_mut(), P0, 3, &mut events)
+        .expect("life gain must resolve without deferring");
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => return *max,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting 'you may pay {X}' must succeed");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing toward the trigger's choice must succeed");
+            }
+        }
+    }
+    panic!(
+        "never reached PayAmountChoice; final waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 107.3a + CR 605.3b + CR 616.1: a resolution-time "pay {X}" is paid through
+/// `pay_unless_cost`, which has no resume root, so its offered range must not
+/// count a mana source whose own cost would pause for a replacement choice.
+/// Offering X=1 there would accept an amount the payment then cannot make.
+#[test]
+fn paused_mana_source_does_not_widen_a_resolution_x_range() {
+    assert_eq!(
+        well_of_lost_dreams_x_max(false),
+        1,
+        "premise: with nothing pausing, the self-sacrificing source funds X=1"
+    );
+    assert_eq!(
+        well_of_lost_dreams_x_max(true),
+        0,
+        "a source that would pause mid-payment cannot fund any X"
     );
 }
 
@@ -1918,6 +2516,7 @@ fn selected_sacrifice_mana_cost_resumes_without_repaying_its_prefix() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the selected-sacrifice mana ability");
     let initial = runner
@@ -2001,6 +2600,7 @@ fn mandatory_single_sacrifice_redirect_completes_without_a_pause() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the unambiguous sacrifice redirect must resolve synchronously");
     assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
@@ -2599,6 +3199,7 @@ fn self_exile_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce self-exile activation");
 
@@ -2791,6 +3392,158 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
 }
 
+/// CR 608.2c + CR 614.12a + CR 616.1: an effect puts the Mimeoplasm forced-cost witness onto the
+/// battlefield and then gains 3 life. Its accepted two-card exile cost pauses on a redirect choice for each
+/// card, and the effect's next instruction waits until both exiles and the entry have completed.
+///
+/// Revert probe: without the rider exclusion for the exile carrier, the life gain resolves after the first
+/// redirect answer — before the second cost exile is even paid — and precedes the entry.
+#[test]
+fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
+        .id();
+    let mimeoplasm = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Forced-Cost Witness",
+            5,
+            5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+    for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    let mut runner = scenario.build();
+    let mut forced_cost_only =
+        runner.state().objects[&mimeoplasm].replacement_definitions[0].clone();
+    // As in the test above: strip only the independent copy/counter branch.
+    forced_cost_only.execute = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mimeoplasm)
+        .expect("Mimeoplasm witness exists")
+        .replacement_definitions = vec![forced_cost_only].into();
+
+    let entry_then_life = ResolvedAbility::new(
+        Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SpecificObject { id: mimeoplasm },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+            library_shuffle: Default::default(),
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    ));
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &entry_then_life, &mut events, 0)
+        .expect("the effect pauses on the witness's entry replacement");
+
+    let entry_and_life_order = |events: &[GameEvent]| -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == mimeoplasm => Some("entry"),
+                GameEvent::LifeChanged { .. } => Some("life"),
+                _ => None,
+            })
+            .collect()
+    };
+    let frame_kinds = |state: &GameState| -> Vec<engine::types::resolution::FrameKind> {
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect()
+    };
+
+    // Accept the cost, then answer the first card's redirect.
+    for _ in 0..2 {
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement answer is legal");
+        events.extend(result.events);
+    }
+    let state = runner.state();
+    assert_eq!(state.objects[&first].zone, Zone::Hand);
+    assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the second card's redirect prompt is open, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.objects[&mimeoplasm].zone,
+        Zone::Hand,
+        "no premature entry"
+    );
+    assert_eq!(
+        state.players[0].life, 20,
+        "the effect's next instruction waits"
+    );
+    assert_eq!(
+        frame_kinds(state),
+        vec![
+            engine::types::resolution::FrameKind::AbilityContinuation,
+            engine::types::resolution::FrameKind::ChangeZone,
+        ],
+        "the enclosing effect's frames are still live"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the second redirect answer is legal");
+    events.extend(result.events);
+
+    let state = runner.state();
+    assert_eq!(entry_and_life_order(&events), vec!["entry", "life"]);
+    assert_eq!(state.players[0].life, 23);
+    assert_eq!(state.objects[&second].zone, Zone::Hand);
+    assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "got {:?}",
+        frame_kinds(state)
+    );
+}
+
 #[test]
 fn self_return_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
     let mut scenario = GameScenario::new();
@@ -2826,6 +3579,7 @@ fn self_return_activation_cost_pauses_for_moved_redirect_without_pending_cast() 
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce self-return activation");
 
@@ -2910,6 +3664,7 @@ fn composite_return_cost_resurfaces_each_return_leg() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate two-return witness");
     assert!(matches!(
@@ -2990,6 +3745,7 @@ fn return_cost_keeps_selected_move_while_residual_self_move_pauses() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate residual self-move witness");
     let result = runner
@@ -3073,6 +3829,7 @@ fn modal_activation_self_exile_cost_resumes_after_moved_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce modal activation");
     let result = runner
@@ -3125,6 +3882,7 @@ fn synthesized_plot_redirect_resumes_as_special_action() {
         .act(GameAction::ActivateAbility {
             source_id: plotted,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("start synthesized plot special action");
     assert!(matches!(
@@ -3280,6 +4038,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         trigger_event: None,
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -3309,7 +4068,8 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "unless payment witness"
                 && remaining == &vec![P1]
@@ -3351,6 +4111,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
             trigger_event,
             effect_description,
             remaining,
+            ..
         } => {
             assert_eq!(*player, P0);
             assert_eq!(cost, &unless_cost);
@@ -3492,6 +4253,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         trigger_event: None,
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
     };
 
     let paused = runner
@@ -3512,7 +4274,8 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "auto-tap unless payment witness"
                 && remaining == &vec![P1]
@@ -3618,6 +4381,137 @@ fn effect_pay_cost_auto_tap_redirect_serializes_exact_cost_and_trailing_effect_o
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
 
+/// CR 603.3b: at a durable-ledger `ManaAbilityResume::EffectPayCost` root, OT (the
+/// frame's own tap) and OL (the rider's life gain) trigger with no priority between them,
+/// so the resumed payment places them as one batch and runs the rider once.
+#[test]
+fn durable_ledger_effect_pay_cost_root_batches_its_tap_and_rider_observers() {
+    let (mut scenario, source) = mana_self_exile_cost_redirect_witness();
+    let observer_t = scenario
+        .add_creature(P0, "OT Source-Tap Observer", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::Taps)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .valid_card(TargetFilter::SpecificObject { id: source })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id();
+    let observer_l = scenario
+        .add_creature(P0, "OL Life-Gain Observer", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::LifeGained)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    let cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 0,
+    };
+    let mut ability = ResolvedAbility::new(
+        Effect::PayCost {
+            cost: AbilityCost::Mana { cost: cost.clone() },
+            scale: None,
+            payer: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("effect payment pauses only for the replacement choice");
+    // Positive reach guard: the DURABLE ledger really is live, and the root
+    // really is the effect-payment family whose resume is not inert.
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor })
+            if matches!(&pending.resume, ManaAbilityResume::EffectPayCost { payer: P0, .. })
+                && !cursor.deferred_cost_events.is_empty()
+    ));
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "no context is materialized while the replacement choice is live"
+    );
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirected source cost resumes the exact outer effect cost");
+
+    let WaitingFor::OrderTriggers { player, triggers } = &resumed.waiting_for else {
+        panic!(
+            "OT and OL wait together for their controller's order, got {:?}",
+            resumed.waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let mut ordered: Vec<ObjectId> = triggers.iter().map(|t| t.source_id).collect();
+    ordered.sort();
+    let mut expected = vec![observer_t, observer_l];
+    expected.sort();
+    assert_eq!(ordered, expected, "the batch is exactly OT and OL");
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 1,
+        "the rider ran exactly once"
+    );
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        })
+        .expect("ordering accepted");
+    let stacked: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match entry.kind {
+            StackEntryKind::TriggeredAbility { .. } => Some(entry.source_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        stacked.contains(&observer_t),
+        "OT was collected by the completed mana frame: {stacked:?}"
+    );
+    assert!(
+        stacked.contains(&observer_l),
+        "and OL was collected for the rider's own event: {stacked:?}"
+    );
+    assert_eq!(
+        stacked.len(),
+        2,
+        "each observer is placed exactly once: {stacked:?}"
+    );
+}
+
 #[test]
 fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() {
     let mut scenario = GameScenario::new();
@@ -3721,7 +4615,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
     let rider_life = resumed
         .events
         .iter()
-        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount } if *player_id == P0 && *amount == 1))
+        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount == 1))
         .expect("the trailing PayCost rider resolves once");
     assert!(
         mana_added < rider_life,
@@ -3742,6 +4636,7 @@ fn assert_repeated_interactive_activation_cost(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activation starts its interactive cost payment");
     if one_of {
@@ -3971,6 +4866,144 @@ fn repeated_unattach_activation_witness(
     (runner, source, [first, second])
 }
 
+/// Synthetic witness for a TWO-slot `UnattachFrom` leg. No printed card has a
+/// multi-attachment unattach cost (Captain America, First Avenger is the only
+/// `AbilityCost::UnattachFrom` card and its count is 1), so the distinctness
+/// conjunct — which a one-slot leg cannot distinguish — needs a count-2 leg.
+/// The nearest printed card is named as the justification for the shape; the
+/// behavior under test is CR 118.3 + CR 601.2h ("one object can't pay two
+/// slots"), not a claim about any printed card.
+fn two_slot_unattach_activation_witness() -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    [engine::types::identifiers::ObjectId; 2],
+) {
+    let unattach = AbilityCost::UnattachFrom {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+        count: 2,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Two-Slot Unattach Activation Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(unattach),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
+    for attachment in [first, second] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&attachment)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(source));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .attachments
+            .push(attachment);
+    }
+    (runner, source, [first, second])
+}
+
+/// CR 118.3 + CR 601.2h: a count-2 unattach leg needs two DISTINCT attachments.
+/// Submitting the same id twice passes the raw count (2 == 2) and detaches it
+/// once, so the leg is "paid" with one object — the duplicate guard must refuse
+/// it before any state changes, and the prompt must stay answerable.
+///
+/// Revert probe: at base the handler has no distinctness check, so `[a, a]`
+/// reaches the detach loop and the activation reaches the stack — the
+/// `expect_err` (and the exact-message assertion) panics.
+#[test]
+fn unattach_cost_rejects_the_same_attachment_for_two_slots() {
+    let (mut runner, source, [first, second]) = two_slot_unattach_activation_witness();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the two-slot unattach cost surfaces its payment prompt");
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            count,
+            min_count,
+            ..
+        } => assert_eq!(
+            (count, min_count),
+            (2, 2),
+            "the prompt advertises the leg's exact cardinality"
+        ),
+        other => panic!("expected PayCost UnattachFrom, got {other:?}"),
+    }
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("CR 118.3: one attachment cannot pay two slots");
+    let engine::game::EngineError::InvalidAction(message) = &duplicate else {
+        panic!("a repeated attachment must be an InvalidAction, got {duplicate:?}");
+    };
+    assert_eq!(
+        message, "Cannot unattach the same attachment more than once for a cost",
+        "the distinctness guard must be what rejected the payment"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            ..
+        }
+    ));
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_some(),
+            "a rejected payment must not detach anything"
+        );
+        assert_eq!(runner.state().objects[&attachment].zone, Zone::Battlefield);
+    }
+    assert_eq!(runner.state().stack.len(), 0, "no stack entry on refusal");
+
+    // Reach guard: two distinct attachments pay the two-slot leg.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("two distinct attachments pay the two-slot cost");
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_none(),
+            "each paid attachment detaches"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the activation reaches the stack"
+    );
+}
+
 #[test]
 fn repeated_and_one_of_interactive_activation_costs_surface_each_unpaid_leg() {
     for one_of in [false, true] {
@@ -4049,6 +5082,7 @@ fn mana_selected_exile_cost_redirect_resumes_after_the_paid_prefix_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("start the selected-exile mana ability");
     let initial = runner
@@ -4181,8 +5215,18 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
         life_before,
         "neither the later life cost nor the rider may run before the typed mana root settles"
     );
+    assert!(
+        runner.state().payment_transaction.is_some(),
+        "the canonical state keeps the staged payment descriptor"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the canonical state remains pre-payment while the composite is paused"
+    );
+    let shadow = engine::game::staged_payment_shadow_for_test(runner.state());
+    assert!(shadow.payment_transaction.is_none());
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        shadow.pending_cost_move_resume.as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -4213,6 +5257,15 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
             .count(),
         1,
         "the source's paid tap prefix is never replayed"
+    );
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { amount: 1, .. }))
+            .count(),
+        1,
+        "the rider resumes exactly once after the unpaid suffix"
     );
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
@@ -4281,18 +5334,28 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
+        choice_player: None,
         library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
         candidate_count: 1,
         candidates: vec![],
+        kind: Default::default(),
+        last_applied_decides: false,
+        remember_identity: None,
     };
 
     let json = serde_json::to_string(runner.state())
@@ -4388,23 +5451,54 @@ fn paused_mana_cost_events_create_observer_triggers_once_and_preserve_order_resu
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("resume the typed cost event settlement");
 
-    assert!(matches!(
-        resumed.waiting_for,
-        WaitingFor::OrderTriggers { ref triggers, .. } if triggers.len() == 2
-    ));
-    assert!(runner.state().pending_cost_move_resume.is_none());
-    let ordered = runner
-        .act(GameAction::OrderTriggers { order: vec![0, 1] })
-        .expect("both observer triggers remain orderable after the cost settles");
-    assert!(matches!(
-        ordered.waiting_for,
-        WaitingFor::ManaPayment { player: P0, .. }
-    ));
-    assert_eq!(
-        runner.state().stack.len(),
-        2,
-        "each actual observer trigger is collected exactly once, not once per pause and resume"
+    // A completed mana frame is a cost-payment micro-frame inside somebody
+    // else's action, not a CR 603.3b release boundary. Its ordinary observers
+    // are collected exactly once and deferred; ordering and announcement belong
+    // to the owner's own boundary, so the resumed action returns straight to the
+    // outer payment with the queue intact and nothing on the stack.
+    assert!(
+        matches!(
+            resumed.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "a completed mana micro-frame returns to its owner's payment, not to CR 603.3b ordering: \
+         {:?}",
+        resumed.waiting_for
     );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(
+        runner.state().stack.is_empty(),
+        "no observer may be announced from inside the payment that produced its events"
+    );
+    let queued_amounts = |state: &GameState| -> Vec<i32> {
+        state
+            .deferred_triggers
+            .iter()
+            .map(|context| match &context.pending.ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => *value,
+                other => panic!("unexpected deferred observer effect {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(
+        queued_amounts(runner.state()),
+        vec![1, 2],
+        "each actual observer trigger is collected exactly once, in the collector's APNAP order, \
+         not once per pause and resume"
+    );
+
+    // The queue is durable across the returned prompt: it is engine state, not
+    // action-local coordination.
+    let json = serde_json::to_string(runner.state())
+        .expect("the deferred observer release group serializes at the outer payment prompt");
+    let across: GameState = serde_json::from_str(&json)
+        .expect("the deferred observer release group deserializes at the outer payment prompt");
+    assert_eq!(queued_amounts(&across), vec![1, 2]);
+    assert!(across.stack.is_empty());
+
     assert_eq!(
         initial_events
             .iter()
@@ -4603,6 +5697,2846 @@ fn nested_costed_mana_source_serializes_parent_cursor_and_finishes_outer_payment
         .act(GameAction::PassPriority)
         .expect("the outer spell payment consumes the outer mana once");
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+}
+
+/// Which permanent the ordinary observer of the A/B/C/D topology watches.
+///
+/// This is the ONLY axis the sibling row changes, which is what makes it the
+/// discriminator for the ancestor-prefix finding: observer E fires on A's tap,
+/// which lives in the *suspended parent's* prefix, not in the paused child's
+/// local ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostileObserverAxis {
+    /// Observer D: source-filtered `Taps` on the paused child B.
+    TapsB,
+    /// Observer E: source-filtered `Taps` on the suspended parent A.
+    TapsA,
+}
+
+struct HostileAbcdFixture {
+    scenario: GameScenario,
+    source_a: ObjectId,
+    source_b: ObjectId,
+    source_c: ObjectId,
+    observer: ObjectId,
+    observer_gain: i32,
+}
+
+/// The plan's four-permanent hostile topology, shared byte-for-byte by the
+/// direct-Priority row, its observer-axis sibling, and both masked-root
+/// controls. Only `axis` differs between them.
+fn hostile_abcd_fixture(axis: HostileObserverAxis) -> HostileAbcdFixture {
+    fn targetless_reflexive_gain(amount: i32) -> AbilityDefinition {
+        let mut reflexive = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+        );
+        reflexive.condition = Some(engine::types::ability::AbilityCondition::WhenYouDo);
+        reflexive
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // A — noncreature ARTIFACT so no summoning sickness and no creature-tier
+    // ambiguity in source selection. `{T}, {2}: Add {G}`, plus a targetless true
+    // `WhenYouDo` rider gaining 5.
+    let source_a = scenario
+        .add_creature(P0, "A Root Green Source", 1, 1)
+        .as_artifact()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2),
+                    },
+                ],
+            })
+            .sub_ability(targetless_reflexive_gain(5)),
+        )
+        .id();
+
+    // B — noncreature LAND. Its land card tier deterministically precedes C's
+    // artifact tier, and its reflexive continuation classifies it
+    // `HasIrreversibleContinuation`; both penalties stay in tier zero. No
+    // auto-tap ordering code is touched — the fixture must EARN B-before-C by
+    // reaching the pause, and the assertions in each row are what prove it did.
+    let source_b = scenario
+        .add_creature(P0, "B Paused Reflexive Land", 1, 1)
+        .as_land()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            })
+            .sub_ability(targetless_reflexive_gain(3)),
+        )
+        .id();
+
+    // C — noncreature artifact, `{T}: Add {C}`, no continuation.
+    let source_c = scenario
+        .add_creature(P0, "C Synchronous Source", 1, 1)
+        .as_artifact()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        )
+        .id();
+
+    // Two COMPETING redirects for B's self-exile, so the exile raises a real
+    // `ReplacementChoice` rather than applying silently.
+    for name in ["B Redirect One", "B Redirect Two"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard));
+    }
+
+    let (observer_name, watched, observer_gain) = match axis {
+        HostileObserverAxis::TapsB => ("D B-Tap Observer", source_b, 2),
+        HostileObserverAxis::TapsA => ("E A-Tap Observer", source_a, 4),
+    };
+    let observer = scenario
+        .add_creature(P0, observer_name, 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::Taps)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed {
+                            value: observer_gain,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .valid_card(TargetFilter::SpecificObject { id: watched })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id();
+
+    HostileAbcdFixture {
+        scenario,
+        source_a,
+        source_b,
+        source_c,
+        observer,
+        observer_gain,
+    }
+}
+
+/// CR 605.3a-c + CR 603.12 + CR 601.2h — the plan's **direct-priority A/B/C/D
+/// hostile regression**, replacing the blocked `EndContinuousEffect` row.
+///
+/// `EndContinuousEffect` cannot host this proof and was not weakened to match
+/// the trace it actually produces: `pay_non_cast_mana_cost`'s automatic planner
+/// pre-funds a costed source LEAF-FIRST, so B is parentless and C is already
+/// committed before A starts, and no live suspended parent with a LATER
+/// synchronous child is ever formed. `game/casting_costs.rs` and the
+/// special-action protocol are out of scope, so the root moves instead.
+///
+/// The reachable root is a real player action: `ActivateAbility` at
+/// `WaitingFor::Priority`. A becomes a genuine parentless cursor with no
+/// `PendingCast`, no resolution stack entry, and no unless-payment owner. Its
+/// `{2}` Mana component asks automatic payment, which selects the LAND B before
+/// the artifact C; B's `{T}, Exile this` hits two competing exile replacements
+/// and serializes the whole nested cursor tree with A recursively `Suspended`.
+///
+/// What this row discriminates that a ledger-shape unit test cannot: the
+/// **prepared parent snapshot's wiring**. At the pause, A's suspended parent
+/// ledger must hold exactly A's own tap and no B tap, and B's frame-local
+/// ledger exactly B's tap and no A tap. Replacing
+/// `parent_snapshot_with_current_cost_events(..)` at the
+/// `resolve_mana_ability_excluding` call site with a plain `parent.cloned()`
+/// leaves A's parent prefix EMPTY and fails assertion (7); restoring the
+/// pre-fix clone-and-scan child ledger puts A's tap into B's ledger and fails
+/// assertion (6).
+///
+/// SCOPE: this row lands the plan's assertions 1-16 for the DIRECT-Priority
+/// root. Its observer-E sibling
+/// (`direct_priority_mana_root_orders_the_ancestor_prefix_observer_with_both_reflexives`)
+/// and the masked cast-root control
+/// (`masked_cast_root_mana_batch_stays_queued_until_the_spell_is_announced`)
+/// carry the rest of this topology's plan requirements. The second masked
+/// control — an `UnlessPayment` resolution owner over the same A/B/C/D fixture —
+/// is `masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles`.
+#[test]
+fn direct_priority_mana_root_suspends_its_parent_and_keeps_ledgers_disjoint() {
+    let HostileAbcdFixture {
+        scenario,
+        source_a,
+        source_b,
+        source_c,
+        observer,
+        observer_gain: _,
+    } = hostile_abcd_fixture(HostileObserverAxis::TapsB);
+    let observer_d = observer;
+    let mut runner = scenario.build();
+
+    // (1) Reach guards for the ROOT itself: a real empty-stack Priority with no
+    // cast, resolution, or payment owner. Without these the row could pass from
+    // some other production chronology.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    let life_before = runner.state().players[P0.0 as usize].life;
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    // (2) The production root action.
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_a,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("A's {2} Mana component pays through B and pauses on its exile replacement");
+
+    // (3) A real replacement pause, not a synthesized one.
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected B's exile ReplacementChoice, got {:?}",
+        paused.waiting_for
+    );
+
+    // (4)-(7) The nested cursor tree, its owner, and the two DISJOINT ledgers.
+    assert_nested_hostile_pause(runner.state(), source_a, source_b);
+
+    // (5) Tapped-state reach guards for the intended chronology: A and B are
+    // paid, C has not been reached yet, and B is still on the battlefield
+    // pending its replacement choice.
+    assert!(runner.state().objects[&source_a].tapped, "A paid its tap");
+    assert!(runner.state().objects[&source_b].tapped, "B paid its tap");
+    assert!(
+        !runner.state().objects[&source_c].tapped,
+        "C must be untapped at the pause — a tapped C means the leaf-first \
+         planner chronology, not the nested-parent one this row exists to prove"
+    );
+    assert_eq!(runner.state().objects[&source_b].zone, Zone::Battlefield);
+
+    // (11) Nothing has resolved yet.
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    // (6) The mandatory durable branch. `current_action_event_start` is
+    // `#[serde(skip)]`, so A's one-event parent prefix must survive on the
+    // serialized ledger itself, not on the marker.
+    let json = serde_json::to_string(runner.state()).expect("paused cursor tree serializes");
+    let restored: GameState = serde_json::from_str(&json).expect("paused cursor tree restores");
+    let mut runner = GameRunner::from_state(restored);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_nested_hostile_pause(runner.state(), source_a, source_b);
+    assert!(runner.state().objects[&source_a].tapped);
+    assert!(runner.state().objects[&source_b].tapped);
+    assert!(!runner.state().objects[&source_c].tapped);
+
+    // (7) Resume through the normal action.
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice resumes B, then A's later synchronous C");
+
+    // (8) B moved exactly once, to the redirected zone.
+    assert_eq!(runner.state().objects[&source_b].zone, Zone::Graveyard);
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == source_b
+            ))
+            .count(),
+        1,
+        "no duplicate exile or move delivery across the pause/resume boundary"
+    );
+
+    // (9) C then taps exactly once, and A produces its green mana. B's and C's
+    // colorless mana was spent on A's {2}; only A's green remains.
+    assert!(
+        runner.state().objects[&source_c].tapped,
+        "A's remaining generic mana must come from the LATER synchronous child C"
+    );
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        pool.total(),
+        1,
+        "only A's own production remains in the pool"
+    );
+    assert_eq!(pool.count_color(ManaType::Green), 1);
+
+    // (10) Every paid cost and every production happened exactly once across
+    // the pause/resume boundary.
+    let all_events: Vec<&GameEvent> = paused.events.iter().chain(resumed.events.iter()).collect();
+    for (label, id) in [("A", source_a), ("B", source_b), ("C", source_c)] {
+        assert_eq!(
+            all_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PermanentTapped { object_id, .. } if *object_id == id
+                ))
+                .count(),
+            1,
+            "{label} paid its tap cost exactly once"
+        );
+        assert_eq!(
+            all_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::ManaAdded { source_id, .. } if *source_id == id
+                ))
+                .count(),
+            1,
+            "{label} produced mana exactly once"
+        );
+    }
+
+    // (11, after resume) Still nothing resolved: neither reflexive nor D.
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "no reflexive rider and no observer may resolve before the batch is ordered"
+    );
+    // (12) ONE empty-stack `OrderTriggers` group holding exactly three members:
+    // B's reflexive rider, D's B-tap observer, and A's reflexive rider — the
+    // last of which only exists after C completed and A produced its mana.
+    //
+    // (13) This exact three-member, empty-stack shape is the joint revert
+    // discriminator. Under the old inherited-ledger behaviour C scans A's cloned
+    // ancestor batch before A finishes, exposing an early incomplete or
+    // duplicated group; under a split collection seam D is already a stack entry
+    // and only the two reflexives remain to order. Neither revert can produce
+    // one empty-stack order prompt containing all three.
+    let WaitingFor::OrderTriggers {
+        player: order_player,
+        triggers: ref group,
+    } = resumed.waiting_for
+    else {
+        panic!(
+            "the completed root must expose one CR 603.3b ordering group, got {:?}",
+            resumed.waiting_for
+        );
+    };
+    assert_eq!(order_player, P0);
+    assert!(
+        runner.state().stack.is_empty(),
+        "no member of the batch may be dispatched separately: the stack must still \
+         be empty when the single ordering group is offered"
+    );
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(
+        members.len(),
+        3,
+        "expected exactly B's reflexive, D's observer, and A's reflexive; got {members:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} must appear in the single ordering group exactly once: {members:?}"
+        );
+    }
+
+    // (14) Order the group through the real action and identify the resulting
+    // stack entries by source.
+    let ordered = runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the three-member group orders through the real CR 603.3b action");
+    assert!(
+        matches!(ordered.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "ordering the whole group returns priority, got {:?}",
+        ordered.waiting_for
+    );
+    let announced: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match entry.kind {
+            StackEntryKind::TriggeredAbility { source_id, .. } => Some(source_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        announced.len(),
+        3,
+        "exactly three triggered entries, no duplicates and no preexisting D entry: {announced:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            announced.iter().filter(|entry| **entry == id).count(),
+            1,
+            "{label} announced exactly once: {announced:?}"
+        );
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "announcement alone resolves nothing"
+    );
+    assert!(runner.state().deferred_triggers.is_empty());
+
+    // (15) Clone at the post-order point for two normal-action branches.
+    let post_order = runner.state().clone();
+
+    // (15a) Resolve all three: 5 + 3 + 2, each exactly once.
+    let mut resolve_all = GameRunner::from_state(post_order.clone());
+    for _ in 0..3 {
+        resolve_all
+            .act(GameAction::PassPriority)
+            .expect("P0 passes priority to resolve the next triggered ability");
+        resolve_all
+            .act(GameAction::PassPriority)
+            .expect("P1 passes priority to resolve the next triggered ability");
+    }
+    assert!(
+        resolve_all.state().stack.is_empty(),
+        "all three triggered abilities resolve through the normal priority path"
+    );
+    assert_eq!(
+        resolve_all.state().players[P0.0 as usize].life,
+        life_before + 10,
+        "the 5, 3 and 2 life effects each occur exactly once"
+    );
+
+    // (15b) Counter one identified reflexive through the normal stack path and
+    // resolve the other two: the countered effect must not occur while the other
+    // two occur exactly once.
+    let mut countered = GameRunner::from_state(post_order);
+    let top = countered
+        .state()
+        .stack
+        .last()
+        .expect("the ordered group left three entries on the stack");
+    let countered_source = match top.kind {
+        StackEntryKind::TriggeredAbility { source_id, .. } => source_id,
+        ref other => panic!("unexpected top-of-stack entry {other:?}"),
+    };
+    let countered_gain = if countered_source == source_a {
+        5
+    } else if countered_source == source_b {
+        3
+    } else {
+        2
+    };
+    let top_id = top.id;
+    let counter_ability = ResolvedAbility::new(
+        Effect::Counter {
+            target: TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+            source_rider: None,
+            countered_spell_zone: None,
+        },
+        vec![TargetRef::Object(top_id)],
+        observer_d,
+        P0,
+    );
+    engine::game::effects::counter::resolve(
+        countered.state_mut(),
+        &counter_ability,
+        &mut Vec::new(),
+    )
+    .expect("the identified entry is countered through the production counter resolver");
+    assert_eq!(
+        countered
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == countered_source
+            ))
+            .count(),
+        0,
+        "the countered entry leaves the stack"
+    );
+    for _ in 0..2 {
+        countered
+            .act(GameAction::PassPriority)
+            .expect("P0 passes priority to resolve a surviving triggered ability");
+        countered
+            .act(GameAction::PassPriority)
+            .expect("P1 passes priority to resolve a surviving triggered ability");
+    }
+    assert!(countered.state().stack.is_empty());
+    assert_eq!(
+        countered.state().players[P0.0 as usize].life,
+        life_before + 10 - countered_gain,
+        "the countered reflexive's effect does not occur while the other two occur exactly once"
+    );
+}
+
+/// CR 603.3b + CR 605.3a — the plan's **observer-axis sibling** of the hostile
+/// direct-Priority row, and the positive-and-revert discriminator for the
+/// ancestor-prefix finding.
+///
+/// It changes exactly one thing: the ordinary observer watches A's tap instead
+/// of B's. A's tap lives in the SUSPENDED PARENT's retained prefix, not in the
+/// paused child B's frame-local ledger, so the completed root can only collect
+/// observer E if the parent-snapshot suffix augmentation actually preserved
+/// A's first-action tap across the pause. Reverting that augmentation leaves no
+/// collector holding A's tap: E never fires, the single ordering group has only
+/// two members, and E's distinguishable +4 never occurs. A ledger-shape-only
+/// unit test cannot close this — the shapes look identical until a real
+/// observer has to match out of them.
+#[test]
+fn direct_priority_mana_root_orders_the_ancestor_prefix_observer_with_both_reflexives() {
+    let HostileAbcdFixture {
+        scenario,
+        source_a,
+        source_b,
+        source_c,
+        observer: observer_e,
+        observer_gain,
+    } = hostile_abcd_fixture(HostileObserverAxis::TapsA);
+    let mut runner = scenario.build();
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_a,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("A's {2} Mana component pays through B and pauses on its exile replacement");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected B's exile ReplacementChoice, got {:?}",
+        paused.waiting_for
+    );
+    // The identical chronology reach guards: same nested cursor tree, same two
+    // DISJOINT ledgers, same untapped C.
+    assert_nested_hostile_pause(runner.state(), source_a, source_b);
+    assert!(runner.state().objects[&source_a].tapped);
+    assert!(runner.state().objects[&source_b].tapped);
+    assert!(!runner.state().objects[&source_c].tapped);
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    let json = serde_json::to_string(runner.state()).expect("paused cursor tree serializes");
+    let restored: GameState = serde_json::from_str(&json).expect("paused cursor tree restores");
+    let mut runner = GameRunner::from_state(restored);
+    assert_nested_hostile_pause(runner.state(), source_a, source_b);
+    assert!(!runner.state().objects[&source_c].tapped);
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice resumes B, then A's later synchronous C");
+    assert!(runner.state().objects[&source_c].tapped);
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    // ONE empty-stack ordering group holding exactly B's reflexive, E's A-tap
+    // observer, and A's reflexive.
+    let WaitingFor::OrderTriggers {
+        player: order_player,
+        triggers: ref group,
+    } = resumed.waiting_for
+    else {
+        panic!(
+            "the completed root must expose one CR 603.3b ordering group, got {:?}",
+            resumed.waiting_for
+        );
+    };
+    assert_eq!(order_player, P0);
+    assert!(
+        runner.state().stack.is_empty(),
+        "no member of the batch may be dispatched separately"
+    );
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(
+        members.len(),
+        3,
+        "expected exactly B's reflexive, E's A-tap observer, and A's reflexive; got {members:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("E", observer_e)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} must appear in the single ordering group exactly once: {members:?}"
+        );
+    }
+
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the three-member group orders through the real CR 603.3b action");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        3
+    );
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 5 + 3 + observer_gain,
+        "E's distinct effect occurs exactly once together with the two reflexive effects"
+    );
+}
+
+/// CR 601.2h + CR 603.3b — the plan's **masked cast-root control** for the same
+/// A/B/C/D topology.
+///
+/// A completed mana frame is a cost-payment micro-frame inside somebody else's
+/// action, so it may not release its own batch. With a real `PendingCast` and a
+/// live `WaitingFor::ManaPayment` owner, the whole three-member batch must stay
+/// in `state.deferred_triggers` — no ordering prompt, no triggered stack entry,
+/// and specifically no observer-D entry — until the spell is actually announced.
+/// Only the cast finalizer may expose the single ordering group, and it must
+/// expose exactly those three above the already-announced spell.
+///
+/// The `deferred_triggers`-size assertion alone does not close the unified-seam
+/// finding; the explicit "no D on the stack" assertion is the one that fails
+/// under a separate fresh dispatch of the ordinary half.
+#[test]
+fn masked_cast_root_mana_batch_stays_queued_until_the_spell_is_announced() {
+    let HostileAbcdFixture {
+        mut scenario,
+        source_a,
+        source_b,
+        source_c,
+        observer: observer_d,
+        observer_gain,
+    } = hostile_abcd_fixture(HostileObserverAxis::TapsB);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Masked Cast Root Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the masked owner announces a real pending cast in manual payment mode");
+    assert!(
+        matches!(cast.waiting_for, WaitingFor::ManaPayment { player: P0, .. }),
+        "expected a live ManaPayment owner, got {:?}",
+        cast.waiting_for
+    );
+    assert!(runner.state().pending_cast.is_some());
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_a,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("A is manually activated during the cast's mana payment");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected the same nested B pause under the masked owner, got {:?}",
+        paused.waiting_for
+    );
+    assert_nested_hostile_pause_cursor_tree(runner.state(), source_a, source_b);
+    assert!(
+        !runner.state().objects[&source_c].tapped,
+        "C must be untapped at the pause under the masked owner too"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice resumes B, then A's later synchronous C");
+    assert!(runner.state().objects[&source_c].tapped);
+
+    // The masked contract: the owner is still live, and the WHOLE batch is
+    // queued rather than released.
+    assert!(
+        matches!(
+            resumed.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "the cast owner must retain the action, got {:?}",
+        resumed.waiting_for
+    );
+    assert!(
+        !matches!(resumed.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "a masked mana frame may not open CR 603.3b ordering"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "no member of the batch — and specifically not observer D — may reach the stack \
+         while the cast owner is live"
+    );
+    let queued: Vec<ObjectId> = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued.len(),
+        3,
+        "one deferred queue holding exactly B's reflexive, D's observer, and A's reflexive: \
+         {queued:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            queued.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} is queued exactly once: {queued:?}"
+        );
+    }
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    // Complete the payment through the real action protocol. Only the cast
+    // finalizer may release the group.
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "A's green mana is available to pay the spell's single green pip"
+    );
+    let finalized = runner.act(GameAction::PassPriority).expect(
+        "the manual payment finalizes from the available green mana and announces the spell",
+    );
+
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. })),
+        "the spell is announced exactly once before the batch is released"
+    );
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = finalized.waiting_for
+    else {
+        panic!(
+            "the cast finalizer must expose the single ordering group, got {:?}",
+            finalized.waiting_for
+        );
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(members.len(), 3, "{members:?}");
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} appears in the released group exactly once: {members:?}"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "no trigger entry may be on the stack before the group is ordered"
+    );
+
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the released group orders above the announced spell");
+    let stack_kinds: Vec<bool> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+        .collect();
+    assert_eq!(stack_kinds.iter().filter(|is_spell| **is_spell).count(), 1);
+    assert!(
+        stack_kinds[0],
+        "CR 603.3 places the newly ordered triggers ABOVE the spell that was already announced"
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 5 + 3 + observer_gain,
+        "each masked batch member resolves exactly once after the owner released it"
+    );
+}
+
+/// CR 118.12 + CR 603.3b + CR 608.2 — the plan's **masked resolution-root
+/// control** for the same A/B/C/D topology, and the sibling that session 7's
+/// report recorded as the one remaining owed member of this family.
+///
+/// The masked cast-root control proves a live `PendingCast` masks the batch.
+/// This row proves the *other* masking owner the plan names: a real resolution
+/// that has stopped at `WaitingFor::UnlessPayment`. There is no `PendingCast`
+/// here at all — the owner is a live `resolution_stack` frame — so the two
+/// controls cannot share a bug: a completed mana frame may not release its own
+/// batch under EITHER owner, and only the owner's own settlement may.
+///
+/// The `deferred_triggers`-size assertion alone does not close the unified-seam
+/// finding; the explicit "no D on the stack" assertion is the one that fails
+/// under a separate fresh dispatch of the ordinary half. The unpaid punishment
+/// is -100 life, so a resolution that leaked past its unless-payment would be
+/// impossible to confuse with the batch's own +1/+5/+3/+2.
+///
+/// FIXTURE NOTE, deliberately recorded rather than absorbed: the punisher
+/// carries an "if you do" rider, so the paid branch runs an ability chain and
+/// the owner reaches its own post-action settlement, which is what releases the
+/// group. A rider-FREE unless-payment currently has no settlement convergence
+/// at all — `finish_successful_unless_payment` runs the pipeline only when it
+/// resolved a sub-ability, so a bare paid cost lands on `Priority` with the
+/// three contexts still queued. That gap is exactly what the plan's settled-
+/// Priority convergence wrapper (`run_post_action_pipeline_from_settled_priority`
+/// plus the `engine_payment_choices` readiness hook) closes, and it is still
+/// owed; this row deliberately does not encode the gap as a contract.
+#[test]
+fn masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles() {
+    let HostileAbcdFixture {
+        mut scenario,
+        source_a,
+        source_b,
+        source_c,
+        observer: observer_d,
+        observer_gain,
+    } = hostile_abcd_fixture(HostileObserverAxis::TapsB);
+
+    // "You lose 100 life unless you pay {1}. If you do, you gain 1 life." The
+    // punishment is unmissable if the owner ever leaked past its payment, and
+    // the "if you do" rider is what carries the resolution to its own
+    // completion — this row's release boundary.
+    let mut paid_rider = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    );
+    paid_rider.condition = Some(engine::types::ability::AbilityCondition::EffectOutcome {
+        signal: engine::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    let mut punisher = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 100 },
+            target: Some(TargetFilter::Controller),
+        },
+    )
+    .sub_ability(paid_rider);
+    punisher.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        },
+        payer: TargetFilter::Controller,
+    });
+    let spell = scenario
+        .add_spell_to_hand(P0, "Masked Resolution Root Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability_definition(punisher)
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the free witness spell is announced");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    let owner = runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the witness resolves into its unless-payment");
+    assert!(
+        matches!(
+            owner.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "expected a live UnlessPayment resolution owner, got {:?}",
+        owner.waiting_for
+    );
+    // Positive reach guard for the axis that distinguishes this control from the
+    // cast-root one: the masking owner here is a paused resolution, not a cast.
+    assert!(
+        runner.state().pending_cast.is_none(),
+        "no PendingCast may mask this batch — the owner is the resolution itself"
+    );
+    let WaitingFor::UnlessPayment {
+        pending_effect: ref parked,
+        ref cost,
+        ..
+    } = owner.waiting_for
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        parked.source_id, spell,
+        "the parked punisher is the witness spell's own resolution"
+    );
+    assert_eq!(
+        cost,
+        &AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_a,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("A is manually activated during the unless payment (CR 118.12)");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected the same nested B pause under the resolution owner, got {:?}",
+        paused.waiting_for
+    );
+    assert_nested_hostile_pause_cursor_tree(runner.state(), source_a, source_b);
+    assert!(
+        !runner.state().objects[&source_c].tapped,
+        "C must be untapped at the pause under the resolution owner too"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice resumes B, then A's later synchronous C");
+    assert!(runner.state().objects[&source_c].tapped);
+
+    // The masked contract: the resolution owner is still live, and the WHOLE
+    // batch is queued rather than released.
+    assert!(
+        matches!(
+            resumed.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "the resolution owner must retain the action, got {:?}",
+        resumed.waiting_for
+    );
+    assert!(
+        !matches!(resumed.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "a masked mana frame may not open CR 603.3b ordering"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "no member of the batch — and specifically not observer D — may reach the stack \
+         while the resolution owner is live"
+    );
+    let queued: Vec<ObjectId> = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued.len(),
+        3,
+        "one deferred queue holding exactly B's reflexive, D's observer, and A's reflexive: \
+         {queued:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            queued.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} is queued exactly once: {queued:?}"
+        );
+    }
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "A's green mana is available to pay the unless cost"
+    );
+
+    // Only the resolution owner's own settlement may release the group.
+    let settled = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the unless cost is paid from A's green mana and the punisher is prevented");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        0,
+        "the green pip really paid the unless cost"
+    );
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = settled.waiting_for
+    else {
+        panic!(
+            "the settled resolution owner must expose the single ordering group, got {:?}",
+            settled.waiting_for
+        );
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(members.len(), 3, "{members:?}");
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} appears in the released group exactly once: {members:?}"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "no trigger entry may be on the stack before the group is ordered"
+    );
+    // The paid branch already ran to completion: the +1 "if you do" rider is the
+    // owner's own last instruction and it happened BEFORE the release, while the
+    // -100 punishment never did.
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before + 1);
+
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the released group orders once the resolution owner has settled");
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 1 + 5 + 3 + observer_gain,
+        "each masked batch member resolves exactly once, and the paid-for punisher never does"
+    );
+}
+
+/// The plan's assertions (4)-(7) at the hostile pause, factored so the
+/// in-memory and the restored-from-JSON branches assert byte-identical
+/// properties. The two ledger assertions are the discriminating pair: they fail
+/// in OPPOSITE directions for the two reverts this row exists to catch.
+fn assert_nested_hostile_pause_cursor_tree(
+    state: &GameState,
+    source_a: ObjectId,
+    source_b: ObjectId,
+) {
+    let Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) =
+        state.pending_cost_move_resume.as_ref()
+    else {
+        panic!(
+            "expected a nested ManaAbilityPayment owner, got {:?}",
+            state.pending_cost_move_resume
+        );
+    };
+    assert_eq!(pending.source_id, source_b, "the paused child is B");
+
+    let parent = cursor
+        .parent
+        .as_ref()
+        .expect("B's cursor must carry the nested A parent");
+    assert_eq!(
+        parent.lifecycle,
+        ManaAbilityCostParentLifecycle::Suspended,
+        "pausing B recursively suspends A"
+    );
+    assert_eq!(parent.pending.source_id, source_a, "the parent is A");
+    assert!(
+        parent.cursor.remaining.iter().any(|cost| matches!(
+            cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 2, .. }
+            }
+        )),
+        "A still owes its {{2}} Mana component, so a LATER synchronous child follows: {:?}",
+        parent.cursor.remaining
+    );
+
+    let tap_of = |events: &[GameEvent], id: ObjectId| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PermanentTapped { object_id, .. } if *object_id == id
+                )
+            })
+            .count()
+    };
+    // (6) B's FRAME-LOCAL ledger: exactly B's own tap, and no ancestor data.
+    // Restoring the pre-fix clone-and-scan child ledger puts A's tap here too.
+    assert_eq!(
+        tap_of(&cursor.deferred_cost_events, source_b),
+        1,
+        "B's local ledger owns exactly its own tap: {:?}",
+        cursor.deferred_cost_events
+    );
+    assert_eq!(
+        tap_of(&cursor.deferred_cost_events, source_a),
+        0,
+        "a child may never scan its ancestor's events: {:?}",
+        cursor.deferred_cost_events
+    );
+    // (7) A's PREPARED parent snapshot: exactly A's pre-child suffix. Reverting
+    // the snapshot augmentation at the `resolve_mana_ability_excluding` call
+    // site leaves this empty.
+    assert_eq!(
+        tap_of(&parent.cursor.deferred_cost_events, source_a),
+        1,
+        "the prepared synchronous parent captured A's pre-child suffix: {:?}",
+        parent.cursor.deferred_cost_events
+    );
+    assert_eq!(
+        tap_of(&parent.cursor.deferred_cost_events, source_b),
+        0,
+        "and never the child's own events: {:?}",
+        parent.cursor.deferred_cost_events
+    );
+}
+
+/// The direct-Priority root additionally owns the plan's "no competing owner"
+/// half of assertion (4). The masked-root controls deliberately do NOT assert
+/// it: a live `PendingCast` or resolution owner is exactly what they exist to
+/// mask the batch behind.
+fn assert_nested_hostile_pause(state: &GameState, source_a: ObjectId, source_b: ObjectId) {
+    assert_nested_hostile_pause_cursor_tree(state, source_a, source_b);
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+    assert!(!matches!(
+        state.waiting_for,
+        WaitingFor::OrderTriggers { .. }
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Round-9 finding 2: the required NO-PAUSE matrix. One synchronous fixture, all
+// three real roots, both colour halves — six action rows through the single
+// typed completed-mana-frame seam, plus the `TapLandForMana` regression that
+// exercises the one changed match arm none of the six reach.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoPauseColorAxis {
+    /// N produces `{G}` outright: the activation completes in one action.
+    Fixed,
+    /// N produces one mana of any colour: the activation returns
+    /// `WaitingFor::ChooseManaColor` first, and the choice action completes it.
+    AnyOneColor,
+}
+
+struct NoPauseFixture {
+    scenario: GameScenario,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+}
+
+/// The plan's synchronous no-pause fixture: source N `{T}: Add {G}` with a
+/// targetless true `WhenYouDo` rider gaining 5, and a source-filtered ordinary
+/// `Taps` observer O of N gaining 2. No replacement, no deferred life cost, no
+/// other pause is reachable, so N's durable cost ledger is provably empty and
+/// every row exercises the EMPTY-LEDGER half of the completed-frame seam.
+fn no_pause_mana_fixture(axis: NoPauseColorAxis) -> NoPauseFixture {
+    let mut reflexive = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            player: TargetFilter::Controller,
+        },
+    );
+    reflexive.condition = Some(engine::types::ability::AbilityCondition::WhenYouDo);
+
+    let produced = match axis {
+        NoPauseColorAxis::Fixed => ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        },
+        NoPauseColorAxis::AnyOneColor => ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Green, ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        },
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source_n = scenario
+        .add_creature(P0, "N Synchronous Green Source", 1, 1)
+        .as_artifact()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+            .sub_ability(reflexive),
+        )
+        .id();
+    let observer_o = scenario
+        .add_creature(P0, "O N-Tap Observer", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::Taps)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .valid_card(TargetFilter::SpecificObject { id: source_n })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id();
+
+    NoPauseFixture {
+        scenario,
+        source_n,
+        observer_o,
+    }
+}
+
+/// The plan's shared per-boundary assertions for the no-pause matrix: neither
+/// member is separately pushed, the deferred queue holds exactly N's reflexive
+/// and O once each, and no life has been gained yet.
+fn assert_exactly_two_contexts_queued_and_unstacked(
+    state: &GameState,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+    life_before: i32,
+) {
+    assert!(
+        !state
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "no member of the pair may be separately pushed before its owner releases it"
+    );
+    let queued: Vec<ObjectId> = state
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued.len(),
+        2,
+        "exactly N's reflexive and O, once each: {queued:?}"
+    );
+    for (label, id) in [("N", source_n), ("O", observer_o)] {
+        assert_eq!(
+            queued.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} is queued exactly once: {queued:?}"
+        );
+    }
+    assert_eq!(
+        state.players[P0.0 as usize].life, life_before,
+        "no trigger may resolve before the release group is ordered"
+    );
+}
+
+/// The plan's terminal assertions: exactly one group of exactly the two
+/// contexts, nothing on the stack before ordering, then the two distinguishable
+/// effects exactly once each for +7.
+fn assert_single_group_of_two_then_resolve_for_seven(
+    runner: &mut GameRunner,
+    group_wait: &WaitingFor,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+    life_before: i32,
+) {
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = group_wait
+    else {
+        panic!("expected the single release group, got {group_wait:?}");
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(members.len(), 2, "{members:?}");
+    for (label, id) in [("N", source_n), ("O", observer_o)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} appears in the released group exactly once: {members:?}"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "no trigger entry may be on the stack before the group is ordered"
+    );
+
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("the released group orders");
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 5 + 2,
+        "the distinguishable 5- and 2-life effects each happen exactly once"
+    );
+}
+
+/// Root 1 of the plan's no-pause matrix: a direct `ActivateAbility` from
+/// `WaitingFor::Priority` with an EMPTY durable ledger.
+///
+/// Baseline had no seam here at all: a `Priority` resume with no deferred cost
+/// events fell straight through `finish_mana_ability_cost_payment` to the
+/// generic post-action scan, which dispatched observer O on its own while N's
+/// synthetic reflexive was materialized by the mana frame. Routing the empty
+/// ledger through `collect_completed_mana_frame_events` makes the two one batch.
+/// Restoring the `has_deferred_cost_events` gate splits them and the
+/// exactly-two group assertion fails.
+#[test]
+fn direct_priority_no_pause_root_releases_its_reflexive_and_observer_as_one_group() {
+    let NoPauseFixture {
+        scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
+
+    let acted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+
+    // The durable ledger really was empty: nothing paused.
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "positive reach guard: the fixture is synchronous, so no cursor survives"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "N's mana is available immediately (CR 605.3b)"
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    // The direct root exposes ONE empty-stack ordering group after the action.
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| !matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "CR 603.3b ordering happens before any entry is placed"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &acted.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Root 2 of the plan's no-pause matrix: manual activation during a real
+/// spell's `WaitingFor::ManaPayment`. The owner retains the action and one
+/// two-context queue until the spell is announced, and only the cast finalizer
+/// exposes the group — above the announced spell.
+#[test]
+fn masked_cast_no_pause_root_queues_both_contexts_until_the_spell_is_announced() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let spell = scenario
+        .add_spell_to_hand(P0, "No-Pause Masked Cast Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the masked owner announces a real pending cast in manual payment mode");
+    assert!(matches!(
+        cast.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+
+    let activated = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is manually activated during the cast's mana payment");
+    assert!(
+        matches!(
+            activated.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "the cast owner must retain the action, got {:?}",
+        activated.waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "N's mana is available immediately, before any trigger resolves"
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let finalized = runner
+        .act(GameAction::PassPriority)
+        .expect("the manual payment finalizes and announces the spell");
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. })),
+        "the spell is announced exactly once before the batch is released"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &finalized.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Root 3 of the plan's no-pause matrix: manual activation during a real
+/// `UnlessPayment` resolution owner. Same fixture, same queue, and the group is
+/// exposed only once that owner has settled.
+#[test]
+fn masked_resolution_no_pause_root_queues_both_contexts_until_the_owner_settles() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let spell = scenario
+        .add_spell_to_hand(P0, "No-Pause Masked Resolution Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability_definition(unless_pay_one_punisher())
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the free witness spell is announced");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    let owner = runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the witness resolves into its unless-payment");
+    assert!(
+        matches!(
+            owner.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "expected a live UnlessPayment resolution owner, got {:?}",
+        owner.waiting_for
+    );
+    assert!(runner.state().pending_cast.is_none());
+
+    let activated = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is manually activated during the unless payment (CR 118.12)");
+    assert!(
+        matches!(
+            activated.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "the resolution owner must retain the action, got {:?}",
+        activated.waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let settled = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the unless cost is paid from N's green mana");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        0,
+        "the green pip really paid the unless cost"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &settled.waiting_for,
+        source_n,
+        // The paid branch's +1 rider ran before the release, so the two batch
+        // members are measured against the post-rider baseline.
+        observer_o,
+        life_before + 1,
+    );
+}
+
+/// "You lose 100 life unless you pay {1}. If you do, you gain 1 life." — the
+/// resolution-owner witness shared by the hostile masked control and the
+/// no-pause resolution root. The rider is what carries the resolution to its
+/// own completion, which is this family's release boundary; see
+/// `masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles`
+/// for the recorded gap in the rider-free shape.
+fn unless_pay_one_punisher() -> AbilityDefinition {
+    let mut paid_rider = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    );
+    paid_rider.condition = Some(engine::types::ability::AbilityCondition::EffectOutcome {
+        signal: engine::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    let mut punisher = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 100 },
+            target: Some(TargetFilter::Controller),
+        },
+    )
+    .sub_ability(paid_rider);
+    punisher.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        },
+        payer: TargetFilter::Controller,
+    });
+    punisher
+}
+
+/// The plan's colour-half reach guard: the activation action returns
+/// `ChooseManaColor` after collecting O but WITHOUT ordering or stacking it, and
+/// the reflexive does not exist yet because no mana has been produced.
+fn assert_color_prompt_holds_only_the_observer(
+    state: &GameState,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+    life_before: i32,
+) {
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "the colour prompt may not be preceded by a CR 603.3b ordering pass"
+    );
+    assert!(
+        !state
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "O may not be separately pushed while the colour choice is open"
+    );
+    let queued: Vec<ObjectId> = state
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued,
+        vec![observer_o],
+        "the already-paid cost range was collected into exactly O; N's reflexive \
+         cannot exist yet because no mana has been produced"
+    );
+    assert!(
+        !queued.contains(&source_n),
+        "no reflexive before production: {queued:?}"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, life_before);
+}
+
+/// Colour half of root 1: the direct `ActivateAbility` root whose `AnyOneColor`
+/// production returns `ChooseManaColor` first. Both halves of the seam run —
+/// the pre-prompt collection in `finish_mana_ability_cost_payment` and the
+/// post-choice collection in `handle_choose_mana_color` — and the release group
+/// is identical to the fixed-colour row's.
+#[test]
+fn direct_priority_color_choice_root_releases_the_same_two_context_group() {
+    let NoPauseFixture {
+        scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::AnyOneColor);
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let prompted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N's AnyOneColor production opens the colour choice");
+    assert!(
+        matches!(
+            prompted.waiting_for,
+            WaitingFor::ChooseManaColor { player: P0, .. }
+        ),
+        "expected ChooseManaColor, got {:?}",
+        prompted.waiting_for
+    );
+    assert_color_prompt_holds_only_the_observer(runner.state(), source_n, observer_o, life_before);
+
+    let chosen = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("the choice action produces the chosen mana and materializes the reflexive");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &chosen.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Colour half of root 2: the same two halves under a live `PendingCast`. The
+/// cast owner retains the action across BOTH halves and only the finalizer
+/// exposes the group.
+#[test]
+fn masked_cast_color_choice_root_releases_the_same_two_context_group() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::AnyOneColor);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Colour-Half Masked Cast Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the masked owner announces a real pending cast");
+
+    let prompted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is manually activated during the cast's mana payment");
+    assert!(
+        matches!(
+            prompted.waiting_for,
+            WaitingFor::ChooseManaColor { player: P0, .. }
+        ),
+        "expected ChooseManaColor, got {:?}",
+        prompted.waiting_for
+    );
+    assert_color_prompt_holds_only_the_observer(runner.state(), source_n, observer_o, life_before);
+
+    let chosen = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("the choice action completes N under the still-live cast owner");
+    assert!(
+        matches!(
+            chosen.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "the cast owner must retain the action across the colour choice, got {:?}",
+        chosen.waiting_for
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let finalized = runner
+        .act(GameAction::PassPriority)
+        .expect("the manual payment finalizes and announces the spell");
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. })));
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &finalized.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Colour half of root 3: the same two halves under a live `UnlessPayment`
+/// resolution owner.
+#[test]
+fn masked_resolution_color_choice_root_releases_the_same_two_context_group() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::AnyOneColor);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Colour-Half Masked Resolution Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability_definition(unless_pay_one_punisher())
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the free witness spell is announced");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    let owner = runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the witness resolves into its unless-payment");
+    assert!(matches!(
+        owner.waiting_for,
+        WaitingFor::UnlessPayment { player: P0, .. }
+    ));
+
+    let prompted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is manually activated during the unless payment");
+    assert!(
+        matches!(
+            prompted.waiting_for,
+            WaitingFor::ChooseManaColor { player: P0, .. }
+        ),
+        "expected ChooseManaColor, got {:?}",
+        prompted.waiting_for
+    );
+    assert_color_prompt_holds_only_the_observer(runner.state(), source_n, observer_o, life_before);
+
+    let chosen = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("the choice action completes N under the still-live resolution owner");
+    assert!(
+        matches!(
+            chosen.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "the resolution owner must retain the action across the colour choice, got {:?}",
+        chosen.waiting_for
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let settled = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the unless cost is paid from N's green mana");
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &settled.waiting_for,
+        source_n,
+        observer_o,
+        life_before + 1,
+    );
+}
+
+/// The plan's required `ManaPayment` + `TapLandForMana` action regression.
+///
+/// The six-row no-pause matrix's manual-cast `ActivateAbility` row does not
+/// execute the ADJACENT changed match arm, so this row drives the real
+/// engine-authored `GameAction::TapLandForMana` instead — never
+/// `ActivateAbility`, never `handle_tap_land_for_mana`, never a production
+/// helper directly.
+///
+/// Explicit revert discriminator: restoring that one arm's baseline immediate
+/// `process_triggers(state, &mana_events)` dispatches or stages O separately
+/// while L's reflexive stays under the cast guard, so the immediate exact-two
+/// deferred queue, the empty trigger stack, and the later exact-two single group
+/// cannot all hold. This row must fail under that one-arm revert even when the
+/// adjacent `ManaPayment` `ActivateAbility` routing remains correct.
+#[test]
+fn manual_cast_tap_land_for_mana_defers_its_reflexive_and_observer_as_one_group() {
+    let mut reflexive = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            player: TargetFilter::Controller,
+        },
+    );
+    reflexive.condition = Some(engine::types::ability::AbilityCondition::WhenYouDo);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land_l = scenario
+        .add_creature(P0, "L Reflexive Green Land", 1, 1)
+        .as_land()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+            .sub_ability(reflexive),
+        )
+        .id();
+    let observer_o = scenario
+        .add_creature(P0, "O L-Tap Observer", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::Taps)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .valid_card(TargetFilter::SpecificObject { id: land_l })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Tap-Land Payment Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("a real one-green cast reaches manual mana payment");
+    assert!(
+        matches!(cast.waiting_for, WaitingFor::ManaPayment { player: P0, .. }),
+        "expected the real ManaPayment owner, got {:?}",
+        cast.waiting_for
+    );
+
+    // The selection must be ENGINE-AUTHORED, not hand-built.
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let selection = grouped
+        .get(&land_l)
+        .into_iter()
+        .flatten()
+        .find_map(|action| match action {
+            GameAction::TapLandForMana { selection } => Some(selection.clone()),
+            _ => None,
+        })
+        .expect("the engine authors a ManaSourceSelection for L at the payment prompt");
+    assert_eq!(selection.source.object_id, land_l);
+    assert_eq!(
+        selection.ability_index,
+        Some(0),
+        "the selection names L's own {{T}}: Add {{G}} ability"
+    );
+
+    let tapped = runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("the engine-authored land tap is submitted as its own action");
+
+    assert!(runner.state().objects[&land_l].tapped, "L is tapped");
+    assert_eq!(
+        tapped
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::TappedForMana { source_id, .. } if *source_id == land_l
+            ))
+            .count(),
+        1,
+        "exactly one source-identifiable TappedForMana(L): {:?}",
+        tapped.events
+    );
+    assert_eq!(
+        tapped
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ManaAdded { .. }))
+            .count(),
+        1,
+        "exactly one base ManaAdded occurrence: {:?}",
+        tapped.events
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "L's green mana is present and usable immediately"
+    );
+    assert!(
+        runner.state().pending_cast.is_some(),
+        "the pending cast is still live"
+    );
+    assert!(
+        matches!(
+            tapped.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "the cast owner retains the action, got {:?}",
+        tapped.waiting_for
+    );
+    assert!(
+        !matches!(tapped.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "a masked land tap may not open CR 603.3b ordering"
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        land_l,
+        observer_o,
+        life_before,
+    );
+    assert!(
+        runner.state().deferred_triggers.iter().all(|context| {
+            !engine::game::mana_abilities::is_triggered_mana_ability(
+                &context.pending.ability,
+                context.pending.trigger_event.as_ref(),
+            )
+        }),
+        "neither queued context is an accepted triggered-mana context"
+    );
+
+    let finalized = runner
+        .act(GameAction::PassPriority)
+        .expect("the manual payment spends L's green pip and announces the spell");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        0,
+        "the green pip is consumed by the real cast"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+            .count(),
+        1,
+        "the spell is announced exactly once"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &finalized.waiting_for,
+        land_l,
+        observer_o,
+        life_before,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `ManaAdded` immediacy: the plan's "targetless nonmodal `ManaAdded`" classifier
+// row, driven as real actions over the no-pause fixture. A third permanent M
+// observes N's `ManaAdded` with a targetless nonmodal mana body, so the complete
+// classifier accepts it and the immediate backend resolves it stacklessly inside
+// the completed mana frame — its bonus mana is in the pool before the frame's
+// owner is resumed, and it never becomes a queue or stack member.
+// ---------------------------------------------------------------------------
+
+/// Attach permanent M to the no-pause fixture: a `TriggerMode::ManaAdded`
+/// observer whose executed body is `body`. `OncePerTurn` is mandatory — M's own
+/// mana body emits a further `ManaAdded`, and CR 603.2h is what stops the
+/// fixed point from re-triggering M off its own production.
+fn add_mana_added_observer(scenario: &mut GameScenario, label: &str, body: Effect) -> ObjectId {
+    scenario
+        .add_creature(P0, label, 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ManaAdded)
+                .execute(AbilityDefinition::new(AbilityKind::Database, body))
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id()
+}
+
+/// M's accepted body: one colorless mana, targetless and nonmodal, so
+/// `build_target_slots` is empty and `is_triggered_mana_ability` holds.
+fn mana_added_bonus_mana_body() -> Effect {
+    Effect::Mana {
+        produced: ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+        restrictions: vec![],
+        grants: vec![],
+        expiry: None,
+        target: None,
+    }
+}
+
+fn count_mana_added_from(events: &[GameEvent], source: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(
+            |event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == source),
+        )
+        .count()
+}
+
+/// How many pips in P0's pool were produced by `source`.
+///
+/// Provenance rather than the raw event vector is the right witness for an
+/// accepted occurrence: `collect_mana_action_trigger_batch` resolves the
+/// accepted body into its own frame-local dispatch buffer, exactly as baseline
+/// `process_triggers` does, so an inline body's own `ManaAdded` deliberately
+/// never receives a live occurrence identity in the reducer's public vector.
+/// The produced pip and its `source_id` are the durable record.
+fn pips_produced_by(state: &GameState, source: ObjectId) -> usize {
+    state.players[P0.0 as usize]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.source_id == source)
+        .count()
+}
+
+/// The plan's `ManaAdded` immediacy row at the direct-`Priority` root.
+///
+/// M is accepted by the complete classifier, so `TriggerPlacement::TriggeredManaImmediate`
+/// resolves it inside N's completed mana frame: the colorless pip exists in the
+/// same action, M is never appended to `state.deferred_triggers`, no
+/// `TriggeredAbility` entry is ever pushed for it, and the single release group
+/// is still exactly N's reflexive plus O.
+#[test]
+fn direct_priority_mana_added_bonus_resolves_inline_without_queue_or_stack() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m = add_mana_added_observer(
+        &mut scenario,
+        "M Mana-Added Bonus",
+        mana_added_bonus_mana_body(),
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let acted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "N's own base mana (CR 605.3b)"
+    );
+    // The immediacy claim: M's accepted body already ran, stacklessly, inside
+    // the same completed mana frame.
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        1,
+        "M's accepted triggered mana is spendable in the SAME action (CR 605.4a)"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        1,
+        "M produces exactly once — CR 603.2h stops it observing its own ManaAdded"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), source_n),
+        1,
+        "and N's base production happens exactly once"
+    );
+    assert_eq!(
+        count_mana_added_from(&acted.events, source_n),
+        1,
+        "N's own base ManaAdded is a live action event exactly once"
+    );
+    assert!(
+        !runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .any(|context| context.pending.source_id == bonus_m),
+        "an accepted triggered-mana context is never appended to the ordinary queue"
+    );
+    if let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = acted.waiting_for
+    {
+        assert!(
+            !group.iter().any(|summary| summary.source_id == bonus_m),
+            "and it is never a member of the released ordinary group"
+        );
+    }
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &acted.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "M never occupied the stack at any point"
+    );
+}
+
+/// The pure-axis positive reach guard for the row above: the ONLY difference is
+/// M's executed body. A `GainLife` body makes `is_triggered_mana_ability` false,
+/// so the same firing `ManaAdded` event, the same matcher and the same
+/// `OncePerTurn` constraint now produce an ORDINARY deferred context — proving
+/// the fixture really does couple M to N's production, and that immediacy is a
+/// property of the accepted mana body rather than of the fixture's topology.
+#[test]
+fn direct_priority_mana_added_nonmana_body_is_deferred_as_an_ordinary_trigger() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m = add_mana_added_observer(
+        &mut scenario,
+        "M Mana-Added Life",
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let acted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "a nonmana body produces no mana at all"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "and nothing resolves before the release group is ordered"
+    );
+
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = acted.waiting_for
+    else {
+        panic!("expected one release group, got {:?}", acted.waiting_for);
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(
+        members.len(),
+        3,
+        "the rejected M joins N's reflexive and O in the SAME ordinary group: {members:?}"
+    );
+    for (label, id) in [("N", source_n), ("O", observer_o), ("M", bonus_m)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} appears exactly once: {members:?}"
+        );
+    }
+
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the released group orders");
+    for _ in 0..4 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 5 + 2 + 3,
+        "all three distinguishable effects happen exactly once each"
+    );
+}
+
+/// The immediacy payoff at a masked root: M's bonus colorless pip must be
+/// spendable by the very cast whose `WaitingFor::ManaPayment` masks the frame.
+/// The witness spell costs `{1}{G}`, which is unpayable unless M resolved
+/// stacklessly inside N's completed frame — reverting `settles_completed_frame`
+/// to baseline's `is_ultimate_root && has_deferred_cost_events` leaves the
+/// empty-ledger `ManaPayment` shape with no collection at all, so M never fires
+/// and the generic pip cannot be paid.
+#[test]
+fn masked_cast_mana_added_bonus_is_spendable_before_the_spell_is_announced() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m = add_mana_added_observer(
+        &mut scenario,
+        "M Mana-Added Bonus",
+        mana_added_bonus_mana_body(),
+    );
+    let spell = scenario
+        .add_spell_to_hand(P0, "Mana-Added Immediacy Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the masked owner announces a real pending cast in manual payment mode");
+    assert!(matches!(
+        cast.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+
+    let activated = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is manually activated during the cast's mana payment");
+    assert!(
+        matches!(
+            activated.waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ),
+        "the cast owner must retain the action, got {:?}",
+        activated.waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        1,
+        "M's accepted bonus is in the pool BEFORE the payment owner resumes"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        1,
+        "the colorless pip really is M's, not a second pip of N's"
+    );
+    assert!(
+        !runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .any(|context| context.pending.source_id == bonus_m),
+        "an accepted triggered-mana context is never appended to the ordinary queue"
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let finalized = runner
+        .act(GameAction::PassPriority)
+        .expect("the manual payment spends BOTH pips and announces the spell");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        0
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "the generic pip is paid by M's bonus mana"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+            .count(),
+        1,
+        "the spell is announced exactly once"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &finalized.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Delayed-trigger families: the plan's `WhenNextEvent` one-shot control and the
+// duration-bearing `WheneverEvent` persistence control. Both prove the mana
+// frame's COMBINED collector materializes normal and delayed contexts together
+// in one APNAP batch — `collect_pending_and_delayed_triggers_for_batch` — rather
+// than letting the generic delayed pass discover them separately after the
+// frame has already claimed its live occurrences.
+// ---------------------------------------------------------------------------
+
+/// A free witness spell that installs one real delayed trigger through
+/// `Effect::CreateDelayedTrigger`, and the second `{T}: Add {G}` source used to
+/// prove one-shot removal versus duration-bearing persistence.
+struct DelayedFrameFixture {
+    scenario: GameScenario,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+    installer: ObjectId,
+    source_n2: ObjectId,
+}
+
+/// The embedded matcher both delayed rows install. `valid_card` is mandatory:
+/// without it `taps_for_mana_card_matches` requires the tapping permanent to BE
+/// the delayed trigger's own source, which an installer in the graveyard never
+/// is. `Any` (rather than a specific id) is what makes the one-shot row's second
+/// tap a non-vacuous probe — N2 would match, and only removal stops it.
+fn delayed_taps_for_mana_matcher() -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::TapsForMana).valid_card(TargetFilter::Any)
+}
+
+fn delayed_frame_fixture(condition: DelayedTriggerCondition) -> DelayedFrameFixture {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let installer = scenario
+        .add_spell_to_hand(P0, "Delayed Trigger Installer", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability_definition(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        ))
+        .id();
+    // A second, otherwise identical mana source with NO rider and NO observer,
+    // so a later tap is a clean probe for whether the delayed source is still
+    // installed.
+    let source_n2 = scenario
+        .add_creature(P0, "N2 Plain Green Source", 1, 1)
+        .as_artifact()
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        )
+        .id();
+
+    DelayedFrameFixture {
+        scenario,
+        source_n,
+        observer_o,
+        installer,
+        source_n2,
+    }
+}
+
+/// Cast and resolve the free installer, then assert exactly one delayed trigger
+/// is installed and return the caller's life total at that point.
+fn resolve_delayed_installer(runner: &mut GameRunner, installer: ObjectId) -> i32 {
+    let card_id = runner.state().objects[&installer].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: installer,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the free installer is announced");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the installer resolves");
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "exactly one real delayed trigger is installed by the resolved effect"
+    );
+    runner.state().players[P0.0 as usize].life
+}
+
+/// Order and resolve a released group of exactly `expected` members, then assert
+/// the total life delta.
+fn resolve_group_of(
+    runner: &mut GameRunner,
+    group_wait: &WaitingFor,
+    expected: &[ObjectId],
+    life_before: i32,
+    total_gain: i32,
+) {
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = group_wait
+    else {
+        panic!("expected one release group, got {group_wait:?}");
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(
+        members.len(),
+        expected.len(),
+        "the frame releases exactly one combined APNAP batch: {members:?}"
+    );
+    for id in expected {
+        assert_eq!(
+            members.iter().filter(|member| *member == id).count(),
+            1,
+            "{id:?} is a member exactly once: {members:?}"
+        );
+    }
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..members.len()).collect(),
+        })
+        .expect("the released group orders");
+    for _ in 0..(members.len() + 1) {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + total_gain,
+        "each distinguishable effect happens exactly once"
+    );
+}
+
+/// The plan's synchronous delayed one-shot `TappedForMana` row.
+///
+/// A real `Effect::CreateDelayedTrigger` carrying `WhenNextEvent` with an
+/// embedded `TriggerMode::TapsForMana` is installed by a resolved spell. N's
+/// fixed-colour activation then emits the base tap plus one source-identifiable
+/// `TappedForMana`, and the completed mana frame's COMBINED collector must
+/// return the delayed context in the SAME APNAP batch as N's reflexive and the
+/// ordinary observer O — one group of three, each effect once, for +11.
+///
+/// The one-shot half is measured twice: the instance is removed from
+/// `state.delayed_triggers` exactly once, and a second identical tap by N2
+/// afterwards produces no further firing at all.
+#[test]
+fn synchronous_delayed_one_shot_taps_for_mana_joins_the_frame_batch_once() {
+    let DelayedFrameFixture {
+        scenario,
+        source_n,
+        observer_o,
+        installer,
+        source_n2,
+    } = delayed_frame_fixture(DelayedTriggerCondition::WhenNextEvent {
+        trigger: Box::new(delayed_taps_for_mana_matcher()),
+        or_trigger: None,
+        lifetime: DelayedTriggerLifetime::default(),
+    });
+    let mut runner = scenario.build();
+    let life_before = resolve_delayed_installer(&mut runner, installer);
+
+    // Positive reach guard on the INSTALLED shape, before anything fires.
+    let installed = &runner.state().delayed_triggers[0];
+    assert!(
+        matches!(
+            installed.condition,
+            DelayedTriggerCondition::WhenNextEvent { ref trigger, .. }
+                if trigger.mode == TriggerMode::TapsForMana
+        ),
+        "the installed condition is the real embedded TapsForMana one-shot: {:?}",
+        installed.condition
+    );
+    assert!(installed.one_shot, "CR 603.7: it is a one-shot");
+    assert_eq!(
+        installed.source_id, installer,
+        "install origin is preserved"
+    );
+
+    let acted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+    assert_eq!(
+        acted
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::TappedForMana { source_id, .. } if *source_id == source_n
+            ))
+            .count(),
+        1,
+        "exactly one source-identifiable TappedForMana reach event"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the matched one-shot instance is removed exactly once: {:?}",
+        runner.state().delayed_triggers
+    );
+    resolve_group_of(
+        &mut runner,
+        &acted.waiting_for,
+        &[source_n, observer_o, installer],
+        life_before,
+        5 + 2 + 4,
+    );
+
+    // The generic delayed pass creates none: a second identical tap after the
+    // one-shot was consumed produces no further delayed firing.
+    let life_after_group = runner.state().players[P0.0 as usize].life;
+    let second = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n2,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N2 taps for mana with no delayed source installed");
+    assert!(
+        !matches!(second.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "no trigger at all may be released by the second tap, got {:?}",
+        second.waiting_for
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_after_group,
+        "the consumed one-shot cannot fire a second time"
+    );
+}
+
+/// The plan's duration-bearing `WheneverEvent` persistence row, deliberately
+/// separate from the one-shot control above.
+///
+/// The same combined collector must place the delayed context in the frame's one
+/// APNAP batch, but the duration-bearing source stays INSTALLED afterwards, and
+/// a later matching event proves persistence by firing exactly one more time.
+#[test]
+fn duration_bearing_delayed_whenever_event_stays_installed_and_fires_again() {
+    let DelayedFrameFixture {
+        scenario,
+        source_n,
+        observer_o,
+        installer,
+        source_n2,
+    } = delayed_frame_fixture(DelayedTriggerCondition::WheneverEvent {
+        trigger: Box::new(delayed_taps_for_mana_matcher()),
+        expiry: WheneverEventExpiry::default(),
+    });
+    let mut runner = scenario.build();
+    let life_before = resolve_delayed_installer(&mut runner, installer);
+    assert!(
+        !runner.state().delayed_triggers[0].one_shot,
+        "CR 603.7b: a duration-bearing WheneverEvent is not a one-shot"
+    );
+
+    let acted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the duration-bearing source remains installed while its context fires"
+    );
+    resolve_group_of(
+        &mut runner,
+        &acted.waiting_for,
+        &[source_n, observer_o, installer],
+        life_before,
+        5 + 2 + 4,
+    );
+
+    // Persistence: a later matching event fires it exactly one additional time.
+    // N2 carries no rider and no observer, so the delayed context is the batch's
+    // only member and CR 603.3b needs no ordering prompt for it.
+    let life_after_group = runner.state().players[P0.0 as usize].life;
+    let second = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n2,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N2 taps for mana while the duration-bearing source is still installed");
+    assert!(
+        !matches!(second.waiting_for, WaitingFor::OrderTriggers { .. }),
+        "a one-member batch needs no ordering prompt, got {:?}",
+        second.waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(
+                |entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    && entry.controller == P0
+            )
+            .count(),
+        1,
+        "the persistent delayed source fired exactly one additional time"
+    );
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the second firing resolves");
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_after_group + 4,
+        "and its distinguishable effect happens exactly once more"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "and it is still installed after firing again"
+    );
 }
 
 fn two_source_assist_replacement_witness(
@@ -5318,12 +9252,16 @@ fn nested_composite_effect_cost_serializes_all_suffixes_and_rider_once() {
     let mut initial_events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("the nested cost reaches the source's replacement pause");
+    assert!(runner.state().payment_transaction.is_some());
+    assert!(runner.state().pending_cost_move_resume.is_none());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        engine::game::staged_payment_shadow_for_test(runner.state())
+            .pending_cost_move_resume
+            .as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -5833,6 +9771,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
+            repeat: None,
         },
         None,
     )
@@ -5858,7 +9797,8 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some(ref description),
             ref remaining,
-        } if cost == &unless_cost
+
+            ..} if cost == &unless_cost
             && resumed_effect.as_ref() == &pending_effect
             && description == "prevented unless payment witness"
             && remaining == &vec![P1]
@@ -6209,6 +10149,7 @@ fn automatic_phyrexian_activation_retries_after_source_cost_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("automatic activation reaches the source-cost replacement choice");
     assert!(matches!(
@@ -6283,6 +10224,7 @@ fn automatic_ordinary_activation_retries_after_source_cost_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("ordinary activation reaches the source-cost replacement choice");
     assert!(matches!(
@@ -6362,6 +10304,7 @@ fn targeted_mana_tap_hand_exile_cost_retries_after_source_cost_redirect_without_
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the targeted activation announces before paying its costs");
     assert!(matches!(
@@ -6727,6 +10670,7 @@ fn mana_cost_proliferate_post_effect_serializes_until_answered_then_resumes_root
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real mana-ability action reaches its Proliferate post-effect");
     assert!(matches!(
@@ -6844,6 +10788,7 @@ fn optional_post_effect_settles_before_resuming_the_parked_mana_root() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the mana ability's mandatory redirect reaches its optional post-effect");
     assert!(
@@ -6895,28 +10840,58 @@ fn optional_post_effect_settles_before_resuming_the_parked_mana_root() {
     );
 }
 
-#[test]
-fn delve_mana_payment_honors_moved_redirect_without_linking_redirected_fuel() {
+struct DelveWitness {
+    before_cast: serde_json::Value,
+    zone_change_commands_before: usize,
+    runner: GameRunner,
+    spell: ObjectId,
+    fuel: [ObjectId; 3],
+    redirects: [ObjectId; 2],
+}
+
+/// Delve spell at its mana-payment window with graveyard `[A, F, C]` and two
+/// competing exile redirects (inert until installed). `F` is a creature card
+/// that optionally carries a dies trigger.
+fn delve_witness(fuel_dies_trigger: bool) -> DelveWitness {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand(P0, "Delve Redirect Payment Witness", true)
-        .with_mana_cost(ManaCost::generic(1))
+        .add_spell_to_hand(P0, "Delve Witness", true)
+        .with_mana_cost(ManaCost::generic(3))
         .with_keyword(Keyword::Delve)
         .id();
-    let fuel = scenario
-        .add_spell_to_graveyard(P0, "Redirected Delve Fuel", true)
+    let a = scenario
+        .add_spell_to_graveyard(P0, "Delve Fuel A", true)
         .id();
-    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
-        scenario
-            .add_creature(P0, name, 0, 0)
-            .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    let mut f = scenario.add_creature_to_graveyard(P0, "Delve Fuel F", 1, 1);
+    if fuel_dies_trigger {
+        f.with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
     }
+    let f = f.id();
+    let c = scenario
+        .add_spell_to_graveyard(P0, "Delve Fuel C", true)
+        .id();
+    let redirects = ["First Delve Exile Redirect", "Second Delve Exile Redirect"]
+        .map(|name| scenario.add_creature(P0, name, 0, 0).as_enchantment().id());
 
     let mut runner = scenario.build();
+    let before_cast = serde_json::to_value(runner.state()).unwrap();
+    let zone_change_commands_before = zone_change_commands(runner.state());
     let card_id = runner.state().objects[&spell].card_id;
-    let announced = runner
+    runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
@@ -6924,79 +10899,700 @@ fn delve_mana_payment_honors_moved_redirect_without_linking_redirected_fuel() {
             payment_mode: CastPaymentMode::Manual,
         })
         .expect("delve spell reaches its mana-payment window");
-    assert!(matches!(
-        announced.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
+    DelveWitness {
+        before_cast,
+        zone_change_commands_before,
+        runner,
+        spell,
+        fuel: [a, f, c],
+        redirects,
+    }
+}
 
-    let paused = runner
-        .act(GameAction::TapForConvoke {
-            object_id: fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
+fn zone_change_commands(state: &GameState) -> usize {
+    state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.command,
+                Some(engine::types::resolved_commands::ResolvedRulesCommand::ZoneChange(_))
+            )
         })
-        .expect("delve fuel must consult competing Moved redirects");
-    assert!(matches!(
-        paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+        .count()
+}
 
-    let resumed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("redirected delve fuel restores the mana-payment root");
-    assert_eq!(runner.state().objects[&fuel].zone, Zone::Hand);
-    assert!(
-        !runner
+/// JSON-pointer paths at which `a` and `b` differ; unequal-length arrays report the array path.
+fn state_diff_paths(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
+    fn walk(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                for key in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
+                    let child = format!("{path}/{key}");
+                    match (x.get(key), y.get(key)) {
+                        (Some(l), Some(r)) => walk(&child, l, r, out),
+                        _ => out.push(child),
+                    }
+                }
+            }
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+                for (i, (l, r)) in x.iter().zip(y).enumerate() {
+                    walk(&format!("{path}/{i}"), l, r, out);
+                }
+            }
+            _ if a != b => out.push(path.to_string()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk("", a, b, &mut out);
+    out
+}
+
+impl DelveWitness {
+    fn delve(&mut self, fuel: ObjectId) -> WaitingFor {
+        self.runner
+            .act(GameAction::TapForConvoke {
+                object_id: fuel,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("delve fuel is selectable")
+            .waiting_for
+    }
+
+    /// Pays the generic mana the selected fuel leaves over.
+    fn fund_remaining_generic(&mut self, count: usize) {
+        for _ in 0..count {
+            self.runner.state_mut().players[0]
+                .mana_pool
+                .add(engine::types::mana::ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+        }
+    }
+
+    fn pass(&mut self) -> WaitingFor {
+        self.runner
+            .act(GameAction::PassPriority)
+            .expect("the delve payment commits")
+            .waiting_for
+    }
+
+    fn set_exile_redirect(&mut self, redirected_to: Option<Zone>) {
+        for id in self.redirects {
+            let object = self.runner.state_mut().objects.get_mut(&id).unwrap();
+            let definitions: Vec<_> = redirected_to
+                .map(|zone| redirect_moved_to(Zone::Exile, zone))
+                .into_iter()
+                .collect();
+            object.replacement_definitions = definitions.clone().into();
+            object.base_replacement_definitions = Arc::new(definitions);
+        }
+    }
+
+    /// Installs an identity exile redirect whose post-effect prompts for a choice.
+    fn set_post_effect_redirect(&mut self) {
+        let object = self
+            .runner
+            .state_mut()
+            .objects
+            .get_mut(&self.redirects[0])
+            .unwrap();
+        let definitions = vec![prompt_after_moved_to_exile()];
+        object.replacement_definitions = definitions.clone().into();
+        object.base_replacement_definitions = Arc::new(definitions);
+    }
+
+    fn zone(&self, object: ObjectId) -> Zone {
+        self.runner.state().objects[&object].zone
+    }
+
+    fn graveyard(&self) -> Vec<ObjectId> {
+        self.runner.state().players[0]
+            .graveyard
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    fn markers(&self) -> Vec<ObjectId> {
+        self.runner.state().players[0]
+            .mana_pool
+            .units()
+            .filter(|unit| unit.is_convoke_payment())
+            .map(|unit| unit.source_id)
+            .collect()
+    }
+
+    fn exile_links_to_spell(&self) -> Vec<ObjectId> {
+        self.runner
             .state()
             .exile_links
             .iter()
-            .any(|link| link.exiled_id == fuel && link.source_id == spell),
-        "fuel redirected away from exile must not be linked as exiled with the spell"
-    );
-    assert!(matches!(
-        resumed.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
+            .filter(|link| link.source_id == self.spell)
+            .map(|link| link.exiled_id)
+            .collect()
+    }
 
-    let completed = runner
-        .act(GameAction::PassPriority)
-        .expect("redirected delve fuel still pays its generic cost component");
+    fn assert_committed_onto_stack(&self) {
+        assert_eq!(self.zone(self.spell), Zone::Stack);
+        assert!(self.runner.state().pending_cost_move_resume.is_none());
+        assert!(self.markers().is_empty());
+    }
+
+    /// Cancels the cast and requires the whole state to equal its pre-cast value
+    /// except cast/cancel residue that carries no gameplay history.
+    fn cancel_restores_the_pre_cast_state(&mut self) {
+        self.runner
+            .act(GameAction::CancelCast)
+            .expect("cancel a delve cast");
+        let after = serde_json::to_value(self.runner.state()).unwrap();
+        let diff = state_diff_paths(&self.before_cast, &after);
+        assert!(diff.iter().any(|path| path == "/cancelled_casts"));
+        assert_eq!(
+            zone_change_commands(self.runner.state()),
+            self.zone_change_commands_before,
+            "the cancel journals no zone-change command"
+        );
+        for path in &diff {
+            let leaf = path.rsplit('/').next().unwrap();
+            let allowed =
+                // The cancel's own record.
+                path == "/cancelled_casts"
+                // Append-only cast/cancel commands (stack push and removal, mana insert).
+                || path.starts_with("/resolved_rules_journal/")
+                // Monotone mana-unit id counter, never rewound.
+                || path == "/next_pip_id"
+                // CR 601.2a + CR 733.1: monotone spell-announcement counter; an
+                // undone announcement's id is never reminted.
+                || path == "/next_spell_announcement"
+                // Layer-pass caches derived from printed characteristics.
+                || (std::iter::once(&self.spell)
+                    .chain(&self.redirects)
+                    .any(|id| path.starts_with(&format!("/objects/{}/", id.0)))
+                    && [
+                        "base_characteristics_initialized",
+                        "layer_base_power",
+                        "layer_base_toughness",
+                    ]
+                    .contains(&leaf))
+                // Redirects the test installs after the snapshot.
+                || self.redirects.iter().any(|id| {
+                    path.starts_with(&format!("/objects/{}/", id.0))
+                        && (path.contains("/replacement_definitions")
+                            || path.contains("/base_replacement_definitions"))
+                });
+            assert!(allowed, "unexplained cancel residue at {path}");
+        }
+    }
+}
+
+/// CR 601.2h + CR 733.1: selecting delve cards moves nothing, so a cancelled
+/// cast leaves the game exactly as it was before the cast: no zone-change row,
+/// no battlefield entry, no death, no descend mark, no journal entry.
+#[test]
+fn cancel_after_delve_selection_restores_the_whole_state() {
+    let mut witness = delve_witness(true);
+    witness.set_exile_redirect(Some(Zone::Battlefield));
+    let [a, f, c] = witness.fuel;
+    let rows = witness.runner.state().zone_changes_this_turn.len();
+    for fuel in [a, f, c] {
+        assert!(matches!(
+            witness.delve(fuel),
+            WaitingFor::ManaPayment { .. }
+        ));
+        assert_eq!(witness.zone(fuel), Zone::Graveyard);
+    }
+    assert_eq!(witness.graveyard(), [a, f, c]);
+    assert_eq!(witness.markers().len(), 3);
+    assert_eq!(witness.runner.state().zone_changes_this_turn.len(), rows);
+
+    witness.cancel_restores_the_pre_cast_state();
+
+    assert_eq!(witness.graveyard(), [a, f, c]);
+    assert!(witness.markers().is_empty());
+    assert!(witness.exile_links_to_spell().is_empty());
+    assert_eq!(witness.runner.state().players[0].life, 20);
+}
+
+/// CR 601.2h + CR 614.1: the exile is a cost move, so a `Moved` redirect applies
+/// when the total cost is paid; the redirected card still pays its generic mana.
+fn commit_with_redirect(redirected_to: Zone) -> DelveWitness {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(redirected_to));
+    assert!(matches!(witness.delve(f), WaitingFor::ManaPayment { .. }));
+    assert_eq!(witness.zone(f), Zone::Graveyard);
+    witness.fund_remaining_generic(2);
     assert!(matches!(
-        completed.waiting_for,
-        WaitingFor::Priority { player: P0 }
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    let resumed = witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("competing Moved redirects resolve")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+    witness
 }
 
 #[test]
-fn delve_murktide_link_tracks_only_fuel_delivered_to_exile() {
+fn commit_honors_moved_redirect_to_hand_without_linking_redirected_fuel() {
+    let witness = commit_with_redirect(Zone::Hand);
+    let [_, f, _] = witness.fuel;
+    assert_eq!(witness.zone(f), Zone::Hand);
+    assert!(witness.exile_links_to_spell().is_empty());
+}
+
+#[test]
+fn commit_honors_moved_redirect_to_library_battlefield_and_graveyard() {
+    for zone in [Zone::Library, Zone::Battlefield, Zone::Graveyard] {
+        let witness = commit_with_redirect(zone);
+        let [_, f, _] = witness.fuel;
+        assert_eq!(witness.zone(f), zone, "fuel redirected to {zone:?}");
+        assert!(witness.exile_links_to_spell().is_empty());
+    }
+}
+
+/// CR 616.1: a prevented exile leaves the fuel in the graveyard.
+#[test]
+fn commit_with_prevented_exile_keeps_fuel_in_graveyard_and_casts() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+    assert!(matches!(
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    stage_prevented_cost_move(witness.runner.state_mut(), witness.redirects[0]);
+    witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("prevented delve fuel resumes the commit");
+
+    assert_eq!(witness.zone(f), Zone::Graveyard);
+    witness.assert_committed_onto_stack();
+}
+
+/// CR 616.1: while the commit's replacement choice is open, the only legal
+/// actions answer it and a cancel is refused without touching the state.
+#[test]
+fn cancel_is_refused_while_the_commit_replacement_choice_is_open() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+    assert!(matches!(
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let before = serde_json::to_value(witness.runner.state()).unwrap();
+    witness
+        .runner
+        .act(GameAction::CancelCast)
+        .expect_err("a cancel is refused while the replacement choice is open");
+    let after = serde_json::to_value(witness.runner.state()).unwrap();
+    assert!(state_diff_paths(&before, &after).is_empty());
+    let (actions, _, _) = legal_actions_full(witness.runner.state());
+    assert!(!actions.is_empty());
+    assert!(actions
+        .iter()
+        .all(|action| matches!(action, GameAction::ChooseReplacement { .. })));
+}
+
+/// CR 601.2h: a delivered exile whose replacement raises its own
+/// post-effect prompt surfaces that prompt at commit; answering it resumes the
+/// parked commit in the same action, with the spell on the stack.
+#[test]
+fn commit_with_post_effect_prompt_answers_then_casts() {
+    let mut witness = delve_witness(false);
+    let [_, f, _] = witness.fuel;
+    witness.set_post_effect_redirect();
+    witness.delve(f);
+    witness.fund_remaining_generic(2);
+
+    let prompted = witness.pass();
+    assert!(
+        matches!(prompted, WaitingFor::NamedChoice { .. }),
+        "{prompted:?}"
+    );
+    assert_eq!(witness.zone(f), Zone::Exile);
+    assert_eq!(witness.zone(witness.spell), Zone::Hand);
+    assert!(witness.runner.state().pending_cost_move_resume.is_some());
+
+    let resumed = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the post-effect prompt resumes the commit")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+}
+
+/// CR 601.2h: each fuel's post-effect prompt surfaces in turn; the parked
+/// remainder stays in the graveyard until its own move runs.
+#[test]
+fn commit_with_post_effect_prompt_resumes_remaining_fuel() {
+    let mut witness = delve_witness(false);
+    let [_, f, c] = witness.fuel;
+    witness.set_post_effect_redirect();
+    witness.delve(f);
+    witness.delve(c);
+    witness.fund_remaining_generic(1);
+
+    assert!(matches!(witness.pass(), WaitingFor::NamedChoice { .. }));
+    assert_eq!(witness.zone(c), Zone::Graveyard);
+    let second = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the first fuel's prompt resumes the commit")
+        .waiting_for;
+    assert!(
+        matches!(second, WaitingFor::NamedChoice { .. }),
+        "{second:?}"
+    );
+    assert_eq!(witness.zone(c), Zone::Exile);
+    let done = witness
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the second fuel's prompt resumes the commit")
+        .waiting_for;
+    assert!(matches!(done, WaitingFor::Priority { player: P0 }));
+    witness.assert_committed_onto_stack();
+}
+
+/// Two inert enchantments that become competing graveyard-to-Exile redirects
+/// (to Hand) once installed, so the commit's first exile parks for a choice.
+fn add_competing_exile_redirects(scenario: &mut GameScenario) -> [ObjectId; 2] {
+    ["Competing Redirect One", "Competing Redirect Two"]
+        .map(|name| scenario.add_creature(P0, name, 0, 0).as_enchantment().id())
+}
+
+fn install_exile_to_hand_redirects(runner: &mut GameRunner, redirects: [ObjectId; 2]) {
+    for id in redirects {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        let definitions = vec![redirect_moved_to(Zone::Exile, Zone::Hand)];
+        object.replacement_definitions = definitions.clone().into();
+        object.base_replacement_definitions = Arc::new(definitions);
+    }
+}
+
+fn add_generic_mana(runner: &mut GameRunner, count: usize) {
+    for _ in 0..count {
+        runner.state_mut().players[0]
+            .mana_pool
+            .add(engine::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+    }
+}
+
+/// CR 601.2h + CR 616.1: a deferred "sacrifice an artifact" cost is paid by the
+/// same commit that parks on the delve exile; the resume must not pay it again.
+#[test]
+fn commit_with_deferred_sacrifice_resumes_after_replacement_choice() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand(P0, "Murktide Regent", true)
-        .with_mana_cost(ManaCost::generic(2))
+        .add_spell_to_hand(P0, "Delve Sacrifice Spell", true)
+        .with_mana_cost(ManaCost::generic(3))
+        .with_keyword(Keyword::Delve)
+        .with_additional_cost(engine::types::ability::AdditionalCost::Required(
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                1,
+            )),
+        ))
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    let artifact = scenario
+        .add_creature(P0, "Sacrificed Artifact", 0, 1)
+        .as_artifact()
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let redirects = add_competing_exile_redirects(&mut scenario);
+    let mut runner = scenario.build();
+    install_exile_to_hand_redirects(&mut runner, redirects);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell asks for its sacrifice");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![artifact],
+        })
+        .expect("the sacrifice is deferred to the commit");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    add_generic_mana(&mut runner, 2);
+
+    let parked = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit sacrifices, then parks on the delve exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes without paying the sacrifice again")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&fuel].zone, Zone::Hand);
+    assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_cast.is_none());
+}
+
+/// CR 107.4f + CR 702.150a: the life paid for a Phyrexian shard survives a commit
+/// that parks on the delve exile and resumes.
+#[test]
+fn commit_with_phyrexian_shard_keeps_life_paid_across_replacement_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Delve Phyrexian Spell", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianGreen],
+            generic: 2,
+        })
         .with_keyword(Keyword::Delve)
         .id();
-    let delivered_fuel = scenario
-        .add_spell_to_graveyard(P0, "Delivered Delve Fuel", true)
-        .id();
-    let redirected_fuel = scenario
-        .add_spell_to_graveyard(P0, "Redirected Murktide Fuel", true)
-        .id();
-    let first_redirect = scenario
-        .add_creature(P0, "First Murktide Exile Redirect", 0, 0)
-        .as_enchantment()
-        .id();
-    let second_redirect = scenario
-        .add_creature(P0, "Second Murktide Exile Redirect", 0, 0)
-        .as_enchantment()
-        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let redirects = add_competing_exile_redirects(&mut scenario);
+    let mut runner = scenario.build();
+    install_exile_to_hand_redirects(&mut runner, redirects);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell reaches mana payment");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    add_generic_mana(&mut runner, 1);
+    let asked = runner
+        .act(GameAction::PassPriority)
+        .expect("the Phyrexian shard asks how it is paid")
+        .waiting_for;
+    assert!(
+        matches!(asked, WaitingFor::PhyrexianPayment { .. }),
+        "{asked:?}"
+    );
+    let parked = runner
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![engine::types::game_state::ShardChoice::PayLife],
+        })
+        .expect("the commit pays life, then parks on the delve exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
 
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes")
+        .waiting_for;
+    assert!(matches!(resumed, WaitingFor::Priority { player: P0 }));
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&spell].phyrexian_life_paid, 1);
+    assert_eq!(state.players[0].life, 18);
+}
+
+/// CR 608.2g + CR 601.2h + CR 702.66a: a free-cast delve spell whose tax is paid by
+/// delve parks on the fuel's exile choice; resuming installs the cast's one
+/// graveyard redirect and does not re-offer the free-cast window.
+#[test]
+fn free_cast_with_tax_delve_commit_installs_single_exile_rider_across_replacement_choice() {
+    let invoke_text = "You may cast up to two instant and/or sorcery spells with total mana \
+         value 6 or less from your graveyard and/or hand without paying their mana costs. \
+         If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Heavy Orb", "Spells cost {1} more to cast.");
+    let invoke = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, invoke_text)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let delve_text = "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDestroy target creature.";
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murderous Cut", true, delve_text)
+        .from_oracle_text_with_keywords(&["Delve"], delve_text)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
+        .id();
+    scenario.add_creature(P1, "Cut Target", 2, 2);
+    let fuel = scenario
+        .add_creature_to_graveyard(P0, "Delve Fuel", 1, 1)
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+        )
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Library).active_zones(vec![Zone::Graveyard]),
+        )
+        .id();
+    let mut runner = scenario.build();
+    add_generic_mana(&mut runner, 2);
+    let card_id = runner.state().objects[&invoke].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Invoke Calamity is cast");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("opponent passes");
+    let window = runner
+        .act(GameAction::PassPriority)
+        .expect("Invoke Calamity resolves")
+        .waiting_for;
+    assert!(
+        matches!(
+            window,
+            WaitingFor::CastOffer {
+                kind: engine::types::game_state::CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+        ),
+        "{window:?}"
+    );
+    let payment = runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(spell),
+        })
+        .expect("the free cast is chosen")
+        .waiting_for;
+    assert!(
+        matches!(
+            payment,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(_),
+                ..
+            }
+        ),
+        "{payment:?}"
+    );
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("delve fuel is selectable");
+    let parked = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit parks on the fuel's exile")
+        .waiting_for;
+    assert!(
+        matches!(parked, WaitingFor::ReplacementChoice { .. }),
+        "{parked:?}"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked commit resumes")
+        .waiting_for;
+
+    assert!(
+        matches!(resumed, WaitingFor::Priority { player: P0 }),
+        "{resumed:?}"
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(state.objects[&fuel].zone, Zone::Hand);
+    let redirects = state.objects[&spell]
+        .replacement_definitions
+        .iter_unchecked()
+        .filter(|d| {
+            d.event == ReplacementEvent::Moved && d.destination_zone == Some(Zone::Graveyard)
+        })
+        .count();
+    assert_eq!(redirects, 1, "one graveyard redirect per free cast");
+}
+
+/// CR 601.2h + CR 616.1: completing a post-payment distribution pays the delve
+/// exile, which parks for competing `Moved` redirects; the choice resumes the commit.
+#[test]
+fn post_distribution_delve_exile_parks_for_a_replacement_choice() {
+    const ORACLE: &str =
+        "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\n\
+~ deals X damage divided as you choose among any number of targets.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Volley", false, ORACLE)
+        .from_oracle_text_with_keywords(&["Delve"], ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
     runner
@@ -7006,73 +11602,144 @@ fn delve_murktide_link_tracks_only_fuel_delivered_to_exile() {
             targets: vec![],
             payment_mode: CastPaymentMode::Manual,
         })
-        .expect("Murktide-shaped delve spell reaches mana payment");
+        .expect("delve spell reaches mana payment");
+    runner
+        .act(GameAction::ChooseX { value: 0 })
+        .expect("announce X = 0");
     runner
         .act(GameAction::TapForConvoke {
-            object_id: delivered_fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
         })
-        .expect("first delve fuel is delivered to exile");
+        .expect("fuel is selectable");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("payment reaches the post-payment distribution");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+    assert_eq!(runner.state().objects[&fuel].zone, Zone::Graveyard);
 
-    for redirect in [first_redirect, second_redirect] {
+    let parked = runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![],
+        })
+        .expect("completing the distribution pays the delve exile")
+        .waiting_for;
+    assert!(matches!(parked, WaitingFor::ReplacementChoice { .. }));
+    assert!(matches!(
+        runner.state().pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast {
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        })
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirect resolves and the commit resumes");
+
+    assert_eq!(runner.state().objects[&fuel].zone, Zone::Hand);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(runner
+        .state()
+        .exile_links
+        .iter()
+        .all(|l| l.exiled_id != fuel));
+}
+
+/// CR 406.6: only a fuel that actually arrived in exile is linked to the spell.
+#[test]
+fn commit_links_only_fuel_delivered_to_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Murktide Regent", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .with_keyword(Keyword::Delve)
+        .id();
+    let delivered = scenario
+        .add_spell_to_graveyard(P0, "Delivered Delve Fuel", true)
+        .id();
+    let redirected = scenario
+        .add_spell_to_graveyard(P0, "Redirected Murktide Fuel", true)
+        .with_replacement_definition(
+            redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+        )
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    for fuel in [delivered, redirected] {
         runner
-            .state_mut()
-            .objects
-            .get_mut(&redirect)
-            .expect("redirect source remains on the battlefield")
-            .replacement_definitions = vec![redirect_moved_to(Zone::Exile, Zone::Hand)].into();
+            .act(GameAction::TapForConvoke {
+                object_id: fuel,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("fuel is selectable");
     }
 
-    let paused = runner
-        .act(GameAction::TapForConvoke {
-            object_id: redirected_fuel,
-            mana_type: engine::types::mana::ManaType::Colorless,
-        })
-        .expect("second delve fuel must consult competing Moved redirects");
-    assert!(matches!(
-        paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+    let completed = runner
+        .act(GameAction::PassPriority)
+        .expect("both fuel pay the generic mana")
+        .waiting_for;
 
-    let resumed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("redirected fuel resumes the Murktide-shaped mana payment");
-    assert!(matches!(
-        resumed.waiting_for,
-        WaitingFor::ManaPayment {
-            player: P0,
-            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
-        }
-    ));
-    assert_eq!(runner.state().objects[&delivered_fuel].zone, Zone::Exile);
-    assert_eq!(runner.state().objects[&redirected_fuel].zone, Zone::Hand);
-    let tracked_ids: Vec<_> = runner
+    assert!(matches!(completed, WaitingFor::Priority { player: P0 }));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&delivered].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&redirected].zone, Zone::Hand);
+    let linked: Vec<ObjectId> = runner
         .state()
         .exile_links
         .iter()
         .filter(|link| link.source_id == spell)
         .map(|link| link.exiled_id)
         .collect();
-    assert_eq!(tracked_ids, vec![delivered_fuel]);
+    assert_eq!(linked, [delivered]);
     assert_eq!(
-        runner
-            .state()
-            .cards_exiled_with_source_this_turn
-            .get(&spell)
-            .cloned()
-            .unwrap_or_default(),
-        vec![delivered_fuel],
-        "Murktide's tracked set contains precisely its delivered exile"
+        runner.state().cards_exiled_with_source_this_turn[&spell],
+        [delivered]
     );
+}
 
-    let completed = runner
-        .act(GameAction::PassPriority)
-        .expect("both delve components pay the generic mana after redirect");
+/// CR 616.1: a replacement choice on the first fuel parks the rest of the
+/// commit; the parked remainder resumes and surfaces the next fuel's choice.
+#[test]
+fn commit_resumes_remaining_fuel_after_replacement_choice() {
+    let mut witness = delve_witness(false);
+    let [a, f, c] = witness.fuel;
+    witness.set_exile_redirect(Some(Zone::Hand));
+    witness.delve(f);
+    witness.delve(c);
+    witness.fund_remaining_generic(1);
     assert!(matches!(
-        completed.waiting_for,
-        WaitingFor::Priority { player: P0 }
+        witness.pass(),
+        WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(witness.zone(c), Zone::Graveyard);
+    let second = witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first fuel's redirect resolves")
+        .waiting_for;
+    assert!(matches!(second, WaitingFor::ReplacementChoice { .. }));
+    assert_eq!(witness.zone(f), Zone::Hand);
+    witness
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the parked remainder's redirect resolves");
+
+    assert_eq!(witness.zone(c), Zone::Hand);
+    assert_eq!(witness.zone(a), Zone::Graveyard);
+    assert!(witness.exile_links_to_spell().is_empty());
+    witness.assert_committed_onto_stack();
 }
 
 /// W-L1 (red first): Cascade's bottom placement must be a replaceable
@@ -7421,6 +12088,8 @@ fn cast_from_zone_exile_redirect_pauses_before_lingering_permission_tail() {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card)],
         source,
@@ -7507,6 +12176,8 @@ fn cast_from_zone_exile_delivery_stays_synchronous_and_grants_permission() {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card), TargetRef::Object(second_card)],
         source,
@@ -7578,6 +12249,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
         source,
@@ -8434,6 +13106,7 @@ fn library_effect_placements_stay_synchronous_without_redirects() {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: engine::types::ability::LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(first), TargetRef::Object(second)],
             put_source,
@@ -8493,6 +13166,8 @@ fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
     let mut ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
+            top_position: Default::default(),
         },
         vec![TargetRef::Object(target)],
         source,
@@ -8587,8 +13262,12 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -8640,7 +13319,14 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
                 .expect("Dig publishes its kept set after the delivery settles"),
         )
         .expect("Dig tracked set exists");
-    assert_eq!(tracked, &vec![kept]);
+    assert!(
+        tracked.is_empty(),
+        "a kept card redirected away from its requested destination is absent from the settled delivery"
+    );
+    assert!(
+        runner.state().last_zone_changed_ids.is_empty(),
+        "a redirected kept card must not satisfy a requested-destination reflexive gate"
+    );
     assert_eq!(
         initial_events
             .iter()
@@ -8676,6 +13362,8 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
     let mut top_ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
+            top_position: Default::default(),
         },
         vec![TargetRef::Object(top_target)],
         top_source,
@@ -8726,8 +13414,12 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![],
@@ -9367,52 +14059,125 @@ fn effect_zone_sacrifice_replacement_preserves_tracked_set_and_tail() {
 
 /// W-163-D: Exploit emits its per-creature event and terminal event only after
 /// the replacement-delivered sacrifice has actually completed.
-#[test]
-fn exploit_replacement_preserves_creature_exploited_follow_up() {
+fn run_exploit_replacement_restore_case(
+    replacement_index: usize,
+    restore_through_persisted_raw: bool,
+    victim_is_token: bool,
+) {
+    const GURMAG_DROWNER: &str = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhen this creature exploits a creature, look at the top four cards of your library. Put one of them into your hand and the rest into your graveyard.";
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let exploiter = scenario
-        .add_creature(P0, "Exploit Replacement Source", 1, 1)
-        .id();
+    let exploiter = {
+        let mut card = scenario.add_creature_to_hand(P0, "Gurmag Drowner", 2, 4);
+        card.from_oracle_text_with_keywords(&["Exploit"], GURMAG_DROWNER)
+            .id()
+    };
     let victim = scenario
         .add_creature(P0, "Exploit Replacement Victim", 1, 1)
         .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
         .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
         .id();
-    let ability = ResolvedAbility::new(
-        Effect::Exploit {
-            target: TargetFilter::Any,
-        },
-        vec![TargetRef::Object(victim)],
-        exploiter,
-        P0,
-    );
     let mut runner = scenario.build();
-    let mut initial_events = Vec::new();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&victim)
+        .expect("fixture victim exists")
+        .is_token = victim_is_token;
+    let paused = runner
+        .cast(exploiter)
+        .target_object(victim)
+        .accept_optional()
+        .effect_zone(&[victim])
+        .resolve();
+    assert!(matches!(
+        paused.final_waiting_for(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(!paused
+        .events()
+        .iter()
+        .any(|event| matches!(event, GameEvent::CreatureExploited { .. })));
 
-    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
-        .expect("exploit reaches the replacement choice");
+    let restored = if restore_through_persisted_raw {
+        let encoded =
+            serde_json::to_value(PersistedGameState::Raw(Box::new(paused.state().clone())))
+                .expect("paused raw state serializes");
+        serde_json::from_value::<PersistedGameState>(encoded)
+            .expect("paused raw state decodes")
+            .into_game_state()
+            .expect("paused raw state satisfies restore finalization")
+    } else {
+        let encoded =
+            serde_json::to_value(ResolutionStateWire::from_game_state(paused.state().clone()))
+                .expect("paused resolution wire serializes");
+        serde_json::from_value::<ResolutionStateWire>(encoded)
+            .expect("paused resolution wire decodes")
+            .into_game_state()
+    };
+    let mut runner = GameRunner::from_state(restored);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(!initial_events
-        .iter()
-        .any(|event| matches!(event, GameEvent::CreatureExploited { .. })));
 
     let completed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
+        .act(GameAction::ChooseReplacement {
+            index: replacement_index,
+        })
         .expect("replacement delivery completes exploit");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let expected_destination = if replacement_index == 0 {
+        Zone::Exile
+    } else {
+        Zone::Hand
+    };
+    let departure_record = completed
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to,
+                record,
+            } if *object_id == victim && *to == expected_destination => Some(record),
+            _ => None,
+        })
+        .expect("replacement completion exposes the victim's actual departure record");
+    let exploited_event = completed
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event,
+                GameEvent::CreatureExploited {
+                    exploiter: event_exploiter,
+                    sacrificed,
+                    ..
+                } if *event_exploiter == exploiter && *sacrificed == victim
+            )
+        })
+        .expect("completed sacrifice emits the exploit event");
+    let GameEvent::CreatureExploited { record, .. } = exploited_event else {
+        unreachable!("the event was matched as CreatureExploited")
+    };
+    assert_eq!(record, departure_record);
     assert_eq!(
-        initial_events
+        serde_json::to_value(exploited_event).expect("event serializes")["data"]["record"],
+        serde_json::to_value(departure_record).expect("departure record serializes")
+    );
+    assert_eq!(
+        completed
+            .events
             .iter()
-            .chain(completed.events.iter())
             .filter(|event| matches!(
                 event,
                 GameEvent::CreatureExploited {
                     exploiter: event_exploiter,
                     sacrificed,
+                    ..
                 } if *event_exploiter == exploiter && *sacrificed == victim
             ))
             .count(),
@@ -9420,9 +14185,9 @@ fn exploit_replacement_preserves_creature_exploited_follow_up() {
         "the exploit follow-up is emitted once after delivery"
     );
     assert_eq!(
-        initial_events
+        completed
+            .events
             .iter()
-            .chain(completed.events.iter())
             .filter(|event| matches!(
                 event,
                 GameEvent::EffectResolved {
@@ -9434,6 +14199,25 @@ fn exploit_replacement_preserves_creature_exploited_follow_up() {
             .count(),
         1
     );
+    assert!(runner
+        .state()
+        .pending_player_scope_sacrifice_choice
+        .is_none());
+}
+
+#[test]
+fn exploit_replacement_preserves_creature_exploited_follow_up() {
+    for replacement_index in [0, 1] {
+        for restore_through_persisted_raw in [false, true] {
+            for victim_is_token in [false, true] {
+                run_exploit_replacement_restore_case(
+                    replacement_index,
+                    restore_through_persisted_raw,
+                    victim_is_token,
+                );
+            }
+        }
+    }
 }
 
 /// W-163-E: the terminal sweep of choose-and-sacrifice-rest keeps its complete
@@ -9459,6 +14243,7 @@ fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         },
         vec![],
         source,
@@ -9536,6 +14321,7 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
             ),
             count: QuantityExpr::Fixed { value: 1 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![],
         source,
@@ -9622,6 +14408,98 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
     );
 }
 
+/// A resolver-created PutAtLibraryPosition choice must reject a repeated card
+/// before mutating its source zone, while preserving selection-order placement
+/// for a distinct follow-up choice.
+#[test]
+fn effect_zone_put_at_library_position_rejects_duplicate_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Put-On-Top Duplicate Selection Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate First", true)
+        .id();
+    let second = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate Second", true)
+        .id();
+    let marker = scenario
+        .add_spell_to_library_top(P0, "Put-On-Top Duplicate Marker", true)
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            count: QuantityExpr::Fixed { value: 2 },
+            position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![marker];
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("PutAtLibraryPosition reaches its real resolver-created choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("a repeated card is not a legal resolution-time choice");
+    assert!(
+        matches!(duplicate, engine::game::EngineError::InvalidAction(message) if message == "Selected cards must be distinct")
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![marker],
+        "rejected input must not mutate the library"
+    );
+
+    let completed = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("distinct eligible cards resolve the existing choice");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Library);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![first, second, marker],
+        "distinct selection retains the requested top order"
+    );
+}
+
 /// W-164-B: a mixed hand/library selection preserves the raw synchronous order
 /// when only the hand members use the replacement-aware delivery path.
 #[test]
@@ -9683,6 +14561,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
     ] {
         let mut runner = GameRunner::from_state(base_state.clone());
         runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: P0,
             cards: vec![hand_first, library_first, hand_second, library_second],
             count: 4,
@@ -9698,11 +14577,15 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -10996,4 +15879,491 @@ fn commander_hand_return_keeps_its_may_choice_inside_cr_616_ordering() {
         Zone::Command,
         "the still-applicable Hand-to-Command redirect resolves after the decline"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The accepted-pause families: `optional` (`OptionalEffectChoice`) and
+// `optional_for` (`OpponentMayChoice`).
+//
+// These are the first shapes the complete classifier accepts that do NOT
+// complete synchronously. The occurrence pauses mid-body inside the completed
+// mana frame, its continuation carrier holds the frame's own resume root, and
+// the answering action's readiness hook in `engine_payment_choices` partitions
+// the stored emission batches, runs the accepted tail, and resumes that exact
+// mana frame once.
+//
+// The widening owns a real behaviour delta: baseline `is_triggered_mana_ability`
+// returns true for an all-mana `optional` body, so baseline resolved it inline
+// and left `waiting_for` set with no continuation at all.
+// ---------------------------------------------------------------------------
+
+/// M's accepted body, made optional: still one colorless mana, still targetless
+/// and nonmodal, so `build_target_slots` stays empty and the baseline
+/// acceptance gate still holds — the ONLY difference from
+/// `mana_added_bonus_mana_body` is the "you may".
+fn optional_mana_added_bonus_observer(scenario: &mut GameScenario, label: &str) -> ObjectId {
+    scenario
+        .add_creature(P0, label, 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ManaAdded)
+                .execute(
+                    AbilityDefinition::new(AbilityKind::Database, mana_added_bonus_mana_body())
+                        .optional(),
+                )
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id()
+}
+
+/// The pause itself, asserted before it is answered: N's activation returns
+/// `OptionalEffectChoice`, not a wait belonging to the payment, and NOTHING of
+/// the frame has been released — M owns no pip, no queue slot and no stack
+/// entry, while the frame's two ordinary observers are already queued
+/// undispatched behind it.
+fn assert_optional_pause_is_open_and_nothing_released(
+    runner: &GameRunner,
+    bonus_m: ObjectId,
+    source_n: ObjectId,
+    observer_o: ObjectId,
+    waiting_for: &WaitingFor,
+    life_before: i32,
+) {
+    assert!(
+        matches!(waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+        "the accepted body's own pause is the action's wait, got {waiting_for:?}"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        0,
+        "an accepted occurrence produces nothing while its own decision is open"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), source_n),
+        1,
+        "N's base production already happened — the frame really is mid-settlement"
+    );
+    assert!(
+        !runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .any(|context| context.pending.source_id == bonus_m),
+        "a paused accepted occurrence is never queued on the ordinary authority"
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Accept: the resumed body's mana reaches the pool inside the answering
+/// action, and readiness then resumes the suspended mana frame exactly once —
+/// the frame's own release group is still exactly N's reflexive plus O.
+#[test]
+fn accepted_optional_mana_body_pauses_the_frame_and_resumes_it_on_accept() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m = optional_mana_added_bonus_observer(&mut scenario, "M Optional Mana-Added Bonus");
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+    assert_optional_pause_is_open_and_nothing_released(
+        &runner,
+        bonus_m,
+        source_n,
+        observer_o,
+        &paused.waiting_for,
+        life_before,
+    );
+
+    let resumed = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P0 accepts the accepted occurrence's own optional body");
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        1,
+        "the resumed accepted body produces exactly once (CR 605.4a)"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        1,
+        "and the bonus is spendable from the answering action onward"
+    );
+    assert!(
+        !runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .any(|context| context.pending.source_id == bonus_m),
+        "resumption never demotes the occurrence to the ordinary queue"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &resumed.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "M never occupied the stack across the pause"
+    );
+}
+
+/// Decline: the same resumption runs, the same single group is released, and
+/// the ONLY difference is that M produced nothing. This is the pure-axis
+/// control for the accept row — it proves the frame's resumption is owned by
+/// readiness rather than by the body having produced mana.
+#[test]
+fn accepted_optional_mana_body_declined_still_resumes_the_frame_once() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m = optional_mana_added_bonus_observer(&mut scenario, "M Optional Mana-Added Bonus");
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+    assert_optional_pause_is_open_and_nothing_released(
+        &runner,
+        bonus_m,
+        source_n,
+        observer_o,
+        &paused.waiting_for,
+        life_before,
+    );
+
+    let resumed = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P0 declines the accepted occurrence's own optional body");
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        0,
+        "a declined body produces nothing"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "and nothing colorless reaches the pool by any other route"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &resumed.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// The same accepted body under `optional_for` (`OpponentMayChoice`): the "you
+/// may" is routed to the opponent, so the pause belongs to a NON-ACTIVATOR while
+/// the mana frame it suspends belongs to P0.
+///
+/// This is the second accepted-pause family and the second readiness hook in
+/// `engine_payment_choices`. Its reducer arm returns the `ActionResult`
+/// directly, without the ordinary post-action pipeline — see the assertion on
+/// the resumed wait, which records exactly where full settled-Priority
+/// convergence is still owed.
+fn opponent_may_mana_added_bonus_observer(scenario: &mut GameScenario, label: &str) -> ObjectId {
+    let mut body =
+        AbilityDefinition::new(AbilityKind::Database, mana_added_bonus_mana_body()).optional();
+    body.optional_for = Some(OpponentMayScope::AnyOpponent);
+    scenario
+        .add_creature(P0, label, 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ManaAdded)
+                .execute(body)
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
+                .trigger_zones(vec![Zone::Battlefield]),
+        )
+        .id()
+}
+
+#[test]
+fn accepted_opponent_may_mana_body_pauses_on_the_nonactivator_and_resumes_the_frame() {
+    let NoPauseFixture {
+        mut scenario,
+        source_n,
+        observer_o,
+    } = no_pause_mana_fixture(NoPauseColorAxis::Fixed);
+    let bonus_m =
+        opponent_may_mana_added_bonus_observer(&mut scenario, "M Opponent-May Mana-Added Bonus");
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_n,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("N is activated directly from Priority");
+    let WaitingFor::OpponentMayChoice { player, .. } = paused.waiting_for else {
+        panic!(
+            "the accepted body's opponent-may pause is the action's wait, got {:?}",
+            paused.waiting_for
+        );
+    };
+    assert_eq!(
+        player, P1,
+        "CR 608.2d: the decision belongs to the opponent, not to the frame's activator"
+    );
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        0,
+        "nothing is produced while the opponent's decision is open"
+    );
+    assert_exactly_two_contexts_queued_and_unstacked(
+        runner.state(),
+        source_n,
+        observer_o,
+        life_before,
+    );
+
+    let resumed = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P1 accepts");
+    assert_eq!(
+        pips_produced_by(runner.state(), bonus_m),
+        1,
+        "the resumed accepted body produces exactly once, into its own controller's pool"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        1,
+        "CR 605.4a: the bonus belongs to M's controller, not to the accepting opponent"
+    );
+    assert_single_group_of_two_then_resolve_for_seven(
+        &mut runner,
+        &resumed.waiting_for,
+        source_n,
+        observer_o,
+        life_before,
+    );
+}
+
+/// Fuel zones and the watcher's +1/+1 counter count after a Delve commit of the
+/// fuel named in `selected` (letters of `abcd`, in that order). `b` and `d` park
+/// on two competing graveyard-to-Exile redirects (index 0 sends them to Hand);
+/// `a` and `c` are delivered to Exile. The watcher is a Murktide-class
+/// "leaves your graveyard" trigger.
+fn delve_commit_with_parking_fuel(selected: &str, mode: LoopDetectionMode) -> ([Zone; 4], u32) {
+    let watcher_text = "Flying\nWhenever an instant or sorcery card leaves your graveyard, put a +1/+1 counter on this creature.";
+    let delve_text = "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDraw three cards.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for n in 0..5 {
+        scenario.add_spell_to_library_top(P0, &format!("Library Card {n}"), true);
+    }
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Graveyard Watcher", 3, 3, watcher_text)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Spell", false, delve_text)
+        .from_oracle_text_with_keywords(&["Delve"], delve_text)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: selected.len() as u32,
+        })
+        .id();
+    let mut fuel = Vec::new();
+    for (name, parks) in [("a", false), ("b", true), ("c", false), ("d", true)] {
+        let mut card = scenario.add_spell_to_graveyard(P0, &format!("Fuel {name}"), true);
+        if parks {
+            card.with_replacement_definition(
+                redirect_self_moved_to(Zone::Exile, Zone::Hand).active_zones(vec![Zone::Graveyard]),
+            )
+            .with_replacement_definition(
+                redirect_self_moved_to(Zone::Exile, Zone::Library)
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+        }
+        fuel.push(card.id());
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = mode;
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    for (letter, &id) in ['a', 'b', 'c', 'd'].iter().zip(&fuel) {
+        if selected.contains(*letter) {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: id,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("fuel is selectable");
+        }
+    }
+    let mut waiting_for = runner
+        .act(GameAction::PassPriority)
+        .expect("the commit starts exiling")
+        .waiting_for;
+    let mut choices = 0;
+    while matches!(waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        choices += 1;
+        waiting_for = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the parked fuel's replacement resolves")
+            .waiting_for;
+    }
+    assert_eq!(
+        choices,
+        selected.chars().filter(|c| "bd".contains(*c)).count(),
+        "one replacement choice per parking fuel"
+    );
+    assert!(matches!(waiting_for, WaitingFor::Priority { player: P0 }));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    // CR 601.2h + CR 603.3 + CR 117.5: drain gate admits watcher triggers below a
+    // waiting spell — each fuel's trigger is above it at the first priority.
+    let state = runner.state();
+    let names: Vec<&str> = state
+        .stack
+        .iter()
+        .map(|entry| state.objects[&entry.source_id].name.as_str())
+        .collect();
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "{mode:?}: {:?}",
+        state.deferred_triggers.len()
+    );
+    let mut expected = vec!["Delve Spell"];
+    expected.extend(std::iter::repeat_n("Graveyard Watcher", selected.len()));
+    assert_eq!(names, expected, "{mode:?}");
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve the watcher triggers and the spell");
+    }
+    let state = runner.state();
+    let counters = state.objects[&watcher]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    (
+        [fuel[0], fuel[1], fuel[2], fuel[3]].map(|id| state.objects[&id].zone),
+        counters,
+    )
+}
+
+/// CR 603.2 + CR 601.2h: a fuel delivered before a later fuel parks still
+/// leaves the graveyard as part of the cast, so its trigger is not lost.
+#[test]
+fn commit_parking_on_second_fuel_keeps_first_fuels_leaves_graveyard_trigger() {
+    for mode in MODES {
+        let (zones, counters) = delve_commit_with_parking_fuel("ab", mode);
+        assert_eq!(
+            zones,
+            [Zone::Exile, Zone::Hand, Zone::Graveyard, Zone::Graveyard]
+        );
+        assert_eq!(counters, 2);
+    }
+}
+
+/// Sibling of the above: the parking fuel comes first, so the span the park
+/// covers is empty and the delivered second fuel triggers normally.
+#[test]
+fn commit_parking_on_first_fuel_keeps_second_fuels_leaves_graveyard_trigger() {
+    for mode in MODES {
+        let (zones, counters) = delve_commit_with_parking_fuel("bc", mode);
+        assert_eq!(
+            zones,
+            [Zone::Graveyard, Zone::Hand, Zone::Exile, Zone::Graveyard]
+        );
+        assert_eq!(counters, 2);
+    }
+}
+
+/// CR 603.2 + CR 616.1: a commit that parks on its second fuel after resuming
+/// from the first keeps the triggers of both parked fuel.
+#[test]
+fn commit_two_parking_fuel_keeps_both_fuels_leaves_graveyard_trigger() {
+    for mode in MODES {
+        let (zones, counters) = delve_commit_with_parking_fuel("bd", mode);
+        assert_eq!(
+            zones,
+            [Zone::Graveyard, Zone::Hand, Zone::Graveyard, Zone::Hand]
+        );
+        assert_eq!(counters, 2);
+    }
+}
+
+#[test]
+fn commit_four_fuel_with_two_parks_triggers_for_every_fuel() {
+    for mode in MODES {
+        let (zones, counters) = delve_commit_with_parking_fuel("abcd", mode);
+        assert_eq!(zones, [Zone::Exile, Zone::Hand, Zone::Exile, Zone::Hand]);
+        assert_eq!(counters, 4);
+    }
+}
+
+/// Control: one park among three fuel, so the resume never parks again.
+#[test]
+fn commit_with_one_parking_fuel_among_three_triggers_for_every_fuel() {
+    for mode in MODES {
+        let (zones, counters) = delve_commit_with_parking_fuel("abc", mode);
+        assert_eq!(
+            zones,
+            [Zone::Exile, Zone::Hand, Zone::Exile, Zone::Graveyard]
+        );
+        assert_eq!(counters, 3);
+    }
 }

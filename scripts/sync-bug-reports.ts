@@ -693,6 +693,24 @@ function buildIssueTitle(item: TriageItem): string {
   return raw.length <= max ? raw : `${raw.slice(0, max - 1).trimEnd()}…`;
 }
 
+/** The reported text in full. `summary` is only its first sentence. */
+function buildReportedTextSection(item: TriageItem): string[] {
+  const body = item.body?.trim();
+  if (body === undefined || body === "" || body === item.summary.trim()) return [];
+  return [`## Reported text`, body, ``];
+}
+
+/** Screenshots and game-state saves — usually the only reproduction we have. */
+function buildAttachmentsSection(item: TriageItem): string[] {
+  const attachments = item.attachments ?? [];
+  if (attachments.length === 0) return [];
+  return [
+    `## Attachments`,
+    ...attachments.map((a) => `- [${a.filename}](${a.url})`),
+    ``,
+  ];
+}
+
 function buildIssueBody(item: TriageItem): string {
   const relevantCards = selectRelevantOracleCards(item);
   // Keep the Discord source URL anchor in the body — it is the stable handle the
@@ -713,6 +731,8 @@ function buildIssueBody(item: TriageItem): string {
     `## Summary`,
     item.summary || "_(no summary extracted — see Discord thread)_",
     ``,
+    ...buildReportedTextSection(item),
+    ...buildAttachmentsSection(item),
     ...buildVerifiedOracleTextSection(item),
     ``,
     `---`,

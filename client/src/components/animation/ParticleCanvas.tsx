@@ -14,6 +14,8 @@ import {
   emitAttackBurst,
   emitSlamImpact,
   emitDamageFlurry,
+  emitForgeHeat,
+  emitForgeStrike,
 } from "./particleEffects";
 
 export interface ParticleCanvasHandle {
@@ -27,6 +29,8 @@ export interface ParticleCanvasHandle {
   blockClash: (x: number, y: number) => void;
   attackBurst: (x: number, y: number, color?: RGB) => void;
   slamImpact: (x: number, y: number, amount: number) => void;
+  forgeStrike: (x: number, y: number, strength: number) => void;
+  forgeHeat: (x: number, y: number, durationMs: number) => void;
   damageFlurry: (fromPoints: { x: number; y: number }[], to: { x: number; y: number }, hitCount: number, totalDamage: number, durationMs: number) => void;
 }
 
@@ -97,6 +101,14 @@ export const ParticleCanvas = forwardRef<ParticleCanvasHandle>(
         slamImpact(x, y, amount) {
           const s = getSystem();
           if (s) emitSlamImpact(s, x, y, amount);
+        },
+        forgeStrike(x, y, strength) {
+          const s = getSystem();
+          if (s) emitForgeStrike(s, x, y, strength);
+        },
+        forgeHeat(x, y, durationMs) {
+          const s = getSystem();
+          if (s) emitForgeHeat(s, x, y, durationMs);
         },
         damageFlurry(fromPoints, to, hitCount, totalDamage, durationMs) {
           const s = getSystem();

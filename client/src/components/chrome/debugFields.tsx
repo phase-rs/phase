@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ManaType, ObjectId, PlayerId, Zone } from "../../adapter/types";
 import { getCardNames } from "../../services/cardNames";
@@ -89,20 +90,22 @@ export function SelectInput<T extends string>({
   value,
   onChange,
   options,
+  getOptionLabel,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: readonly T[];
+  getOptionLabel?: (option: T) => string;
 }) {
   const items = useMemo(
-    () => options.map((opt) => ({ value: opt, label: opt })),
-    [options],
+    () => options.map((opt) => ({ value: opt, label: getOptionLabel?.(opt) ?? opt })),
+    [getOptionLabel, options],
   );
 
   return (
     <MenuSelect
       {...DEBUG_MENU_PROPS}
-      label={value}
+      label={getOptionLabel?.(value) ?? value}
       items={items}
       selectedValue={value}
       onSelect={(next) => onChange(next as T)}
@@ -143,6 +146,7 @@ export function ObjectIdInput({
   onChange: (v: number) => void;
   label?: string;
 }) {
+  const { t } = useTranslation("game");
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
   const gameState = useGameStore((s) => s.gameState);
   const selectedName =
@@ -151,7 +155,7 @@ export function ObjectIdInput({
       : null;
 
   return (
-    <FieldRow label={label ?? "Object ID"}>
+    <FieldRow label={label ?? t("sandboxTools.objectId")}>
       <div className="flex items-center gap-1">
         <input
           type="number"
@@ -164,9 +168,11 @@ export function ObjectIdInput({
           <button
             onClick={() => onChange(selectedObjectId)}
             className="shrink-0 rounded bg-gray-700 px-1.5 py-1 text-[10px] text-blue-300 transition-colors hover:bg-gray-600"
-            title={selectedName ? `Use ${selectedName} (${selectedObjectId})` : `Use ${selectedObjectId}`}
+            title={selectedName
+              ? t("sandboxTools.useSelectedName", { name: selectedName, id: selectedObjectId })
+              : t("sandboxTools.useSelectedId", { id: selectedObjectId })}
           >
-            sel
+            {t("sandboxTools.useSelection")}
           </button>
         )}
       </div>
@@ -208,8 +214,9 @@ export function ObjectSelect({
   onChange,
   filter,
   label,
-  placeholder = "Pick an object…",
+  placeholder,
 }: ObjectSelectProps) {
+  const { t } = useTranslation("game");
   const objectsMap = useGameStore((s) => s.gameState?.objects);
   const myId = usePerspectivePlayerId();
   const [open, setOpen] = useState(false);
@@ -279,7 +286,7 @@ export function ObjectSelect({
     value != null && objectsMap ? (objectsMap[value] as GameObject | undefined) : undefined;
   const selectedLabel = selectedObj
     ? `${selectedObj.name}  #${selectedObj.id}`
-    : placeholder;
+    : placeholder ?? t("sandboxTools.pickObject");
 
   // Drive a *debug-specific* board highlight (`debugHighlightedObjectId`),
   // not the standard `hoveredObjectId`. Most board elements don't visibly
@@ -324,7 +331,7 @@ export function ObjectSelect({
 
   let runningIndex = -1;
   return (
-    <FieldRow label={label ?? "Object"}>
+    <FieldRow label={label ?? t("sandboxTools.object")}>
       <div ref={containerRef} className="relative">
         <button
           type="button"
@@ -344,13 +351,13 @@ export function ObjectSelect({
               autoFocus
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Search by name or id…"
+              placeholder={t("sandboxTools.searchObjects")}
               className="block w-full border-b border-gray-700 bg-gray-900 px-2 py-1 font-mono text-[11px] text-gray-200 focus:outline-none"
             />
             <div className="max-h-60 overflow-y-auto">
               {grouped.length === 0 && (
                 <div className="px-2 py-1.5 font-mono text-[10px] text-gray-500">
-                  No matching objects
+                  {t("sandboxTools.noObjects")}
                 </div>
               )}
               {grouped.map(({ zone, objects }) => (
@@ -388,7 +395,7 @@ export function ObjectSelect({
                               (obj.controller === myId ? "text-blue-400" : "text-rose-400")
                             }
                           >
-                            {obj.controller === myId ? "you" : `P${obj.controller}`}
+                            {obj.controller === myId ? t("sandboxTools.you") : `P${obj.controller}`}
                           </span>
                         </span>
                         <span className="shrink-0 text-[9px] text-gray-500">#{obj.id}</span>
@@ -412,22 +419,19 @@ export function PlayerSelect({
   value: PlayerId;
   onChange: (v: PlayerId) => void;
 }) {
+  const { t } = useTranslation("game");
   const players = useGameStore((s) => s.gameState?.players);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const myId = usePerspectivePlayerId();
   const setDebugHighlightedPlayerId = useUiStore((s) => s.setDebugHighlightedPlayerId);
 
-  const items = useMemo(
-    () =>
-      (players ?? []).map((p) => ({
-        value: String(p.id),
-        label: getPlayerDisplayName(p.id, myId),
-      })),
-    [players, myId],
-  );
+  const items = (players ?? []).map((p) => ({
+    value: String(p.id),
+    label: getPlayerDisplayName(p.id, myId),
+  }));
 
   const selectedLabel =
-    items.find((item) => item.value === String(value))?.label ?? "Player";
+    items.find((item) => item.value === String(value))?.label ?? t("sandboxTools.player");
   const seatColor = getSeatColor(value, seatOrder);
 
   return (

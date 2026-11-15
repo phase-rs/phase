@@ -17,8 +17,8 @@
 //! on `cast_variant_paid` surviving zone changes.
 
 use crate::types::ability::{
-    ContinuousModification, DelayedTriggerCondition, Duration, Effect, ResolvedAbility,
-    TargetFilter,
+    ContinuousModification, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::ObjectId;
@@ -38,6 +38,7 @@ pub(crate) fn install_dash_riders(
     state: &mut GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
 ) {
     // CR 702.109a: the permanent has haste. A transient continuous keyword grant
     // scoped to this object (Layer 6), present while it is on the battlefield —
@@ -63,13 +64,19 @@ pub(crate) fn install_dash_riders(
         object_id,
         controller,
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-        ability: return_to_hand,
-        controller,
-        source_id: object_id,
-        one_shot: true,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ability: Box::new(return_to_hand),
+            controller,
+            source_id: object_id,
+            one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        },
+        events,
+    );
 }
 
 /// CR 702.109a + CR 400.3: "Return it to its owner's hand." A battlefield → hand
@@ -77,6 +84,8 @@ pub(crate) fn install_dash_riders(
 /// owner's hand, so `enters_under` / `owner_library` stay at their defaults.
 fn return_to_owner_hand_effect() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Hand,
         target: TargetFilter::SelfRef,

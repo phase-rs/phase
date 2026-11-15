@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useSearchParams } from "react-router";
 
 import { AppShell } from "./components/chrome/AppShell";
 import { AppToast } from "./components/chrome/AppToast";
+import { NativeEngineProgressOverlay } from "./components/chrome/NativeEngineProgressOverlay";
 import { RouteTelemetry } from "./components/chrome/RouteTelemetry";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HostControlTile } from "./components/chrome/HostControlTile";
@@ -11,10 +12,14 @@ import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
 import { StuckDecisionToast } from "./components/modal/StuckDecisionToast";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
+import { useDesktopDeepLinks } from "./hooks/useDesktopDeepLinks";
 import { useHostingSession } from "./hooks/useHostingSession";
-import { migrateSavedDecks } from "./services/deckMigrations";
+import { canonicalizeSavedDeckNames, migrateSavedDecks } from "./services/deckMigrations";
+import { useDeckLibraryAutoSync } from "./services/visualPacks/deckLibraryAutoSync";
 import { ensurePreload, subscribePreload } from "./startup/preloadAssets";
+import { useCardDataStore } from "./stores/cardDataStore";
 import { useCloudSyncStore } from "./stores/cloudSyncStore";
+import { useEffectiveOffline } from "./stores/connectivityStore";
 import { MenuPage } from "./pages/MenuPage";
 
 const GamePage = lazy(() =>
@@ -34,6 +39,9 @@ const DraftSpectatorPage = lazy(() =>
   import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
 );
 const ReplayPage = lazy(() => import("./pages/ReplayPage").then((m) => ({ default: m.ReplayPage })));
+const OpenDesktopPage = lazy(() => import("./pages/OpenDesktopPage").then((m) => ({ default: m.OpenDesktopPage })));
+const TournamentLandingPage = lazy(() => import("./pages/TournamentLandingPage").then((m) => ({ default: m.TournamentLandingPage })));
+const TournamentPage = lazy(() => import("./pages/TournamentPage").then((m) => ({ default: m.TournamentPage })));
 
 function DevStrict({ children }: { children: ReactNode }) {
   if (!import.meta.env.DEV) return children;
@@ -62,8 +70,10 @@ export function App() {
 }
 
 function AppContent() {
-  useFeedInitialization();
+  const effectiveOffline = useEffectiveOffline();
+  const feedInitializationReady = useFeedInitialization(effectiveOffline);
   useHostingSession();
+  useDesktopDeepLinks();
 
   // One-shot localStorage migrations. Must run before cloud-sync init so the
   // first sync sees the canonical (repaired) deck shapes and doesn't push a
@@ -72,10 +82,24 @@ function AppContent() {
     migrateSavedDecks();
   }, []);
 
-  // Install the storage watcher, restore any cloud-sync session, and reconcile
-  // on boot. init() returns an uninstaller so listeners are cleaned up on
-  // unmount / hot reload rather than stacking.
-  useEffect(() => useCloudSyncStore.getState().init(), []);
+  const cardDataStatus = useCardDataStore((s) => s.status);
+  useEffect(() => {
+    if (cardDataStatus !== "ready") return;
+    void canonicalizeSavedDeckNames().catch(() => {/* best-effort; saved names still resolve */});
+  }, [cardDataStatus]);
+
+  // Connectivity policy is the sole lifecycle authority. Offline mode keeps
+  // local dirty observation alive through pause(); only online generations own
+  // a cleanup function.
+  useEffect(() => {
+    if (effectiveOffline) {
+      useCloudSyncStore.getState().pause();
+      return;
+    }
+    return useCloudSyncStore.getState().init();
+  }, [effectiveOffline]);
+
+  useDeckLibraryAutoSync(effectiveOffline, feedInitializationReady);
 
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -118,16 +142,20 @@ function AppContent() {
             <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />
             <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
             <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
+            <Route path="/tournament" element={<DevStrict><TournamentLandingPage /></DevStrict>} />
+            <Route path="/tournament/:code" element={<DevStrict><TournamentPage /></DevStrict>} />
             <Route path="/draft-pod" element={<DraftPodPage />} />
             <Route path="/draft-spectator" element={<DraftSpectatorPage />} />
           </Route>
           <Route path="/game/:id" element={<GameRouteElement />} />
           <Route path="/replay" element={<ReplayPage />} />
+          <Route path="/open-desktop" element={<OpenDesktopPage />} />
         </Routes>
       </Suspense>
       </ErrorBoundary>
       <HostControlTile />
       <AppToast />
+      <NativeEngineProgressOverlay />
       <EngineLostModal />
       <NonFatalPanicToast />
       <StuckDecisionToast />

@@ -153,10 +153,13 @@ mod tests {
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
         obj.back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Nightbound Werewolf".to_string(),
             power: Some(4),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -177,6 +180,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         id
     }

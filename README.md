@@ -33,16 +33,6 @@
 </p>
 <!-- coverage-badges:end -->
 
-<p align="center">
-  <a href="https://gittensor.io/miners/repository?name=phase-rs%2Fphase">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg">
-      <img src="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg" alt="Gittensor contributor impact for phase.rs" width="600">
-    </picture>
-  </a>
-</p>
-
 ---
 
 <p align="center">
@@ -84,6 +74,8 @@ Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.m
 and follow it end-to-end to implement {a card I name, or pick one for me}.
 Use the $engine-implementer skill. Use high thinking. Don't stop for my input.
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -94,9 +86,9 @@ Full procedure, two tracks (developer / non-developer), and copy-paste prompts f
 
 - [Rust toolchain](https://rustup.rs/)
 - wasm32 target: `rustup target add wasm32-unknown-unknown` (Windows: see below)
-- wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.114`
+- wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.121` (must match the `wasm-bindgen` version in `Cargo.lock`)
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
-- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
+- [Node.js](https://nodejs.org/) 24+ (`.nvmrc` pins the exact version) and [pnpm](https://pnpm.io/): `npm i -g pnpm`
 
 #### Windows
 
@@ -136,6 +128,163 @@ If `tilt` is installed, `setup.sh` skips the eager WASM + card-data build and `t
 cd client && pnpm install && pnpm dev # Start frontend
 ```
 
+### Linux Desktop Audio
+
+WebKitGTK has no audio stack of its own — the desktop app's sound effects and
+music are GStreamer pipelines it assembles at runtime. The **AppImage bundles
+that runtime itself** (`bundle.linux.appimage.bundleMediaFramework`), so it
+needs nothing installed. The **`.deb` declares it** and apt pulls it in. The
+**Flatpak inherits it from `org.gnome.Platform`** (see [Flatpak](#flatpak)).
+Running from source, or repackaging for another distribution, needs these
+installed:
+
+```bash
+sudo apt-get install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+```
+
+Between them they provide the elements WebKit looks up — `appsrc`/`appsink`,
+`decodebin`, `giostreamsrc`, `autoaudiosink`, and the `qtdemux`/`avdec_aac` pair
+the bundled `.m4a` tracks decode through. Without them the app starts and plays
+normally but stays silent, and prints the missing plugins and their packages to
+the terminal on launch.
+
+Release-time verification that the shipped AppImage's bundled plugin set really
+resolves those elements is tracked separately, in
+[#8357](https://github.com/phase-rs/phase/issues/8357) — it lives in the release
+workflow, which is maintainer-owned.
+
+### Flatpak
+
+`packaging/flatpak/` holds a Flatpak manifest for the desktop shell and a
+`build-local.sh` that builds it from an already-released `.deb` or `.AppImage`:
+
+```bash
+./packaging/flatpak/build-local.sh --appimage ~/Downloads/Phase-Desktop-Linux-x86_64.AppImage --install
+```
+
+On an arm64 machine, pass the matching `Phase-Desktop-Linux-aarch64` artifact instead.
+
+That needs a release whose shell already carries the update guard described
+below; the script refuses older artifacts rather than package them. Run
+`--help` for the full options.
+
+**Why a third Linux artifact.** The two existing ones each leave users out. The
+AppImage pegs a CPU core at idle on the NVIDIA proprietary driver, and the
+`.deb` installs cleanly only on Debian-family distributions — everyone else
+needs the AppImage or a conversion workaround. A Flatpak covers both gaps at
+once: it installs the same way on any distribution that has `flatpak`, and it
+inherits a working WebKitGTK and GStreamer stack from the runtime.
+
+It compiles nothing. Every library `phase-tauri` links against is already in
+`org.gnome.Platform//50`, so the script stages the exact binary from a release
+artifact — the packaged binary stays identical to the one `.deb`/`.AppImage`
+users run — and the package inherits the runtime's WebKitGTK and GStreamer
+plugin set instead of vendoring its own. Concretely, that buys three things —
+the first from the packaging format, the other two from that inheritance:
+
+- **Distribution coverage.** The `.deb` is Debian-family only. A Flatpak is the
+  one artifact that installs identically on Fedora, openSUSE, Arch, the
+  immutable/atomic desktops, and Debian/Ubuntu alike, without asking the user
+  to convert a package or fall back to the AppImage.
+- **NVIDIA idle CPU ([#8614](https://github.com/phase-rs/phase/issues/8614)).**
+  The AppImage's bundled, Ubuntu-built WebKitGTK burns close to a full core at
+  idle on the NVIDIA proprietary driver. Measured on the reporter's machine, the
+  Flatpak idles in the same range as a healthy host-WebKit build, while still
+  rendering on the NVIDIA driver rather than falling back to software. The root
+  cause is still unknown — this routes around the bug rather than fixing it, and
+  the measurement covers one machine, one driver version, and one distribution.
+  The AppImage is unaffected on other GPU stacks, so this is not a deprecation —
+  but **NVIDIA users are the ones to point here.**
+- **Audio ([#8615](https://github.com/phase-rs/phase/issues/8615)).** The
+  runtime supplies every element the section above lists, `avdec_aac` included,
+  from the base runtime rather than the optional
+  `org.freedesktop.Platform.codecs-extra` extension. (That is the decoder whose
+  absence makes the AppImage silent; end-to-end playback in the Flatpak has not
+  been verified. The AppImage-side fix is tracked separately.)
+
+A packaged shell must not self-update: `/app` is read-only and `flatpak update`
+owns upgrades. `client/src-tauri/src/update_authority.rs` detects the sandbox
+and declines every release the updater offers. That guard is compiled **into the
+shell binary**, so it only holds for artifacts built from a release that
+contains it — `build-local.sh` refuses to stage an older binary rather than
+produce a package that tries to rewrite its own read-only `/app`. Most releases
+do not touch the package at all: the shell is a thin bootstrap that loads the
+current web channel over the network, so web-app releases arrive without any
+package update.
+
+The package is X11-only — it pins `GDK_BACKEND=x11` and grants no Wayland
+socket, so a Wayland session needs Xwayland (the default nearly everywhere).
+
+CI does not build this package today, so there is no prebuilt Flatpak for users
+to install yet — the manifest and script are for local and manual builds. Adding
+a build step to the release workflow, which is maintainer-owned, is what would
+attach a `.flatpak` to each release and make this an artifact users can actually
+get.
+
+### Android APKs
+
+Android builds require Node.js 22 (exception to the general 24+ requirement), pnpm 9.15.9, JDK 17, Android SDK platform
+36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi
+sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+```
+
+Install dependencies and invoke only the lock-installed Tauri CLI through an
+absolute Node executable. Initialization is deterministic and reapplies the
+maintained Gradle integration:
+
+```bash
+cd client
+corepack pnpm@9.15.9 install --frozen-lockfile
+NODE_BIN="$(realpath "$(command -v node)")"
+TAURI_JS="$(pwd)/node_modules/@tauri-apps/cli/tauri.js"
+export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+"$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+```
+
+The generated Android project is checked in at `client/src-tauri/gen/android`
+and its Gradle/Rust integration is maintained by the repository. Do not run
+`android init` during normal development. If a Tauri upgrade requires
+regeneration, do it on a throwaway branch, review the complete generated diff,
+and explicitly preserve the signing/version guards in `app/build.gradle.kts`.
+The Rust test `generated_android_gradle_keeps_release_invariants` fails if those
+load-bearing edits are lost.
+
+Debug APKs are written below
+`client/src-tauri/gen/android/app/build/outputs/apk/`. Install and cold-launch
+the ARM64 build on a selected device without relying on adb's implicit target:
+
+```bash
+adb -s <serial> install -r path/to/debug.apk
+adb -s <serial> shell am force-stop rs.phase.app.debug
+adb -s <serial> shell monkey -p rs.phase.app.debug -c android.intent.category.LAUNCHER 1
+```
+
+Official releases publish separately signed `Phase-Android-ARM64.apk` and
+`Phase-Android-ARMv7.apk` files. Release builds fail closed unless all four
+local signing inputs are nonempty: `PHASE_ANDROID_KEYSTORE_FILE`,
+`PHASE_ANDROID_KEYSTORE_PASSWORD`, `PHASE_ANDROID_KEY_ALIAS`, and
+`PHASE_ANDROID_KEY_PASSWORD` (equivalent Gradle properties use the
+`phase.android.*` names in `app/build.gradle.kts`). The local keystore path must
+name an existing file. CI builds release APKs when all five Android secrets are
+configured, skips APK attachment when none are configured, and fails on a
+partial configuration without blocking publication of the desktop release.
+The required secret names are `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
+plus `ANDROID_CERTIFICATE_SHA256`. CI decodes the first into a runner-local
+keystore, maps the next three to the Gradle inputs, and verifies that both APKs
+use the certificate identified by the final digest. Secret values are never
+committed.
+
+Android `versionCode` is derived strictly from `major.minor.patch` as
+`major * 1_000_000 + minor * 1_000 + patch`; minor and patch must each fit a
+three-digit slot and overflow is rejected (`0.60.0` maps to `60000`). Android
+supports APK delivery only (ARM64 and ARMv7): AAB/Play Store publishing and
+automatic updater manifests/keys are intentionally not supported. Desktop
+artifacts continue to use the existing signed `update.json` flow.
+
 ## Dedicated Server
 
 The easiest way to run a dedicated multiplayer server is the Docker image:
@@ -143,7 +292,6 @@ The easiest way to run a dedicated multiplayer server is the Docker image:
 ```bash
 docker volume create phase-server-data
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 9374:9374 \
@@ -153,7 +301,8 @@ docker run -d \
   ghcr.io/phase-rs/phase-server:latest
 ```
 
-The image includes the server binary and generated card data. It exposes:
+The image (linux/amd64 and linux/arm64) includes the server binary; card data is
+downloaded into the data volume on first boot. It exposes:
 
 - `http://localhost:9374/health` for health checks
 - `ws://localhost:9374/ws` for WebSocket clients
@@ -178,7 +327,7 @@ Docker uses environment variables for the common options:
 You can also pass server flags after the image name:
 
 ```bash
-docker run --rm --platform linux/amd64 -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
+docker run --rm -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
 ```
 
 For public internet play, put the container behind a TLS reverse proxy and give
@@ -187,7 +336,6 @@ same host, bind Docker to localhost instead:
 
 ```bash
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 127.0.0.1:9374:9374 \
@@ -198,6 +346,17 @@ docker run -d \
 ```
 
 The same flags work when running the `phase-server` release binary directly.
+
+To build the image yourself (cross-compiles on the build host, no emulated
+cargo):
+
+```bash
+docker buildx create --use   # once: multi-platform builds need a docker-container builder
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHASE_CHANNEL=release \
+  -t <registry>/phase-server:latest --push .
+```
+
+For Kubernetes, see the Helm chart in [`deploy/helm/phase-server`](deploy/helm/phase-server).
 
 ## Architecture
 
@@ -223,6 +382,154 @@ Transport-agnostic `EngineAdapter` interface with multiple implementations:
 - **TauriAdapter** — Tauri IPC (desktop)
 - **WebSocketAdapter** — WebSocket (multiplayer)
 - **P2PHostAdapter / P2PGuestAdapter** — WebRTC peer-to-peer via PeerJS
+
+Default server game and draft sockets never wait for a shared codec lease before
+dialing. A cold WASM runtime warms in the background; a warm runtime can prepare
+its lease while the handshake proceeds. At the first `ServerHello`, only an
+already-ready lease can negotiate `StateCodecV1`. Otherwise that connection stays
+snapshot-only and a late lease is released, never used for a live upgrade.
+Explicit codec providers retain their bounded preparation wait. The codec wrapper
+runs after optional gzip decompression and preserves frame order. Canonical codec
+headers are read without materializing their payload; Rust validates the body.
+The wrapper limits outstanding receives to 64 messages (including the active
+decode) and text queued behind that active frame to 16 MiB of UTF-16. The active
+frame has no new individual-size ceiling, so a supported large spectator Full
+can bootstrap an empty queue. Overload closes and releases rather than dropping
+deltas. Leaving a local WASM game, including a native-AI fallback,
+resets game state without disposing the shared runtime or unrelated codec leases.
+Recovery notifications use the active UI language and distinguish an interrupted
+in-flight action from a new action that was never sent.
+Recovery reopens submissions only when the primary application handler returns
+`true` after committing that specific Full and its bootstrap is still accepted.
+A declined stale/foreign Full or a callback that throws before acknowledging it
+closes the transport; healthy-stream ignores are unchanged. The wrapper reports
+`CLOSED` before close callbacks, so synchronous reentrant submissions reject
+rather than occupying an unsent slot.
+
+A natural close is latched directly from the undecorated transport, before
+pending gzip inflation can hide its death. `readyState` immediately reports
+`CLOSED`; no new sends or raw frames are admitted. Already-received healthy
+frames may finish inflation and decoding in order before the close notification.
+An independent five-second event-loop timer starts at raw death, not at inflater
+completion or the 60-second decoder watchdog. A stalled inflater, decoder or
+missing consumer cannot retain the lease beyond that drain; late results are
+fenced. A codec rejection or resync request after network death settles the
+original network close instead of replacing its cause or downgrading reconnect
+policy. The timer cannot preempt synchronous main-thread WASM.
+
+Terminal attachment close also retires the gzip receive owner, immediately
+dropping queued compressed payload references even if its active inflater stays
+stalled. A late active result is ignored and no queued successor starts inflation.
+Raw death alone still permits healthy admitted frames to drain before that
+terminal boundary. This is attachment cleanup, not a new compressed-queue or
+total-heap size limit.
+
+During healthy traffic the gzip FIFO also reclaims its consumed prefix in place.
+Its storage scales with the pending tail rather than cumulative frame count;
+compacting only after half is consumed amortizes copying across the stream.
+This does not impose a new live compressed-backlog limit.
+
+Game transport adoption rejects predecessor-owned commands, previews, exports,
+seat mutations and abandon requests with `WS_CLOSED` before releasing the old
+wrapper and decoder lease; the server need not close the old peer. All request
+owners are cleared before listeners can claim replacement work. Join/game-start
+waiters instead follow the attachment handoff: while a reconnect candidate's
+interval is open, the incumbent's own transport error or close settles its
+requests and resources but not the initialization the candidate's episode owns.
+Each acquired candidate, including an initial join's or a Create's, is retired
+with its decoder lease as soon as its attachment is cancelled, not when a held
+setup write answers. Each acquired candidate keeps an
+idempotent cleanup owner through throwing, disposal and superseding callbacks,
+including requests claimed before that candidate is abandoned.
+
+A replacement transport stays private until its own `JoinGameWithPassword` or
+`CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
+write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
+bootstrap (or, for a draft, the server's rejection) arrives; only then may
+`serverHello` or pending indicator consumers issue requests. The server
+replaces the seat's sender when it handles a reconnect, so between that write
+and the bootstrap neither socket is known to own the seat. The incumbent stays
+current for the replies it still owes, but new seat-bound submissions (game
+commands, draft picks, decisions and decks) are refused with the typed unsent
+error, and an `Error` it receives answers only its own request. A close, an
+`Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
+from the write) retires both sockets and settles the incumbent's work (an abort
+while the write receipt is still pending retires the candidate and releases the
+gate at once, and the receipt's fate, under the same bound, decides the
+incumbent); the
+bound defers once to a decode already in flight, for at most one further
+bound of its own that does not depend on the decode settling; the codec socket
+also bounds each decoder call itself, and a setup receipt the transport holds
+is not waited for past the bound or once the server has answered, on initial
+attachments (the first frame received after the setup write) as on reconnects,
+and a cancellation raised synchronously inside the transport's setup send
+retires the candidate at once (a game reconnect can decode its bootstrap Full inside the interval; a
+draft reattach is answered by a plain frame first, so this server never puts a
+decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
+the server sends it both for refusals and after it has already moved the seat
+to the candidate, so the rejection replays there and rejects the reattach. A
+candidate's terminal codec failure moves the sticky snapshot-only policy: each
+adapter applies it when it retires the candidate (`retireSocket`,
+`abandonCandidate`), and a successor started meanwhile from a listener still
+opens snapshot-only because its codec lease is checked against the policy when
+it arrives. After a close or the bound the game adapter retries through
+`attemptReconnect`, a refusal ends the episode, and nothing retries a draft
+reattach. Two game attachments keep the write-time cutover: native sidecar
+sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it
+was, and the attempts of an active initial-join fallback, which start only
+after the previous socket closed and have their own deadline. The interval
+reads each frame's tag from the canonical type-first envelope (the frames a
+candidate buffers before its setup settles are bounded at the adapter: 64
+frames and 16 MiB of expanded text, not counting the attachment's bootstrap, which is recognized by its tag wherever it sits behind a prefix of small frames, and a
+candidate that exceeds it is cut off and handled like a close); a frame whose
+tag can settle it is parsed once there, must parse as that envelope, and is
+the envelope dispatched after adoption, so the bootstrap is parsed once.
+Frames already admitted for that candidate stay buffered through those
+callbacks and drain in wire order, so a synchronous
+peer reply cannot overtake an older bootstrap. While a reconnect interval is
+open, the game adapter refuses a submission with the typed unsent error; an
+ordinary game submission has no further accepted-bootstrap guard. The draft
+adapter refuses a command until the *current* socket has accepted its own
+validated `GameStarted`; a predecessor's Full never authorizes the replacement.
+The socket and its owning match key are bound together when the command is
+claimed, before pending-indicator listeners run, so a synchronous match change
+inside that callback cannot stamp the old command with the new match.
+
+Draft adapters explicitly own current and retired transports. Healthy replacement
+closes an idle predecessor immediately; a source with a permitted command,
+preview or sent draft reply remains owned until that work settles or the source
+closes, then releases its decoder lease. Interaction-preview IDs are scoped to
+their transport so a reused ID cannot overwrite another source's pending reply.
+Disposal rejects owned work and closes every current or retired transport even
+when the server never closes the old peer. Abandoning an adopted setup candidate
+also settles that source's owned work before releasing it, including synchronous
+`serverHello` reentry and setup-send failure. The only new reply bound is the
+reconnect interval above; Create and Join keep waiting without one.
+
+A draft view completes a pick only when its inventory proves the exact newly
+selected instance. Reply ownership and pick counters alone are not outcome
+evidence. A pick backed by the complete selection offered in the original
+authoritative view can be completed by a replacement's view too, if the
+replacement matches the original draft code/token. A pick without that
+evidence can be completed only by its own sending socket; once a different
+socket is adopted it is retired as unconfirmed with a recoverable error.
+Retired views can settle their own permitted reply but cannot overwrite the
+current view, phase or credentials, or publish themselves as the current view.
+This reports the selected-inventory outcome, not a new request-level
+acknowledgement: an automatic timer pick of the identical instance is
+indistinguishable on the existing wire.
+
+A command already sent for the outgoing match cannot complete once that same
+socket announces a replacement match: its addressed reply is fenced by the new
+match key, so the slot is released with a recoverable failure before listeners
+observe the new match and the next command can be claimed. A command still being
+claimed is instead released unsent by its own post-notification check.
+
+The codec socket reads the canonical type-first envelope header by prefix, so an
+ordinary frame is handed to the adapter without a throwaway parse; only a
+noncanonical field order or an escaped tag (for example `Fu\u006cl`) falls back
+to the JSON discriminator. `Full`/`Delta` still decode through the shared
+runtime, and Rust remains the only authority over bodies.
 
 ### Design Principles
 
@@ -254,6 +561,39 @@ pnpm build                                 # TypeScript check + Vite build
 pnpm lint                                  # ESLint
 pnpm test                                  # Vitest
 ```
+
+### Large Codec Frame Proof
+
+The manual native producer uses 9,000 database-backed Llanowar Elves, the real
+spectator projection and frame guards, and the connection codec/gzip encoder.
+Its consumer proof uses real WASM reconstruction and the production spectator
+adapter for both initial and established delivery. This is a supported-size
+scenario, not an action replay or a claim that a 9,000-card deck is reachable.
+Run producer and consumer from the same committed source. Output is fixed at the
+gitignored `target/state-codec-fixtures/large-spectator-full` directory; no runtime
+environment variable selects a local input/output path. The producer refuses an
+existing fixture directory, so remove only that generated directory before
+regenerating. A missing directory visibly skips this manual consumer suite;
+an existing directory must contain complete, valid fixtures.
+
+The producer embeds the existing committed card fixture using the same
+source-relative `include_bytes!` pattern as the engine integration tests, without
+reading environment metadata. Its output is relative to
+[Cargo's documented package-root test working directory](https://doc.rust-lang.org/cargo/commands/cargo-test.html#working-directory-of-tests),
+so the Cargo invocation below is independent of the launcher's working directory.
+
+```bash
+cargo test -p phase-server \
+  --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
+  -- --ignored --exact --nocapture
+./scripts/build-wasm.sh wasm-dev
+pnpm --dir client exec vitest run \
+  --config vitest.integration.config.ts --coverage.enabled=false \
+  src/adapter/__tests__/largeSpectatorFull.integration.test.ts
+```
+
+If Cargo uses a relocated target directory, export `CARGO_TARGET_DIR` to that
+directory for `build-wasm.sh`.
 
 ### Cargo Aliases
 
@@ -313,6 +653,7 @@ If you believe content in this repository infringes your rights, please see
 - [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
 - [Scryfall](https://scryfall.com/) — Card images and search API
 - [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
+- [Tabler Icons](https://tabler.io/icons) — Turn-phase icon paths (MIT licensed)
 - [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering
 
 ## License

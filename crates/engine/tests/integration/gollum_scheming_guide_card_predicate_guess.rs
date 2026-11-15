@@ -63,7 +63,10 @@ fn gollum_attack_trigger_parser_promotes_choices_to_card_predicates() {
     assert!(matches!(
         choose_opponent.effect.as_ref(),
         Effect::Choose {
-            choice_type: ChoiceType::Opponent { restriction: None },
+            choice_type: ChoiceType::Opponent {
+                restriction: None,
+                ..
+            },
             persist: false,
             ..
         }
@@ -278,7 +281,13 @@ fn choose_opponent(
     };
     assert_eq!(player, expected_chooser, "wrong player choosing opponent");
     assert!(
-        matches!(choice_type, ChoiceType::Opponent { restriction: None }),
+        matches!(
+            choice_type,
+            ChoiceType::Opponent {
+                restriction: None,
+                ..
+            }
+        ),
         "expected opponent choice, got {choice_type:?}"
     );
     let choice = opponent.0.to_string();

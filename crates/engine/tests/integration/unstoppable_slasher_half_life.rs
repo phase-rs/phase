@@ -2,7 +2,7 @@
 //! ("Whenever this creature deals combat damage to a player, they lose half
 //! their life, rounded up.") silently resolved as "lose 0 life".
 //!
-//! The trigger is event-bound (CR 603.6f): "they"/"their" refers to the
+//! The trigger is event-bound (CR 115.1d): "they"/"their" refers to the
 //! damaged player carried on the triggering event, not a chosen target.
 //! Before the fix, "they" parsed to `ParentTarget` and the half-life amount
 //! to `LifeTotal { Target }` — both reading an absent player target, so the

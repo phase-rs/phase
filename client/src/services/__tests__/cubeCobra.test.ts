@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchCubeList } from "../cubeCobra";
+import { useConnectivityStore } from "../../stores/connectivityStore";
+import { CUBE_IMPORT_ERROR_KEYS, fetchCubeList } from "../cubeCobra";
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
 describe("fetchCubeList", () => {
@@ -57,5 +59,18 @@ describe("fetchCubeList", () => {
 
     await expect(fetchCubeList("https://example.com/cube.txt")).resolves.toBe("1 Black Lotus\n");
     expect(global.fetch).toHaveBeenCalledWith("https://example.com/cube.txt");
+  });
+
+  it("rejects CubeCobra API and raw export URLs offline without fetching", async () => {
+    global.fetch = vi.fn();
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(fetchCubeList("https://cubecobra.com/cube/list/abc123")).rejects.toThrow(
+      CUBE_IMPORT_ERROR_KEYS.offline,
+    );
+    await expect(fetchCubeList("https://example.com/cube.txt")).rejects.toThrow(
+      CUBE_IMPORT_ERROR_KEYS.offline,
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

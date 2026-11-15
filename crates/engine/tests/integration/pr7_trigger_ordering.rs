@@ -6,16 +6,16 @@
 //! into the flat `deferred_triggers` vec on a target pause; the re-drain
 //! (`drain_deferred_trigger_queue_unchecked`) re-runs `begin_trigger_ordering` on the
 //! still-order-dependent tail and RE-PROMPTS — a second `OrderTriggers` popup on a batch
-//! the player already ordered. CR 603.3b (docs line 2586): a simultaneous batch is
-//! ordered once in the two-part APNAP process, never re-ordered per target.
+//! the player already ordered. CR 603.3b: a simultaneous batch is ordered once in the
+//! two-part APNAP process, never re-ordered per target.
 //!
 //! Fix: an ephemeral `DecisionTemplate` coverage marker registered when the group is
 //! ordered lets the gate's 3rd arm auto-apply the chosen order (coverage-only) to every
 //! shrinking parked-tail suffix instead of re-prompting.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
-//!   - CR 603.3b (docs 2586): simultaneous triggers are ordered once, in APNAP order.
-//!   - CR 608.2b (docs 2789): a triggered ability's targets are chosen as it goes on
+//!   - CR 603.3b: simultaneous triggers are ordered once, in APNAP order.
+//!   - CR 608.2b: a triggered ability's targets are chosen as it goes on
 //!     the stack.
 //!   - CR 704.5g: a creature with lethal marked damage is destroyed by SBA. CR 704.3:
 //!     all applicable state-based actions are performed simultaneously as a single

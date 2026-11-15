@@ -4,7 +4,6 @@ import type { ManaType, ManaUnit } from "../../adapter/types.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { groupManaPoolUnits, manaGroupTooltip } from "../../viewmodel/manaPoolGroups.ts";
-import { familyOf } from "./HudBadges.tsx";
 
 const EMPTY_MANA: ManaUnit[] = [];
 
@@ -28,9 +27,10 @@ export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryP
     (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
   );
   // CR 732.2a: when an unbounded loop pumps the mana family, surface a small `∞`
-  // marker on the pool. Engine-decided (the FE only formats the provided axis).
-  const { unboundedResources } = usePlayerDesignations(playerId);
-  const hasUnboundedMana = unboundedResources.some((u) => familyOf(u.axis) === "mana");
+  // marker on the pool. Engine-decided — this READS the engine's per-seat family
+  // channel instead of mapping axes to families itself.
+  const { unboundedFamilies } = usePlayerDesignations(playerId);
+  const hasUnboundedMana = unboundedFamilies.some((f) => f.family === "mana");
 
   // Group fungible units (color, restrictions, grants) so distinctly-restricted
   // mana of the same color renders as separate pills (shared with the payment UI).

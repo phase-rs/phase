@@ -6,12 +6,12 @@ license.workspace = true
 
 [dependencies]
 draft-core = { path = "../draft-core" }
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 lobby-broker = { path = "../lobby-broker" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
 serde = { workspace = true }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["full"] }
 tracing = { workspace = true }
 rand = "0.9"
@@ -19,7 +19,7 @@ rand_chacha = "0.9"
 
 [dev-dependencies]
 # cfg(test) modules place objects with the raw zone API (sealed in production builds).
-engine = { path = "../engine", features = ["test-support"] }
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
 proptest = "1"
 serde_json = "1"
 tempfile = "3"

@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-host-platform"
+description = "Allows the frontend to read the shell host platform."
+commands.allow = ["host_platform"]
+
+[[permission]]
+identifier = "deny-host-platform"
+description = "Denies reading the shell host platform."
+commands.deny = ["host_platform"]

@@ -4,10 +4,14 @@ import type {
   GameObject,
   ManaCost,
   ObjectId,
+  RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
+  UnlessDrawCostView,
 } from "../adapter/types.ts";
+import i18n from "../i18n";
 import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
+import { renderDescription } from "../utils/description.ts";
 
 // Converts Rust ManaCostShard variant names to MTG abbreviations.
 // This is the canonical bridge between engine serialization and display—
@@ -112,7 +116,93 @@ type SerializedCost = {
   count?: QuantityExpr | number;
   costs?: SerializedCost[];
   cost?: { type: string; shards?: string[]; generic?: number };
+  filter?: { type: string; type_filters?: unknown[] } | null;
+  zone?: string | null;
+  effect?: {
+    type: string;
+    amount?: QuantityExpr | number;
+    player?: {
+      type: string;
+      controller?: string | null;
+      type_filters?: unknown[];
+      properties?: unknown[];
+      player?: { type: string; exclude?: { type: string }; relation?: string };
+    };
+  };
 };
+
+/**
+ * Display-only formatting of an engine `EffectCost` (precedent: `formatFilteredCard`).
+ * The engine is the authority on what the cost is; this only renders the
+ * recipient shapes it pays at cast time — "have an opponent gain N life"
+ * (Invigorate) and "have each other player gain N life" (Reverent Silence).
+ * Every other effect-cost has no rendering here (null), so `formatCost` keeps
+ * its generic "Activate" label and keyword detail shows nothing.
+ */
+function formatEffectCost(effect: SerializedCost["effect"]): string | null {
+  if (effect?.type !== "GainLife") return null;
+  const player = effect.player;
+  const amount = formatQuantity(effect.amount, 1);
+  if (
+    player?.type === "Typed" &&
+    player.controller === "Opponent" &&
+    (player.type_filters ?? []).length === 0 &&
+    (player.properties ?? []).length === 0
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveOpponentGainLife", { amount });
+  }
+  const scope = player?.type === "PlayerMatching" ? player.player : undefined;
+  if (
+    scope?.type === "AllExcept" &&
+    scope.exclude?.type === "Controller" &&
+    (scope.relation ?? "All") === "All"
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveEachOtherPlayerGainLife", { amount });
+  }
+  return null;
+}
+
+function formatTypeFilter(filter: unknown): string {
+  if (typeof filter === "string") return filter;
+  if (!filter || typeof filter !== "object") {
+    return i18n.t("game:resolutionOptionalPayment.cost.card");
+  }
+  if ("Non" in filter) {
+    return i18n.t("game:resolutionOptionalPayment.cost.nonType", {
+      type: formatTypeFilter((filter as { Non: unknown }).Non),
+    });
+  }
+  if ("Subtype" in filter) return String((filter as { Subtype: unknown }).Subtype);
+  if ("AnyOf" in filter) {
+    const alternatives = (filter as { AnyOf: unknown[] }).AnyOf ?? [];
+    return alternatives
+      .map(formatTypeFilter)
+      .join(i18n.t("game:resolutionOptionalPayment.cost.orSeparator"));
+  }
+  return i18n.t("game:resolutionOptionalPayment.cost.card");
+}
+
+function formatFilteredCard(filter: SerializedCost["filter"], plural: boolean): string {
+  const types = filter?.type === "Typed" ? filter.type_filters ?? [] : [];
+  const meaningful = types.filter((type) => type !== "Card" && type !== "Any");
+  if (meaningful.length === 0) {
+    return i18n.t(`game:resolutionOptionalPayment.cost.${plural ? "cards" : "card"}`);
+  }
+  return i18n.t(
+    `game:resolutionOptionalPayment.cost.${plural ? "filteredCards" : "filteredCard"}`,
+    { types: meaningful.map(formatTypeFilter).join(" ") },
+  );
+}
+
+function formatZone(zone: string | null | undefined): string {
+  switch (zone) {
+    case "Battlefield": return i18n.t("game:resolutionOptionalPayment.cost.zoneBattlefield");
+    case "Graveyard": return i18n.t("game:resolutionOptionalPayment.cost.zoneGraveyard");
+    case "Library": return i18n.t("game:resolutionOptionalPayment.cost.zoneLibrary");
+    case "Exile": return i18n.t("game:resolutionOptionalPayment.cost.zoneExile");
+    default: return i18n.t("game:resolutionOptionalPayment.cost.zoneHand");
+  }
+}
 
 /** Render a QuantityExpr (or legacy raw number) for display in cost labels. */
 function formatQuantity(q: QuantityExpr | number | undefined, fallback = 1): string {
@@ -178,6 +268,8 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "PermanentsLeftBattlefieldThisTurn": return "permanents that left the battlefield this turn";
     case "NonlandPermanentsLeftBattlefieldThisTurn": return "nonland permanents that left this turn";
     case "CrimesCommittedThisTurn": return "crimes committed this turn";
+    case "EnergyPaidOrLostThisTurn":
+      return i18n.t("quantityRef.energyPaidOrLostThisTurn");
     // Counter / property references
     case "BasicLandTypeCount": return "basic land types you control";
     case "PartySize": return "your party's size";
@@ -186,6 +278,20 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "ExiledFromHandThisResolution": return "cards exiled from hand";
     case "Speed": return "your speed";
     case "ChosenNumber": return "the chosen number";
+    // CR 101.4: the number a player secretly chose. The engine supplies the
+    // player scope (and, for the cross-player scopes, the fold); this only
+    // renders it — "the highest number" / "the lowest number". Routed through
+    // the i18n boundary; the surrounding labels in this file are legacy raw
+    // English and are tracked separately.
+    case "PlayerChosenNumber": {
+      const aggregate =
+        ref.player != null && typeof ref.player === "object" && "aggregate" in ref.player
+          ? (ref.player as { aggregate?: string }).aggregate
+          : undefined;
+      if (aggregate === "Max") return i18n.t("quantityRef.highestNumber");
+      if (aggregate === "Min") return i18n.t("quantityRef.lowestNumber");
+      return i18n.t("quantityRef.chosenNumber");
+    }
     case "PreviousEffectAmount": return "the previous amount";
     case "EventContextAmount": return "the amount";
     case "EventContextSourcePower": return "the source's power";
@@ -249,6 +355,15 @@ export function loyaltyStartIconClasses(amount: number): string | null {
 }
 
 export function formatCost(cost: SerializedCost): string {
+  return formatKnownCost(cost) ?? "Activate";
+}
+
+/**
+ * `formatCost` without its "Activate" fallback: null when the cost's type has
+ * no rendering here, so a caller that labels something other than an
+ * activation (a keyword's cost) can show nothing instead.
+ */
+export function formatKnownCost(cost: SerializedCost): string | null {
   switch (cost.type) {
     case "Loyalty": {
       // CR 606.1: Loyalty cost is always a literal `i32` on the Rust side.
@@ -272,7 +387,26 @@ export function formatCost(cost: SerializedCost): string {
     case "Sacrifice": return "Sacrifice";
     case "Discard": {
       const label = formatQuantity(cost.count, 1);
-      return `Discard ${label} card${quantityIsPlural(cost.count) ? "s" : ""}`;
+      const cards = formatFilteredCard(cost.filter, quantityIsPlural(cost.count));
+      return i18n.t("game:resolutionOptionalPayment.cost.discard", { count: label, cards });
+    }
+    case "Exile": {
+      const count = formatQuantity(cost.count, 1);
+      const cards = formatFilteredCard(cost.filter, quantityIsPlural(cost.count));
+      return i18n.t("game:resolutionOptionalPayment.cost.exile", {
+        count,
+        cards,
+        zone: formatZone(cost.zone),
+      });
+    }
+    case "Reveal": {
+      const count = formatQuantity(cost.count, 1);
+      const cards = formatFilteredCard(cost.filter, quantityIsPlural(cost.count));
+      return i18n.t("game:resolutionOptionalPayment.cost.reveal", {
+        count,
+        cards,
+        zone: formatZone(cost.zone),
+      });
     }
     case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
@@ -286,8 +420,10 @@ export function formatCost(cost: SerializedCost): string {
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
+    case "EffectCost":
+      return formatEffectCost(cost.effect);
     default:
-      return "Activate";
+      return null;
   }
 }
 
@@ -338,6 +474,7 @@ export function abilityChoiceLabel(
   object: GameObject,
   objects?: Record<ObjectId, GameObject>,
   webSlingingCosts?: Record<string, ManaCost>,
+  roomHalfIdentities?: Record<string, RoomHalvesView>,
 ): { label: string; description?: string } {
   // CR 702.190a: Sneak — label identifies which unblocked attacker is
   // returned to pay the Sneak cost. Include the Sneak mana cost from the
@@ -402,27 +539,78 @@ export function abilityChoiceLabel(
       description: `Tap ${object.name} to help pay this spell's cost.`,
     };
   }
+  if (action.type === "TapLandForMana") {
+    const mana = action.data.selection.atomic_combination ?? [action.data.selection.mana_type];
+    const symbols = mana
+      .map((manaType) => MANA_COLOR_ABBREVIATION[manaType] ?? "C")
+      .map((symbol) => `{${symbol}}`)
+      .join("");
+    return { label: `Tap for ${symbols}` };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost
+    // DELIBERATE SPLIT PREDICATE: this branch keys on the effect AST, NOT on the engine's
+    // `is_mana_ability` flag — only the `description` below is CR 605.1a-gated. Narrowing
+    // this predicate to the flag would push a Loyalty+Mana ability (Chandra, Torch of
+    // Defiance's `+1: Add {R}{R}`) down to the tail below, whose `stripCostPrefix` renders
+    // "Add {R}{R}." — a trailing period instead of today's "Add {R}{R}". Measured, not
+    // assumed. Leaving the label branch alone keeps the loyalty path byte-identical.
     if (ability?.effect?.type === "Mana" && ability.effect.produced) {
       const produced = ability.effect.produced;
+      // CR 605.1a: `is_mana_ability` is the ENGINE's mana-ability verdict
+      // (`game/mana_abilities.rs::is_mana_ability`) — it excludes loyalty abilities AND
+      // targeted mana effects (`multi_target` / embedded `Effect::Mana{target}`).
+      // Gate on the flag, never on the effect AST: a cost line under a LoyaltyBadge would
+      // double-render the cost that GamePage's `stripLoyaltyCostPrefix` exists to suppress.
+      // The flag is optional on the wire, so `=== true` treats absent as "not a mana
+      // ability" — the convention documented at `viewmodel/cardActionChoice.ts:29-32`.
+      // Second conjunct: only ENGINE-AUTHORED cost text is worth showing. With no
+      // description `abilityLabel` falls back to `formatCost`, which is partial over the
+      // engine's cost surface — 20 of the 32 `AbilityCost` variants have no arm and answer
+      // the literal word "Activate" (`TapCreatures` and `RemoveCounter` among them, i.e.
+      // exactly the costs on Relic of Legends' second ability and on Pentad Prism), and a
+      // `Composite`/`OneOf` with no `costs` answers "". `Sacrifice` and `Composite` DO have
+      // arms ("Sacrifice", "{T}, Sacrifice") — this conjunct is not about them.
+      // Descriptionless mana abilities are the engine-synthesized intrinsics
+      // (`database/synthesis.rs`, `game/layers.rs::basic_land_mana_ability`, and the
+      // `game/effects/token.rs` predefined-token abilities) — the wire sends Island with
+      // `description: null` — and every land with two or more basic land types carries one
+      // per type, so this conjunct is what keeps a dual/triome's already-distinct
+      // "Add {W}"/"Add {U}" options from each gaining an identical, uninformative "{T}".
+      // Known bounded gap: a permanent carrying two descriptionless mana abilities of the
+      // same produced shape (Treasure + Gold) still renders two identical options; the fix
+      // is engine-authored cost text, not a second frontend parse of the cost AST.
+      // CR 602.1a: the activation cost is everything before the colon — for two abilities
+      // producing identical mana it is the ONLY discriminator the engine ships.
+      // CR 201.5: `~` binds to the object that has the ability, which is `object` here.
+      const costLine =
+        ability.is_mana_ability === true && ability.description
+          ? renderDescription(abilityLabel(ability), object.name)
+          : undefined;
       if (produced.type === "Fixed" && produced.colors?.length) {
         const symbols = produced.colors.map((c) => `{${MANA_COLOR_ABBREVIATION[c] ?? c}}`).join("");
-        return { label: `Add ${symbols}` };
+        return { label: `Add ${symbols}`, description: costLine };
       }
       if (produced.type === "Colorless") {
-        return { label: "Add {C}" };
+        return { label: "Add {C}", description: costLine };
       }
       if (produced.type === "AnyOneColor") {
         const count = formatQuantity((produced as { count?: QuantityExpr | number }).count, 1);
         return {
           label: count === "1" ? "Add one mana of any color" : `Add ${count} mana of any one color`,
+          description: costLine,
         };
       }
     }
-    const label = abilityLabel(ability);
-    const description = ability?.description ? stripCostPrefix(ability.description) : undefined;
+    // CR 201.5: the non-mana tail feeds the SAME choice modal as the mana branch above and
+    // must bind `~` to the same object, or one row renders "Sacrifice Ghost Quarter" while
+    // the next renders "Sacrifice ~". Both halves leak in the live dump (29 abilities in the
+    // cost text, 27 in the effect text, e.g. "{T}: ~ deals 1 damage to any target.").
+    const label = renderDescription(abilityLabel(ability), object.name);
+    const description = ability?.description
+      ? renderDescription(stripCostPrefix(ability.description), object.name)
+      : undefined;
     return { label, description };
   }
   if (action.type === "CastSpell") {
@@ -488,6 +676,37 @@ export function abilityChoiceLabel(
     return {
       label: "Equip",
       description: "Attach this Equipment to target creature you control.",
+    };
+  }
+  // CR 709.5e: unlocking pays the mana cost of a LOCKED half, so the offer has
+  // to say WHICH half and what it costs — with two locked doors the two entries
+  // are otherwise indistinguishable. CR 709.5b + CR 707.2: the half identities
+  // are engine-published (`DerivedViews::room_half_identities`) and already
+  // resolved through the COPIED halves for a permanent that copies a Room; its
+  // own printed card carries neither the name nor the cost, and printed order
+  // is not the frontend's to derive.
+  if (action.type === "UnlockRoomDoor") {
+    const halves = roomHalfIdentities?.[String(action.data.object_id)];
+    const half = action.data.door === "Right" ? halves?.right : halves?.left;
+    if (half == null) {
+      // No published halves (face-down, CR 708.2a, or an older host): stay
+      // honest rather than name a half we were not told about.
+      return { label: i18n.t("game:gamePage.abilityChoice.unlockThisDoor") };
+    }
+    // No description: the label already carries the only two things the player
+    // chooses between, and CR 709.5e's timing ("as a sorcery, main phase, empty
+    // stack") is a legality the ENGINE enforces — the offer does not appear
+    // otherwise. Restating an enforced rule in the menu is noise, not clarity.
+    const costSymbols = manaCostToShards(half.mana_cost)
+      .map((shard) => `{${shard}}`)
+      .join("");
+    return {
+      label: costSymbols
+        ? i18n.t("game:gamePage.abilityChoice.unlockHalfWithCost", {
+          name: half.name,
+          cost: costSymbols,
+        })
+        : i18n.t("game:gamePage.abilityChoice.unlockHalf", { name: half.name }),
     };
   }
   return { label: "Tap for Mana" };
@@ -629,7 +848,7 @@ export function additionalCostChoices(
 }
 
 /** Strip the leading cost prefix from Oracle text (e.g. "[+2]: Draw a card." → "Draw a card.") */
-function stripCostPrefix(text: string): string {
+export function stripCostPrefix(text: string): string {
   // Bracket format: [+2]: ..., [−1]: ..., [0]: ...
   const bracketMatch = text.match(/^\[.*?\]:\s*/);
   if (bracketMatch) return text.slice(bracketMatch[0].length);
@@ -640,4 +859,25 @@ function stripCostPrefix(text: string): string {
   const costMatch = text.match(/^[^:]+:\s*/);
   if (costMatch) return text.slice(costMatch[0].length);
   return text;
+}
+
+/**
+ * CR 121.1 + CR 702.24a: label the draw an unless-payment prompt asks for from
+ * the engine-resolved count and repetition (`derived.unless_draw_cost`); the
+ * cost AST is never decoded here.
+ */
+export function unlessDrawCostLabel(draw: UnlessDrawCostView): string {
+  const instruction = draw.cards === 1
+    ? i18n.t("game:gamePage.cost.draw")
+    : i18n.t("game:gamePage.cost.drawCount", { count: draw.cards });
+  return draw.instructions > 1 ? `${instruction} × ${draw.instructions}` : instruction;
+}
+
+/**
+ * CR 702.24a: whether the open unless-payment prompt offers a decline. The
+ * engine reports the stage (`derived.unless_draw_cost.stage`): a repeated draw
+ * payment that is already partly performed only continues.
+ */
+export function unlessPaymentCanBeDeclined(draw: UnlessDrawCostView | undefined): boolean {
+  return draw?.stage !== "Continuing";
 }

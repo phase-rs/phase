@@ -15,8 +15,14 @@ vi.mock("../cloudSync/sessionKey", () => ({
   getSupabaseSessionKey: () => "sb-project-auth-token",
 }));
 
-import { importLegacyStorage } from "../legacyMigration";
+import { importLegacyStorage, markRemoteLoadOk } from "../legacyMigration";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../savedDeckTransaction";
+import {
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
 
 const backup = {
   version: 1 as const,
@@ -83,5 +89,78 @@ describe("importLegacyStorage", () => {
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("take_legacy_storage");
+  });
+
+  it("skipped by a busy library, leaves the backup's decks out of storage and does not confirm", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "take_legacy_storage") {
+        return Promise.resolve(JSON.stringify({ backup, supabaseSession: null }));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    installFifoWebLocks();
+    await resetSavedDeckLibraryForTests();
+    setSavedDeckTxnLockWaitForTests(20);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = withSavedDeckLibrary(() => held);
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+
+    await importLegacyStorage();
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Migrated")).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("confirm_legacy_import");
+
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    release();
+    await holder;
+    uninstallWebLocks();
+  });
+});
+
+describe("markRemoteLoadOk", () => {
+  it("waits for remote IPC and does not reuse a sequential success", async () => {
+    let resolveFirst!: () => void;
+    invokeMock
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveFirst = resolve; }))
+      .mockRejectedValueOnce(new Error("write failed"));
+
+    const first = markRemoteLoadOk();
+    expect(invokeMock).toHaveBeenCalledWith("mark_remote_load_ok");
+    resolveFirst();
+    await expect(first).resolves.toBe(true);
+    await expect(markRemoteLoadOk()).resolves.toBe(false);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent writes, resolves synchronous throws, and retries failures", async () => {
+    let resolve!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>((done) => { resolve = done; }));
+
+    const first = markRemoteLoadOk();
+    const concurrent = markRemoteLoadOk();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    resolve();
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([true, true]);
+
+    invokeMock.mockImplementationOnce(() => { throw new Error("sync failure"); });
+    await expect(markRemoteLoadOk()).resolves.toBe(false);
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+  });
+
+  it("does not invoke IPC outside a remote Tauri shell", async () => {
+    isTauriMock.mockReturnValue(false);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+
+    isTauriMock.mockReturnValue(true);
+    isBundledTauriOriginMock.mockReturnValue(true);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

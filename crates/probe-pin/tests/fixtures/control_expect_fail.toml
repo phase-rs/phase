@@ -1,0 +1,24 @@
+# The control declares an expectation the run CONTRADICTS (final review-impl, MAJOR-2). The
+# filter selects a test that passes on the unmodified tree, so `outcome = "fail"` is refuted by
+# the measurement — and the control must reach that conclusion through `verdict::verdict`, the
+# same authority every other probe uses, not through a hand-built `Verdict::Pass`.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+timeout_secs = 60
+
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/control_expect_fail_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+claim = "no mounts, unmodified tree — and an expectation the tree refutes"
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 1"]

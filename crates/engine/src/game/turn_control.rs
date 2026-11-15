@@ -1,6 +1,10 @@
+use std::collections::BTreeSet;
+
 use crate::types::ability::ControlWindow;
+use crate::types::actions::ResolveAllScope;
 use crate::types::game_state::{
-    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
+    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ResolveAllConsentRun,
+    ScheduledTurnControl, WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -11,9 +15,11 @@ use crate::types::statics::StaticMode;
 /// current decision controller from the effects that remain applicable. Returns
 /// the removed entry so the caller can apply
 /// window-specific post-processing (CR 723.1 extra-turn grant; CR 723.2 no-op).
-/// All three release sites — turn boundary (`start_next_turn`), combat-phase
-/// boundary (`finish_enter_phase`), and leave-game cleanup (`do_eliminate`) —
-/// route through here so control ends in exactly one place.
+/// The per-entry release sites are the three boundaries: turn boundary
+/// (`start_next_turn`), combat-phase boundary (`finish_enter_phase`), and
+/// leave-game cleanup (`do_eliminate`). Every game-ending release goes through
+/// [`end_all_player_control`], which enumerates its own callers, so control
+/// ends in exactly one place.
 pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> ScheduledTurnControl {
     let entry = state.scheduled_turn_controls[idx];
     let identity = control_identity(entry);
@@ -43,6 +49,28 @@ pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> Scheduled
         }
     }
     entry
+}
+
+/// CR 104.1 + CR 723.1: end every player-control effect because the game ended.
+/// A game that has ended takes no further turn and no further combat phase, so
+/// every scheduled window is over — including one that has not activated yet.
+/// Each removal routes through [`release_control_at`], whose returned CR 500.7
+/// extra-turn grant is deliberately dropped: the game is already over. That
+/// authority clears a window only for the exact entry that created it, so the
+/// two explicit clears are what turn its per-entry guarantee into the
+/// whole-state postcondition "no control survives", and the recompute retires a
+/// latch no surviving window backs.
+///
+/// Called from every site that ends a game: `elimination::end_game` (the
+/// terminal record) and `match_flow::apply_trusted_match_forfeit` (the match
+/// ending that does not go through it).
+pub(super) fn end_all_player_control(state: &mut GameState) {
+    while !state.scheduled_turn_controls.is_empty() {
+        release_control_at(state, 0);
+    }
+    state.active_full_turn_control = None;
+    state.active_combat_phase_control = None;
+    recompute_active_player_control(state);
 }
 
 pub(super) fn control_identity(scheduled: ScheduledTurnControl) -> ActivePlayerControl {
@@ -190,7 +218,7 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     // CR 723.5 + CR 805.8: A turn controller makes decisions for the
     // controlled player; in shared team turns, controlling one affected player
     // controls that player's team.
-    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+    let controlled_seat = if super::topology::side_takes_shared_turn(state, state.active_player) {
         super::topology::team_members(state, state.active_player).contains(&semantic_player)
     } else {
         semantic_player == state.active_player
@@ -200,6 +228,20 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
         controller
     } else {
         semantic_player
+    }
+}
+
+/// The current, unfrozen controller for a semantic player. Resolve All uses
+/// this only to verify that a consent-time submitter was not rebound before
+/// materializing its shared stack-resolution session.
+pub(crate) fn live_authorized_submitter_for_player(
+    state: &GameState,
+    semantic_player: PlayerId,
+) -> PlayerId {
+    match search_decision_authority(state, semantic_player) {
+        Some(ActiveSearchDecisionAuthority::LatchedController { controller }) => controller,
+        Some(ActiveSearchDecisionAuthority::SearcherFallback) => semantic_player,
+        None => effective_authority_for_player(state, semantic_player),
     }
 }
 
@@ -352,11 +394,172 @@ fn search_decision_authority(
 }
 
 pub fn authorized_submitter_for_player(state: &GameState, semantic_player: PlayerId) -> PlayerId {
-    match search_decision_authority(state, semantic_player) {
-        Some(ActiveSearchDecisionAuthority::LatchedController { controller }) => controller,
-        Some(ActiveSearchDecisionAuthority::SearcherFallback) => semantic_player,
-        None => effective_authority_for_player(state, semantic_player),
+    // Resolve All consent freezes the submitting authority at proposal time.
+    // This must win over live turn control: otherwise a control effect that
+    // changes while a representative is queued could redirect an already-issued
+    // response to a different actor.
+    if let WaitingFor::ResolveAllConsent {
+        epoch,
+        representative,
+    } = &state.waiting_for
+    {
+        if *representative == semantic_player {
+            if let Some(submitter) = state
+                .resolve_all_consent_run
+                .as_ref()
+                .filter(|run| run.epoch == *epoch)
+                .and_then(|run| run.authorized_submitter_for(*representative))
+            {
+                return submitter;
+            }
+        }
     }
+    live_authorized_submitter_for_player(state, semantic_player)
+}
+
+/// Whether a frozen Resolve All participant set still names precisely the
+/// current priority representatives and their live submitting authorities.
+///
+/// CR 117.6 + CR 805.5b: representatives are the shared-team priority seats.
+/// CR 723.5: a live controller change must not rebind a consent response that
+/// was authorized for a different submitter.
+pub(crate) fn resolve_all_consent_authority_matches_live(
+    state: &GameState,
+    run: &ResolveAllConsentRun,
+) -> bool {
+    let frozen_representatives: BTreeSet<_> = run
+        .participants
+        .iter()
+        .map(|participant| participant.representative)
+        .collect();
+    let live_representatives: BTreeSet<_> = super::topology::priority_pass_participants(state)
+        .into_iter()
+        .collect();
+
+    // CR 117.3d: a `Shared` run is a table-wide proposal, so a seat that became
+    // a priority participant after the snapshot would otherwise be bound by a
+    // consent it never gave — the live set must match exactly. An `Own` run
+    // binds only the requester and asks nobody, so it stays coherent as long as
+    // every seat it froze is still a live participant.
+    let membership_holds = match run.scope {
+        ResolveAllScope::Own => frozen_representatives.is_subset(&live_representatives),
+        ResolveAllScope::Shared => frozen_representatives == live_representatives,
+    };
+
+    membership_holds
+        && run.participants.iter().all(|participant| {
+            live_authorized_submitter_for_player(state, participant.representative)
+                == participant.authorized_submitter
+        })
+}
+
+/// Returns the frozen submitter who may revoke one granted Resolve All consent.
+/// Revoke is valid while a later representative is queued and after the run is
+/// Ready, so it cannot be expressed through the ordinary single-actor prompt.
+pub fn resolve_all_granted_submitter(
+    state: &GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Option<PlayerId> {
+    matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent { epoch: active, .. }
+            | WaitingFor::ResolveAllReady { epoch: active }
+            if *active == epoch
+    )
+    .then(|| state.resolve_all_consent_run.as_ref())
+    .flatten()
+    .filter(|run| run.epoch == epoch && run.is_granted(representative))
+    .and_then(|run| run.authorized_submitter_for(representative))
+}
+
+/// Drops an active Resolve All consent run when player topology changes. A
+/// frozen representative set is no longer meaningful after elimination, so
+/// restart ordinary priority from a living representative instead of trying to
+/// repair the proposal in place.
+///
+/// The public consent state, not the private run, decides whether a repair is
+/// owed. An earlier form returned as soon as `take()` found no run, which made
+/// this a no-op in exactly the case it exists to fix — a consent `WaitingFor`
+/// left standing over a run that is already gone. Neither half of that pairing
+/// can advance: a run-less `ResolveAllReady` has no acting player AND — with
+/// no run to enumerate grantors from — not even the Revoke that an intact
+/// latch still offers, and a run-less `ResolveAllConsent` still offers its
+/// representative a Grant that `respond_resolve_all_consent` can only reject.
+/// Taking the run stays unconditional so the two fields cannot disagree
+/// afterwards.
+///
+/// CR 117.4: clearing the recorded passes restarts the pass cycle that the
+/// discarded consent state had suspended, so priority resumes from the
+/// repaired holder rather than from a partial round nobody can complete.
+pub fn invalidate_resolve_all_consent(state: &mut GameState) {
+    invalidate_resolve_all_consent_inner(state, false);
+}
+
+/// Invalidates a frozen consent run because the player topology is about to
+/// change. Even before the departing seat is physically removed, its pending
+/// departure makes the saved pass round unusable, so this deliberately chooses
+/// the projected-live rebase rather than exact snapshot rollback.
+pub fn invalidate_resolve_all_consent_for_topology_change(state: &mut GameState) {
+    rebase_invalid_resolve_all_consent(state);
+}
+
+/// Discards an incoherent consent run and projects ordinary priority from the
+/// live table rather than replaying its no-longer-valid saved pass round.
+pub(crate) fn rebase_invalid_resolve_all_consent(state: &mut GameState) {
+    invalidate_resolve_all_consent_inner(state, true);
+}
+
+fn invalidate_resolve_all_consent_inner(state: &mut GameState, force_projected_rebase: bool) {
+    let run = state.resolve_all_consent_run.take();
+    if let Some(baseline) = run.as_ref().and_then(|run| run.auto_pass_baseline.as_ref()) {
+        state.auto_pass = baseline
+            .iter()
+            .map(|(&player, &mode)| (player, mode))
+            .collect();
+    }
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        return;
+    }
+    let exact_snapshot_is_live = !force_projected_rebase
+        && run.as_ref().is_some_and(|run| {
+            matches!(
+                state.waiting_for,
+                WaitingFor::ResolveAllConsent { epoch, .. } if epoch == run.epoch
+            ) && state.priority_player == run.priority_snapshot.priority_player
+                && state.priority_pass_count == run.priority_snapshot.priority_pass_count
+                && state.priority_passes == run.priority_snapshot.priority_passes
+                && resolve_all_consent_authority_matches_live(state, run)
+        });
+    if exact_snapshot_is_live {
+        let snapshot = &run
+            .as_ref()
+            .expect("exact Resolve All recovery retains its run")
+            .priority_snapshot;
+        state.waiting_for = WaitingFor::Priority {
+            player: snapshot.waiting_player,
+        };
+        state.priority_player = snapshot.priority_player;
+        state.priority_pass_count = snapshot.priority_pass_count;
+        state.priority_passes = snapshot.priority_passes.clone();
+        return;
+    }
+    let preferred = super::topology::priority_pass_representative(state, state.active_player);
+    let player = super::players::is_alive(state, preferred)
+        .then_some(preferred)
+        .or_else(|| {
+            super::topology::priority_pass_participants(state)
+                .first()
+                .copied()
+        })
+        .unwrap_or(preferred);
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = authorized_submitter_for_player(state, player);
+    state.priority_pass_count = 0;
+    state.priority_passes.clear();
 }
 
 /// CR 723.4: A controlled player and the player controlling them may see the
@@ -414,6 +617,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

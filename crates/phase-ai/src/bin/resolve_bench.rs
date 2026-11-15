@@ -11,6 +11,12 @@
 //!   RUSTFLAGS="-C debug-assertions=on" CARGO_TARGET_DIR=/tmp/forge-prof-target-dbg \
 //!       cargo build --profile tool --bin resolve_bench
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::Instant;
@@ -146,9 +152,15 @@ fn bench_fast_forward(original: &GameState, it: usize, resolution_cap: u32) {
     let start_stack = state.stack.len();
     perf_counters::reset();
     let t_all = Instant::now();
-    let result = resolve_all_fast_forward(&mut state, PlayerId(0), resolution_cap, |_, _| {
+    let result = match resolve_all_fast_forward(&mut state, PlayerId(0), resolution_cap, |_, _| {
         ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-    });
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("fast  iter {it}: rejected: {error}");
+            return;
+        }
+    };
     let all = t_all.elapsed();
     let counters = perf_counters::snapshot();
     println!(
@@ -194,6 +206,7 @@ fn print_stack_summary(state: &GameState) {
             StackEntryKind::ActivatedAbility { .. } => "ActivatedAbility",
             StackEntryKind::TriggeredAbility { .. } => "TriggeredAbility",
             StackEntryKind::KeywordAction { .. } => "KeywordAction",
+            StackEntryKind::CombatDamage { .. } => "CombatDamage",
         };
         *kinds.entry(kind).or_default() += 1;
     }

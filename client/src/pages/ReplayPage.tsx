@@ -10,6 +10,10 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { useReplayStore } from "../stores/replayStore";
+import { useGameStore } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
+import { useIsMobile } from "../hooks/useIsMobile";
+import { getSeatCount, resolveMultiplayerBoardLayout } from "../viewmodel/gameStateView";
 
 /**
  * Stand-alone replay viewer. Deliberately does NOT use `GameProvider` /
@@ -32,6 +36,14 @@ export function ReplayPage() {
   const loadReplay = useReplayStore((s) => s.loadReplay);
   const unload = useReplayStore((s) => s.unload);
   const isLoaded = useReplayStore((s) => s.adapter !== null);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
+  const isMobile = useIsMobile();
+  const gameState = useGameStore((s) => s.gameState);
+  const effectiveMultiplayerBoardLayout = resolveMultiplayerBoardLayout(
+    multiplayerBoardLayout,
+    getSeatCount(gameState),
+    isMobile,
+  );
 
   useEffect(() => unload, [unload]);
 
@@ -120,7 +132,7 @@ export function ReplayPage() {
         </button>
       </div>
       <div className="relative z-10 flex min-h-0 flex-1 flex-col">
-        <GameBoard />
+        <GameBoard effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
       </div>
       <ReplayControls />
     </div>

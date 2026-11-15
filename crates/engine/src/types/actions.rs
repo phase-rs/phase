@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 use super::ability::{LibraryPosition, TargetRef};
@@ -7,7 +5,8 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceKey, PriorityPassingMode, ShardChoice, YieldScope, YieldTarget,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode,
+    ReplacementAutoChoiceId, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -16,6 +15,10 @@ use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
+use crate::analysis::decision_template::{
+    AnnouncementSubject, DecisionSlot, DecisionTemplate, PinnedDecision, Ranking, TargetPin,
+    TargetSchedule,
+};
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::AttachTarget;
 
@@ -63,6 +66,8 @@ pub enum CastChoice {
 ///   Only available when `object_id` references a card named "Serum Powder" in
 ///   the actor's hand (CR 103.5b and Serum Powder Oracle text). The player
 ///   remains pending and may keep, mulligan, or use another Serum Powder next.
+/// - `FreeReveal` — reveal the hand, return it and redraw without taking a
+///   regular mulligan (the Dandan free-reveal rule).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MulliganChoice {
@@ -73,6 +78,11 @@ pub enum MulliganChoice {
     UseSerumPowder {
         object_id: ObjectId,
     },
+    /// CR 103.5 as modified by the Dandan free-reveal rule: reveal the hand,
+    /// return it and redraw; the mulligan count is unchanged and nothing is
+    /// bottomed. Legal only where `GameFormat::free_reveal_mulligan()` offers
+    /// it, before this player's first regular mulligan, while the hand qualifies.
+    FreeReveal,
 }
 
 /// CR 118.9: Player decision at a `WaitingFor::AlternativeCastChoice` prompt —
@@ -91,7 +101,7 @@ pub enum AlternativeCastDecision {
     Normal,
     /// Pay the keyword-granted alternative cost. Resolution applies the
     /// keyword's post-payment effects (Overload's target→each text change per
-    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74b, Bestow's
+    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74a, Bestow's
     /// Aura transformation per CR 702.103b, Warp's exile-at-end-step rider).
     Alternative,
 }
@@ -109,6 +119,14 @@ pub enum UnlessCostBranch {
     Pay { index: usize },
 }
 
+/// CR 118.12: decision for an optional cost paid while an effect resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResolutionOptionalPaymentChoice {
+    Decline,
+    Pay { index: usize },
+}
+
 /// CR 400.11 + CR 406.3: One discriminated selection committed for an
 /// outside-game choice. The two source pools (sideboard and face-up exile) are
 /// expressed as parallel variants so the action wire format is uniform.
@@ -119,6 +137,15 @@ pub enum OutsideGameSelection {
     Sideboard { sideboard_index: usize },
     /// CR 406.3: A face-up exile object the player owns.
     FaceUpExile { object_id: ObjectId },
+    /// CR 400.11b: A card in the booster pack this effect just opened,
+    /// identified by its slot in the opened pack. The pack's cards are not in
+    /// any zone and have no `ObjectId` until one is taken, so the slot index is
+    /// the only stable identity — and it keeps two identically named cards in
+    /// the same pack distinguishable.
+    BoosterPack { pack_slot: usize },
+    /// CR 702.139a + CR 400.11: the player's revealed, not-yet-used companion.
+    /// There is at most one per player, so the selection needs no identity.
+    Companion,
 }
 
 #[derive(
@@ -164,6 +191,11 @@ pub enum GameAction {
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
+        /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference,
+        /// the same opt-in as `CastSpell`'s. `Manual` stops in `ManaPayment`
+        /// after targets so the player activates mana abilities themself.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        payment_mode: CastPaymentMode,
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
@@ -220,6 +252,13 @@ pub enum GameAction {
     ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
+    /// CR 601.2 + CR 115.10a: the caster's answer to `WaitingFor::ChooseGiftRecipient`
+    /// — which opponent is chosen for the prompt's `purpose` (Gift recipient,
+    /// CR 702.174a, or an effect-as-cost's player, CR 601.2h). `opponent` must be
+    /// one of the prompt's `candidates`.
+    ChooseGiftRecipient {
+        opponent: PlayerId,
+    },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
     /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
     /// the generic mana; `None` declines and proceeds to normal payment.
@@ -252,6 +291,15 @@ pub enum GameAction {
     TapLandForMana {
         selection: ManaSourceSelection,
     },
+    /// CR 605.3a: Activate one exact engine-authored mana-source capability.
+    /// Unlike the legacy land-only action, this covers mana abilities on every
+    /// permanent type and preserves the selected output provenance.
+    ActivateManaSource {
+        selection: ManaSourceSelection,
+    },
+    /// Return from a sacrificial-mana choice to the exact saved payment state
+    /// without re-planning or mutating the mana pool.
+    BackToManaPayment,
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
     UntapLandForMana {
@@ -281,6 +329,15 @@ pub enum GameAction {
     SelectCoinFlips {
         keep_indices: Vec<usize>,
     },
+    /// CR 706.6: Die-roll ignore choice — indices into `results` the roller
+    /// IGNORES (the rest survive). Note the inversion from
+    /// [`GameAction::SelectCoinFlips`], which names the flips KEPT: CR 705.1
+    /// instructs the player to keep one, while CR 706.6 instructs them to ignore
+    /// the lowest. Length must equal `ignore_count`, and every index must be one
+    /// the engine offered in `ignorable_indices`.
+    SelectDieRolls {
+        ignore_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -296,6 +353,19 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    /// CR 616.1: remember the complete ordering or plain optional decision.
+    ChooseReplacementAndRemember {
+        choice: ReplacementAutoChoice,
+    },
+    /// Forget only the authenticated actor's replacement preferences.
+    SetReplacementAutoChoice {
+        selector: Option<ReplacementAutoChoiceId>,
+    },
+    /// CR 614.12a: choose which eligible opponent controls an entering
+    /// permanent. This is distinct from CR 616 replacement ordering.
+    ChooseEntryController {
+        opponent: PlayerId,
+    },
     /// CR 603.3b: Player submits the chosen order for their pending triggers.
     /// `order` is a permutation of indices into the `OrderTriggers.triggers`
     /// vec the player was prompted with; index 0 = first placed (bottom of
@@ -303,6 +373,23 @@ pub enum GameAction {
     OrderTriggers {
         order: Vec<usize>,
     },
+    /// CR 601.2b + CR 601.2f: Caster submits their cost-determination election.
+    /// `order` is a permutation of indices into the
+    /// `WaitingFor::OrderCostReductions.reductions` vec the caster was prompted
+    /// with; index 0 = applied first ("If multiple cost reductions apply, the
+    /// player may apply them in any order"). `hybrid_announcement` is the
+    /// announced nonhybrid equivalent for each entry of that prompt's
+    /// `hybrid_symbols` vec, in the same order ("the player announces the
+    /// nonhybrid equivalent cost they intend to pay"), or empty to announce
+    /// nothing and leave every hybrid symbol in the locked cost.
+    OrderCostReductions {
+        order: Vec<usize>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hybrid_announcement: Vec<crate::types::mana::ManaCostShard>,
+    },
+    /// CR 601.2 + CR 602.2b: withdraw a pending spell cast or a pre-cost
+    /// keyword-activation announcement (Equip/Crew/Station/Saddle selection),
+    /// restoring priority with nothing to unwind.
     CancelCast,
     Equip {
         equipment_id: ObjectId,
@@ -366,6 +453,10 @@ pub enum GameAction {
     },
     ChoosePlayDraw {
         play_first: bool,
+    },
+    /// CR 103.1: answer to `WaitingFor::ChooseStartingPlayer` — the seat that takes the first turn.
+    ChooseStartingPlayer {
+        player: PlayerId,
     },
     ChooseOption {
         choice: String,
@@ -529,6 +620,11 @@ pub enum GameAction {
     DecideOptionalEffect {
         accept: bool,
     },
+    /// CR 118.12: decline or choose one server-advertised branch of an optional
+    /// disjunctive cost while an effect resolves.
+    ChooseResolutionOptionalPaymentBranch {
+        choice: ResolutionOptionalPaymentChoice,
+    },
     /// CR 702.47a–e: Respond to a `WaitingFor::SpliceOffer`. `Some(card)` splices
     /// that card from hand onto the spell being cast (re-presenting the offer for
     /// any remaining eligible cards, CR 702.47e); `None` declines/finishes
@@ -538,6 +634,8 @@ pub enum GameAction {
     },
     DecideOptionalEffectAndRemember {
         choice: AutoMayChoice,
+        #[serde(default)]
+        scope: MayTriggerAutoChoiceScope,
     },
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
@@ -607,6 +705,12 @@ pub enum GameAction {
     HarmonizeTap {
         creature_id: Option<ObjectId>,
     },
+    /// CR 702.106a / CR 702.106f: Answer a secret pregame agenda prompt with all
+    /// of the conspiracy's names at once, so nothing observable distinguishes a
+    /// double agenda from a hidden agenda.
+    ChooseSecretAgendaNames {
+        names: Vec<String>,
+    },
     /// CR 702.139a: Declare a companion during pre-game reveal (or decline).
     DeclareCompanion {
         /// An explicit reveal choice or an explicit decline. This cannot be
@@ -666,7 +770,7 @@ pub enum GameAction {
     ChooseLegend {
         keep: ObjectId,
     },
-    /// CR 310.10 + CR 704.5w + CR 704.5x: Choose which player becomes the
+    /// CR 310.11 + CR 704.5x: Choose which player becomes the
     /// battle's new protector when the SBA pauses with a `BattleProtectorChoice`.
     ChooseBattleProtector {
         protector: PlayerId,
@@ -703,6 +807,13 @@ pub enum GameAction {
     /// mirroring `SetPriorityYield`. Pure preference propagation.
     SetMayTriggerAutoChoice {
         op: MayTriggerAutoChoiceOp,
+    },
+    /// Un-card actions (Unglued/Unhinged/Unstable/Unfinity silver-border cards):
+    /// opt in or out, perform a gesture from the Un-actions menu, or call
+    /// "Gotcha!". Legal in any `WaitingFor` state and actor-scoped, like the
+    /// preference actions — a gesture never changes game progression by itself.
+    UnAction {
+        action: super::un_actions::UnAction,
     },
     /// CR 603.3b: Update the acting player's saved trigger-ordering templates.
     /// Legal in any WaitingFor state and routed to the acting player (who may only
@@ -754,8 +865,13 @@ pub enum GameAction {
         amount: u32,
     },
     /// CR 115.7: Choose new target(s) for a spell or ability on the stack.
+    /// One entry per addressed position of `WaitingFor::RetargetChoice`:
+    /// `None` leaves that target unchanged with its announced incarnation
+    /// (CR 115.7d: "leave any number of the targets unchanged, even if those
+    /// targets would be illegal"); `Some(t)` chooses `t`. A bare target (the
+    /// pre-nullable wire form) decodes as `Some`.
     RetargetSpell {
-        new_targets: Vec<TargetRef>,
+        new_targets: Vec<Option<TargetRef>>,
     },
     /// CR 701.48a: Learn — choose to rummage (discard a card, draw a card) or skip.
     LearnDecision {
@@ -874,9 +990,20 @@ pub enum GameAction {
     /// CR 732.2a: the proposer (the loop's determinate winner, holding priority)
     /// declares the loop shortcut. `count` is the repeat count — Phase 3 only produces
     /// [`IterationCount::UntilLethal`]. `template` pins the per-iteration choices for a
-    /// choice-bearing loop; it MUST be `None` in Phase 3 (the B3 consumer that reads it
-    /// is Phase 4 — the field is present now so Phase 4 adds no dispatch-signature
-    /// change).
+    /// choice-bearing loop, and `Some` IS accepted and consumed: the declare handler binds
+    /// `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
+    /// their own choices) and, for a non-empty schema, requires
+    /// `decision_template::{predictability_gate, validate_pins}` to pass before the pins drive the
+    /// cycle; any failure rejects the declaration and hands back to manual play. That owner binding
+    /// plus pin validation IS L2 (unconditionality by construction) enforced AT THE WIRE: an
+    /// accepted template cannot carry a choice its proposer never pinned or was not entitled to
+    /// pin, so the sequence the table accepts is the sequence that runs — which is why accepting
+    /// `Some` costs the CR 732.2a argument nothing.
+    ///
+    /// The CURRENT FRONTEND always sends `null` (`LoopShortcutModal`, pinned by that modal's T2
+    /// test) — that is a client-side policy, NOT this action's contract. Engine-side per-iteration
+    /// pin CAPTURE is what remains outstanding, as part of the "Shortcut-system rules-correctness
+    /// completion" follow-up in `.deferred-backlog.md`.
     DeclareShortcut {
         count: crate::analysis::decision_template::IterationCount,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -899,6 +1026,85 @@ pub enum GameAction {
         epoch: u64,
         response: PrecastCopyShortcutResponse,
     },
+    /// CR 116.2c: Special action — pay a continuous effect's printed termination
+    /// cost to end it ("You may pay {W} to end this effect"). CR 116.1: special
+    /// actions don't use the stack and can't be responded to.
+    ///
+    /// `group` names the continuous effect ONE resolution created (see
+    /// [`crate::types::game_state::EndEffectPermission`]); it is a group key,
+    /// NOT a `TransientContinuousEffect::id`.
+    ///
+    /// `source_name` and `cost` are engine-authored presentation values. Clients
+    /// display them verbatim and echo them back; dispatch revalidates `group`
+    /// against live state and never trusts either echoed value.
+    ///
+    /// Kept after the existing action variants so their derived
+    /// `GameActionKind` ordering remains stable for deterministic replay.
+    EndContinuousEffect {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_name: String,
+        cost: crate::types::mana::ManaCost,
+    },
+    /// Begins a Resolve All batch. `scope` selects whether this binds only the
+    /// requester (`Own` — the player-facing button, resolves immediately) or
+    /// opens the table-wide consent protocol (`Shared` — engine stack
+    /// compression). See [`ResolveAllScope`].
+    BeginResolveAll {
+        max_resolutions: u32,
+        /// `#[serde(default)]` migrates payloads written before the scope
+        /// existed to `Own`, the weaker of the two authorities.
+        #[serde(default)]
+        scope: ResolveAllScope,
+    },
+    /// Answers the currently queued Resolve All consent prompt. `epoch` makes
+    /// delayed transport submissions fail closed rather than answering a newer
+    /// proposal.
+    RespondResolveAllConsent {
+        epoch: u64,
+        decision: ResolveAllConsentDecision,
+    },
+    /// Withdraws a representative's prior Resolve All consent while the exact
+    /// epoch remains active. This is intentionally available from Ready as
+    /// well as while another representative is queued.
+    RevokeResolveAllConsent {
+        epoch: u64,
+        representative: PlayerId,
+    },
+}
+
+/// One representative's explicit Resolve All decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResolveAllConsentDecision {
+    Grant,
+    Decline,
+}
+
+/// CR 117.3d + CR 117.4: which priority representatives a Resolve All request
+/// binds.
+///
+/// `Own` is the player-facing shortcut: a pre-commitment to pass the
+/// REQUESTER'S OWN priority windows while the current stack cohort drains. One
+/// player can never decide another's passes, so it asks nobody and cannot be
+/// blocked by a seat that declines or (an AI seat) never answers. Every other
+/// seat keeps its ordinary windows and its non-representative meaningful-action
+/// protection in `stack_resolution_session_priority_decision`, so CR 117.4 still
+/// requires their real passes before anything resolves.
+///
+/// `Shared` is the table-wide compression proposal: it asks every representative
+/// for consent, and a unanimous grant makes them all representatives of one
+/// session. That is strictly stronger than `Own` — a representative's windows
+/// are passed WITHOUT the meaningful-action check — which is exactly what lets
+/// the engine collapse a stack whose other players could still have acted. It
+/// is opt-in for that reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResolveAllScope {
+    /// Bind only the requester. The default so a payload written before this
+    /// field existed cannot silently acquire table-wide authority.
+    #[default]
+    Own,
+    Shared,
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -920,14 +1126,24 @@ pub enum PriorityYieldOp {
     ClearAll,
 }
 
+/// CR 616.1: a complete ordering and an optional branch are distinct decisions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ReplacementAutoChoice {
+    Order { order: Vec<usize> },
+    Optional { index: usize },
+}
+
 /// CR 603.5: The mutation a `GameAction::SetMayTriggerAutoChoice` performs on the
 /// acting player's stored "don't ask again" auto-choices for optional ("may")
-/// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every stored
+/// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every stored
 /// auto-choice belonging to the acting player.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceOp {
-    Remove { key: MayTriggerAutoChoiceKey },
+    Remove {
+        selector: MayTriggerAutoChoiceSelector,
+    },
     ClearAll,
 }
 
@@ -958,16 +1174,66 @@ fn default_true() -> bool {
     true
 }
 
+/// Default and maximum debug-spawn batch sizes. The ceiling is deliberately
+/// small relative to the server's 10,000-object snapshot ceiling: debug spawns
+/// can still be multiplied by ordinary token replacement effects.
+pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
+
+/// Maximum amount for one sandbox `GainLife` / `LoseLife` debug action. A sanity
+/// bound on the request, not the representability authority: it leaves about 2^11
+/// headroom under `i32::MAX` for doubling replacements, but a stack of replacements
+/// can still carry the result past what the engine represents. That result is never
+/// clamped: the checked quantity resolver and the checked `Times` / `Plus` appliers
+/// report it as an unrepresentable life change and the action is rejected unchanged.
+pub const MAX_DEBUG_LIFE_AMOUNT: u32 = 1_000_000;
+
+/// Maximum count for one sandbox `GivePlayerCounters` / `GiveEnergy` debug
+/// action. A sanity bound on the request, not the representability
+/// authority: count replacements can still carry the result past what the
+/// engine represents. That result is never clamped: the checked
+/// `Times` / `Plus` appliers and the checked settle step report it as an
+/// unrepresentable player-resource change and the action is rejected unchanged.
+pub const MAX_DEBUG_COUNTER_AMOUNT: u32 = 1_000_000;
+
+/// Serde default for debug create counts: legacy payloads create one object.
+fn default_debug_create_count() -> u32 {
+    1
+}
+
+/// Whether a sandbox Create Card request materializes a printed card object or
+/// a token with that card's printed characteristics.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum DebugCardCreationKind {
+    #[default]
+    Card,
+    Token,
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
-/// the current prompt. Gated on `GameState::debug_mode`.
+/// the current prompt, except the player-resource variants that
+/// [`DebugAction::requires_settled_priority`] gates to a Priority window, and the
+/// payload-dependent checks (`CreateCard { zone: Battlefield, run_etb: true }`,
+/// `MoveToZone { simulate: true }`) that `preflight_debug_action` gates the same
+/// way.
+/// Gated on `GameState::debug_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DebugAction {
     // ── Object Zone Manipulation ──────────────────────────────────────────
     /// Move an existing object to a different zone.
-    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs).
-    /// When false, raw placement with no triggers or SBAs.
+    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
+    /// a `Battlefield` destination also consults ETB replacements (enters tapped,
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`;
+    /// an object already on the battlefield, or a token that has left it (CR 111.8),
+    /// is not put onto the battlefield, so no replacement is consulted and nothing
+    /// enters; triggers and state-based actions are still checked, as for every
+    /// simulated move.
+    /// When false, raw placement with no replacements, triggers, or SBAs; a
+    /// planeswalker or battle still arrives with its printed loyalty / defense
+    /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c).
     MoveToZone {
         object_id: ObjectId,
         to_zone: Zone,
@@ -987,14 +1253,32 @@ pub enum DebugAction {
         card_name: String,
         owner: PlayerId,
         zone: Zone,
+        /// Number of card objects to create. The WASM card-database bridge
+        /// currently supports one-at-a-time materialization only, because an
+        /// entry can pause for a replacement or ETB choice.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<AttachTarget>,
         /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
         /// (replacements → ETB triggers → SBAs). When `false`, place the card raw
-        /// with no entry effects — mirrors `MoveToZone { simulate: false }`. Only
+        /// with no entry effects — mirrors `MoveToZone { simulate: false }`; a
+        /// planeswalker or battle still arrives with its printed loyalty / defense
+        /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c). Only
         /// consulted for `zone == Battlefield`; ignored for other destinations.
         #[serde(default = "default_true")]
         run_etb: bool,
+        /// Strip the Legendary supertype from the spawned card's copiable
+        /// characteristics. This sandbox-only override is applied before an
+        /// optional battlefield entry so legend-rule SBAs see the requested
+        /// characteristics.
+        #[serde(default)]
+        nonlegendary: bool,
+        /// A token retains the card's printed copiable characteristics and
+        /// artwork while obeying token zone behavior once it leaves the
+        /// battlefield.
+        #[serde(default)]
+        creation_kind: DebugCardCreationKind,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1079,6 +1363,12 @@ pub enum DebugAction {
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.
     SetLife { player_id: PlayerId, life: i32 },
+    /// Gain life through the real CR 119.3 life-gain event (replacements, can't-gain statics, life-gain triggers apply).
+    /// Requires a Priority window, so an open prompt (e.g. a CR 616.1 replacement choice) keeps its owner.
+    GainLife { player_id: PlayerId, amount: u32 },
+    /// Lose life through the real CR 119.3 life-loss event.
+    /// Requires a Priority window, like `GainLife`.
+    LoseLife { player_id: PlayerId, amount: u32 },
     /// Modify a non-energy player counter. Positive delta adds, negative removes.
     ModifyPlayerCounters {
         player_id: PlayerId,
@@ -1087,6 +1377,18 @@ pub enum DebugAction {
     },
     /// Modify energy counters, which are stored separately from `PlayerCounterKind`.
     ModifyEnergy { player_id: PlayerId, delta: i32 },
+    /// CR 122.1: Give a non-energy player counter through the real counter-placement
+    /// event, so can't effects, count replacements (scoped by the requesting seat, the
+    /// player who puts them), CR 616.1 ordering, counter triggers and state-based
+    /// actions apply. Requires a Priority window, like `GainLife`.
+    GivePlayerCounters {
+        player_id: PlayerId,
+        counter_kind: PlayerCounterKind,
+        count: u32,
+    },
+    /// CR 107.14 + CR 122.1: Give energy counters through the real counter-placement
+    /// event. Requires a Priority window, like `GainLife`.
+    GiveEnergy { player_id: PlayerId, count: u32 },
     /// Add mana to a player's pool (mixed types in one action).
     AddMana {
         player_id: PlayerId,
@@ -1126,6 +1428,10 @@ pub enum DebugAction {
     /// pass are skipped — mirrors `MoveToZone { simulate: false }`.
     CreateToken {
         request: DebugTokenRequest,
+        /// Number of tokens proposed in one creation event. This intentionally
+        /// reaches the normal replacement pipeline as one batch.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default = "default_true")]
         run_etb: bool,
     },
@@ -1134,6 +1440,13 @@ pub enum DebugAction {
     CreateTokenCopy {
         source_id: ObjectId,
         owner: PlayerId,
+        /// Number of token copies created by the normal copy-token resolver.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
+        /// Apply the existing `RemoveSupertype(Legendary)` copy modification
+        /// while synthesizing the token.
+        #[serde(default)]
+        nonlegendary: bool,
     },
 }
 
@@ -1180,6 +1493,178 @@ impl DebugTokenRequest {
 }
 
 impl DebugAction {
+    fn related_object_ids(&self, ids: &mut Vec<ObjectId>) {
+        match self {
+            Self::MoveToZone { object_id, .. }
+            | Self::RemoveObject { object_id }
+            | Self::Sacrifice { object_id }
+            | Self::SetBasePowerToughness { object_id, .. }
+            | Self::ModifyCounters { object_id, .. }
+            | Self::SetTapped { object_id, .. }
+            | Self::SetPrepared { object_id, .. }
+            | Self::SetController { object_id, .. }
+            | Self::SetSummoningSickness { object_id, .. }
+            | Self::SetFaceState { object_id, .. }
+            | Self::Detach { object_id }
+            | Self::GrantKeyword { object_id, .. }
+            | Self::RemoveKeyword { object_id, .. } => push_related_object_id(ids, *object_id),
+            Self::CreateCard { attach_to, .. } => {
+                if let Some(AttachTarget::Object(object_id)) = attach_to {
+                    push_related_object_id(ids, *object_id);
+                }
+            }
+            Self::Attach { object_id, target } => {
+                push_related_object_id(ids, *object_id);
+                if let AttachTarget::Object(target_id) = target {
+                    push_related_object_id(ids, *target_id);
+                }
+            }
+            Self::CreateTokenCopy { source_id, .. } => push_related_object_id(ids, *source_id),
+            Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetLife { .. }
+            | Self::GainLife { .. }
+            | Self::LoseLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::GivePlayerCounters { .. }
+            | Self::GiveEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. } => {}
+        }
+    }
+
+    /// A zero-count create request is an authorized, state-preserving no-op.
+    /// The action boundary recognizes it before lifecycle/finalization work so
+    /// UI count controls can submit zero without invalidating replays.
+    pub fn is_zero_count_create(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateCard { count: 0, .. }
+                | Self::CreateToken { count: 0, .. }
+                | Self::CreateTokenCopy { count: 0, .. }
+        )
+    }
+
+    /// Rejects hostile or accidental debug spawn batches before they allocate
+    /// objects. Zero is legal and is handled as a no-op by the action boundary.
+    pub fn validate_create_count(&self) -> Result<(), String> {
+        let count = match self {
+            Self::CreateCard { count, .. }
+            | Self::CreateToken { count, .. }
+            | Self::CreateTokenCopy { count, .. } => *count,
+            _ => return Ok(()),
+        };
+        if count > MAX_DEBUG_CREATE_COUNT {
+            return Err(format!(
+                "Debug create count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether this debug action is a real player-resource event whose
+    /// replacements can park a CR 616.1 ordering choice, so it is admitted only
+    /// at a settled Priority boundary. Both payload-dependent checks
+    /// (`CreateCard`'s battlefield-ETB entry and `MoveToZone`'s simulated
+    /// processing) live in `preflight_debug_action`.
+    pub fn requires_settled_priority(&self) -> bool {
+        match self {
+            Self::GainLife { .. }
+            | Self::LoseLife { .. }
+            | Self::GivePlayerCounters { .. }
+            | Self::GiveEnergy { .. } => true,
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => false,
+        }
+    }
+
+    /// Rejects sandbox life-change amounts above `MAX_DEBUG_LIFE_AMOUNT` and
+    /// player-counter/energy gain counts above `MAX_DEBUG_COUNTER_AMOUNT` before
+    /// any state change (no silent wrap or clamp).
+    pub fn validate_player_resource_amount(&self) -> Result<(), String> {
+        match self {
+            Self::GainLife { amount, .. } | Self::LoseLife { amount, .. } => {
+                if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                    return Err(format!(
+                        "Debug life change amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::GivePlayerCounters { count, .. } | Self::GiveEnergy { count, .. } => {
+                if *count > MAX_DEBUG_COUNTER_AMOUNT {
+                    return Err(format!(
+                        "Debug counter gain count {count} exceeds the maximum {MAX_DEBUG_COUNTER_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => Ok(()),
+        }
+    }
+
     /// Human-readable description of this debug action, used by the sandbox
     /// audit log so all players see what an authorized debugger did. Engine
     /// owns the wording so the FE remains a pure display layer.
@@ -1226,8 +1711,11 @@ impl DebugAction {
                 card_name,
                 owner,
                 zone,
+                count,
                 attach_to,
                 run_etb,
+                nonlegendary,
+                creation_kind,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1237,13 +1725,21 @@ impl DebugAction {
                     None => String::new(),
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
+                let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
+                let token_suffix = match creation_kind {
+                    DebugCardCreationKind::Card => "",
+                    DebugCardCreationKind::Token => " (token)",
+                };
                 format!(
-                    "CreateCard ({} for {} in {:?}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{}{})",
                     card_name,
+                    count,
                     player_label(*owner),
                     zone,
                     attach_suffix,
                     etb_suffix,
+                    nonlegendary_suffix,
+                    token_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
@@ -1357,6 +1853,27 @@ impl DebugAction {
             DebugAction::SetLife { player_id, life } => {
                 format!("SetLife ({} → {})", player_label(*player_id), life)
             }
+            DebugAction::GainLife { player_id, amount } => {
+                format!("GainLife ({} gains {})", player_label(*player_id), amount)
+            }
+            DebugAction::LoseLife { player_id, amount } => {
+                format!("LoseLife ({} loses {})", player_label(*player_id), amount)
+            }
+            DebugAction::GivePlayerCounters {
+                player_id,
+                counter_kind,
+                count,
+            } => format!(
+                "GivePlayerCounters ({} gets {} {} counters)",
+                player_label(*player_id),
+                count,
+                counter_kind
+            ),
+            DebugAction::GiveEnergy { player_id, count } => format!(
+                "GiveEnergy ({} gets {} energy)",
+                player_label(*player_id),
+                count
+            ),
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
             }
@@ -1374,7 +1891,11 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { request, run_etb } => {
+            DebugAction::CreateToken {
+                request,
+                count,
+                run_etb,
+            } => {
                 let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
@@ -1405,17 +1926,25 @@ impl DebugAction {
                     } => characteristics.display_name.clone(),
                 };
                 format!(
-                    "CreateToken ({} for {}{}{})",
+                    "CreateToken ({} ×{} for {}{}{})",
                     token_label,
+                    count,
                     player_label(request.owner()),
                     counters,
                     etb_suffix
                 )
             }
-            DebugAction::CreateTokenCopy { source_id, owner } => format!(
-                "CreateTokenCopy ({} for {})",
+            DebugAction::CreateTokenCopy {
+                source_id,
+                owner,
+                count,
+                nonlegendary,
+            } => format!(
+                "CreateTokenCopy ({} ×{} for {}{})",
                 obj(*source_id),
-                player_label(*owner)
+                count,
+                player_label(*owner),
+                if *nonlegendary { " (nonlegendary)" } else { "" },
             ),
         }
     }
@@ -1427,11 +1956,158 @@ fn default_one() -> u32 {
     1
 }
 
+fn push_related_object_id(ids: &mut Vec<ObjectId>, object_id: ObjectId) {
+    if !ids.contains(&object_id) {
+        ids.push(object_id);
+    }
+}
+
+fn push_target_ref(ids: &mut Vec<ObjectId>, target: &TargetRef) {
+    if let TargetRef::Object(object_id) = target {
+        push_related_object_id(ids, *object_id);
+    }
+}
+
+fn push_target_refs(ids: &mut Vec<ObjectId>, targets: &[TargetRef]) {
+    for target in targets {
+        push_target_ref(ids, target);
+    }
+}
+
+fn push_attack_target(ids: &mut Vec<ObjectId>, target: &AttackTarget) {
+    match target {
+        AttackTarget::Player(_) => {}
+        AttackTarget::Planeswalker(object_id) | AttackTarget::Battle(object_id) => {
+            push_related_object_id(ids, *object_id);
+        }
+    }
+}
+
+fn push_yield_target(ids: &mut Vec<ObjectId>, target: &YieldTarget) {
+    match target {
+        YieldTarget::ThisObject { source_id, .. } => push_related_object_id(ids, *source_id),
+        YieldTarget::AllCopies { .. } => {}
+    }
+}
+
+fn push_decision_slot(ids: &mut Vec<ObjectId>, slot: &DecisionSlot) {
+    push_yield_target(ids, &slot.source);
+}
+
+fn push_ranking(ids: &mut Vec<ObjectId>, ranking: &Ranking) {
+    for subject in ranking.iter() {
+        match subject {
+            AnnouncementSubject::Object(source) => push_yield_target(ids, source),
+            AnnouncementSubject::Seat(_) => {}
+        }
+    }
+}
+
+fn push_target_schedule(ids: &mut Vec<ObjectId>, schedule: &TargetSchedule) {
+    match schedule {
+        TargetSchedule::Constant(ranking) => {
+            push_ranking(ids, ranking);
+        }
+        TargetSchedule::RoundRobin(rankings) => {
+            for ranking in rankings {
+                push_ranking(ids, ranking);
+            }
+        }
+        TargetSchedule::Piecewise(steps) => {
+            for (_, ranking) in steps {
+                push_ranking(ids, ranking);
+            }
+        }
+    }
+}
+
+fn push_target_pin(ids: &mut Vec<ObjectId>, pin: &TargetPin) {
+    match pin {
+        TargetPin::ByIdentity(source) => {
+            push_yield_target(ids, source);
+        }
+        TargetPin::Player(_) => {}
+        TargetPin::Scheduled(schedule) => {
+            push_target_schedule(ids, schedule);
+        }
+    }
+}
+
+fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) {
+    for (source, _) in &template.key.sources {
+        push_yield_target(ids, source);
+    }
+    for decision in &template.decisions {
+        match decision {
+            PinnedDecision::Targets { slot, targets } => {
+                push_decision_slot(ids, slot);
+                for target in targets {
+                    push_target_pin(ids, target);
+                }
+            }
+            PinnedDecision::Order { slot, .. }
+            | PinnedDecision::Mode { slot, .. }
+            | PinnedDecision::MayChoice { slot, .. }
+            | PinnedDecision::UnlessBreak { slot, .. }
+            | PinnedDecision::ConvokeTaps { slot }
+            | PinnedDecision::ManaColor { slot, .. } => {
+                push_decision_slot(ids, slot);
+            }
+        }
+    }
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
     pub fn variant_name(&self) -> &'static str {
         self.into()
+    }
+
+    /// Whether this is an actor-scoped UI preference action.
+    ///
+    /// These mutations are legal in every `WaitingFor` state, do not change game
+    /// progression, and must not trigger auto-pass advancement at the engine
+    /// boundary. The authenticated actor is the only preference owner.
+    pub fn is_actor_scoped_preference(&self) -> bool {
+        matches!(
+            self,
+            GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::UnAction {
+                    action: super::un_actions::UnAction::SetEnabled { .. },
+                }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::ReorderHand { .. }
+        )
+    }
+
+    /// Whether this action names the submitting seat itself rather than a
+    /// decision slot the engine is waiting on.
+    ///
+    /// CR 723.5b: the controller of another player can't make choices or
+    /// decisions for that player that aren't called for by the rules or by any
+    /// objects. A UI preference mutates the submitter's own slot and a debug
+    /// capability grant authorizes the submitting connection — neither is such
+    /// a choice, so controlling a player must not redirect either one.
+    ///
+    /// Not `game::interaction::action_preserves_interaction`, whose
+    /// near-identical list answers a different question: this one decides
+    /// whether an action may skip the seat check, that one whether an action
+    /// leaves an open interaction standing. The two lists may diverge.
+    pub fn is_submitter_scoped(&self) -> bool {
+        self.is_actor_scoped_preference()
+            || matches!(
+                self,
+                GameAction::Debug(_)
+                    | GameAction::GrantDebugPermission { .. }
+                    | GameAction::RevokeDebugPermission { .. }
+                    | GameAction::UnAction { .. }
+            )
     }
 
     /// Issue #4878: allocation-free total order over `GameAction`, used for
@@ -1454,20 +2130,22 @@ impl GameAction {
         matches!(
             self,
             GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
-                // action; classifying it here grants MP skip_legality acceptance and
-                // AI-exclusion via the single !is_mana_ability authority.
+                // action; classifying it here keeps it out of AI priority-action
+                // candidates via the single !is_mana_ability authority.
                 | GameAction::SpendPoolMana { .. }
                 | GameAction::UnspendPoolMana { .. }
         )
     }
 
-    /// The cast payment preference carried by this action, if it is one of
-    /// the cast-family variants (CR 601.2g).
+    /// The payment preference carried by this action, if it is one of the
+    /// cast-family variants (CR 601.2g) or an activation (CR 602.2b).
     pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
+            | GameAction::ActivateAbility { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }
             | GameAction::CastSpellAsMiracle { payment_mode, .. }
             | GameAction::CastSpellAsMadness { payment_mode, .. }
@@ -1477,49 +2155,306 @@ impl GameAction {
         }
     }
 
-    /// CR 601.2g: `CastPaymentMode` selects whether the engine auto-pays an
-    /// unambiguous mana cost or pauses after announcement for manual mana
-    /// activation — a per-player payment preference, not part of whether the
-    /// cast itself is legal. Candidate enumeration (`ai_support::candidates`)
-    /// emits every cast candidate with the canonical `Auto` mode, so any
-    /// membership test of a submitted action against the enumerated legal set
-    /// must erase the preference first (GH #6275: the multiplayer server's
-    /// legality gate rejected every `Manual`-mode cast). Borrows `self`
-    /// unchanged unless a `Manual` mode has to be rewritten.
-    pub fn with_canonical_payment_mode(&self) -> Cow<'_, Self> {
+    /// Object identities explicitly named by this action, in first-seen payload
+    /// order with duplicates removed. This is deliberately exhaustive so a new
+    /// action variant cannot silently omit identities from a rejection.
+    pub fn related_object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = Vec::new();
         match self {
-            GameAction::CastSpell {
-                payment_mode: CastPaymentMode::Manual,
+            Self::PassPriority
+            | Self::ChooseExert { .. }
+            | Self::ChooseClashOpponent { .. }
+            | Self::ChooseZoneOpponentChooser { .. }
+            | Self::ChoosePileOpponent { .. }
+            | Self::ChooseAnnouncingOpponent { .. }
+            | Self::ChooseGiftRecipient { .. }
+            | Self::ChooseAssistPlayer { .. }
+            | Self::CommitAssistPayment { .. }
+            | Self::BackToManaPayment
+            | Self::SpendPoolMana { .. }
+            | Self::UnspendPoolMana { .. }
+            | Self::SelectCoinFlips { .. }
+            | Self::SelectDieRolls { .. }
+            | Self::ChooseReplacement { .. }
+            | Self::ChooseReplacementAndRemember { .. }
+            | Self::SetReplacementAutoChoice { .. }
+            | Self::ChooseEntryController { .. }
+            | Self::OrderTriggers { .. }
+            | Self::OrderCostReductions { .. }
+            | Self::CancelCast
+            | Self::SubmitSideboard { .. }
+            | Self::ChoosePlayDraw { .. }
+            | Self::ChooseStartingPlayer { .. }
+            | Self::ChooseOption { .. }
+            | Self::SubmitVoteCandidate { .. }
+            | Self::SubmitSpellbookDraft { .. }
+            | Self::ChoosePile { .. }
+            | Self::ChooseBranch { .. }
+            | Self::SubmitLifeRedistribution { .. }
+            | Self::SelectModes { .. }
+            | Self::DecideOptionalCost { .. }
+            | Self::ChooseAdventureFace { .. }
+            | Self::ChooseModalFace { .. }
+            | Self::ChooseAlternativeCast { .. }
+            | Self::ChooseCastingVariant { .. }
+            | Self::KeepAllCopyTargets
+            | Self::ChoosePermanentTypeSlot { .. }
+            | Self::DecideOptionalEffect { .. }
+            | Self::ChooseResolutionOptionalPaymentBranch { .. }
+            | Self::DecideOptionalEffectAndRemember { .. }
+            | Self::PayUnlessCost { .. }
+            | Self::ChooseUnlessCostBranch { .. }
+            | Self::ChooseActivationCostBranch { .. }
+            | Self::PayCombatTax { .. }
+            | Self::ChooseDungeon { .. }
+            | Self::ChooseDungeonRoom { .. }
+            | Self::RollPlanarDie
+            | Self::ChooseSecretAgendaNames { .. }
+            | Self::DeclareCompanion { .. }
+            | Self::CompanionToHand
+            | Self::DiscoverChoice { .. }
+            | Self::GraveyardPaidCastChoice { .. }
+            | Self::CascadeChoice { .. }
+            | Self::RippleChoice { .. }
+            | Self::ChooseTopOrBottom { .. }
+            | Self::ChooseMutateMergeSide { .. }
+            | Self::ChooseBattleProtector { .. }
+            | Self::SetAutoPass { .. }
+            | Self::CancelAutoPass
+            | Self::SetPhaseStops { .. }
+            | Self::SetPriorityPassingMode { .. }
+            | Self::UnAction { .. }
+            | Self::SetTriggerOrderTemplate { .. }
+            | Self::ChooseCountersToRemove { .. }
+            | Self::SubmitPayAmount { .. }
+            | Self::ChooseX { .. }
+            | Self::SubmitPhyrexianChoices { .. }
+            | Self::ChooseManaColor { .. }
+            | Self::PayManaAbilityMana { .. }
+            | Self::ChooseSpecializeColor { .. }
+            | Self::PassParadigmOffer
+            | Self::GrantDebugPermission { .. }
+            | Self::RevokeDebugPermission { .. }
+            | Self::Concede { .. }
+            | Self::RespondToShortcut { .. }
+            | Self::DeclineShortcut
+            | Self::PrecastCopyShortcut { .. }
+            | Self::EndContinuousEffect { .. }
+            | Self::BeginResolveAll { .. }
+            | Self::RespondResolveAllConsent { .. }
+            | Self::RevokeResolveAllConsent { .. } => {}
+            Self::ChooseMeldPair {
+                source_id,
+                partner_id,
+            } => {
+                push_related_object_id(&mut ids, *source_id);
+                push_related_object_id(&mut ids, *partner_id);
+            }
+            Self::ChooseEntryAttackTarget { target } => push_attack_target(&mut ids, target),
+            Self::PlayLand { object_id, .. }
+            | Self::Foretell { object_id, .. }
+            | Self::ChooseUntap { object_id, .. }
+            | Self::UntapLandForMana { object_id }
+            | Self::Transform { object_id }
+            | Self::PlayFaceDown { object_id, .. }
+            | Self::TurnFaceUp { object_id, .. }
+            | Self::UnlockRoomDoor { object_id, .. }
+            | Self::ChooseRoomDoor { object_id, .. }
+            | Self::TapForConvoke { object_id, .. }
+            | Self::CastSpellAsMiracle { object_id, .. }
+            | Self::CastSpellAsMadness { object_id, .. } => {
+                push_related_object_id(&mut ids, *object_id)
+            }
+            Self::CastSpell {
+                object_id, targets, ..
+            } => {
+                push_related_object_id(&mut ids, *object_id);
+                for target in targets {
+                    push_related_object_id(&mut ids, *target);
+                }
+            }
+            Self::ActivateAbility { source_id, .. }
+            | Self::ChooseDamageSource { source: source_id }
+            | Self::CastPreparedCopy { source: source_id }
+            | Self::CastParadigmCopy { source: source_id } => {
+                push_related_object_id(&mut ids, *source_id)
+            }
+            Self::DeclareAttackers { attacks, bands } => {
+                for (attacker, target) in attacks {
+                    push_related_object_id(&mut ids, *attacker);
+                    push_attack_target(&mut ids, target);
+                }
+                for band in bands {
+                    for object_id in band {
+                        push_related_object_id(&mut ids, *object_id);
+                    }
+                }
+            }
+            Self::DeclareBlockers { assignments } => {
+                for (blocker, attacker) in assignments {
+                    push_related_object_id(&mut ids, *blocker);
+                    push_related_object_id(&mut ids, *attacker);
+                }
+            }
+            Self::ChooseEnlist { target }
+            | Self::ChoosePair { partner: target }
+            | Self::RespondToSpliceOffer { card: target }
+            | Self::HarmonizeTap {
+                creature_id: target,
+            }
+            | Self::FreeCastWindowChoice { selection: target }
+            | Self::CipherEncode { creature: target } => {
+                if let Some(object_id) = target {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::MulliganDecision { choice } => {
+                if let MulliganChoice::UseSerumPowder { object_id } = choice {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ReorderHand { order }
+            | Self::SelectCards { cards: order }
+            | Self::SubmitPilePartition { pile_a: order }
+            | Self::ChooseKeptCreatures { kept: order }
+            | Self::ChooseKeptPermanents { kept: order } => {
+                for object_id in order {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::TapLandForMana { selection } | Self::ActivateManaSource { selection } => {
+                push_related_object_id(&mut ids, selection.source.object_id);
+            }
+            Self::ChooseRemoveCounterCostDistribution { distribution } => {
+                for choice in distribution {
+                    push_related_object_id(&mut ids, choice.object_id);
+                }
+            }
+            Self::ChooseOutsideGameCards { selections } => {
+                for selection in selections {
+                    if let OutsideGameSelection::FaceUpExile { object_id } = selection {
+                        push_related_object_id(&mut ids, *object_id);
+                    }
+                }
+            }
+            Self::SelectTargets { targets } => push_target_refs(&mut ids, targets),
+            Self::ChooseTarget { target } => {
+                if let Some(target) = target {
+                    push_target_ref(&mut ids, target);
+                }
+            }
+            Self::Equip {
+                equipment_id,
+                target_id,
+            } => {
+                push_related_object_id(&mut ids, *equipment_id);
+                push_related_object_id(&mut ids, *target_id);
+            }
+            Self::CrewVehicle {
+                vehicle_id,
+                creature_ids,
+            }
+            | Self::SaddleMount {
+                mount_id: vehicle_id,
+                creature_ids,
+            } => {
+                push_related_object_id(&mut ids, *vehicle_id);
+                for object_id in creature_ids {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ActivateStation {
+                spacecraft_id,
+                creature_id,
+            } => {
+                push_related_object_id(&mut ids, *spacecraft_id);
+                if let Some(object_id) = creature_id {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ChooseRingBearer { target } | Self::ChooseLegend { keep: target } => {
+                push_related_object_id(&mut ids, *target);
+            }
+            Self::ActivateNinjutsu {
+                ninjutsu_object_id,
+                creature_to_return,
+            }
+            | Self::CastSpellAsSneak {
+                hand_object: ninjutsu_object_id,
+                creature_to_return,
                 ..
             }
-            | GameAction::CastSpellForFree {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMiracle {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMadness {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsSneak {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsWebSlinging {
-                payment_mode: CastPaymentMode::Manual,
+            | Self::CastSpellAsWebSlinging {
+                hand_object: ninjutsu_object_id,
+                creature_to_return,
                 ..
             } => {
-                let mut canonical = self.clone();
-                if let Some(mode) = canonical.payment_mode_mut() {
-                    *mode = CastPaymentMode::Auto;
-                }
-                Cow::Owned(canonical)
+                push_related_object_id(&mut ids, *ninjutsu_object_id);
+                push_related_object_id(&mut ids, *creature_to_return);
             }
-            _ => Cow::Borrowed(self),
+            Self::CastSpellForFree {
+                object_id,
+                source_id,
+                ..
+            } => {
+                push_related_object_id(&mut ids, *object_id);
+                push_related_object_id(&mut ids, *source_id);
+            }
+            Self::SetPriorityYield { op } => match op {
+                PriorityYieldOp::Add { source_id, .. } => {
+                    push_related_object_id(&mut ids, *source_id);
+                }
+                PriorityYieldOp::Remove { target } => push_yield_target(&mut ids, target),
+                PriorityYieldOp::ClearAll => {}
+            },
+            Self::SetMayTriggerAutoChoice { op } => match op {
+                MayTriggerAutoChoiceOp::Remove { selector } => match selector {
+                    MayTriggerAutoChoiceSelector::ExactInstance { source_id, .. } => {
+                        push_related_object_id(&mut ids, *source_id);
+                    }
+                    MayTriggerAutoChoiceSelector::SameCard { .. } => {}
+                },
+                MayTriggerAutoChoiceOp::ClearAll => {}
+            },
+            Self::DeclareShortcut { template, .. } => {
+                if let Some(template) = template {
+                    push_decision_template(&mut ids, template);
+                }
+            }
+            Self::AssignCombatDamage { assignments, .. }
+            | Self::AssignBlockerDamage { assignments } => {
+                for (object_id, _) in assignments {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::DistributeAmong { distribution } => {
+                for (target, _) in distribution {
+                    push_target_ref(&mut ids, target);
+                }
+            }
+            Self::ChooseCounterMoveDistribution { selections } => {
+                for selection in selections {
+                    push_related_object_id(&mut ids, selection.destination_id);
+                }
+            }
+            Self::RetargetSpell { new_targets } => {
+                for target in new_targets.iter().flatten() {
+                    push_target_ref(&mut ids, target);
+                }
+            }
+            Self::LearnDecision { choice } => {
+                if let LearnOption::Rummage { card_id } = choice {
+                    push_related_object_id(&mut ids, *card_id);
+                }
+            }
+            Self::SelectCategoryPermanents { choices } => {
+                for object_id in choices.iter().flatten() {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::Debug(action) => action.related_object_ids(&mut ids),
         }
+        ids
     }
 
     /// Engine-side authoritative mapping from action → permanent it acts on.
@@ -1553,6 +2488,7 @@ impl GameAction {
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
+            GameAction::ActivateManaSource { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1584,14 +2520,20 @@ impl GameAction {
             | GameAction::SelectCards { .. }
             | GameAction::ChooseRemoveCounterCostDistribution { .. }
             | GameAction::SelectCoinFlips { .. }
+            | GameAction::SelectDieRolls { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseReplacementAndRemember { .. }
+            | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
+            | GameAction::OrderCostReductions { .. }
             | GameAction::CancelCast
+            | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
@@ -1609,6 +2551,7 @@ impl GameAction {
             | GameAction::KeepAllCopyTargets
             | GameAction::ChoosePermanentTypeSlot { .. }
             | GameAction::DecideOptionalEffect { .. }
+            | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
             | GameAction::ChooseUnlessCostBranch { .. }
@@ -1618,6 +2561,7 @@ impl GameAction {
             | GameAction::RollPlanarDie
             | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
+            | GameAction::ChooseSecretAgendaNames { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
@@ -1632,6 +2576,7 @@ impl GameAction {
             | GameAction::ChooseZoneOpponentChooser { .. }
             | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAnnouncingOpponent { .. }
+            | GameAction::ChooseGiftRecipient { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
@@ -1641,6 +2586,8 @@ impl GameAction {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
@@ -1668,6 +2615,14 @@ impl GameAction {
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
             | GameAction::PrecastCopyShortcut { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
+            // CR 116.2c: the payload names a continuous-effect GROUP, not a
+            // permanent — a global action with no source object (frontend
+            // Pattern A). The Licid that installed the effect is not addressed
+            // by this action.
+            | GameAction::EndContinuousEffect { .. }
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
@@ -1676,79 +2631,37 @@ impl GameAction {
 mod tests {
     use super::*;
 
-    /// GH #6275: every cast-family variant must canonicalize `Manual` to
-    /// `Auto` so legality-gate membership checks match the enumerated
-    /// candidates; everything else must pass through borrowed and unchanged.
+    /// U1: the wire shape of the sandbox give actions, pinned for the phase-3
+    /// TypeScript mirror.
     #[test]
-    fn with_canonical_payment_mode_erases_manual_on_every_cast_variant() {
-        use crate::types::game_state::CastPaymentMode;
-
-        let oid = ObjectId(1);
-        let cid = CardId(2);
-        let other = ObjectId(3);
-        let make = |payment_mode: CastPaymentMode| -> Vec<GameAction> {
-            vec![
-                GameAction::CastSpell {
-                    object_id: oid,
-                    card_id: cid,
-                    targets: vec![other],
-                    payment_mode,
-                },
-                GameAction::CastSpellForFree {
-                    object_id: oid,
-                    card_id: cid,
-                    source_id: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMiracle {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMadness {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsSneak {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsWebSlinging {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-            ]
+    fn u1_give_actions_wire_shape() {
+        let give_counters = DebugAction::GivePlayerCounters {
+            player_id: PlayerId(1),
+            counter_kind: PlayerCounterKind::Rad,
+            count: 3,
         };
-
-        for (manual, auto) in make(CastPaymentMode::Manual)
-            .iter()
-            .zip(&make(CastPaymentMode::Auto))
-        {
-            let canonical = manual.with_canonical_payment_mode();
-            assert!(
-                matches!(canonical, Cow::Owned(_)),
-                "Manual {} must be rewritten",
-                manual.variant_name()
-            );
-            assert_eq!(canonical.as_ref(), auto);
-
-            let unchanged = auto.with_canonical_payment_mode();
-            assert!(
-                matches!(unchanged, Cow::Borrowed(_)),
-                "Auto {} must stay borrowed",
-                auto.variant_name()
-            );
+        assert_eq!(
+            serde_json::to_value(&give_counters).unwrap(),
+            serde_json::json!({
+                "type": "GivePlayerCounters",
+                "data": { "player_id": 1, "counter_kind": "Rad", "count": 3 }
+            })
+        );
+        let give_energy = DebugAction::GiveEnergy {
+            player_id: PlayerId(0),
+            count: 2,
+        };
+        assert_eq!(
+            serde_json::to_value(&give_energy).unwrap(),
+            serde_json::json!({
+                "type": "GiveEnergy",
+                "data": { "player_id": 0, "count": 2 }
+            })
+        );
+        for action in [give_counters, give_energy] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<DebugAction>(&json).unwrap(), action);
         }
-
-        assert!(matches!(
-            GameAction::PassPriority.with_canonical_payment_mode(),
-            Cow::Borrowed(_)
-        ));
     }
 
     #[test]
@@ -1912,6 +2825,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),
@@ -1941,6 +2855,9 @@ mod tests {
                         },
                         ability_index: None,
                         mana_type: crate::types::mana::ManaType::Green,
+                        output: crate::types::mana::ManaSourceOutput::Concrete(
+                            crate::types::mana::ManaType::Green,
+                        ),
                         atomic_combination: None,
                         restrictions: Vec::new(),
                         penalty: crate::types::mana::ManaSourcePenalty::None,
@@ -2011,6 +2928,15 @@ mod tests {
             ),
             (GameAction::CancelCast, None),
             (GameAction::CompanionToHand, None),
+            // CR 116.2c: the group key is not an ObjectId — no source object.
+            (
+                GameAction::EndContinuousEffect {
+                    group: crate::types::game_state::EndEffectGroupId(1),
+                    source_name: "Calming Licid".to_string(),
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                None,
+            ),
             (GameAction::CancelAutoPass, None),
             (
                 GameAction::SetPriorityPassingMode {

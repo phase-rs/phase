@@ -14,9 +14,14 @@ wasm-opt = false
 crate-type = ["cdylib"]
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
+# LLM opponents (opt-in): prompt rendering, provider wire formats, response
+# parsing. The `draft` feature is intentionally off here — draft prompts belong
+# to `draft-wasm`, and enabling it would pull `draft-core` into this artifact.
+phase-llm = { path = "../phase-llm" }
 seat-reducer = { path = "../seat-reducer" }
+state-codec = { path = "../state-codec" }
 rand = "0.9"
 rand_chacha = "0.9"
 wasm-bindgen = "0.2.114"
@@ -30,4 +35,5 @@ js-sys = "0.3"
 [dev-dependencies]
 # Unit tests place objects with the raw zone API, which is sealed in production
 # builds; dev-dependencies never reach the shipped WASM artifact.
-engine = { path = "../engine", features = ["test-support"] }
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+flate2 = "1"

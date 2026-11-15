@@ -15,12 +15,15 @@
 //! reason this class of bug shipped.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Effect, ReplacementDefinition, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::{CastChoice, GameAction};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastOfferKind, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
+    CastOfferKind, CastPaymentMode, GameState, PendingCostMoveResume, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -28,18 +31,23 @@ use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
 
+use crate::support::shared_card_db;
+
 const THRUMMING_STONE_ORACLE: &str = "Spells you cast have ripple 4. (When you cast a spell, you may reveal the top four cards of your library. You may cast any revealed cards with the same name as the cast spell without paying their mana costs. Put the rest on the bottom of your library in any order.)";
 const RAT_COLONY_ORACLE: &str = "Rat Colony gets +1/+0 for each other Rat you control named Rat Colony.\nA deck can have any number of cards named Rat Colony.";
 const AETHERFLUX_RESERVOIR_ORACLE: &str = "Whenever you cast a spell, you gain 1 life for each spell you've cast this turn.\nPay 50 life: This artifact deals 50 damage to any target.";
 
-/// CR 614.1a: a synthetic global Library-destination redirect used to force a
-/// genuine CR 616.1 ordering choice in the terminal Ripple bottom batch.
+/// CR 614.1a: a synthetic global Library-destination redirect installed as a
+/// control — the terminal Ripple bottom batch only reorders cards already in
+/// the library (CR 701.20b), so it must never consult it.
 fn redirect_library_move_to(destination: Zone) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Library)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -81,6 +89,26 @@ fn has_exile_alt_cost(state: &GameState, id: ObjectId) -> bool {
         .casting_permissions
         .iter()
         .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }))
+}
+
+/// CR 702.60a: accept the "you may reveal the top N cards" prompt so the
+/// same-named free-cast offers begin. Returns the events emitted by the accept
+/// (the `CardsRevealed` publication rides this action, not the priority pass).
+fn accept_ripple_reveal(runner: &mut engine::game::scenario::GameRunner) -> Vec<GameEvent> {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RippleRevealChoice { .. }
+        ),
+        "expected the Ripple reveal prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept the Ripple reveal")
+        .events
 }
 
 /// CR 702.60a-b + CR 603.3b: a Ripple-found Rat Colony is cast while the
@@ -146,6 +174,7 @@ fn thrumming_stone_ripple_retriggers_for_each_cast_rat_colony() {
         .expect("cast first Rat Colony");
     runner.act(GameAction::PassPriority).expect("p0 pass");
     runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
 
     assert!(matches!(
         runner.state().waiting_for,
@@ -252,12 +281,12 @@ fn thrumming_stone_ripple_retriggers_for_each_cast_rat_colony() {
     assert_eq!(runner.state().objects[&rat_c].zone, Zone::Stack);
 }
 
-/// CR 702.60a + CR 603.3b + CR 616.1: a terminal accepted Ripple cast whose
-/// miss bottom batch pauses for competing replacements keeps the typed terminal
-/// completion through the prompt, then puts B/C's exactly-once Ripple triggers
-/// above both spells after the final cast actually completes.
+/// CR 702.60a + CR 603.3b + CR 701.20b: a terminal accepted Ripple cast whose
+/// miss bottom batch is an in-library reorder (no zone change, so competing
+/// Library-destination replacements never prompt) still puts B/C's
+/// exactly-once Ripple triggers above both spells after the final cast completes.
 #[test]
-fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
+fn thrumming_stone_terminal_ripple_bottom_reorder_consults_no_replacement() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     red_pool(&mut scenario, 2);
@@ -308,6 +337,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
         .expect("cast first Rat Colony");
     runner.act(GameAction::PassPriority).expect("p0 pass");
     runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::CastOffer {
@@ -332,40 +362,11 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
         .act(GameAction::RippleChoice {
             choice: CastChoice::Cast,
         })
-        .expect("accept terminal C until bottom replacement choice");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    assert!(
-        matches!(
-            runner
-                .state()
-                .active_batch_delivery()
-                .and_then(|batch| batch.completion.as_ref()),
-            Some(engine::types::game_state::BatchCompletion::RippleTerminalComplete {
-                player: P0,
-                source_id: _,
-                final_cast: Some(id),
-            }) if *id == rat_c
-        ),
-        "the terminal batch completion must survive the replacement prompt"
-    );
-    assert!(
-        matches!(
-            runner.state().pending_resolution_completion,
-            Some(engine::types::game_state::PendingResolutionCompletion {
-                player: P0,
-                final_cast: Some(id),
-                ..
-            }) if id == rat_c
-        ),
-        "the terminal marker must survive the replacement prompt until C reaches the stack"
-    );
-
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("resolve terminal bottom replacement");
+        .expect("accept terminal C; the in-library bottom placement does not pause");
+    // CR 701.20b + CR 401.4: the missed cards are already in the library, so
+    // putting them on the bottom is a reorder, not a zone change — the global
+    // Library-destination redirects installed above never get to prompt.
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OrderTriggers { ref triggers, .. } if triggers.len() == 2
@@ -391,7 +392,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
                 .filter(|&&source| source == id)
                 .count(),
             1,
-            "each accepted Ripple cast must contribute exactly one trigger after the pause"
+            "each accepted Ripple cast must contribute exactly one trigger"
         );
         let spell_index = runner
             .state()
@@ -427,7 +428,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
 /// battlefield source, so its exactly-once B/C triggers prove the synthetic
 /// terminal SpellCast collector keys on the event, not `source_id == final_cast`.
 #[test]
-fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
+fn terminal_ripple_collects_distinct_spell_cast_observer() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     red_pool(&mut scenario, 2);
@@ -526,6 +527,7 @@ fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
         .expect("place initial observer below Ripple");
     runner.act(GameAction::PassPriority).expect("p0 pass");
     runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::CastOffer {
@@ -561,14 +563,11 @@ fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
         .act(GameAction::RippleChoice {
             choice: CastChoice::Cast,
         })
-        .expect("accept terminal C until bottom replacement choice");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("resolve the terminal bottom replacement");
+        .expect("accept terminal C; the in-library bottom placement does not pause");
+    // CR 701.20b + CR 401.4: the missed card is already in the library, so the
+    // bottom placement is a reorder and the Library-destination redirects
+    // installed above never prompt.
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
 
     assert!(matches!(
         runner.state().waiting_for,
@@ -1237,4 +1236,1173 @@ fn accept_then_resolve_leaves_no_lingering_permission() {
          stack resolves; leaked = {leaked:?}"
     );
     let _ = hit;
+}
+
+// ---------------------------------------------------------------------------
+// CR 702.60a + CR 701.20b: Ripple's in-library reveal — the revealed top-N
+// cards STAY in the library, are published to every viewer for the duration of
+// the same-named free-cast offer, and the non-cast ones are put on the bottom.
+// The pre-fix implementation exiled the reveal and never published it, so
+// "Ripple reveals no cards" — these lock the visible reveal + the residency.
+// ---------------------------------------------------------------------------
+
+/// Fill `P0`'s mana pool with one unit per listed `ManaType`.
+fn typed_pool(scenario: &mut GameScenario, types: &[ManaType]) {
+    let units: Vec<ManaUnit> = types
+        .iter()
+        .map(|t| ManaUnit::new(*t, ObjectId(0), false, vec![]))
+        .collect();
+    scenario.with_mana_pool(P0, units);
+}
+
+fn cards_revealed_events(
+    events: &[GameEvent],
+) -> Vec<(engine::types::player::PlayerId, Vec<ObjectId>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } => Some((*player, card_ids.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Surging spells all target something; satisfy the CR 601.2c target
+/// prompt with a player target when the announcement raises one.
+fn choose_player_target_if_pending(
+    runner: &mut engine::game::scenario::GameRunner,
+    target: engine::types::player::PlayerId,
+) {
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(target)),
+            })
+            .expect("choose the spell's player target");
+    }
+}
+
+/// CR 702.60a: "you **may** reveal the top N cards." Declining the initial
+/// reveal leaves the library completely untouched — no `CardsRevealed`, no
+/// `revealed_cards` publication, no reordering.
+#[test]
+fn surging_flame_ripple_decline_reveal_leaves_library_untouched() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(&mut scenario, &[ManaType::Red, ManaType::Red]);
+
+    let spell = scenario.add_real_card(P0, "Surging Flame", Zone::Hand, db);
+    let top = [
+        scenario.add_real_card(P0, "Surging Flame", Zone::Library, db),
+        scenario.add_real_card(P0, "Mountain", Zone::Library, db),
+        scenario.add_real_card(P0, "Mountain", Zone::Library, db),
+        scenario.add_real_card(P0, "Island", Zone::Library, db),
+    ];
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let library_before: Vec<ObjectId> = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library
+        .iter()
+        .copied()
+        .collect();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Flame");
+    choose_player_target_if_pending(&mut runner, P1);
+    let mut events = Vec::new();
+    events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p0 pass")
+            .events,
+    );
+    events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p1 pass")
+            .events,
+    );
+
+    // The reveal decision is pending.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::RippleRevealChoice { count: 4, .. }
+    ));
+
+    // CR 702.60a: decline the reveal.
+    let decline_events = runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Decline,
+        })
+        .expect("decline the Ripple reveal")
+        .events;
+
+    // Nothing was revealed or published, on either action.
+    for evs in [&events, &decline_events] {
+        assert!(cards_revealed_events(evs).is_empty());
+    }
+    for id in top {
+        assert!(!runner.state().revealed_cards.contains(&id));
+        assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+    }
+    // The library order is byte-for-byte identical.
+    let library_after: Vec<ObjectId> = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(library_before, library_after);
+    // The Ripple trigger has finished — priority is back.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 702.60a + CR 701.20b: casting a real printed Ripple card publishes its
+/// in-library top-N reveal and offers the same-named card for a free cast.
+/// CR 608.2d: after the free-cast offers, the controller announces the
+/// bottom-placement order for the uncast pile — here a REVERSED permutation.
+#[test]
+fn surging_dementia_ripple_reveal_offer_then_controller_orders_bottom() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(&mut scenario, &[ManaType::Black, ManaType::Black]);
+
+    let spell = scenario.add_real_card(P0, "Surging Dementia", Zone::Hand, db);
+    // Library top -> bottom.
+    let hit = scenario.add_real_card(P0, "Surging Dementia", Zone::Library, db);
+    let miss_a = scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+    let miss_b = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let miss_c = scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let deep = scenario.add_real_card(P0, "Plains", Zone::Library, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Dementia");
+    choose_player_target_if_pending(&mut runner, P1);
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+
+    assert!(runner.state().objects[&spell]
+        .cast_spell_keywords
+        .iter()
+        .any(|k| matches!(k, engine::types::keywords::Keyword::Ripple(4))));
+
+    // CR 702.60a: accept the optional reveal — the pile is published here.
+    let reveal_events = accept_ripple_reveal(&mut runner);
+    let revealed = cards_revealed_events(&reveal_events);
+    assert_eq!(revealed.len(), 1, "one CardsRevealed for the whole reveal");
+    assert_eq!(revealed[0].0, P0);
+    assert_eq!(revealed[0].1, vec![hit, miss_a, miss_b, miss_c]);
+
+    // CR 701.20b: still in the library; the 5th card is untouched.
+    for id in [hit, miss_a, miss_b, miss_c, deep] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+    }
+    // CR 701.20a: public to every viewer.
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    for id in [hit, miss_a, miss_b, miss_c] {
+        assert!(runner.state().revealed_cards.contains(&id));
+        assert_ne!(
+            p1_view.objects[&id].name, "Hidden Card",
+            "the opponent can read the revealed pile"
+        );
+    }
+    assert!(!runner.state().revealed_cards.contains(&deep));
+
+    // CR 702.60a: the same-named library card is offered.
+    match &runner.state().waiting_for {
+        WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::Ripple {
+                    hit_card,
+                    revealed_misses,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(*hit_card, hit);
+            assert_eq!(revealed_misses, &vec![miss_a, miss_b, miss_c]);
+        }
+        other => panic!("expected a Ripple CastOffer, got {other:?}"),
+    }
+
+    // Decline the free cast — all four uncast cards go to the bottom order step.
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Decline,
+        })
+        .expect("decline the Ripple free cast");
+
+    let order = match &runner.state().waiting_for {
+        WaitingFor::RippleBottomOrder { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            // The offered pile is the uncast reveal (misses + the declined hit).
+            let mut sorted = cards.clone();
+            sorted.sort();
+            let mut expected = vec![miss_a, miss_b, miss_c, hit];
+            expected.sort();
+            assert_eq!(sorted, expected);
+            cards.clone()
+        }
+        other => panic!("expected RippleBottomOrder, got {other:?}"),
+    };
+
+    // CR 608.2d: submit a REVERSED permutation — not the offered order.
+    let reversed: Vec<ObjectId> = order.iter().rev().copied().collect();
+    assert_ne!(reversed, order, "the fixture must exercise a real reorder");
+    runner
+        .act(GameAction::SelectCards {
+            cards: reversed.clone(),
+        })
+        .expect("submit the Ripple bottom order");
+
+    // The library bottom is exactly the submitted permutation, beneath `deep`.
+    let library: Vec<ObjectId> = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(library.first().copied(), Some(deep));
+    assert_eq!(
+        &library[library.len() - reversed.len()..],
+        reversed.as_slice()
+    );
+    // Reveal ended once the cards were reordered (CR 701.20d).
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    for id in [hit, miss_a, miss_b, miss_c] {
+        assert!(!runner.state().revealed_cards.contains(&id));
+    }
+}
+
+/// CR 702.60a + CR 608.2d: with no same-named card revealed, the whole pile
+/// still routes through the controller bottom-order prompt (the "no-hit path").
+/// A non-reveal-order permutation is honored.
+#[test]
+fn surging_flame_ripple_no_match_routes_through_bottom_order() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(&mut scenario, &[ManaType::Red, ManaType::Red]);
+
+    let spell = scenario.add_real_card(P0, "Surging Flame", Zone::Hand, db);
+    let m0 = scenario.add_real_card(P0, "Mountain", Zone::Library, db);
+    let m1 = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let m2 = scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let m3 = scenario.add_real_card(P0, "Plains", Zone::Library, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Flame");
+    choose_player_target_if_pending(&mut runner, P1);
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+
+    // Accept the reveal — no hit, so straight to the bottom-order prompt.
+    let reveal_events = accept_ripple_reveal(&mut runner);
+    let revealed = cards_revealed_events(&reveal_events);
+    assert_eq!(revealed.len(), 1);
+    assert_eq!(revealed[0].1, vec![m0, m1, m2, m3]);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            }
+        ),
+        "no same-named card means no free-cast offer"
+    );
+
+    let cards = match &runner.state().waiting_for {
+        WaitingFor::RippleBottomOrder { cards, .. } => cards.clone(),
+        other => panic!("no-hit Ripple must still prompt for the bottom order, got {other:?}"),
+    };
+    assert_eq!(cards, vec![m0, m1, m2, m3]);
+
+    // Submit a rotation — distinct from the revealed order.
+    let permuted = vec![m2, m0, m3, m1];
+    runner
+        .act(GameAction::SelectCards {
+            cards: permuted.clone(),
+        })
+        .expect("submit the no-hit Ripple bottom order");
+
+    let library: Vec<ObjectId> = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library, permuted,
+        "the whole library is the submitted order"
+    );
+    // Rejecting a bad permutation.
+    // (fresh state check omitted — validation is unit-covered in engine_resolution_choices)
+}
+
+/// CR 702.60a + CR 701.20a: when a Ripple-found Rat Colony's own Ripple trigger
+/// reveals cards, every viewer — including the controller ordering them —
+/// sees the revealed pile face-up at the bottom-order step.
+#[test]
+fn nested_ripple_bottom_order_cards_are_visible_to_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, "Draw a card.")
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in std::iter::once(rat_b).chain(misses.iter().copied()) {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Rat Colony");
+
+    // Drive past the parent's bottom-order prompt to the nested Ripple's.
+    let mut bottom_orders = 0;
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::RippleBottomOrder { cards, .. } => {
+                let view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+                for id in &cards {
+                    assert!(
+                        !view.objects[id].face_down,
+                        "revealed Ripple card {id:?} must not be hidden from its controller"
+                    );
+                }
+                let opp = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+                for id in &cards {
+                    assert!(!opp.objects[id].face_down, "{id:?} hidden from opponent");
+                }
+                bottom_orders += 1;
+                if bottom_orders == 2 {
+                    return;
+                }
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("order parent's bottom pile");
+            }
+            WaitingFor::RippleRevealChoice { .. } => {
+                accept_ripple_reveal(&mut runner);
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    panic!("never reached a nested RippleBottomOrder");
+}
+
+/// CR 702.60a + CR 701.20a: a Ripple free cast that pauses for target
+/// selection must not hide the still-revealed pile once the bottom-order
+/// prompt opens.
+#[test]
+fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let shock_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let shock_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, "Draw a card.")
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in std::iter::once(shock_b).chain(misses.iter().copied()) {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+    let card_id = runner.state().objects[&shock_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: shock_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Shock");
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("target first Shock");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::RippleRevealChoice { .. } => break,
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Shock");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "free Ripple cast must pause for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("target revealed Shock");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    for id in &cards {
+        assert!(
+            !view.objects[id].face_down,
+            "revealed Ripple card {id:?} must stay face-up after the cast's target pause"
+        );
+    }
+}
+
+/// CR 701.20a: an effect's reveal lasts only as long as needed. Once Ripple has
+/// finished, a lingering resolution permission on the still-stacked accepted
+/// hit must not keep an unrelated momentary reveal public past the next action.
+#[test]
+fn finished_ripple_with_stacked_hit_does_not_retain_later_reveal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let other = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unrelated Card", true, "Draw a card.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in [rat_b, other] {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Rat Colony");
+
+    // Ripple is finished; the accepted hit is still on the stack and still
+    // carries its resolution-owned permission.
+    assert_eq!(runner.state().objects[&rat_b].zone, Zone::Stack);
+    assert!(
+        runner.state().objects[&rat_b]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(_),
+                    ..
+                }
+            )),
+        "precondition: the stacked hit retains its resolution permission"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+    ));
+
+    // A separate momentary reveal (e.g. an ordinary reveal-the-top effect).
+    runner.state_mut().revealed_cards.insert(other);
+    let action = match runner.state().waiting_for.clone() {
+        WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        },
+        _ => GameAction::PassPriority,
+    };
+    runner.act(action).expect("ordinary action");
+    assert!(
+        !runner.state().revealed_cards.contains(&other),
+        "the next normal action must clear the unrelated reveal"
+    );
+    for viewer in [P0, P1] {
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        assert!(
+            view.objects[&other].face_down,
+            "the unrelated library card must be hidden from {viewer:?}"
+        );
+    }
+}
+
+/// CR 701.20a: every still-unplaced revealed Ripple card is public to every
+/// viewer — both the engine's `revealed_cards` set and each viewer's filtered
+/// projection must agree.
+fn assert_ripple_pile_revealed(
+    runner: &engine::game::scenario::GameRunner,
+    pile: &[ObjectId],
+    context: &str,
+) {
+    for id in pile {
+        assert!(
+            runner.state().revealed_cards.contains(id),
+            "{context}: revealed Ripple card {id:?} must stay in revealed_cards"
+        );
+    }
+    for viewer in [P0, P1] {
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        for id in pile {
+            assert!(
+                !view.objects[id].face_down,
+                "{context}: revealed Ripple card {id:?} must be face-up to {viewer:?}"
+            );
+        }
+    }
+}
+
+/// A Surging Flame cast under Thalia's noncreature-spell tax, a Ripple 4 pile
+/// whose top card is the same-named hit, and a Phyrexian Altar (a sacrifice-for-
+/// any-color mana source auto-payment cannot spend on its own) as the only
+/// mana left for the free cast's `{1}` tax. `fodder` is the creature the
+/// Altar can sacrifice; `extra_permanents` are added to P0's battlefield.
+/// Returns `(runner, fodder, altar, misses)` positioned at the free cast's
+/// `ManaPayment` prompt.
+fn ripple_free_cast_at_tax_payment(
+    db: &'static engine::database::CardDatabase,
+    fodder: &str,
+    extra_permanents: &[&str],
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    Vec<ObjectId>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // The original cast pays {1}{R} plus Thalia's {1} from the pool.
+    typed_pool(
+        &mut scenario,
+        &[ManaType::Red, ManaType::Red, ManaType::Red],
+    );
+    scenario.add_real_card(P0, "Thalia, Guardian of Thraben", Zone::Battlefield, db);
+    let fodder = scenario.add_real_card(P0, fodder, Zone::Battlefield, db);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    for name in extra_permanents {
+        scenario.add_real_card(P0, name, Zone::Battlefield, db);
+    }
+    let spell = scenario.add_real_card(P0, "Surging Flame", Zone::Hand, db);
+    scenario.add_real_card(P0, "Surging Flame", Zone::Library, db);
+    let misses: Vec<ObjectId> = ["Mountain", "Forest", "Island"]
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Library, db))
+        .collect();
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Flame");
+    choose_player_target_if_pending(&mut runner, P1);
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast the revealed Surging Flame");
+    choose_player_target_if_pending(&mut runner, P1);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the free cast's Thalia tax must open a manual payment, got {:?}",
+        runner.state().waiting_for
+    );
+    (runner, fodder, altar, misses)
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2g + CR 605.3b: the free Ripple cast's
+/// additional mana payment is part of the same announcement. A nested mana
+/// ability (sacrifice choice, then chosen color) must not clear the pile that
+/// is still revealed, and the pile must still be public at the bottom-order
+/// step once the cast completes.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_mana_ability_color_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, bears, altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Grizzly Bears", &[]);
+    assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Phyrexian Altar during the free cast's payment");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "Altar's sacrifice cost must prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the Altar's sacrifice choice");
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![bears] })
+        .expect("sacrifice Grizzly Bears to the Altar");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "Altar produces any color, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the chosen-color prompt");
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        })
+        .expect("choose the Altar's color");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the chosen mana returns to the cast's payment, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "back at ManaPayment");
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("commit the free cast's payment");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder after the free cast, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+
+    // Finished control: once the pile is bottomed the reveal does not outlive
+    // the next ordinary action.
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the bottom pile");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("ordinary action after Ripple finished");
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a finished Ripple must not keep its reveal"
+    );
+}
+
+/// CR 701.20a + CR 702.60a: canceling the free cast mid-payment ends the
+/// announcement, so the hit is a revealed card "not cast this way" and goes to
+/// the bottom with the pile; the reveal is no longer necessary and is gone by
+/// the following ordinary action.
+#[test]
+fn ripple_free_cast_canceled_at_payment_does_not_retain_reveal() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, _bears, _altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Grizzly Bears", &[]);
+    assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel the free cast");
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::RippleBottomOrder { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("order the bottom pile");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+                break;
+            }
+            other => panic!("unexpected prompt after cancel: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a canceled Ripple cast must not retain its reveal past the next action"
+    );
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2d: a Ripple free cast of a divided-damage
+/// spell (Thrumming Stone grants Ripple to Arc Lightning) pauses at
+/// `DistributeAmong`, with the spell's `PendingCast` carried outside that
+/// prompt. The still-revealed pile must survive that pause.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_distribution() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(
+        &mut scenario,
+        &[ManaType::Red, ManaType::Red, ManaType::Red],
+    );
+    scenario.add_real_card(P0, "Thrumming Stone", Zone::Battlefield, db);
+    let victim = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let spell = scenario.add_real_card(P0, "Arc Lightning", Zone::Hand, db);
+    scenario.add_real_card(P0, "Arc Lightning", Zone::Library, db);
+    let misses: Vec<ObjectId> = ["Mountain", "Forest", "Island"]
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Library, db))
+        .collect();
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let divide = |runner: &mut engine::game::scenario::GameRunner| {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1), TargetRef::Object(victim)],
+            })
+            .expect("choose Arc Lightning's targets");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "two targets must open the damage division, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Arc Lightning");
+    divide(&mut runner);
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![(TargetRef::Player(P1), 1), (TargetRef::Object(victim), 2)],
+        })
+        .expect("divide the original cast's damage");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast the revealed Arc Lightning");
+
+    divide(&mut runner);
+    assert_ripple_pile_revealed(&runner, &misses, "at DistributeAmong");
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![(TargetRef::Player(P1), 2), (TargetRef::Object(victim), 1)],
+        })
+        .expect("divide the free cast's damage");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+}
+
+/// Index of the `source`-owned candidate at the current `ReplacementChoice`.
+fn replacement_candidate_index(
+    runner: &engine::game::scenario::GameRunner,
+    source: ObjectId,
+) -> usize {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.source_id == source)
+            .expect("replacement candidate is selectable"),
+        other => panic!("expected ReplacementChoice, got {other:?}"),
+    }
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2g + CR 605.3b + CR 616.1: the free Ripple
+/// cast's Thalia tax is paid with Phyrexian Altar, whose own sacrifice cost
+/// (Darksteel Colossus under Rest in Peace) pauses at a replacement choice.
+/// The cast's announcement lives in the external `pending_cast` behind the
+/// mana ability's typed cost root, so it is still in flight: the remaining
+/// pile stays revealed to every viewer across `ChooseReplacement`, through the
+/// rest of the payment, and at the bottom-order step.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_mana_ability_cost_replacement_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, colossus, altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Darksteel Colossus", &["Rest in Peace"]);
+    let rest_in_peace = runner
+        .state()
+        .objects
+        .values()
+        .find(|obj| obj.name == "Rest in Peace")
+        .map(|obj| obj.id)
+        .expect("Rest in Peace on the battlefield");
+    assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Phyrexian Altar during the free cast's payment");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![colossus],
+        })
+        .expect("sacrifice Darksteel Colossus to the Altar");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Rest in Peace and Darksteel Colossus compete for the sacrifice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+        ),
+        "the Altar's paused sacrifice must be parked in its mana-ability root"
+    );
+    assert!(
+        runner.state().pending_cast.is_some(),
+        "the free cast's announcement stays in the external carrier"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the Altar's ReplacementChoice");
+
+    let index = replacement_candidate_index(&runner, rest_in_peace);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("Rest in Peace exiles the sacrificed Colossus");
+    assert_eq!(
+        runner.state().objects[&colossus].zone,
+        Zone::Exile,
+        "choosing Rest in Peace avoids the Colossus shuffle"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "after ChooseReplacement");
+
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseManaColor { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+            .expect("choose the Altar's color");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the Altar's mana returns to the free cast's payment, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "back at ManaPayment");
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("commit the free cast's payment");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder after the free cast, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the bottom pile");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("ordinary action after Ripple finished");
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a finished Ripple must not keep its reveal"
+    );
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2h + CR 616.1: a Thrumming Stone-granted
+/// Ripple free cast of Fling pays its own additional sacrifice cost; Darksteel
+/// Colossus under Rest in Peace pauses that cost at a replacement choice. The
+/// announcement is embedded in the cast's typed cost-move root (no external
+/// carrier), and the remaining pile stays revealed across `ChooseReplacement`
+/// and at the bottom-order step.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_additional_cost_replacement_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(&mut scenario, &[ManaType::Red, ManaType::Red]);
+    scenario.add_real_card(P0, "Thrumming Stone", Zone::Battlefield, db);
+    let rest_in_peace = scenario.add_real_card(P0, "Rest in Peace", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let colossus = scenario.add_real_card(P0, "Darksteel Colossus", Zone::Battlefield, db);
+    let spell = scenario.add_real_card(P0, "Fling", Zone::Hand, db);
+    scenario.add_real_card(P0, "Fling", Zone::Library, db);
+    let misses: Vec<ObjectId> = ["Mountain", "Forest", "Island"]
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Library, db))
+        .collect();
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Fling");
+    choose_player_target_if_pending(&mut runner, P1);
+    runner
+        .act(GameAction::SelectCards { cards: vec![bears] })
+        .expect("sacrifice Grizzly Bears to the original Fling");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast the revealed Fling");
+    choose_player_target_if_pending(&mut runner, P1);
+    assert_ripple_pile_revealed(&runner, &misses, "at the free Fling's sacrifice choice");
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![colossus],
+        })
+        .expect("sacrifice Darksteel Colossus to the free Fling");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Rest in Peace and Darksteel Colossus compete for the sacrifice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending: Some(_),
+                ..
+            })
+        ),
+        "the free cast's announcement is embedded in its sacrifice cost root"
+    );
+    assert!(
+        runner.state().pending_cast.is_none(),
+        "no external carrier holds the free cast's announcement"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the Fling ReplacementChoice");
+
+    let index = replacement_candidate_index(&runner, rest_in_peace);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("Rest in Peace exiles the sacrificed Colossus");
+    assert_eq!(runner.state().objects[&colossus].zone, Zone::Exile);
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder after the free Fling, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the bottom pile");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("ordinary action after Ripple finished");
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a finished Ripple must not keep its reveal"
+    );
 }

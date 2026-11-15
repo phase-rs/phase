@@ -1,4 +1,4 @@
-import { createStore, del, get, set } from "idb-keyval";
+import { createStore, del, get, keys, set } from "idb-keyval";
 
 import type {
   EngineAdapter,
@@ -6,20 +6,58 @@ import type {
   GameState,
   MatchConfig,
   PersistedGameState,
+  PlayerId,
 } from "../adapter/types";
+import { isCustomGameFormat } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
+import {
+  clearWsSession,
+  matchesStoredWsSession,
+  type FullSessionKey,
+  type WsSessionIdentity,
+} from "./multiplayerSession";
+import { sameFullSessionKey } from "./fullSessionKey";
+import { ACTIVE_GAME_CHANGED_EVENT, notifyActiveGameChange } from "./activeGameChange";
+import type { P2PSessionKey } from "./p2pSession";
+import { isValidP2PTerminalResult, type P2PTerminalResult } from "./p2pTerminalResult";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
-/** Snapshot of an AI seat's configuration at game-start time. The per-seat
- *  deck has already been baked into the engine's persisted `GameState`, so
- *  `deckId` is retained only as an informational label for UI/resume tooling.
- *  `difficulty` is the load-bearing field: the AI controller needs it on resume
- *  to reconstruct the per-seat policy. */
+/** Snapshot of an AI seat's configuration at game-start time. `deckId` is read
+ *  once, at a fresh game start, to pick the seat's deck (`null` = Random;
+ *  absent = fall back to the single-player preferences). After start the
+ *  per-seat deck is baked into the engine's persisted `GameState`, so on resume
+ *  `deckId` is informational only. `difficulty` is load-bearing at both points:
+ *  the AI controller needs it on resume to reconstruct the per-seat policy. */
 export interface AiSeatMeta {
   difficulty: string;
   deckId?: string | null;
   deckName?: string | null;
 }
+
+/**
+ * Credentials to reconnect a suspended native-engine solo (AI) game.
+ *
+ * Native games are server-authoritative: the game state lives in the local
+ * phase-server's `games.db`, never in IndexedDB. The player token is issued
+ * once at game creation and is the reconnect security boundary — it lives only
+ * client-side, so it must be persisted here for the game to be resumable.
+ * Presence of this field is what marks an `ActiveGameMeta` as a native resume
+ * (which has no local `saveGame` snapshot to validate against).
+ */
+export interface NativeSoloSession {
+  gameCode: string;
+  playerId: PlayerId;
+  playerToken: string;
+  fullKey: FullSessionKey;
+  /** Set once this game's terminal delivery is committed locally. The pointer
+   *  then recovers only that result (re-display and ACK retry) and never
+   *  reconnects to gameplay; it is removed when the server acknowledges. */
+  terminalOnly?: true;
+}
+
+/** The server-issued identity a native solo pointer was saved for. */
+export type NativeSoloSessionIdentity = Pick<NativeSoloSession, "gameCode" | "playerToken" | "fullKey">;
 
 export interface ActiveGameMeta {
   id: string;
@@ -37,6 +75,11 @@ export interface ActiveGameMeta {
   formatConfig?: FormatConfig;
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
+  /** Present for native-engine solo (AI) games hosted by the local
+   *  phase-server. Its presence marks this pointer as a native resume; on
+   *  resume the client reconnects to the server session rather than loading a
+   *  local snapshot. Absent for in-browser (WASM) AI games. */
+  nativeSession?: NativeSoloSession;
 }
 
 /**
@@ -58,12 +101,21 @@ export interface PersistedP2PHostSession {
   gameId: string;
   /** Bare 5-char room code; the PeerJS prefix is reattached by `hostRoom`. */
   roomCode: string;
+  /** Stable authority identity. A resumed host claims a fresh incarnation. */
+  sessionKey: P2PSessionKey;
   brokerGameCode?: string;
   useBroker: boolean;
   /** PlayerId.0 → token. PlayerId 0 is the host's own slot. */
   playerTokens: Record<number, string>;
   /** PlayerId.0 → deck submitted by that guest (pre-game data). */
   guestDecks: Record<number, unknown>;
+  /**
+   * PlayerId.0 → display name the guest sent with its deck. A reconnecting
+   * guest's `reconnect` frame carries no name, so the host's copy is the only
+   * one that survives a host refresh. Optional: sessions saved before this
+   * field existed resume with commander/fallback labels.
+   */
+  guestNames?: Record<number, string>;
   /** PlayerId.0 → resolved AI deck for AI-controlled seats. */
   aiDecks?: Record<number, unknown>;
   /** Tokens that were kicked — refused on reconnect on resume. */
@@ -78,6 +130,11 @@ export interface PersistedP2PHostSession {
   gameStarted: boolean;
   seatState?: SeatState;
   /**
+   * Native AI driver failure retained so reconnecting guests receive the same
+   * terminal fault after the resumed host has restored their state snapshot.
+   */
+  nativeAiDriverFault?: NativeAiDriverFault;
+  /**
    * Present when the desktop host delegated authority to its local
    * phase-server. The server persists the game state; IndexedDB retains only
    * the opaque credentials needed to reconnect each host-local viewer.
@@ -85,13 +142,104 @@ export interface PersistedP2PHostSession {
   nativeSession?: NativeP2PServerSession;
 }
 
+export interface NativeAiDriverFault {
+  id: number;
+  revision: number;
+  message: string;
+}
+
 export interface NativeP2PServerSession {
   gameCode: string;
+  fullKey: FullSessionKey;
   /** Native player token keyed by the matching P2P player id. */
   playerTokens: Record<number, string>;
 }
 
+type LegacyDeckSizeType = "Minimum" | "Exactly";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Resolve the old numeric field's discriminant from engine-authored rules. */
+function legacyDeckSizeType(
+  formatConfig: Record<string, unknown>,
+): LegacyDeckSizeType | undefined {
+  const format = formatConfig.format;
+  if (typeof format !== "string") return undefined;
+
+  const builtInMetadata = formatMetadata(format as FormatConfig["format"]);
+  if (builtInMetadata) return builtInMetadata.default_config.deck_size.type;
+
+  if (!isCustomGameFormat(format)) return undefined;
+  const structural = asRecord(asRecord(formatConfig.custom_rules)?.structural);
+  const deckSize = asRecord(structural?.deck_size);
+  return deckSize?.type === "Minimum" || deckSize?.type === "Exactly"
+    ? deckSize.type
+    : undefined;
+}
+
+/**
+ * Convert the pre-Commander-Draft save spelling of FormatConfig.deck_size.
+ *
+ * Protocol v42 changed this field from a bare number to DeckSizeRule. Network
+ * peers are version-gated, but IndexedDB saves survive upgrades and have no
+ * protocol handshake to reject them. A legacy local save therefore reached
+ * Rust deserialization with e.g. `deck_size: 100` and was discarded by the
+ * resume fallback. The engine registry (for built-ins) or persisted engine
+ * custom rules supplies the discriminant; without either authority the old
+ * value is left untouched so engine restore fails closed rather than guessing.
+ */
+function normalizeLegacyDeckSizeRule(
+  formatConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Number.isInteger(formatConfig.deck_size)) return formatConfig;
+
+  const magnitude = formatConfig.deck_size as number;
+  const variant = legacyDeckSizeType(formatConfig);
+  if (!variant) return formatConfig;
+  return {
+    ...formatConfig,
+    deck_size: { type: variant, data: magnitude },
+  };
+}
+
+/** Normalize only the persisted state boundary; never mutate the IDB object. */
+export function migratePersistedGameState<T extends PersistedGameState>(state: T): T {
+  const envelope = "state" in state;
+  const gameState = (envelope ? state.state : state) as GameState;
+  const formatConfig = gameState.format_config;
+  if (!formatConfig || typeof formatConfig !== "object") return state;
+
+  const rawFormatConfig = formatConfig as unknown as Record<string, unknown>;
+  const normalized = normalizeLegacyDeckSizeRule(rawFormatConfig);
+  if (normalized === rawFormatConfig) return state;
+
+  const nextState = { ...gameState, format_config: normalized as unknown as FormatConfig };
+  return (envelope ? { ...state, state: nextState } : nextState) as T;
+}
+
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
+const FULL_TERMINAL_CLEANUP_PREFIX = "phase-full-terminal-cleanup:";
+
+export interface FullTerminalCleanupDelivery {
+  recipient: PlayerId;
+  deliveryId: string;
+  credential: string;
+}
+
+/** Cleanup authority contains no private final view and cannot resume gameplay. */
+export interface FullTerminalCleanupObligation {
+  gameId: string;
+  p2pSessionKey: P2PSessionKey;
+  p2pTerminalId: string;
+  p2pResult: P2PTerminalResult;
+  fullKey: FullSessionKey;
+  terminalRevision: number;
+  deliveries: FullTerminalCleanupDelivery[];
+}
 
 /**
  * Dedicated IndexedDB store for game state persistence.
@@ -106,6 +254,85 @@ const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
  * environments where IndexedDB is unavailable (tests, SSR).
  */
 let _gameStore: ReturnType<typeof createStore> | undefined;
+const gameWriteQueues = new Map<string, Promise<void>>();
+
+/** Serialize lifecycle writes so a delayed autosave cannot follow terminal cleanup. */
+async function withGameWriteLock<T>(gameId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = gameWriteQueues.get(gameId);
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous ? previous.then(() => next) : next;
+  gameWriteQueues.set(gameId, queued);
+  // Start the first operation synchronously, matching IndexedDB's usual
+  // async-function behavior while still making later same-game writes wait.
+  if (previous) await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (gameWriteQueues.get(gameId) === queued) gameWriteQueues.delete(gameId);
+  }
+}
+
+function cleanupKey(gameId: string): string {
+  return FULL_TERMINAL_CLEANUP_PREFIX + gameId;
+}
+
+function isValidCleanupObligation(value: unknown, gameId?: string): value is FullTerminalCleanupObligation {
+  if (!value || typeof value !== "object") return false;
+  const owner = value as Partial<FullTerminalCleanupObligation>;
+  const result = owner.p2pResult;
+  const fullKey = owner.fullKey;
+  const deliveries = owner.deliveries;
+  if (
+    typeof owner.gameId !== "string"
+    || owner.gameId.length === 0
+    || (gameId !== undefined && owner.gameId !== gameId)
+    || owner.p2pSessionKey !== result?.key
+    || owner.p2pTerminalId !== result?.terminalId
+    || owner.terminalRevision !== result?.revision
+    || !isValidP2PTerminalResult(result)
+    || result.recipient !== 0
+    || !fullKey
+    || typeof fullKey.game_code !== "string"
+    || fullKey.game_code.length === 0
+    || !Number.isSafeInteger(fullKey.generation)
+    || fullKey.generation <= 0
+    || !Array.isArray(deliveries)
+    || deliveries.length === 0
+  ) return false;
+  const recipients = new Set<number>();
+  const ids = new Set<string>();
+  for (const delivery of deliveries) {
+    if (
+      !delivery
+      || !Number.isSafeInteger(delivery.recipient)
+      || delivery.recipient < 0
+      || typeof delivery.deliveryId !== "string"
+      || delivery.deliveryId.length === 0
+      || ids.has(delivery.deliveryId)
+      || typeof delivery.credential !== "string"
+      || delivery.credential.length === 0
+      || recipients.has(delivery.recipient)
+      || Object.prototype.hasOwnProperty.call(delivery, "finalView")
+    ) return false;
+    recipients.add(delivery.recipient);
+    ids.add(delivery.deliveryId);
+  }
+  return recipients.has(0);
+}
+
+async function hasTerminalCleanup(gameId: string): Promise<boolean> {
+  return await get<unknown>(cleanupKey(gameId), getGameStore()) !== undefined;
+}
+
+function isTerminalPersistedState(state: PersistedGameState): boolean {
+  const publicState = "state" in state ? state.state : state;
+  return (
+    publicState.match_phase === "Completed"
+    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
+  );
+}
 
 function getGameStore(): ReturnType<typeof createStore> {
   if (!_gameStore) {
@@ -117,19 +344,40 @@ function getGameStore(): ReturnType<typeof createStore> {
 // ── Game State (IndexedDB) ──────────────────────────────────────────────
 
 export async function saveGame(gameId: string, state: PersistedGameState): Promise<void> {
-  const publicState = "state" in state ? state.state : state;
-  if (
-    publicState.match_phase === "Completed"
-    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
-  ) {
-    await clearGame(gameId);
+  if (isTerminalPersistedState(state)) {
+    // A terminal StateUpdate can arrive before its recipient-specific GameOver
+    // envelope. The latter carries the terminal access record, so this path
+    // must not clear resumable state before that record has been committed.
     return;
   }
   try {
-    await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
+    await withGameWriteLock(gameId, async () => {
+      if (await hasTerminalCleanup(gameId)) return;
+      await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
+    });
   } catch (err) {
     console.warn("[saveGame] IndexedDB write failed:", err);
   }
+}
+
+/**
+ * Writes a known-resumable authority snapshot. Resume initialization uses this
+ * strict boundary before a host may publish or accept a reconnect: swallowing
+ * a failed write there could replay an already-consumed automation session.
+ */
+export async function saveResumableGameStrict(
+  gameId: string,
+  state: PersistedGameState,
+): Promise<void> {
+  if (isTerminalPersistedState(state)) {
+    throw new Error("Refusing to retain a terminal game as resumable state");
+  }
+  await withGameWriteLock(gameId, async () => {
+    if (await hasTerminalCleanup(gameId)) {
+      throw new Error("Terminal cleanup is pending; gameplay cannot be resumed");
+    }
+    await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
+  });
 }
 
 /**
@@ -141,35 +389,138 @@ export async function saveAuthoritativeGame(
   adapter: EngineAdapter,
   fallbackState: GameState,
 ): Promise<void> {
+  await saveGame(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/** Commit the engine-authored initial snapshot before a fresh game can start. */
+export async function saveAuthoritativeGameStrict(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  await saveResumableGameStrict(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/**
+ * Capture the engine-authored trusted envelope for a persistence boundary
+ * (saves, undo checkpoints). Rendered screen states are viewer projections
+ * (`wire_projection`) that the restore ingress fails closed on, so anything
+ * that may later be restored must come from this boundary. Returns null when
+ * the adapter holds no local engine — callers push/save nothing restorable
+ * rather than an unrestorable projection.
+ */
+export async function captureTrustedCheckpoint(
+  adapter: EngineAdapter,
+): Promise<PersistedGameState | null> {
   const trustedJson = await adapter.exportPersistenceState?.();
-  await saveGame(
-    gameId,
-    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
-  );
+  return trustedJson ? JSON.parse(trustedJson) as PersistedGameState : null;
+}
+
+async function authoritativePersistenceState(
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<PersistedGameState> {
+  return (await captureTrustedCheckpoint(adapter)) ?? fallbackState;
 }
 
 export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
     const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
-    return state ?? null;
+    return state ? migratePersistedGameState(state) : null;
   } catch {
     return null;
   }
 }
 
+/** Read a saved game without interpreting an IndexedDB failure as absence. */
+export async function loadGameStrict(gameId: string): Promise<PersistedGameState | null> {
+  const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+  return state === undefined ? null : migratePersistedGameState(state);
+}
+
 export async function clearGame(gameId: string): Promise<void> {
+  const pointer = activeGamePointerToken();
   try {
-    await del(GAME_KEY_PREFIX + gameId, getGameStore());
-    await del(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
-    // P2P host meta is scoped to the same gameId — a completed/reset game
-    // must drop its resume metadata too, or the menu's Resume button
-    // would surface a game the engine has forgotten.
-    await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
+    await withGameWriteLock(gameId, async () => {
+      await del(GAME_KEY_PREFIX + gameId, getGameStore());
+      await del(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
+      // P2P host meta is scoped to the same gameId — a completed/reset game
+      // must drop its resume metadata too, or the menu's Resume button
+      // would surface a game the engine has forgotten.
+      await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
+    });
   } catch { /* best effort */ }
-  const active = loadActiveGame();
-  if (active?.id === gameId) {
-    clearActiveGame();
+  if (!ownsActiveGame(gameId, pointer)) return;
+  if (await hasTerminalCleanup(gameId).catch(() => true)) return;
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
+}
+
+/** Remove every game-scoped record before reusing a game ID for a fresh start. */
+export async function clearGameStrict(gameId: string): Promise<void> {
+  const pointer = activeGamePointerToken();
+  await withGameWriteLock(gameId, async () => {
+    const store = getGameStore();
+    await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
+    await del(P2P_HOST_KEY_PREFIX + gameId, store);
+    await del(GAME_KEY_PREFIX + gameId, store);
+  });
+  if (!ownsActiveGame(gameId, pointer)) return;
+  if (await hasTerminalCleanup(gameId)) return;
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
+}
+
+export async function saveFullTerminalCleanupStrict(
+  obligation: FullTerminalCleanupObligation,
+): Promise<void> {
+  if (!isValidCleanupObligation(obligation)) {
+    throw new Error("Invalid Full terminal cleanup obligation");
   }
+  await withGameWriteLock(obligation.gameId, async () => {
+    const key = cleanupKey(obligation.gameId);
+    const existing = await get<unknown>(key, getGameStore());
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(obligation)) {
+        throw new Error("Conflicting Full terminal cleanup obligation");
+      }
+      return;
+    }
+    await set(key, obligation, getGameStore());
+  });
+}
+
+export async function loadFullTerminalCleanupStrict(
+  gameId: string,
+): Promise<FullTerminalCleanupObligation | null> {
+  const value = await get<unknown>(cleanupKey(gameId), getGameStore());
+  if (value === undefined) return null;
+  if (!isValidCleanupObligation(value, gameId)) {
+    throw new Error("Stored Full terminal cleanup obligation is invalid");
+  }
+  return value;
+}
+
+export async function listFullTerminalCleanupStrict(): Promise<FullTerminalCleanupObligation[]> {
+  const store = getGameStore();
+  const matchingKeys = (await keys(store)).filter((key): key is string =>
+    typeof key === "string" && key.startsWith(FULL_TERMINAL_CLEANUP_PREFIX),
+  );
+  const owners = await Promise.all(matchingKeys.map(async (key) => {
+    const value = await get<unknown>(key, store);
+    const gameId = key.slice(FULL_TERMINAL_CLEANUP_PREFIX.length);
+    if (!isValidCleanupObligation(value, gameId)) {
+      throw new Error("Stored Full terminal cleanup obligation is invalid");
+    }
+    return value;
+  }));
+  return owners;
+}
+
+export async function clearFullTerminalCleanupStrict(gameId: string): Promise<void> {
+  await withGameWriteLock(gameId, async () => {
+    await del(cleanupKey(gameId), getGameStore());
+  });
+  const active = loadActiveGame();
+  if (active?.id === gameId) clearActiveGame();
 }
 
 // ── P2P Host Session (IndexedDB) ────────────────────────────────────────
@@ -179,7 +530,10 @@ export async function saveP2PHostSession(
   session: PersistedP2PHostSession,
 ): Promise<void> {
   try {
-    await set(P2P_HOST_KEY_PREFIX + gameId, session, getGameStore());
+    await withGameWriteLock(gameId, async () => {
+      if (await hasTerminalCleanup(gameId)) return;
+      await set(P2P_HOST_KEY_PREFIX + gameId, session, getGameStore());
+    });
   } catch (err) {
     console.warn("[saveP2PHostSession] IndexedDB write failed:", err);
   }
@@ -193,7 +547,8 @@ export async function loadP2PHostSession(
       P2P_HOST_KEY_PREFIX + gameId,
       getGameStore(),
     );
-    return s ?? null;
+    if (!s || typeof s.sessionKey !== "string" || s.sessionKey.length === 0) return null;
+    return s;
   } catch {
     return null;
   }
@@ -201,22 +556,27 @@ export async function loadP2PHostSession(
 
 export async function clearP2PHostSession(gameId: string): Promise<void> {
   try {
-    await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
+    await withGameWriteLock(gameId, async () => {
+      await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
+    });
   } catch { /* best-effort */ }
 }
 
 // ── Checkpoints (IndexedDB) ─────────────────────────────────────────────
 
-export async function saveCheckpoints(gameId: string, checkpoints: GameState[]): Promise<void> {
+export async function saveCheckpoints(gameId: string, checkpoints: PersistedGameState[]): Promise<void> {
   try {
-    await set(GAME_CHECKPOINTS_PREFIX + gameId, checkpoints, getGameStore());
+    await withGameWriteLock(gameId, async () => {
+      if (await hasTerminalCleanup(gameId)) return;
+      await set(GAME_CHECKPOINTS_PREFIX + gameId, checkpoints, getGameStore());
+    });
   } catch { /* best effort */ }
 }
 
-export async function loadCheckpoints(gameId: string): Promise<GameState[]> {
+export async function loadCheckpoints(gameId: string): Promise<PersistedGameState[]> {
   try {
-    const checkpoints = await get<GameState[]>(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
-    return checkpoints ?? [];
+    const checkpoints = await get<PersistedGameState[]>(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
+    return checkpoints?.map((checkpoint) => migratePersistedGameState(checkpoint)) ?? [];
   } catch {
     return [];
   }
@@ -224,8 +584,15 @@ export async function loadCheckpoints(gameId: string): Promise<GameState[]> {
 
 // ── Active Game Meta (localStorage — tiny, synchronous) ─────────────────
 
+export { ACTIVE_GAME_CHANGED_EVENT, notifyActiveGameChange };
+
 export function saveActiveGame(meta: ActiveGameMeta): void {
-  localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+  try {
+    localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
 }
 
 export function loadActiveGame(): ActiveGameMeta | null {
@@ -239,5 +606,98 @@ export function loadActiveGame(): ActiveGameMeta | null {
 }
 
 export function clearActiveGame(): void {
-  localStorage.removeItem(ACTIVE_GAME_KEY);
+  try {
+    localStorage.removeItem(ACTIVE_GAME_KEY);
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
+}
+
+/**
+ * Clears the active pointer only while it is still the one a consumer read.
+ * A pointer written while an async validation was in flight — another game, or
+ * this game with a new session — is newer authority and survives. A denied
+ * read yields a null token: ownership is then unknown, so nothing is cleared.
+ */
+export function clearActiveGameIfUnchanged(token: string | null): void {
+  if (token === null || activeGamePointerToken() !== token) return;
+  clearActiveGame();
+}
+
+/** The stored pointer exactly as written: a compare-and-delete token. */
+export function activeGamePointerToken(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_GAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether game cleanup may release the stored pointer: a compare-and-delete
+ * against the pointer the cleanup started with. Any pointer written while the
+ * cleanup awaited storage — for another game, or for this game ID with a new
+ * session — is a replacement and survives. A native pointer is owned solely by
+ * native terminal persistence and is released only by `clearNativeSoloSession`,
+ * with its session identity checked, once its session has ended. An online
+ * pointer is owned solely by online session persistence and is released only by
+ * `clearOnlineSession`, with its session identity checked, once its session has
+ * ended.
+ */
+function ownsActiveGame(gameId: string, startedWith: string | null): boolean {
+  if (startedWith === null || activeGamePointerToken() !== startedWith) return false;
+  const active = loadActiveGame();
+  return active?.id === gameId && active.mode !== "online" && active.nativeSession === undefined;
+}
+
+function holdsNativeSoloSession(
+  meta: ActiveGameMeta | null,
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): meta is ActiveGameMeta & { nativeSession: NativeSoloSession } {
+  const session = meta?.nativeSession;
+  return meta?.id === gameId
+    && session !== undefined
+    && session.gameCode === expected.gameCode
+    && session.playerToken === expected.playerToken
+    && sameFullSessionKey(session.fullKey, expected.fullKey);
+}
+
+/** Marks this game's native pointer terminal-only. A pointer for any other
+ *  game or session is a replacement and is left untouched. */
+export function markNativeSoloSessionTerminal(
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): void {
+  try {
+    const active = loadActiveGame();
+    if (!holdsNativeSoloSession(active, gameId, expected)) return;
+    saveActiveGame({ ...active, nativeSession: { ...active.nativeSession, terminalOnly: true } });
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** Removes this game's native pointer after its session has ended. A pointer
+ *  for any other game or session is a replacement and is kept. */
+export function clearNativeSoloSession(gameId: string, expected: NativeSoloSessionIdentity): void {
+  try {
+    if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** Removes this game's online pointer after its session has ended. A pointer
+ *  for any other game or session is a replacement and is kept. */
+export function clearOnlineSession(gameId: string, expected?: WsSessionIdentity): void {
+  try {
+    if (expected && !matchesStoredWsSession(expected)) return;
+    clearWsSession(expected);
+    const active = loadActiveGame();
+    if (active?.id === gameId && active.mode === "online") clearActiveGame();
+  } catch {
+    /* storage denied */
+  }
 }

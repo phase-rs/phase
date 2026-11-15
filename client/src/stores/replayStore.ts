@@ -33,6 +33,8 @@ interface ReplayStoreActions {
 export type ReplayStore = ReplayStoreState & ReplayStoreActions;
 
 let playTimer: ReturnType<typeof setInterval> | null = null;
+/** Bumped by `unload`; a `loadReplay` whose captured value is behind it is stale. */
+let replayLoadAttempt = 0;
 
 function stopPlayTimer(): void {
   if (playTimer !== null) {
@@ -72,21 +74,31 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
 
   loadReplay: async (replayJson) => {
     get().unload();
+    const attempt = replayLoadAttempt;
+    const throwIfStale = () => {
+      if (attempt !== replayLoadAttempt) throw new Error("Replay load superseded");
+    };
     set({ isLoading: true, error: null });
 
     const adapter = new ReplayAdapter();
     try {
       await adapter.initialize();
+      throwIfStale();
       const totalActions = await adapter.loadReplay(replayJson);
+      throwIfStale();
       const header = await adapter.header();
+      throwIfStale();
       const state = await adapter.seek(0);
+      throwIfStale();
 
       useGameStore.setState({
         gameId: "replay",
         gameMode: "spectate",
         adapter,
         legalActions: [],
+        endContinuousEffectOffers: [],
         legalActionsByObject: {},
+        activationBlockReasons: {},
         autoPassRecommended: false,
         spellCosts: {},
         stateHistory: [],
@@ -97,6 +109,7 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
       set({ adapter, header, totalActions, currentIndex: 0, isLoading: false });
     } catch (err) {
       adapter.dispose();
+      if (attempt !== replayLoadAttempt) return;
       set({ isLoading: false, error: err instanceof Error ? err.message : String(err) });
       throw err;
     }
@@ -157,6 +170,7 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
   },
 
   unload: () => {
+    replayLoadAttempt += 1;
     stopPlayTimer();
     get().adapter?.dispose();
     set({ ...initialState });

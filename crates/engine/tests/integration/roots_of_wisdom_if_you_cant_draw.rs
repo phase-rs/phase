@@ -199,6 +199,7 @@ fn bounce_then_gated_draw(source: ObjectId, controller: PlayerId) -> ResolvedAbi
         .condition(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::ZoneChangedThisWay {
                 filter: TargetFilter::Any,
+                destination: None,
             }),
         }),
     )

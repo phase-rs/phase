@@ -63,6 +63,7 @@ fn place_and_choose(
 
     let source = crate::support::exact_named_choice_source(runner.state(), obj);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: P0,
         choice_type: ChoiceType::Labeled {
             options: labels.iter().map(|s| s.to_string()).collect(),
@@ -383,6 +384,7 @@ fn cast_and_engine_choose(
     // LOAD-BEARING: the engine (not the test) must have paused the entry on the
     // modal choice produced by the Moved/Battlefield Choose replacement.
     let WaitingFor::NamedChoice {
+        free_entry: None,
         options,
         source: Some(source),
         ..

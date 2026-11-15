@@ -4,7 +4,7 @@
 //!   * The §5.2 **allowlist-parity sweep** — the corpus-wide proof that the new
 //!     `ability_rw` conflict gate reproduces the DELETED 12-string serde
 //!     allowlist's decision on every printed no-ordering-input trigger, modulo
-//!     the seven proven-order-dependent category-(1) rows (the CR 603.3b fix).
+//!     the proven-order-dependent category-(1) rows (the CR 603.3b fix).
 //!     A FROZEN in-test copy of the deleted walk is the reference oracle.
 //!   * The **discriminators** N-A/N-B/N-B2/N-C/N-D/N-F — hand-built groups run
 //!     through the production ordering-soundness authority
@@ -97,9 +97,8 @@ fn ast_bears_unimplemented(value: &serde_json::Value) -> bool {
 
 /// The canonical category-(1) rows (§5.2): provably order-dependent printed
 /// groups whose same-event auto→prompt flip IS the CR 603.3b fix. Each carries
-/// its in-plan order-dependence proof (see PR-6.75-C0FULL-C1-PLAN.md §5.2). A
-/// same-event diff on any OTHER card is an implementation finding, never a new
-/// row (STRICT PROOF-GATE).
+/// its one-line order-dependence proof. A same-event diff on any OTHER card is an
+/// implementation finding until such a proof lists it (STRICT PROOF-GATE).
 const CATEGORY_1_ROWS: &[&str] = &[
     // Ouroboroid: each copy's Power{Source} read is fed by the other's
     // PutCounterAll — token/counter totals differ by order.
@@ -115,12 +114,21 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Spawn of Mayhem: damage order across the 10-life threshold decides which
     // copy gets the counter.
     "spawn of mayhem",
+    // Marauding Raptor: the first copy's damage can destroy a small entering Dinosaur
+    // (CR 704.5g) before the second resolves — which copy gets +2/+0 depends on order.
+    "marauding raptor",
     // Your Inescapable Doom: PutCounter{Any} write × sibling CountersOn{Source}
     // read — same-kind counter feed (CR 904.3 two-copy scheme deck).
     "your inescapable doom",
     // Complex Automaton: ObjectCount{Permanent} intervening-if read × self-Bounce
     // whose moved census (permanent) overlaps the read filter.
     "complex automaton",
+    // Fraying Line ("Otherwise, exile this artifact and each creature without a rope
+    // counter on it, then remove all rope counters from all creatures"): the first
+    // copy's mass RemoveCounter strips every rope counter, so the second copy's
+    // "each creature without a rope counter" census then matches every creature —
+    // which creatures are exiled depends on order (CR 603.3b + CR 608.2h).
+    "fraying line",
 ];
 
 /// §7 documented-conservative over-prompts: cards whose sweep decision-diff is a
@@ -132,6 +140,23 @@ const CATEGORY_1_ROWS: &[&str] = &[
 /// Grouped by class; each entry carries its one-line safety argument (§7 ledger
 /// source of truth).
 const DOCUMENTED_OVER_PROMPT: &[&str] = &[
+    // Woodwork Prodigy: its source-local prepared intervening-if
+    // ("if this creature isn't prepared") and the corresponding BecomePrepared
+    // write targeting SelfRef are disjoint for same-event sibling triggers,
+    // so they commute. The conservative prompt remains fail-closed until that
+    // per-source proof is structural.
+    "woodwork prodigy",
+    // Paradox Shaper: same trigger shape as Woodwork Prodigy (Phase/Upkeep +
+    // OnlyDuringYourTurn + Not(SourceMatchesFilter Prepared) +
+    // BecomePrepared SelfRef Single — all structural fields verified identical
+    // in the export): source-local prepared gate and SelfRef write are
+    // disjoint across same-event siblings. Same justification as the woodwork
+    // row; fail-closed prompt until the per-source proof is structural.
+    "paradox shaper",
+    // Stingerquill Voxmancer: same Woodwork Prodigy trigger shape as paradox
+    // shaper above (structural fields verified identical). Disjoint
+    // per-source gate/write; fail-closed prompt.
+    "stingerquill voxmancer",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer
@@ -146,6 +171,24 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // falls) and self-limiting, so identical siblings commute up to relabeling — either
     // order sweeps the board and sacrifices exactly one of the two copies.
     "planar collapse",
+    // Eye of Jace: Phase upkeep trigger, no intervening-if — Surveil 1, then
+    // GraveyardSize GE 7-gated Sacrifice(SelfRef) + DamageEachPlayer(2) +
+    // GainLife(2) (gate repeated on each node, AST measured). Both copies
+    // always fire and resolve; the graveyard only GROWS within the group
+    // (surveil adds, nothing removes), so a true gate stays true, and the two
+    // surveils are one controller's sequential choices off a fixed library
+    // order with identical information in either order. Identical siblings
+    // commute up to relabeling (planar-collapse-style monotone argument).
+    "eye of jace",
+    // Impending Disaster: Phase upkeep trigger — Sacrifice(SelfRef) gated on
+    // ObjectCount(Lands) GE 7, then DestroyAll lands as a DEPENDENT sub
+    // (sub_link None, AST measured: suppressed with a false gate, never an
+    // independent sibling). The first resolution sees the pre-resolution
+    // count; on 7+ it sacs itself and wipes the lands, leaving the sibling's
+    // re-read at 0 so it stays. Either order: exactly one copy sacs (up to
+    // relabeling) and the wipe happens iff 7+ lands were present — monotone
+    // census fall + self-limiting, the planar collapse argument verbatim.
+    "impending disaster",
     // Mill membership write × ZoneCardCount(gy, Creature) self-transform threshold —
     // monotone graveyard growth.
     "deathbonnet sprout",
@@ -169,14 +212,20 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // optional self-return-from-graveyard — self-limiting (second copy breaks the
     // gate; issue #5983 fixture regen surfaced this card in the sweep corpus).
     "nether spirit",
+    // Darklight Phoenix: Phase combat trigger + QuantityComparison
+    // (ZoneChangeCountThisTurn Battlefield→Graveyard Creature GE 2) gate +
+    // ChangeZone SelfRef graveyard→battlefield (AST measured). The gate reads
+    // turn-history deaths; within the group no deaths occur (self-returns are
+    // not deaths), so both copies see the identical count at fire and
+    // re-check, and each returns only itself (disjoint graveyard referents).
+    // The death-count read × zone-change write conflict is conservative.
+    "darklight phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
     "reveille squad",
     // Token write × ObjectCount == 13 self-sacrifice — equality over symmetric writes.
     "stensia uprising",
-    // Mill + self-exile + put-on-top writes × ZoneCardCount(Library == 0) read.
-    "stillness in motion",
     // ---- osseous-class: owner-keyed read × owner-misaligned write ----
     // DistinctCardTypes{your gy} GE 4 read × opponent-Sacrifice write that lands in
     // the sacrificed permanent's OWNER's graveyard (CR 701.21a): a control-changed
@@ -192,14 +241,104 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // commutes ONLY because the phoenix's own power (2 < 4) — runtime P/T, invisible
     // to a context-free recognizer.
     "flamewake phoenix",
+    // Choose{CreatureType, persist} → ChangeZoneAll{gy → library}: the chosen type is
+    // bound earlier in the same resolution, but the AST has no scope distinguishing it
+    // from persistent per-source storage.
+    "elvish soultiller",
     // ---- parse-blocked commutes (underneath the mis-parse, the structure
     // commutes) ----
-    // RemoveCounter{TriggeringSource} mis-parse (should be SelfRef): each removes
-    // its own time counter.
-    "deep-sea kraken",
-    // HasCounters(oil) mis-reads the source Golem (should be the entering creature):
-    // both writes are monotone oil-adds on the shared object.
-    "ichorplate golem",
+    // Event-object-routed "it becomes X" transformation grants: these 16 cards
+    // (17 triggers — hidden stag has two) parse the self-transformation ("it
+    // becomes ...") as a GenericEffect Continuous grant with target null and
+    // nested affected=TriggeringSource (AST measured on all 17 triggers), so
+    // each grant lands on the SHARED event object (the spell/land/entering
+    // creature) instead of the source — an "it"-pronoun mis-target that needs
+    // its own card-fix (see the issue #8500 full-db diagnosis). UNDERNEATH
+    // it, the S2 structure commutes: each copy's SourceMatchesFilter gate
+    // reads its OWN type (disjoint across siblings, and unaffected by grants
+    // that hit the event object rather than either copy), and both copies'
+    // grants are byte-identical modification lists (Set P/T, AddType, ...)
+    // applied to the same object — idempotent under the layer system, with no
+    // counters/piles/choices consumed. The spell-characteristic reads
+    // (veiled sentry's EventSource-MV P/T, opal titan's spell-color
+    // protection) are frozen event reads no sibling writes. The prompt is
+    // conservative: the event-object characteristics+membership write (the
+    // ability_rw.rs GenericEffect arm) defeats the disjointness rows.
+    // Hidden Ancients: SpellCast/Enchantment trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden ancients",
+    // Hidden Herd: LandPlayed/nonbasic-land trigger, Enchantment self-gate —
+    // idempotent shared-land grant, commutes (proof in section banner).
+    "hidden herd",
+    // Hidden Gibbons: SpellCast/Instant trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden gibbons",
+    // Hidden Spider: SpellCast/flying-Creature trigger, Enchantment
+    // self-gate — idempotent shared-spell grant, commutes (banner).
+    "hidden spider",
+    // Hidden Guerrillas: SpellCast/Artifact trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "hidden guerrillas",
+    // Hidden Stag: LandPlayed ×2 triggers (opponent-land/Enchantment-gate +
+    // own-land/Creature-gate) — both carry the shared-land grant shape and
+    // both commute per the banner (hence two diff lines, one ledger row).
+    "hidden stag",
+    // Opal Champion: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal champion",
+    // Opal Titan: SpellCast/Creature trigger, Enchantment self-gate, plus a
+    // frozen spell-color protection read — idempotent grant, commutes.
+    "opal titan",
+    // Opal Gargoyle: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal gargoyle",
+    // Opal Acrolith: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal acrolith",
+    // Opal Caryatid: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal caryatid",
+    // Opal Archangel: SpellCast/Creature trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "opal archangel",
+    // Veiled Sentry: SpellCast(any) trigger, Enchantment self-gate, plus a
+    // frozen EventSource-MV P/T read — idempotent grant, commutes (banner).
+    "veiled sentry",
+    // Veiled Apparition: SpellCast(any) trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "veiled apparition",
+    // Veil of Birds: SpellCast(any) trigger, Enchantment self-gate —
+    // idempotent shared-spell grant, commutes (proof in section banner).
+    "veil of birds",
+    // Lurking Skirge: ChangesZone (creature→opponent-graveyard) trigger,
+    // Enchantment self-gate — idempotent grant on the shared dead creature,
+    // commutes (proof in section banner).
+    "lurking skirge",
+    // Romulan Bird-of-Prey: SpellCast(noncreature) + Not(SourceMatchesFilter
+    // Creature) per-source gate + PutCounter charge×2 → TriggeringSource (AST
+    // measured; Oracle "it" = the spacecraft — mistargeted to the cast spell,
+    // separate card-fix). Gates are disjoint per-copy reads; both copies add
+    // 2 charge to the SAME spell — additive (2+2 either order) — and the gate
+    // re-check reads only the copy's own type. Commutes.
+    "romulan bird-of-prey",
+    // Tactical Officer: YouAttack + EventTime(PropertyAggregate power GE 8)
+    // fire-time gate (evaluated at trigger time; the GE quantity is monotone
+    // within the group — each copy's +1/+1 only raises total power, so a
+    // fired gate stays fired at any re-check) + PutCounter P1P1 SelfRef
+    // (disjoint) + SetTapState Untap TriggeringSource (AST measured; Oracle
+    // "it" = the officer — mistargeted to the attack event's source, i.e. the
+    // sole attacker or a no-op; separate card-fix; idempotent either way). No
+    // flippable shared state. Commutes.
+    "tactical officer",
+    // ---- same-event additive shared writes with per-source gates (correct
+    // parses) ----
+    // Support Mission: ChangesZone ETB trigger (no intervening-if) —
+    // quest+1 SelfRef (disjoint per-copy piles) + ConditionInstead(own quest
+    // GE 5) → P1P1×2 ParentTarget else P1P1×1 TriggeringSource, both routed
+    // to the shared entering creature ("that creature", AST measured). Each
+    // copy's +1/+1 amount is fixed by its OWN quest count, which no sibling
+    // writes — the total added is the sum, order-independent. Commutes.
+    "support mission",
     // ---- owner-misalignment (osseous-class), batch — aligned-safe via sum-symmetry ----
     // dies-batch GainLife{ZoneCardCount(your gy, Creature)} + self-exile-from-gy:
     // the count-read × graveyard-self-exile is a genuine structural RW conflict, so
@@ -210,6 +349,127 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // MISaligned copies go to a different graveyard and are correctly prompted by
     // the same conflict — see the impl-report soundness note.)
     "skyfisher spider",
+    // ---- unprofiled-effect commute, batch: the effect node has no RW profile, so
+    // the fail-closed `RwProfile::conservative()` catch-all prompts ----
+    // dies-batch optional PutOnTopOrBottom{SelfRef, chooser: Controller} (AST
+    // measured): each co-departing copy moves ONLY its own graveyard card (CR 603.6c
+    // first-zone check) to its OWN owner's library, so the members' writes are
+    // disjoint — owner-misaligned copies route to different libraries entirely, and
+    // same-owner copies contend only for the top/bottom slot, where identical
+    // same-name cards commute up to relabeling. The "may" and the top-or-bottom pick
+    // are resolution-time choices (CR 603.5) made by the batch's one controller in
+    // either order: production ordering groups are partitioned per-controller
+    // (`trigger_order_controller` / `begin_trigger_ordering`, triggers.rs; CR 603.3b
+    // — each player orders only the triggers THEY control, cross-controller
+    // placement being APNAP-fixed, not chosen), the premise the §5 batch rows model
+    // as `ControllerUniformity::Uniform` — single-controller BY CONSTRUCTION, not an
+    // artifact of the Phase+OnlyDuringYourTurn privacy predicate (same-event S2
+    // only). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
+    // lands in `RwProfile::conservative()` (maximal reads/writes + fail-closed
+    // `reads_member_bound`), refusing batch-T1 and tripping the feed rows, so no
+    // in-scope recognizer proves the self-scoped move context-free (Valakut
+    // Exploration misparse-fix fixture regen surfaced this card in the sweep
+    // corpus; same adjudication as the #7031 branch).
+    "arashin sovereign",
+    // ---- batch: symmetric shared-hand wheel (correct parse) ----
+    // U.S.S. Enterprise-C, Time-Tossed: dies-self trigger (BATCH; the ETB
+    // twin is self_ref-exempt from S2 and a non-departure): optional Discard
+    // hand + Draw #discarded (FilteredTrackedSetSize, AST measured). Two
+    // co-departing copies wheel sequentially off a fixed library order —
+    // A-then-B discards N, draws top-N, discards those, draws next-N;
+    // B-then-A draws the same 2N cards into the same slots. Final
+    // hand/graveyard/library identical; the per-resolution "may" (CR 603.5)
+    // is symmetric. NOT great desert hellion: hellion draws per-source
+    // Intensity (a≠b → order-dependent); this draws the tracked discard
+    // count (shared-hand-determined → symmetric). Commutes.
+    "u.s.s. enterprise-c, time-tossed",
+    // ---- commander-census read × token-creation write (CR 903.3d) ----
+    // "At the beginning of your upkeep, if you control a commander, create a token
+    // that's a copy of this creature." The CR 603.4 intervening-if is a LIVE
+    // battlefield census (`TriggerCondition::ControlsCommander` ⇒
+    // `commander_control_read`, ability_rw.rs), and each member WRITES battlefield
+    // membership by minting a token — a structural `SetMembership` read × creation
+    // feed, so `profiles_conflict` prompts.
+    //
+    // CONSERVATIVE: the created object is a token copy of Biowaste Blob, which is
+    // never a commander — CR 903.3's own example is exactly this ("A permanent
+    // that's copying a commander … is not a commander"), because the designation
+    // is an attribute of the CARD rather than a characteristic, and CR 707.2's
+    // copiable values are only the printed characteristics. So no member's write
+    // can flip another member's gate, and the two creations commute up to
+    // relabeling. Proving
+    // that needs "this creation cannot produce a commander", which no context-free
+    // recognizer in scope can see: the read's census is `Census::Any` (a commander
+    // may be any permanent type, CR 903.3), so the census/zone/controller
+    // disjointness rows all overlap. Fail-closed prompt, never an under-prompt.
+    //
+    // The alternative — declaring the commander gate read-free — is exactly the
+    // unsound classification this ledger row exists to avoid: a sibling that
+    // MOVES, steals or phases out a real commander genuinely flips the gate.
+    //
+    // CONSUMPTION: this row is gated like every other one — the exact-set
+    // `DOCUMENTED_OVER_PROMPT` assertion runs BEFORE the STRICT PROOF-GATE (see
+    // `ordering_parity_sweep`), so an unrelated red gate can no longer leave a
+    // newly-added row unverified. That ordering was introduced with this row for
+    // exactly that reason: at the time it landed the sweep was red on 18
+    // unexplained same-event over-prompts (`hidden *` / `opal *` / `veiled *` /
+    // `lurking skirge` / `impending disaster` / `veil of birds`) and the
+    // completeness assertion downstream of the gate never executed. Those 18 are
+    // CORPUS DRIFT, not this change: every one carries
+    // `TriggerCondition::SourceMatchesFilter` or no trigger condition, ZERO carry
+    // `ControlsCommander` (checked against the full export), and this change's
+    // classification edits are confined to the `ControlsCommander` arms of
+    // `rw_trigger_condition` / `rw_static_condition` / `rw_ability_condition` and
+    // `scan_*_condition`. They must land as their own corpus-drift rows, NOT
+    // folded in here. The `over_prompt_hit members` line printed above the
+    // assertion names the consumed set directly, so the next maintainer need not
+    // re-derive it.
+    // UPDATE (Nov 2026 full-db reconciliation, issue #8500): those 18 landed
+    // as their own rows in this const (the "event-object-routed
+    // transformation grants" section plus "impending disaster").
+    "biowaste blob",
+    // ---- dynamic P/T read of frozen or per-source objects (CR 603.10a) ----
+    // Token P/T = total power of the co-departed batch: a frozen LKI read no sibling's
+    // token creation changes, so the copies' tokens are identical in either order.
+    "the skullspore nexus",
+    // -X/-X where X is the mana value of the card THIS source exiled: each member reads
+    // its own exile pile and writes only to it, so the members commute.
+    "cemetery desecrator",
+    // Each member adds one slime counter, then creates a token whose P/T is a CDA (CR 604.3a)
+    // reading the counter total, so either order ends with the same counters and tokens.
+    "gutter grime",
+    // Combat-begin "any opponent may tap an untapped creature they control; if
+    // they do, tap this creature and create a 1/1 Fish" (AST measured). Each
+    // member taps only ITSELF (disjoint self-write) and creates a Fish the
+    // Kraken's controller owns, so no sibling's product feeds another's
+    // "creature they [opponent] control" choice; the opponent's tapped pool is
+    // monotone (tapped stays tapped) and the intervening-if reads only
+    // self-tappedness, which no sibling writes. Identical siblings commute up
+    // to relabeling — either order ends with the same Fish count and tapped
+    // sets. Only visible post-#9830 — the scoped-player parse binds "they
+    // control" to the acting opponent; the pre-regen fixture carried
+    // controller You, which the discriminator auto-ordered.
+    "reservoir kraken",
+    // Dies self-return stamped by the CR 603.6 + CR 400.7e origin walk (AST
+    // measured): the inner ChangeZone is pinned to origin=Graveyard,
+    // target=SelfRef where the pre-regen fixture carried origin=null /
+    // target=TriggeringSource, which the batch discriminator auto-ordered.
+    // Each co-departing member returns ITS OWN source from its own graveyard
+    // departure — disjoint SelfRef referents, no shared pile, counter, or
+    // choice consumed — so identical siblings commute up to relabeling. The
+    // flipped prompt is fail-closed (CR 603.3b choice preserved), not
+    // rules-required. Class closed at 3: the export carries no other stamped
+    // self-return dies-aura.
+    "bronzehide lion",
+    // Same stamped self-return shape as bronzehide lion, plus a WasType(Creature)
+    // intervening-if ("if it was a creature"): the condition reads each member's
+    // OWN pre-departure type (per-source LKI, CR 608.2h), still disjoint, so the
+    // members commute. Fail-closed over-prompt, not genuine.
+    "harold and bob, first numens",
+    // Same stamped self-return shape as bronzehide lion, plus WasType(Creature)
+    // ("if it was a creature") — per-source condition read, disjoint referents,
+    // members commute. Fail-closed over-prompt, not genuine.
+    "old-growth troll",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event
@@ -236,12 +496,29 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
     // and the sweep skips Unimplemented-bearing triggers.
     "great desert hellion",
+    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockPairing{Either,
+    // None}, subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
+    // ITS OWN departure row's block pairings (CR 608.2h), so the members destroy
+    // different creatures, and a leaves trigger one resolution sets off resolves
+    // before the next (Reveillark returning the creature the other Abu Ja'far
+    // destroyed, CR 603.6c): the outcome differs by order (CR 603.3b intended
+    // prompt). `MemberBinding::SourceCombatPairing` refuses the batch. Runtime pin:
+    // two_abu_jafars_dying_together_let_their_controller_order_the_triggers
+    "abu ja'far",
+    // Dies during combat (self_ref): DamageAll{6, creatures with CombatRelation{
+    // BlockPairing{SubjectIsBlocker, ThisCombat}, subject: Source}} (AST measured). Each
+    // co-departing Membrane damages the attacker IT blocked, the attacker dies to
+    // state-based actions between the two resolutions, and a leaves trigger it
+    // sets off resolves before the next (CR 603.6c): same shape as Abu Ja'far.
+    // Runtime pin:
+    // two_cathedral_membranes_dying_together_let_their_controller_order_the_triggers
+    "cathedral membrane",
 ];
 
 /// R3 HIGH-1 (PR #5072 review): SAME-EVENT GENUINE member-bound order-dependence —
 /// the REAL under-prompts the maintainer review caught. The base engine auto-ordered
 /// ALL same-event groups unconditionally (CR 603.3b DEFERRED); the same-event member-
-/// bound discriminator (`profiles_conflict`: `if s.same_event && p.reads_member_bound`)
+/// bound discriminator (`profiles_conflict`: `if s.same_event && p.reads_member_bound()`)
 /// now correctly PROMPTS them. Kept SEPARATE from the conservative class-count below
 /// (rider-3 §7 honesty), analogous to `BATCH_GENUINE_ROWS`. Every member reads
 /// per-source bound storage AND routes a SHARED object into it, so the identical-
@@ -618,7 +895,7 @@ fn ordering_parity_sweep() {
                     } else if profile.reads_member_bound() {
                         // R3 HIGH-1: the same-event member-bound over-prompt CLASS.
                         // Predicate-keyed (mirrors the discriminator's own gate
-                        // `s.same_event && p.reads_member_bound` exactly — one
+                        // `s.same_event && p.reads_member_bound()` exactly — one
                         // predicate, two consumers), membership DERIVED not enumerated
                         // (rider-1: corpus-churn-robust — a 48-name allowlist would
                         // break on every regen). CONSERVATIVE by construction: an
@@ -763,6 +1040,46 @@ fn ordering_parity_sweep() {
         se_event_object_class.len(),
         se_event_object_class
     );
+    // CONSUMED `DOCUMENTED_OVER_PROMPT` membership, emitted as evidence for the same
+    // reason the two class memberships above are: it names exactly which ledger rows
+    // the corpus hit on this run. `over_prompt_hit` is a subset of
+    // `DOCUMENTED_OVER_PROMPT` by construction (both insertion sites are inside a
+    // `DOCUMENTED_OVER_PROMPT.contains(..)` arm), so this line plus the const is a
+    // complete consumption proof on its own. Evidence only — the exact-set assertion
+    // immediately below is the gate.
+    eprintln!(
+        "over_prompt_hit members ({}/{}): {:?}",
+        over_prompt_hit.len(),
+        DOCUMENTED_OVER_PROMPT.len(),
+        over_prompt_hit
+    );
+
+    // LEDGER COMPLETENESS, adjudicated BEFORE the STRICT PROOF-GATE below (full-DB
+    // only — the committed fixture lacks these cards). Every allowlist entry MUST be
+    // consumed: an unhit entry is stale bookkeeping (the card cleared — remove it —
+    // or its name drifted).
+    //
+    // Ordering is load-bearing, not cosmetic. The strict gate panics on ANY
+    // unexplained decision diff, including pure corpus drift that has nothing to do
+    // with the ledger; while it is red, a `DOCUMENTED_OVER_PROMPT` row added by
+    // ordinary card work would never be checked at all, so a stale or mis-keyed row
+    // could ride along unverified and only surface later, attributed to whoever
+    // cleared the unrelated drift. Checking consumption first makes every ledger row
+    // gated on every full-DB run. The gate's own diff count is carried in this
+    // message so a simultaneous drift is never hidden by an earlier panic.
+    if full_db {
+        let expected_over_prompt: BTreeSet<String> = DOCUMENTED_OVER_PROMPT
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            over_prompt_hit,
+            expected_over_prompt,
+            "DOCUMENTED_OVER_PROMPT stale/unhit entries ({} unexplained decision diff(s) \
+             also pending at the STRICT PROOF-GATE below)",
+            unexplained.len()
+        );
+    }
 
     assert!(
         unexplained.is_empty(),
@@ -799,11 +1116,26 @@ fn ordering_parity_sweep() {
             floor_hadcounters_batch_self >= 1,
             "HadCounters batch_self auto floor: {floor_hadcounters_batch_self} < 1"
         );
-        // retained_prompt: measured 285 @ b1b3c873e; floor = ⌈285·0.95⌉. Makes the D5
+        // retained_prompt: measured 266 @ ea0327b0b (Nov 2026 full-db
+        // reconciliation, issue #8500); floor = ⌈266·0.95⌉. Makes the D5
         // legacy-prompt override population a real regression tripwire (M4 → 0).
+        // Re-pinned from 271 (measured 285 @ b1b3c873e — a local measurement
+        // commit absent upstream, irreproducible from repo state since
+        // card-data.json is gitignored): the Nov-1→Nov-4 parser window rebound
+        // 27 self-return dies triggers from legacy event-context refs (origin
+        // null / target TriggeringSource) to precise origin=Graveyard /
+        // target=SelfRef — the d208c0c18 (#8851) whole-chain origin stamp,
+        // verified trigger-by-trigger across all 27 (mover list in the
+        // reconciliation PR body; zero gaps introduced, zero joiners). 24 went
+        // precise-auto (sound: disjoint SelfRef self-returns); 3 (bronzehide
+        // lion, harold and bob, old-growth troll) stayed prompt as documented
+        // over-prompts in DOCUMENTED_OVER_PROMPT. No sweep/profile code changed
+        // in the window (only a test-only commit touches those files), and the
+        // fixture-subset count pinned (75=75 across the window), so the
+        // export-side movement is fully accounted.
         assert!(
-            floor_retained_prompt >= 271,
-            "retained-prompt floor: {floor_retained_prompt} < 271"
+            floor_retained_prompt >= 253,
+            "retained-prompt floor: {floor_retained_prompt} < 253"
         );
         // t1_source_indep: measured 2871 @ b1b3c873e; floor = ⌊2871·0.95⌋.
         // Deterministic tripwire for the `source_independent` predicate (M1 → 0).
@@ -825,14 +1157,9 @@ fn ordering_parity_sweep() {
         // Ledger completeness (full-DB only — the committed fixture lacks these
         // cards). Every allowlist entry MUST be consumed: an unhit entry is stale
         // bookkeeping (the card cleared — remove it — or its name drifted).
-        let expected_over_prompt: BTreeSet<String> = DOCUMENTED_OVER_PROMPT
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            over_prompt_hit, expected_over_prompt,
-            "DOCUMENTED_OVER_PROMPT stale/unhit entries"
-        );
+        // `DOCUMENTED_OVER_PROMPT`'s exact-set assertion is deliberately NOT here:
+        // it runs ABOVE the STRICT PROOF-GATE (see the comment there) so unrelated
+        // corpus drift cannot leave a newly-added over-prompt row unverified.
         let expected_batch_genuine: BTreeSet<String> =
             BATCH_GENUINE_ROWS.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -856,7 +1183,7 @@ fn ordering_parity_sweep() {
         // ~15% churn tolerance (`>=`, corpus-churn-robust per rider-1 — the class is
         // predicate-keyed so its membership churns with the corpus). NON-vacuity /
         // mutation tripwire: deleting the discriminator row (`s.same_event &&
-        // p.reads_member_bound`) makes every member auto-order ⇒ this count collapses
+        // p.reads_member_bound()`) makes every member auto-order ⇒ this count collapses
         // to 0 ⇒ floor trips. Guards the HIGH-1 fix itself against silent regression.
         assert!(
             se_member_bound_class.len() >= 35,
@@ -898,13 +1225,15 @@ fn ordering_parity_sweep() {
                 .intersection(&se_event_object_class)
                 .collect::<Vec<_>>()
         );
-        // cat-1 exact-hit: the 6 measured same-event flips. Your Inescapable Doom is
+        // cat-1 exact-hit: the measured same-event flips. Your Inescapable Doom is
         // expected-UNHIT (its counter feed parses to Any so the sweep never forms its
         // group); if that parser gap is ever fixed it starts hitting and this assert
         // forces the bookkeeping update.
         let expected_cat1: BTreeSet<String> = [
             "complex automaton",
             "docent of perfection",
+            "fraying line",
+            "marauding raptor",
             "ouroboroid",
             "promise of tomorrow",
             "sidequest: hunt the mark",
@@ -937,7 +1266,7 @@ fn ctx(
         source_id: ObjectId(source),
         controller: PlayerId(0),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -948,6 +1277,7 @@ fn ctx(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result,
+        provenance: None,
     })
 }
 
@@ -988,6 +1318,7 @@ fn token_power_src() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -995,6 +1326,8 @@ fn token_power_src() -> Effect {
 }
 fn return_all_creatures_gy_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: creature(),
@@ -1238,6 +1571,80 @@ fn n_d_intervening_if_case_a_prompts() {
     );
 }
 
+/// N-D2: the commander intervening-`if` is a LIVE BOARD CENSUS (CR 903.3d), so a
+/// sibling copy whose resolution writes battlefield membership FEEDS it and the
+/// group must PROMPT (CR 603.3b). Biowaste Blob's exact shape ("At the beginning of
+/// your upkeep, if you control a commander, create a token that's a copy of this
+/// creature") — the card the full-DB sweep's `DOCUMENTED_OVER_PROMPT` row names.
+///
+/// `game::commander::controls_any_commander` / `controls_own_commander` scan
+/// `state.battlefield` for `is_commander && controller [&& owner] &&
+/// is_phased_in`. Only the designation and owner conjuncts are frozen card
+/// attributes (CR 903.3); membership, control and CR 702.26b phased-in status are
+/// all sibling-mutable, so the gate is NOT read-free.
+///
+/// BOTH `CommanderOwnership` arms are driven. Biowaste Blob's printed gate is
+/// "if you control **a** commander" ⇒ `Any` (verified against
+/// `data/mtgjson/AtomicCards.json`), which is the arm the paired
+/// `DOCUMENTED_OVER_PROMPT` ledger row actually exercises; `Own` is the arm every
+/// card in the pool that says "your commander" (Fight for the Throne) produces.
+/// `commander_control_read` is shared by both, so a regression on either arm
+/// alone must red here.
+///
+/// REVERT-TO-RED: classify `TriggerCondition::ControlsCommander` as
+/// `RwProfile::empty()` again (its pre-fix profile) and BOTH gated groups
+/// auto-order — CR 603.3b sibling-ordering silently reopened.
+///
+/// The second group per arm is the discrimination proof and pins that the prompt
+/// is the GATE's read, not the ability: the byte-identical ability with NO
+/// condition still auto-orders. (Both groups are source-DEPENDENT —
+/// `CopyTokenOf{SelfRef}` — so neither takes the T1 `source_independent` fast
+/// path, which is what makes the feed row observable at all.)
+#[test]
+fn n_d2_commander_intervening_if_is_fed_by_a_sibling_membership_write() {
+    let state = empty_state();
+    let copy_self = || Effect::CopyTokenOf {
+        target: TargetFilter::SelfRef,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        tapped: false,
+        count: qfix(1),
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    };
+    let ev = shared_etb_event();
+
+    for ownership in [
+        // CR 903.3d "a commander" — Biowaste Blob, the `DOCUMENTED_OVER_PROMPT` row.
+        crate::types::ability::CommanderOwnership::Any,
+        // CR 903.3 + CR 109.5 "your commander" — Fight for the Throne.
+        crate::types::ability::CommanderOwnership::Own,
+    ] {
+        let gate = TriggerCondition::ControlsCommander { ownership };
+        let gated = vec![
+            ctx(10, ra(copy_self()), Some(gate.clone()), ev.clone(), None),
+            ctx(11, ra(copy_self()), Some(gate), ev.clone(), None),
+        ];
+        assert!(
+            !group_is_order_independent(&state, &gated),
+            "CR 903.3d + CR 603.3b: the commander census the CR 603.4 gate reads is fed by \
+             a sibling's battlefield-membership write ⇒ prompt (ownership = {ownership:?})"
+        );
+    }
+
+    let ungated = vec![
+        ctx(10, ra(copy_self()), None, ev.clone(), None),
+        ctx(11, ra(copy_self()), None, ev, None),
+    ];
+    assert!(
+        group_is_order_independent(&state, &ungated),
+        "discrimination: the SAME ability with no intervening-if auto-orders, so the \
+         prompts above are the commander gate's board read and nothing else"
+    );
+}
+
 /// N-F: die_result conjunct unit pin (CR 706.2 + CR 603.12). Two otherwise-
 /// identical no-input source-independent triggers off one event with DIFFERENT
 /// stamped die results are NOT the same state transformation ⇒ not order-
@@ -1399,7 +1806,7 @@ fn ctx_c(
         source_id: ObjectId(source),
         controller: PlayerId(controller),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1410,6 +1817,7 @@ fn ctx_c(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     })
 }
 
@@ -1467,6 +1875,8 @@ fn search_own_creatures() -> Effect {
 /// no `enters_under`) that consumes the search's `You` move-owner fact.
 fn change_zone_lib_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination: Zone::Battlefield,
         target: TargetFilter::Any,
@@ -1882,6 +2292,8 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
 /// A `ChangeZone{target → Battlefield, enters_under: You}` return (Exile → bf).
 fn change_zone_return(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Exile),
         destination: Zone::Battlefield,
         target,
@@ -1906,7 +2318,8 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        chooser: crate::types::ability::ControllerRef::You,
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),
     })
@@ -2013,7 +2426,7 @@ fn b2_dotd_member_bound_pin() {
 /// Revert-fail (both edits independently load-bearing): (1) restoring the bare
 /// `p.source_independent()` disjunct at `profiles_conflict`'s same-event fast path
 /// takes the member-bound group down the fast path ⇒ AUTO (RED); (2) deleting the
-/// `if s.same_event && p.reads_member_bound { return true }` discriminator lets it
+/// `if s.same_event && p.reads_member_bound() { return true }` discriminator lets it
 /// fall through to the feed rows, which check read/write KIND overlap not per-source
 /// storage (the TrackedSet return writes membership with no matching read) ⇒ AUTO
 /// (RED). Before this PR's same-event predicate the base engine auto-ordered ALL
@@ -2194,6 +2607,8 @@ fn b3_source_independent_and_persist_false() {
 
     let self_sac = || {
         sacrifice_all_own_creatures().sub_ability(ra(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,

@@ -10,7 +10,9 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::EffectKind;
-use engine::types::ability::{AbilityCost, ContinuousModification, Effect, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, ContinuousModification, Effect, TargetChoiceTiming, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -86,6 +88,11 @@ fn nahiri_plus_two_attach_sub_is_optional_and_targets_last_created() {
     let Effect::Attach { target, .. } = attach.effect.as_ref() else {
         panic!("expected Attach sub, got {:?}", attach.effect);
     };
+    assert_eq!(
+        attach.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "untargeted Equipment selection happens only after accepting the optional instruction"
+    );
     assert_eq!(
         *target,
         TargetFilter::LastCreated,

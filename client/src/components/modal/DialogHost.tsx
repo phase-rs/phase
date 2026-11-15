@@ -30,7 +30,10 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "OpeningHandBottomCards",
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
+  "ChooseStartingPlayer",
   "GameOver",
+  // Eye to Eye / Mouth to Mouth render their own full-screen ContestOverlay.
+  "PhysicalContest",
 ]);
 
 // `WaitingFor` variants whose UI deliberately uses `pointer-events: none` so
@@ -48,10 +51,14 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "TriggerTargetSelection",
   "CopyTargetChoice",
   "CopyRetarget",
-  "RetargetChoice",
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "EquipTarget",
+  "ChooseTokenHost",
+  "UntapChoice",
+  "ChooseUntapSubset",
+  "ChooseObjectsSelection",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
@@ -62,6 +69,21 @@ export function isClickThroughWaitingFor(
   objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
+  // CR 115.7: only a one-target retarget uses the board-picker. An `All`
+  // retarget renders RetargetChoiceModal, whose card choices and confirmation
+  // button need the host to retain pointer events.
+  if (waitingFor.type === "RetargetChoice") {
+    return waitingFor.data.scope.type === "Single";
+  }
+  // CR 601.2c + CR 115.1: a copy announcement's announcing-opponent election
+  // is a modal choice, not a board pick.
+  if (waitingFor.type === "CopyRetarget" && waitingFor.data.announcer_election) {
+    return false;
+  }
+  // CR 608.2d: only a single-pick object selection is a board pick; a
+  // multi-pick selection renders ProliferateModal, whose toggles and Confirm
+  // need the host's pointer events.
+  if (waitingFor.type === "ChooseObjectsSelection" && waitingFor.data.max !== 1) return false;
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }
@@ -88,7 +110,7 @@ function isClickThroughDialog(
   // `ManaPayment` WaitingFor only ever reaches the UI when board taps are live.)
   // Convoke/improvise (CR 702.51a / CR 702.126a), which additionally tap
   // creatures/artifacts, are a subset of this same click-through behavior.
-  return waitingFor.type === "ManaPayment";
+  return waitingFor.type === "ManaPayment" || waitingFor.type === "ManaAbilityManaPayment";
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {
@@ -169,9 +191,13 @@ export function DialogHost({ children }: { children: ReactNode }) {
   const isNarrow = useIsNarrowViewport();
   // Only apply the peek slide transform while peeked. Framer-motion keeps a
   // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
-  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
-  // such as ChooseXValueUI — the slider looks fine but ignores drags until
-  // something else reflows the tree (issue #2427).
+  // which breaks pointer hit-testing in bottom-anchored panels — the control
+  // looks fine but ignores input until something else reflows the tree
+  // (issue #2427). Originally hit `<input type="range">` in ChooseXValueUI;
+  // that slider no longer exists, and the live subjects are now the amount box
+  // and its ± steppers (AmountInput), which ChooseXValueUI's mount-integration
+  // test drives for exactly this reason. The guard is NOT obsolete just because
+  // the control it was written for is gone.
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }

@@ -12,7 +12,7 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -101,5 +101,72 @@ fn pool_mana_alone_cannot_pay_hogaak() {
         runner.state().players[P0.0 as usize].mana_pool.total(),
         pool_before,
         "no pool mana may be spent on a cast that cannot legally be paid"
+    );
+}
+
+/// Hogaak's real `{5}{B/G}{B/G}` cost is payable from its graveyard only when
+/// Convoke supplies the two green hybrid pips and Delve exiles five graveyard
+/// cards for the generic component. The payment permissions compose; no pool
+/// mana is available or spent.
+#[test]
+fn hogaak_combines_convoke_and_delve_from_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hogaak = scenario
+        .add_creature_to_graveyard(P0, "Hogaak, Arisen Necropolis", 8, 8)
+        .from_oracle_text(HOGAAK_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::BlackGreen, ManaCostShard::BlackGreen],
+            generic: 5,
+        })
+        .id();
+    let convoker_a = scenario.add_creature(P0, "Green Convoker A", 1, 1).id();
+    let convoker_b = scenario.add_creature(P0, "Green Convoker B", 1, 1).id();
+    let delve_fuel: Vec<ObjectId> = (0..5)
+        .map(|index| {
+            scenario
+                .add_spell_to_graveyard(P0, &format!("Delve Fuel {index}"), true)
+                .id()
+        })
+        .collect();
+
+    let mut runner = scenario.build();
+    for convoker in [convoker_a, convoker_b] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&convoker)
+            .expect("convoker exists")
+            .color
+            .push(ManaColor::Green);
+    }
+
+    let outcome = runner
+        .cast(hogaak)
+        .delve_with(&delve_fuel)
+        .convoke_with(&[convoker_a, convoker_b])
+        .resolve();
+    let state = outcome.state();
+
+    assert_eq!(
+        state.objects[&hogaak].zone,
+        Zone::Battlefield,
+        "Hogaak must be cast from the graveyard when its real cost is fully covered"
+    );
+    assert!(
+        delve_fuel
+            .iter()
+            .all(|fuel| state.objects[fuel].zone == Zone::Exile),
+        "Delve must exile exactly the selected graveyard cards"
+    );
+    assert!(
+        [convoker_a, convoker_b]
+            .iter()
+            .all(|convoker| state.objects[convoker].tapped),
+        "Convoke must tap both green creatures for Hogaak's hybrid pips"
+    );
+    assert!(
+        !state.objects[&hogaak].mana_spent_to_cast,
+        "Hogaak's restriction forbids spending ordinary mana"
     );
 }

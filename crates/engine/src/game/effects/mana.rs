@@ -1,36 +1,193 @@
+use crate::game::mana_sources::mana_type_to_color;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::{mana_payment, mana_sources};
 #[cfg(test)]
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
     ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
-    ManaSpendRestriction, ObjectScope, ResolvedAbility, TargetFilter, TargetRef,
+    ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, ResolvedAbility, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::ability::{DevotionColors, QuantityRef};
+use crate::types::events::{GameEvent, ManaAbilityTriggerState};
 use crate::types::game_state::{
     GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
 };
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 use crate::types::player::PlayerId;
 
-/// CR 106.4: The player who receives (and, when a color is chosen, chooses) the
-/// mana produced by an `Effect::Mana`. A subject-led / chosen-player clause
-/// ("Choose a player. That player adds one mana of any color they choose" —
-/// Spectral Searchlight, Stadium Vendors) carries a player context-ref in
-/// `recipient_filter`; a non-player-ref filter or `None` leaves the controller
-/// as the recipient. Shared by the immediate `resolve` path, the color-choice
-/// prompt, and the prompt-completion path so all three agree on the recipient.
+/// CR 601.2c + CR 608.2b: A view of `ability` whose `targets` contain only the
+/// target chosen for `slot`, re-validated against that slot's own filter.
+/// Shared quantity resolution (`QuantityRef::TargetZoneCardCount`,
+/// `LifeTotal { player: Target }`) reads "the first player target", so each role
+/// must be resolved against a view holding only its own — otherwise the
+/// recipient at index 0 would be read as the count source. Scoping HERE keeps
+/// `game/quantity.rs` slot-agnostic, because `TargetZoneCardCount` serves many
+/// non-mana cards.
+///
+/// Returns `None` when the role declares no filter for `slot`, when that filter
+/// is a context-ref (no slot surfaced), when the index is out of range, or when
+/// the chosen target is no longer legal (CR 608.2b) — callers distinguish
+/// "no such role" from "role present but target illegal" via `role.filter_for`.
+fn ability_scoped_to_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    role: &ManaTargetRole,
+    slot: ManaTargetSlot,
+) -> Option<ResolvedAbility> {
+    // The role index is a declared position; it is also the stored position
+    // because resolution validation keeps every role of a multi-role mana in
+    // place (`OccurrenceVerdict::IllegalRetained`) unless all are illegal.
+    let index = role.slot_index(slot)?;
+    let filter = role.filter_for(slot)?;
+    let chosen = ability.targets.get(index)?;
+    let legal = crate::game::targeting::validate_targets_for_ability(
+        state,
+        std::slice::from_ref(chosen),
+        filter,
+        ability,
+    );
+    let _kept = legal.into_iter().next()?;
+    let mut scoped = ability.clone();
+    scoped.project_target_occurrences(&retain_only_player_at(ability, Some(index)));
+    Some(scoped)
+}
+
+/// CR 601.2c: Narrow `ability.targets` to ONE player target — the entry at
+/// `keep`, or none at all when `keep` is `None` — while leaving every NON-player
+/// target in place at its original position.
+///
+/// Scoping must be confined to the axis the shared quantity resolvers actually
+/// read. `QuantityRef::TargetZoneCardCount` and `LifeTotal { player: Target }`
+/// scan for the FIRST `TargetRef::Player`, so leaving two players visible is
+/// what let a count read the recipient. Object-scoped production
+/// (`ManaProduction::AnyCombinationOfObjectColors { scope: Target }` via
+/// `object_colors_for_scope`) reads an OBJECT target from the same vec and
+/// requires nothing about the player roles — clearing the whole vec would make
+/// that half of the production silently produce no colors, which CR 608.2b does
+/// not license: only the part that "requires information about an illegal
+/// target" fails.
+///
+/// Returns the kept POSITIONS: scoping is an occurrence projection
+/// (`ResolvedAbility::project_target_occurrences`), so each kept occurrence
+/// keeps its own pin.
+fn retain_only_player_at(ability: &ResolvedAbility, keep: Option<usize>) -> Vec<usize> {
+    ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| !matches!(t, TargetRef::Player(_)) || Some(*i) == keep)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// CR 601.2c + CR 608.2b: The ability view the production COUNT resolves
+/// against. FOUR distinct cases, which must not be collapsed:
+///
+/// 1. No count-source role declared (no role at all, or `Recipient`-only —
+///    Jetfire, and every single-role mana). The count reads nothing
+///    target-derived, so the unscoped ability is correct and this preserves
+///    today's behavior exactly.
+/// 2. The count source is a CONTEXT REF (`ScopedPlayer`, `TriggeringPlayer`,
+///    …). It surfaces no target slot, so there is no chosen target to be
+///    illegal — the player comes from context, exactly as the recipient path
+///    does. Resolving it through the CR 608.2b branch instead would silently
+///    yield 0 under a rule that does not apply, because nothing here is an
+///    illegal target.
+/// 3. A count source is declared, surfaces a slot, and its chosen target is
+///    still legal. Narrow to that ONE player, so shared "first player target"
+///    quantity resolution (`QuantityRef::TargetZoneCardCount`,
+///    `LifeTotal { player: Target }`) cannot read the recipient instead.
+/// 4. A count source is declared but its chosen target is no longer legal.
+///    CR 608.2b: the effect "fails to determine any such information" about an
+///    illegal target — so expose NO player, resolving the count to 0. Falling
+///    back to the unscoped ability here would be a BUG: it still holds the
+///    (legal) recipient, so the count would read the RECIPIENT's hand instead
+///    of failing.
+///
+/// In cases 3 and 4 only the PLAYER axis is narrowed; non-player targets stay
+/// put (see `retain_only_player_at`).
+fn count_scoped_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    role: Option<&ManaTargetRole>,
+) -> ResolvedAbility {
+    // Case 1: nothing target-derived to scope.
+    let Some(role) = role.filter(|r| r.count_source().is_some()) else {
+        return ability.clone();
+    };
+    // Case 2: context-ref count source — read the player from context, mirroring
+    // `mana_effect_recipient`, and expose it as the sole player target.
+    if let Some(filter) = role.count_source().filter(|filter| filter.is_context_ref()) {
+        let from_context = super::resolve_player_for_context_ref(state, ability, filter);
+        let mut scoped = ability.clone();
+        scoped.project_target_occurrences(&retain_only_player_at(ability, None));
+        if let Some(player) = from_context {
+            scoped.push_target(TargetRef::Player(player));
+        }
+        return scoped;
+    }
+    // Case 3, else case 4.
+    ability_scoped_to_slot(state, ability, role, ManaTargetSlot::CountSource).unwrap_or_else(|| {
+        let mut scoped = ability.clone();
+        scoped.project_target_occurrences(&retain_only_player_at(ability, None));
+        scoped
+    })
+}
+
+/// CR 106.4 + CR 608.2b: Which player's mana pool receives the mana.
+/// `None` means the effect declares a recipient whose chosen target is no longer
+/// legal — the mana is not added to any pool ("illegal targets won't be affected
+/// by parts of the effect for which they're illegal"). This is DISTINCT from a
+/// role with no recipient at all (Jeska's Will, Carpet of Flowers), which
+/// correctly deposits into `ability.controller`.
+///
+/// Shared by the immediate `resolve` path, the color-choice prompt, and the
+/// prompt-completion path so all three agree on the recipient. No quantity is
+/// inspected anywhere — the role states the answer.
+/// CR 106.4 + CR 109.5: single recipient authority for mana-echo production
+/// ("add one mana of any type that land produced"), shared by the prompt
+/// origin in `resolve` and the `handle_choose_mana_effect` completion. The
+/// recipient is the tap event's tapper — never the controller default — so
+/// an unscoped echo observing another player's tap directs the choice and
+/// the deposit to the tapping player (the sibling single-type contract:
+/// P0 source observing P1's tap credits P1, not P0). `None` when no tap
+/// event is live; echo produces no mana then anyway (CR 106.5).
+fn echo_recipient(state: &GameState) -> Option<PlayerId> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .and_then(|event| match event {
+            GameEvent::TappedForMana { player_id, .. }
+            | GameEvent::ManaAbilityProduced { player_id, .. } => Some(*player_id),
+            _ => None,
+        })
+}
+
 fn mana_effect_recipient(
     state: &GameState,
     ability: &ResolvedAbility,
-    recipient_filter: &Option<TargetFilter>,
-) -> PlayerId {
-    match recipient_filter {
-        Some(filter) if filter.is_context_ref() => {
-            super::resolve_player_for_context_ref(state, ability, filter)
-        }
-        _ => ability.controller,
+    role: Option<&ManaTargetRole>,
+) -> Option<PlayerId> {
+    let Some(filter) = role.and_then(ManaTargetRole::recipient) else {
+        // CR 106.4: no recipient role declared — the controller adds the mana.
+        return Some(ability.controller);
+    };
+    // CR 106.4: context-ref recipients (ScopedPlayer, TriggeringPlayer,
+    // ParentTargetController, chosen player) resolve via the context, not
+    // `ability.targets`.
+    if filter.is_context_ref() {
+        return super::resolve_player_for_context_ref(state, ability, filter);
     }
+    // CR 115.1 + CR 106.4: "target player adds …" (Jetfire, Ingenious
+    // Scientist) — the targeted player was chosen at announcement and lives in
+    // this role's OWN slot. An illegal chosen target yields `None`: the mana is
+    // not deposited anywhere (CR 608.2b). Never fall back to the controller —
+    // that would hand a targeted player's mana to the caster.
+    let scoped = ability_scoped_to_slot(state, ability, role?, ManaTargetSlot::Recipient)?;
+    scoped.targets.iter().find_map(|t| match t {
+        TargetRef::Player(player_id) => Some(*player_id),
+        TargetRef::Object(_) => None,
+    })
 }
 
 /// Mana effect: adds mana to the recipient's mana pool (CR 106.4).
@@ -39,42 +196,92 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (produced, restrictions, grants, expiry, mana_recipient_filter) = match &ability.effect {
+    let (produced, restrictions, grants, expiry, mana_role) = match &ability.effect {
         Effect::Mana {
             produced,
             restrictions,
             grants,
             expiry,
-            // CR 106.4 + CR 115.1: `target` names the player whose mana pool
-            // receives the mana. For Jeska's Will mode 1 the count quantity
-            // inside `produced` references the target via `TargetZoneCardCount`;
-            // for subject-led mana clauses ("the active player adds {C}{C} …",
-            // Belbe) it is the recipient itself, resolved below.
+            // CR 601.2c: `target` is a ROLE. The RECIPIENT names the player
+            // whose mana pool receives the mana (CR 106.4); the COUNT SOURCE
+            // names the player a `TargetZoneCardCount` / `LifeTotal` quantity
+            // inside `produced` reads. Each is resolved below from its OWN
+            // target slot — no quantity shape is inspected to tell them apart.
             target,
         } => (produced, restrictions, grants, *expiry, target.clone()),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
-    let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
+    // CR 601.2c + CR 608.2b: resolve the production count against a view of the
+    // ability holding ONLY the count source's own chosen target, so shared
+    // "first player target" quantity resolution cannot read the recipient.
+    let count_ability = count_scoped_ability(state, ability, mana_role.as_ref());
+    let count_ability = &count_ability;
+    // CR 605.4a: read back the acceptance decision for the occurrence that is
+    // actually executing rather than re-answering CR 605.1b from a clone the
+    // resolver may already have bound a context referent onto. With no accepted
+    // occurrence live this is byte-for-byte the baseline raw classifier call.
+    let is_triggered_mana_inline =
+        crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
+    // CR 608.2d: a mana-echo body ("add one mana of any type that land
+    // produced") resolving from a multi-type tap event pauses for exactly one
+    // chosen type even inside immediate (triggered-mana) resolution — the
+    // fixed-point authority pauses for and resumes the choice (whitelisted
+    // below) without a stack entry, so the inline gate must not swallow it.
+    // Single-type echo yields no prompt here and falls through to the normal
+    // gate, resolving with no interaction.
+    let echo_pause = crate::game::mana_abilities::echo_body_owes_type_choice(
         ability,
         state.current_trigger_event.as_ref(),
-    );
-    let mana_choice = (!is_triggered_mana_inline)
-        .then(|| {
-            crate::game::mana_abilities::mana_choice_prompt(
-                &ability.effect,
-                state,
-                ability.source_id,
-                Some(ability),
-            )
-        })
-        .flatten();
+    )
+    .then(|| {
+        crate::game::mana_abilities::mana_choice_prompt(
+            &ability.effect,
+            state,
+            ability.source_id,
+            Some(ability),
+            Some(count_ability),
+        )
+    })
+    .flatten();
+    let mana_choice = echo_pause.or_else(|| {
+        (!is_triggered_mana_inline)
+            .then(|| {
+                crate::game::mana_abilities::mana_choice_prompt(
+                    &ability.effect,
+                    state,
+                    ability.source_id,
+                    Some(ability),
+                    Some(count_ability),
+                )
+            })
+            .flatten()
+    });
     if let Some(choice) = mana_choice {
         // CR 106.4: the player who *chooses* the color is the effect's named
         // recipient — for "that player adds one mana of any color they choose"
         // (Spectral Searchlight, Stadium Vendors) that is the chosen player, not
         // the controller. Resolve it here so the prompt is directed correctly;
         // `handle_choose_mana_effect` re-derives the same recipient for deposit.
-        let prompt_player = mana_effect_recipient(state, ability, &mana_recipient_filter);
+        //
+        // CR 608.2b: when the declared recipient's chosen target is no longer
+        // legal, no player adds this mana, so there is no color for anyone to
+        // choose — the mana part of the effect simply does nothing.
+        //
+        // CR 106.4 + CR 109.5: a mana-echo production reads its recipient from
+        // the tap event's tapper through the single `echo_recipient` authority
+        // below — the same authority completion uses — so prompt direction and
+        // deposit agree even for unscoped echo observing another player's tap
+        // (where the controller default would misdirect the choice).
+        let prompt_recipient = match &ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                ..
+            } => echo_recipient(state),
+            _ => mana_effect_recipient(state, ability, mana_role.as_ref()),
+        };
+        let Some(prompt_player) = prompt_recipient else {
+            return Ok(());
+        };
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: prompt_player,
             choice,
@@ -102,14 +309,20 @@ pub fn resolve(
                 // Resolve the count from the production descriptor, then produce
                 // that many units of the override color — mirrors the behavior of
                 // `resolve_single_color_override` in `mana_abilities.rs`.
-                let count = resolve_mana_types_with_ability(produced, &*state, ability).len();
+                let count = match mana_type_to_color(color) {
+                    Some(chosen) => {
+                        let bound = bind_any_one_color_choice(produced, chosen);
+                        resolve_mana_types_with_ability(&bound, &*state, count_ability).len()
+                    }
+                    None => resolve_mana_types_with_ability(produced, &*state, count_ability).len(),
+                };
                 vec![color; count]
             }
             Some(crate::types::game_state::ProductionOverride::Combination(types)) => types,
-            None => resolve_mana_types_with_ability(produced, &*state, ability),
+            None => resolve_mana_types_with_ability(produced, &*state, count_ability),
         }
     } else {
-        resolve_mana_types_with_ability(produced, &*state, ability)
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
     };
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
@@ -126,25 +339,36 @@ pub fn resolve(
         // CR 106.3 + CR 109.5: "add one mana of any type that land produced" —
         // the bonus mana goes to the player who tapped the land (the
         // `TappedForMana` event's `player_id`), not the trigger's controller.
-        ManaProduction::TriggerEventManaType => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(|event| match event {
-                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
-                _ => None,
-            })
-            .unwrap_or(ability.controller),
+        // Read through the single `echo_recipient` authority shared with the
+        // prompt origin and the choice completion below.
+        ManaProduction::TriggerEventManaType => echo_recipient(state).unwrap_or(ability.controller),
         // CR 106.4: A subject-led mana clause routes the mana to the named
         // player ("the active player adds {C}{C} …" on a Phase trigger, "that
         // player adds one mana of any color" on Spectral Searchlight).
-        _ => mana_effect_recipient(state, ability, &mana_recipient_filter),
+        _ => match mana_effect_recipient(state, ability, mana_role.as_ref()) {
+            Some(player) => player,
+            // CR 608.2b: "Illegal targets won't be affected by parts of the
+            // effect for which they're illegal." A declared recipient whose
+            // chosen target is no longer legal receives nothing, and the mana is
+            // NOT redirected to the controller. The count source's half of the
+            // sentence already resolved above and is unaffected.
+            None => {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            }
+        },
     };
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
-    for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes_from_source_quality(
+    let mut deposited = false;
+    for &mana_type in &mana_types {
+        deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
@@ -155,9 +379,19 @@ pub fn resolve(
             grants,
             expiry,
             events,
-        );
+        )
+        .is_empty();
     }
+    complete_triggered_mana_production(
+        state,
+        ability,
+        is_triggered_mana_inline && deposited,
+        recipient,
+        mana_types,
+        events,
+    );
     record_firebending_if_marked(state, ability, produced_mana, events);
+    record_triggered_ability_added_mana(state, ability, recipient, deposited);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -168,11 +402,45 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 605.1b: a triggered mana ability that deposited mana announces its production, which a
+/// mana ability can trigger from, whether it resolved at once or after a type choice.
+fn complete_triggered_mana_production(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    deposited_triggered_mana: bool,
+    recipient: PlayerId,
+    produced: Vec<ManaType>,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 605.1b is traded away under Off: this production event is emitted only where loop
+    // detection samples, the only modes that can recognise the self-retrigger it may start.
+    if !(deposited_triggered_mana && state.loop_detection.samples()) {
+        return;
+    }
+    let event = GameEvent::ManaAbilityProduced {
+        player_id: recipient,
+        source_id: ability.source_id,
+        produced,
+        trigger_state: ManaAbilityTriggerState::Pending,
+    };
+    // CR 104.4b + CR 732.4: a mandatory self-retrigger inside one mana resolution
+    // (CR 605.4a) is a loop of mandatory actions.
+    if crate::game::triggers::mana_production_retriggers_itself_mandatorily(state, ability, &event)
+    {
+        if state.game_end.is_none() {
+            super::declare_mandatory_loop_draw(state, events);
+        }
+    } else {
+        events.push(event);
+    }
+}
+
 /// CR 106.3 + CR 608.2d: Complete a mana-choice prompt created while a spell
 /// or non-mana ability effect is resolving.
 pub fn handle_choose_mana_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    prompt_player: PlayerId,
     prompt: &ManaChoicePrompt,
     chosen: ManaChoice,
     events: &mut Vec<GameEvent>,
@@ -190,7 +458,12 @@ pub fn handle_choose_mana_effect(
         ));
     };
 
-    let mana_types = chosen_mana_types_for_prompt(state, ability, produced, prompt, chosen)?;
+    // CR 601.2c + CR 608.2b: the prompt-completion path derives the COUNT too
+    // (`SingleColor` multiplies the chosen color by it), so it must read the
+    // count source's own slot for exactly the same reason `resolve` does —
+    // otherwise a `Both` role with a color choice counts the RECIPIENT.
+    let count_ability = count_scoped_ability(state, ability, target.as_ref());
+    let mana_types = chosen_mana_types_for_prompt(state, &count_ability, produced, prompt, chosen)?;
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
             state,
@@ -203,29 +476,70 @@ pub fn handle_choose_mana_effect(
     // same player the color prompt was directed to in `resolve`), not the
     // controller. Priority still returns to the controller below — only the mana
     // is redirected.
-    let recipient = mana_effect_recipient(state, ability, target);
-    let produced_mana = !mana_types.is_empty();
-    for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes_from_source_quality(
+    //
+    // CR 608.2b: `None` means the declared recipient's chosen target is no
+    // longer legal — no player adds this mana, and it is NOT redirected to the
+    // controller.
+    //
+    // CR 106.3 + CR 109.5 (mirrors `resolve` above): a mana-echo production
+    // reads its recipient from the triggering tap event's tapper through the
+    // single `echo_recipient` authority — the same authority the prompt
+    // origin uses — so prompt direction and deposit agree even for unscoped
+    // echo observing another player's tap. The tapper is latched two ways
+    // so suspension cannot lose it: the live trigger event when still
+    // present, and — as the final backstop — the prompt player carried in
+    // `WaitingFor::ChooseManaColor` (which `resolve` directed to this same
+    // recipient when the choice was offered). On every reachable input the
+    // two agree; the backstop only matters if the event was cleared while
+    // the choice was pending.
+    let recipient: Option<PlayerId> = match produced {
+        ManaProduction::TriggerEventManaType => echo_recipient(state).or(Some(prompt_player)),
+        _ => mana_effect_recipient(state, ability, target.as_ref()),
+    };
+    let produced_mana = recipient.is_some() && !mana_types.is_empty();
+    let is_triggered_mana_inline =
+        crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
+    let mut deposited = false;
+    if let Some(recipient) = recipient {
+        for &mana_type in &mana_types {
+            deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
+                state,
+                ability.source_id,
+                mana_type,
+                recipient,
+                false,
+                source_could_produce_two_or_more_colors,
+                &concrete_restrictions,
+                grants,
+                *expiry,
+                events,
+            )
+            .is_empty();
+        }
+        complete_triggered_mana_production(
             state,
-            ability.source_id,
-            mana_type,
+            ability,
+            is_triggered_mana_inline && deposited,
             recipient,
-            false,
-            source_could_produce_two_or_more_colors,
-            &concrete_restrictions,
-            grants,
-            *expiry,
+            mana_types,
             events,
         );
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
+    if let Some(recipient) = recipient {
+        record_triggered_ability_added_mana(state, ability, recipient, deposited);
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
         subject: None,
     });
+
+    // CR 104.1: a production that ended the game ends it immediately, so no priority or parked work follows.
+    if state.game_end.is_some() {
+        return Ok(state.waiting_for.clone());
+    }
 
     // Priority is restored to the ability's controller exactly as before this
     // change (the recipient computed above governs only where the mana lands, a
@@ -264,6 +578,40 @@ fn record_firebending_if_marked(
     );
 }
 
+/// CR 106.4 + CR 607.1c: the single recording authority for "this triggered
+/// ability added mana this turn". Records the resolving ability's exact
+/// `TriggerDefinitionRef` and actual receiving `PlayerId` when `deposited`
+/// is true, meaning at least one `ManaUnit` reached a pool. Two deposit
+/// routes call it: the
+/// `Effect::Mana` resolver (`resolve`, `handle_choose_mana_effect`), and
+/// the resolution-time `AbilityCost::EffectCost { Effect::Mana }` payment
+/// in `costs::pay_ability_cost_inner`. Paying that cost carries out the
+/// resolving ability's own instruction to add mana (CR 118.1 + CR 118.12 +
+/// CR 608.2c), so the mana is added with that ability (Braid of Fire's
+/// cumulative upkeep, CR 702.24a). A `None` ref is the ordinary
+/// non-triggered case: spells, activated abilities, replacement
+/// may-costs. The state-trigger builder passes `None`, so a state trigger records nothing here.
+pub(crate) fn record_triggered_ability_added_mana(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    player: PlayerId,
+    deposited: bool,
+) {
+    // No unit reached a pool (declined, zero-count, prevented, or no legal
+    // recipient): nothing was added with this ability, so there is no record.
+    if !deposited {
+        return;
+    }
+    // Only a triggered ability carries a definition ref; any other resolving
+    // ability that adds mana is outside this per-trigger record by design.
+    let Some(definition_ref) = &ability.trigger_definition_ref else {
+        return;
+    };
+    state
+        .triggered_abilities_added_mana_this_turn
+        .insert((definition_ref.clone(), player));
+}
+
 fn chosen_mana_types_for_prompt(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -278,7 +626,24 @@ fn chosen_mana_types_for_prompt(
                     "Chosen color is not among the legal options".to_string(),
                 ));
             }
-            let count = resolve_mana_types_for_ability(produced, state, ability).len();
+            // CR 106.12a: a mana-echo production ("add ONE mana of any type
+            // that land produced") structurally carries no count — the variant
+            // has no count field — so one choice yields exactly one mana even
+            // when the triggering event produced several types. Every other
+            // SingleColor production multiplies the choice by its resolved
+            // count, with the chosen color bound into choice-reading counts
+            // first (upstream count-binding authority, preserved here).
+            let count = if matches!(produced, ManaProduction::TriggerEventManaType) {
+                1
+            } else {
+                match mana_type_to_color(color) {
+                    Some(chosen) => {
+                        let bound = bind_any_one_color_choice(produced, chosen);
+                        resolve_mana_types_for_ability(&bound, state, ability).len()
+                    }
+                    None => resolve_mana_types_for_ability(produced, state, ability).len(),
+                }
+            };
             Ok(vec![color; count])
         }
         (ManaChoicePrompt::Combination { options }, ManaChoice::Combination(combo)) => {
@@ -317,11 +682,26 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellType(t) => {
                 Some(ManaRestriction::OnlyForSpellType(t.clone()))
             }
+            // Preserve the historical behavior of this older template: it is
+            // omitted when the source has no creature-type choice. The newer
+            // `SpellOfSourceChosenColor` below deliberately differs; its
+            // missing choice must make the produced mana unspendable.
             ManaSpendRestriction::ChosenCreatureType => state
                 .objects
                 .get(&source_id)
                 .and_then(|obj| obj.chosen_creature_type())
                 .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
+            // CR 105.2 + CR 106.6: The spell's color must equal the mana
+            // source's live chosen color. A missing source/choice is not an
+            // omitted restriction; it makes this produced mana unspendable.
+            ManaSpendRestriction::SpellOfSourceChosenColor => Some(
+                state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|obj| obj.chosen_color())
+                    .map(ManaRestriction::OnlyForSpellColor)
+                    .unwrap_or(ManaRestriction::Impossible),
+            ),
             // CR 106.6: Combined spell type + ability activation restriction.
             ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type,
@@ -368,6 +748,9 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellFromZone(zs) => {
                 Some(ManaRestriction::OnlyForSpellFromZone(*zs))
             }
+            ManaSpendRestriction::CannotCastSpellFromZone(zone) => {
+                Some(ManaRestriction::CannotCastSpellFromZone(*zone))
+            }
             // CR 106.6 + CR 116.2m + CR 709.5e: Lower the door-unlock special-action
             // leaf into the runtime gate checked by `allows_special_action` when a
             // Room's unlock cost is paid through `PaymentContext::SpecialAction`.
@@ -393,9 +776,9 @@ pub(crate) fn resolve_restrictions(
                     crate::types::mana::SpecialAction::TurnFaceUp,
                 ))
             }
-            // CR 106.6: Disjunction — recursively lower each branch. If every branch
-            // dropped (e.g. an unresolvable `ChosenCreatureType` with no chosen type),
-            // the disjunction has no payable cases, so drop it too.
+            // CR 106.6: Disjunction — recursively lower each branch. The
+            // chosen-color branch preserves its fail-closed `Impossible`; the
+            // legacy chosen-creature-type branch retains its historical drop.
             ManaSpendRestriction::Any(subs) => {
                 let inner = resolve_restrictions(subs, state, source_id);
                 (!inner.is_empty()).then_some(ManaRestriction::OnlyForAny(inner))
@@ -481,16 +864,18 @@ fn resolve_mana_types_impl(
         }
         // CR 106.5: If an ability would produce one or more mana of an undefined type,
         // it produces no mana instead.
-        ManaProduction::AnyOneColor {
-            count,
-            color_options,
-            ..
-        } => {
-            let amount = resolve_count(count, state, ability, controller, source_id);
-            let Some(mana_type) = color_options.first().map(mana_color_to_type) else {
+        ManaProduction::AnyOneColor { color_options, .. } => {
+            let Some(&color) = color_options.first() else {
                 return Vec::new();
             };
-            vec![mana_type; amount]
+            // CR 608.2d + CR 700.5: The count reads this production's selected
+            // color, including when the default path makes that choice.
+            let bound = bind_any_one_color_choice(produced, color);
+            let ManaProduction::AnyOneColor { count, .. } = &*bound else {
+                unreachable!("binding preserves the production variant");
+            };
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            vec![mana_color_to_type(&color); amount]
         }
         ManaProduction::AnyCombination {
             count,
@@ -526,13 +911,32 @@ fn resolve_mana_types_impl(
                 (None, None) => Vec::new(),
             }
         }
+        // CR 106.1b + CR 106.5: Jeweled Amulet — "Add one mana of this
+        // artifact's last noted type." Unlike `ChosenColor` (a
+        // player-prompted `ManaColor`), the noted value is engine-set
+        // (`Effect::NoteManaSpent`) and `ManaType`-valued (colorless is a
+        // real noted type per the card's ruling). A card in this class always
+        // notes exactly one type — its cost's own generic mana is spent as a
+        // single unit-worth of one type — so, mirroring `AnyOneColor`'s
+        // repeat-by-count idiom, the first noted type repeats `count` times.
+        // No noted type (never activated the noting ability, or a fresh
+        // incarnation after a zone change) produces no mana.
+        ManaProduction::NotedType { count } => {
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            match noted_mana_type_for(state, source_id) {
+                Some(mana_type) => vec![mana_type; amount],
+                None => Vec::new(),
+            }
+        }
         // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
         // Delegates to mana_sources::opponent_land_color_options for the shared computation.
         ManaProduction::OpponentLandColors { count } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
             let color_options = mana_sources::opponent_land_color_options(state, controller);
-            // CR 106.5: If no color can be defined, produce no mana.
-            let Some(first) = color_options.first().copied() else {
+            // CR 106.5 + CR 106.7: If no color can be defined (including when the
+            // surveyed lands could produce only {C}, which is not a color per
+            // CR 106.1a), produce no mana.
+            let Some(first) = color_options.first().map(mana_color_to_type) else {
                 return Vec::new();
             };
             vec![first; amount]
@@ -655,21 +1059,20 @@ fn resolve_mana_types_impl(
         // `TappedForMana` event, this produces no mana (CR 106.5 — undefined
         // mana type).
         //
-        // For every land the engine models, a single resolution produces mana
-        // of one uniform color (basics → one type; Nykthos → all green), so
-        // emitting one unit per *distinct* color yields exactly one mana — the
-        // CR-correct "any type that land produced" with no choice to make.
-        //
-        // If a future card requires the player to *choose* among multiple
-        // produced types in a single resolution ("any one type that land
-        // produced"), the resolver must be extended to emit a player choice.
-        // Add a separate `ManaProduction::TriggerEventManaTypeChoice` variant
-        // before reusing this branch — silently expanding the vec here would
-        // skip the choice.
+        // This branch only runs when no choice is owed: a multi-type event
+        // pauses earlier in the echo pre-check in `resolve` (CR 608.2d
+        // SingleColor choice, completed for exactly one mana), in both the
+        // inline fixed-point path and the stack path; the Pass-1 skip keeps
+        // the bare loop out, and single-type echo falls through here.
+        // Emitting one unit per *distinct* color here therefore always yields
+        // exactly one mana.
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::TappedForMana { produced, .. }) => {
+                Some(
+                    GameEvent::TappedForMana { produced, .. }
+                    | GameEvent::ManaAbilityProduced { produced, .. },
+                ) => {
                     let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
                     distinct.into_iter().collect()
                 }
@@ -718,6 +1121,30 @@ pub(crate) fn object_colors_for_scope(
     .collect()
 }
 
+/// CR 105.1 + CR 105.2: union borrowed colors once, emitting the five colors
+/// in canonical WUBRG order; colorless contributes no member.
+pub(crate) fn distinct_colors<'a>(
+    colors: impl IntoIterator<Item = &'a ManaColor>,
+) -> Vec<ManaColor> {
+    let mut seen = 0u8;
+    for color in colors {
+        seen |= match color {
+            ManaColor::White => 1,
+            ManaColor::Blue => 2,
+            ManaColor::Black => 4,
+            ManaColor::Red => 8,
+            ManaColor::Green => 16,
+        };
+    }
+    let mut result = Vec::with_capacity(seen.count_ones() as usize);
+    for (index, color) in ManaColor::ALL.into_iter().enumerate() {
+        if seen & (1 << index) != 0 {
+            result.push(color);
+        }
+    }
+    result
+}
+
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -732,30 +1159,13 @@ pub(crate) fn distinct_colors_among_permanents(
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: std::collections::HashSet<crate::types::mana::ManaColor> =
-        std::collections::HashSet::new();
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, &filter_ctx) {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            for color in &obj.color {
-                seen.insert(*color);
-            }
-        }
-    }
-    // Stable order for determinism (WUBRG).
-    use crate::types::mana::ManaColor;
-    [
-        ManaColor::White,
-        ManaColor::Blue,
-        ManaColor::Black,
-        ManaColor::Red,
-        ManaColor::Green,
-    ]
-    .into_iter()
-    .filter(|c| seen.contains(c))
-    .collect()
+    distinct_colors(
+        crate::game::targeting::zone_object_ids(state, zone)
+            .iter()
+            .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.color.iter()),
+    )
 }
 
 /// CR 605.1a + CR 406.1 + CR 610.3: Resolve the legal `ManaType` set for a
@@ -770,22 +1180,10 @@ pub(crate) fn exiled_color_options(
     source_id: crate::types::identifiers::ObjectId,
 ) -> Vec<ManaType> {
     let mut options: Vec<ManaType> = Vec::new();
-    for link in &state.exile_links {
-        let host_id = match scope {
-            LinkedExileScope::ThisObject => source_id,
-        };
-        if link.source_id != host_id {
-            continue;
-        }
-        let Some(exiled) = state.objects.get(&link.exiled_id) else {
-            continue;
-        };
-        // CR 400.7: Only consider linked cards still in exile (links are pruned
-        // from `state.exile_links` when the exiled card leaves exile, but guard
-        // defensively in case ordering interleaves).
-        if exiled.zone != crate::types::zones::Zone::Exile {
-            continue;
-        }
+    // The object comes back WITH the id: `linked_exiled_ids` already resolved it through
+    // `state.objects.get(&link.exiled_id)?` and drops every id it cannot resolve, so a
+    // second lookup here would have a provably unreachable `else` arm.
+    for (_, exiled) in linked_exiled_ids(state, scope, source_id) {
         // CR 202.3d + CR 709.4b: a linked exiled card is off the stack, so a split
         // card exposes the combined colors of both halves, not just its front half.
         for color in exiled.effective_colors() {
@@ -796,6 +1194,47 @@ pub(crate) fn exiled_color_options(
         }
     }
     options
+}
+
+/// CR 607.2a: the LINK RELATION an exiled-colour mana ability reads — "the second ability
+/// refers only to cards in the exile zone that were put there as a result of an instruction to
+/// exile them in the first ability". Yields, in `state.exile_links` order, the ids linked to
+/// `source_id` under `scope` that are STILL in exile, EACH WITH THE OBJECT IT RESOLVED TO. The
+/// object is not a convenience: deciding the `zone == Exile` conjunct already resolves
+/// `state.objects.get(&link.exiled_id)`, so every yielded id provably HAS a live entry and no
+/// consumer needs an `else` arm that can never be taken.
+///
+/// The single link authority for [`exiled_color_options`].
+///
+/// ORDER IS PART OF THE CONTRACT: link order, not a set, because [`exiled_color_options`] returns
+/// its options in it. The guards are that function's `#[cfg(test)]` assertions
+/// (`exiled_color_options_use_combined_split_colors`, `pit_of_offerings_*` in `mana_abilities.rs`).
+pub(crate) fn linked_exiled_ids(
+    state: &GameState,
+    scope: LinkedExileScope,
+    source_id: crate::types::identifiers::ObjectId,
+) -> impl Iterator<
+    Item = (
+        crate::types::identifiers::ObjectId,
+        &crate::game::game_object::GameObject,
+    ),
+> + '_ {
+    let host_id = match scope {
+        LinkedExileScope::ThisObject => source_id,
+    };
+    state.exile_links.iter().filter_map(move |link| {
+        if link.source_id != host_id {
+            return None;
+        }
+        let exiled = state.objects.get(&link.exiled_id)?;
+        // CR 400.7: Only consider linked cards still in exile (links are pruned
+        // from `state.exile_links` when the exiled card leaves exile, but guard
+        // defensively in case ordering interleaves).
+        if exiled.zone != crate::types::zones::Zone::Exile {
+            return None;
+        }
+        Some((link.exiled_id, exiled))
+    })
 }
 
 pub(crate) fn chosen_color_for_mana(
@@ -815,6 +1254,124 @@ pub(crate) fn chosen_color_for_mana(
                     _ => None,
                 })
         })
+}
+
+/// CR 700.5 + CR 608.2d: Whether an any-one-color production's amount reads
+/// the color chosen for it ("equal to your devotion to that color": Nykthos,
+/// Nyx Lotus, the plane Nyx). Within `AnyOneColor` the only choice such a
+/// count can name is the production's own, since the parser emits it only for
+/// "Choose a color. Add ... of that color".
+pub(crate) fn any_one_color_count_reads_choice(produced: &ManaProduction) -> bool {
+    let ManaProduction::AnyOneColor { count, .. } = produced else {
+        return false;
+    };
+    count.any_ref(&mut |qty| {
+        matches!(
+            qty,
+            QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor
+            }
+        )
+    })
+}
+
+/// CR 106.1 + CR 605.3b + CR 608.2d: `produced` with its amount bound to
+/// `color`, the color chosen for this production as it resolves. A count that
+/// reads "that color" reads `color` itself, never a color stored on the source
+/// or left over from another choice; nothing in the game state is written.
+/// Other productions are returned unchanged.
+pub(crate) fn bind_any_one_color_choice(
+    produced: &ManaProduction,
+    color: ManaColor,
+) -> std::borrow::Cow<'_, ManaProduction> {
+    if !any_one_color_count_reads_choice(produced) {
+        return std::borrow::Cow::Borrowed(produced);
+    }
+    let mut bound = produced.clone();
+    if let ManaProduction::AnyOneColor { count, .. } = &mut bound {
+        count.each_ref_mut(&mut |qty| {
+            if let QuantityRef::Devotion { colors } = qty {
+                if *colors == DevotionColors::ChosenColor {
+                    *colors = DevotionColors::Fixed(vec![color]);
+                }
+            }
+        });
+    }
+    std::borrow::Cow::Owned(bound)
+}
+
+/// CR 106.1 + CR 608.2d: The amount an any-one-color production adds for each
+/// color it could be activated for, when that amount depends on the color
+/// (see [`any_one_color_count_reads_choice`]); empty otherwise. Colors that
+/// would add no mana are omitted, and the rest are best first (ties keep the
+/// printed order), so a planner taking one row for generic mana takes the
+/// color that adds the most.
+pub(crate) fn any_one_color_outputs(
+    state: &GameState,
+    produced: &ManaProduction,
+    ability: &ResolvedAbility,
+) -> Vec<(ManaType, usize)> {
+    let ManaProduction::AnyOneColor { color_options, .. } = produced else {
+        return Vec::new();
+    };
+    if !any_one_color_count_reads_choice(produced) {
+        return Vec::new();
+    }
+    let mut outputs: Vec<(ManaType, usize)> = color_options
+        .iter()
+        .map(|color| {
+            (
+                mana_color_to_type(color),
+                any_one_color_amount(produced, state, ability, *color),
+            )
+        })
+        .filter(|(_, amount)| *amount > 0)
+        .collect();
+    outputs.sort_by_key(|(_, amount)| std::cmp::Reverse(*amount));
+    outputs
+}
+
+/// CR 106.1 + CR 608.2d: The amount an any-one-color production adds when
+/// `color` is chosen for it, as a scalar: the count is bound to `color`
+/// ([`bind_any_one_color_choice`]) and resolved directly, with no mana units
+/// built. The scalar authority for planning; resolution builds its units from
+/// the same bound count.
+fn any_one_color_amount(
+    produced: &ManaProduction,
+    state: &GameState,
+    ability: &ResolvedAbility,
+    color: ManaColor,
+) -> usize {
+    let bound = bind_any_one_color_choice(produced, color);
+    match &*bound {
+        ManaProduction::AnyOneColor {
+            count,
+            color_options,
+            ..
+        } if !color_options.is_empty() => resolve_count(
+            count,
+            state,
+            Some(ability),
+            ability.controller,
+            ability.source_id,
+        ),
+        _ => 0,
+    }
+}
+
+/// CR 106.1b: The first mana type noted by a past `Effect::NoteManaSpent`
+/// resolution on `source_id` ("this artifact's last noted type" — Jeweled
+/// Amulet). Unlike `chosen_color_for_mana`, this is never player-prompted —
+/// engine-set state only, with no `last_named_choice` fallback.
+pub(crate) fn noted_mana_type_for(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Option<ManaType> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.noted_mana_spent())
+        .and_then(|types| types.first().copied())
 }
 
 /// Convert a ManaColor to the runtime ManaType.
@@ -837,13 +1394,27 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, DevotionColors, QuantityExpr,
-        QuantityRef, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, ControllerRef, DevotionColors,
+        QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distinct_color_reduction_is_bounded_ordered_and_borrowed() {
+        assert!(distinct_colors(std::iter::empty()).is_empty());
+        let colors = [ManaColor::Red, ManaColor::White, ManaColor::Red];
+        assert_eq!(
+            distinct_colors(&colors),
+            vec![ManaColor::White, ManaColor::Red]
+        );
+        assert_eq!(
+            distinct_colors(ManaColor::ALL.iter().rev().chain(&ManaColor::ALL)),
+            ManaColor::ALL.to_vec()
+        );
+    }
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -889,6 +1460,94 @@ mod tests {
             options.contains(&ManaType::Red) && options.contains(&ManaType::Green),
             "a linked exiled Assault // Battery must expose BOTH Red and Green (its \
              combined split colors); the front-only read would omit Green — got {options:?}"
+        );
+    }
+
+    /// `linked_exiled_ids` yields link-relation ORDER, and `exiled_color_options` preserves it
+    /// into the offered option vector.
+    ///
+    /// The two pre-existing guards structurally cannot measure this:
+    /// `exiled_color_options_use_combined_split_colors` has a SINGLE link, and the
+    /// `pit_of_offerings_*` guards have three links but only one COLORED card — under either the
+    /// produced vector has one element and every ordering agrees. This board is the smallest one
+    /// on which orderings disagree: two links, two DIFFERENT colors. The claim is a positional
+    /// `assert_eq!` on the whole vector, deliberately not a `contains` pair, a set comparison, or
+    /// a sorted compare — each of those is order-blind and would restate the gap, not close it.
+    ///
+    /// REVERT / MUTATION PROBE: change `linked_exiled_ids`' `state.exile_links.iter()` to
+    /// `.iter().rev()` ⇒ **FAILS** on the link-order assertion.
+    #[test]
+    fn linked_exiled_ids_preserves_link_order_into_the_offered_colors() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let source = sc.add_real_card(P0, "Gray Ogre", Zone::Battlefield, db);
+        // Linked FIRST: mono-GREEN. Linked SECOND: mono-RED. Real cards, so a card-data
+        // colour change fails a reach-guard below rather than silently re-pointing the
+        // order claim.
+        let green = sc.add_real_card(P0, "Grizzly Bears", Zone::Exile, db);
+        let red = sc.add_real_card(P0, "Gray Ogre", Zone::Exile, db);
+        let mut state = sc.state;
+        for exiled_id in [green, red] {
+            state.exile_links.push(ExileLink {
+                exiled_id,
+                source_id: source,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        // ── REACH-GUARDS, before the order assertion ─────────────────────────────────
+        // Deliberately ORDER-INSENSITIVE. This guard's job is to prove BOTH links
+        // survive the CR 607.2a source and CR 400.7 zone conjuncts, so the option vector
+        // really has two elements and orderings can disagree. Asserting order here too
+        // would shadow the order assertion below and steal the mutation that proves it.
+        let survivors = linked_exiled_ids(&state, LinkedExileScope::ThisObject, source)
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            survivors.len(),
+            2,
+            "reach-guard: BOTH links must survive. If either were filtered out the option \
+             vector would have ONE element, every ordering would agree, and the order \
+             assertion below would be vacuous — got {survivors:?}"
+        );
+        assert!(
+            survivors.contains(&green) && survivors.contains(&red),
+            "reach-guard: the survivors are exactly the two cards linked above — \
+             got {survivors:?}"
+        );
+        assert_eq!(
+            state.objects[&green]
+                .effective_colors()
+                .into_iter()
+                .map(|c| mana_color_to_type(&c))
+                .collect::<Vec<_>>(),
+            vec![ManaType::Green],
+            "reach-guard: the first-linked card must be mono-GREEN — the order claim is \
+             only observable because the two links contribute DIFFERENT colours"
+        );
+        assert_eq!(
+            state.objects[&red]
+                .effective_colors()
+                .into_iter()
+                .map(|c| mana_color_to_type(&c))
+                .collect::<Vec<_>>(),
+            vec![ManaType::Red],
+            "reach-guard: the second-linked card must be mono-RED"
+        );
+
+        let options = exiled_color_options(&state, LinkedExileScope::ThisObject, source);
+        assert_eq!(
+            options,
+            vec![ManaType::Green, ManaType::Red],
+            "MED-3: `exiled_color_options` must offer the colours in LINK-RELATION order — \
+             Green (linked first) then Red (linked second). This is the ORDER half of the \
+             C2 extraction's identity contract, and it is why `linked_exiled_ids` yields \
+             ids in `state.exile_links` order rather than collecting a set. Changing that \
+             `.iter()` to `.iter().rev()` makes this FAIL with `[Red, Green]`"
         );
     }
 
@@ -948,7 +1607,9 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: Some(TargetFilter::ScopedPlayer),
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer,
+                }),
             },
             vec![],
             source,
@@ -984,6 +1645,7 @@ mod tests {
         handle_choose_mana_effect(
             &mut state,
             &ctx_ability,
+            PlayerId(1),
             &prompt,
             ManaChoice::SingleColor(ManaType::Blue),
             &mut events2,
@@ -999,6 +1661,364 @@ mod tests {
             state.players[0].mana_pool.total(),
             0,
             "controller (P0) must NOT receive the chosen player's mana"
+        );
+    }
+
+    /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire) — a
+    /// genuine `TargetFilter::Player` recipient whose count is NOT target-derived
+    /// deposits into the chosen target player (`ability.targets`), not the
+    /// controller. Revert-probe: before the `TargetFilter::Player` arm in
+    /// `mana_effect_recipient`, the mana lands in P0's pool.
+    #[test]
+    fn target_player_recipient_deposits_into_the_target_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 3 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Colorless),
+            3,
+            "the targeted player (P1) must receive the mana"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "controller (P0) must NOT receive a targeted recipient's mana"
+        );
+    }
+
+    /// Matrix row 5 (runtime half) — a CONTEXT-REF recipient plus a REAL count
+    /// source. The recipient occupies NO surfaced slot, so the count source
+    /// lands at surfaced index 0; naive "recipient == targets[0]" index math
+    /// breaks exactly here.
+    ///
+    /// This is the subject-predicate shape ("That player adds {R} for each card
+    /// in target opponent's hand", Blinkmoth Urn's route). CR 106.4: the mana
+    /// goes to the scoped player. CR 115.1: the amount is read from the chosen
+    /// count-source player's hand — NOT the scoped player's, and NOT the
+    /// controller's.
+    #[test]
+    fn context_ref_recipient_with_real_count_source_reads_the_count_slot() {
+        use crate::types::ability::{ControllerRef, ManaProduction, ManaTargetRole, ZoneRef};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Subject Led Count Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // P1 is BOTH the scoped recipient and the chosen count source here only
+        // by construction of the two-player fixture; the discriminating fact is
+        // that the count must come from the TARGET slot, so give P1 a hand of a
+        // size the controller does not share.
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(50 + i),
+                PlayerId(1),
+                format!("Count Card {i}"),
+                Zone::Hand,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: ZoneRef::Hand,
+                            scope: ControllerRef::TargetOpponent,
+                            binding: crate::types::ability::CountBinding::Explicit,
+                        },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Both {
+                    recipient: TargetFilter::ScopedPlayer,
+                    count_source: TargetFilter::Player,
+                }),
+            },
+            // ONE target: the count source, at surfaced index 0. The context-ref
+            // recipient surfaces no slot and so consumes no target.
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("subject-led count-source mana resolves");
+
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Colorless),
+            4,
+            "CR 106.4 + CR 115.1: the scoped recipient receives mana equal to the \
+             COUNT SOURCE slot's hand size"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "the controller receives nothing"
+        );
+    }
+
+    /// Matrix row 10a — CR 608.2b clause (1): an illegal RECIPIENT means "that
+    /// part of the effect does nothing", and the mana is NOT quietly redirected
+    /// to the controller (which would hand a targeted opponent's mana to the
+    /// caster). The count source's half is unaffected, and positions are stable.
+    ///
+    /// The chosen recipient here is the CONTROLLER while the recipient filter
+    /// demands an OPPONENT, so the target is illegal at resolution. A
+    /// `mana_effect_recipient` that skipped per-slot re-validation would find
+    /// P0 and deposit into it — which is exactly what this asserts must not
+    /// happen. Reach guard: the paired legal case below deposits a non-zero
+    /// amount through the same code path.
+    #[test]
+    fn illegal_recipient_target_deposits_no_mana_anywhere() {
+        use crate::types::ability::{ControllerRef, ManaProduction, ManaTargetRole, TypedFilter};
+
+        let opponent_only =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        let build = |chosen: PlayerId| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 3 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Recipient {
+                        recipient: opponent_only.clone(),
+                    }),
+                },
+                vec![TargetRef::Player(chosen)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        // Reach guard / positive: a LEGAL opponent recipient does receive mana,
+        // proving the negative below is not a vacuous "nothing ever resolves".
+        let mut state = GameState::new_two_player(42);
+        let legal = build(PlayerId(1));
+        let mut events = Vec::new();
+        crate::game::effects::mana::resolve(&mut state, &legal, &mut events)
+            .expect("a legal opponent recipient resolves");
+        assert_eq!(
+            state.players[1].mana_pool.total(),
+            3,
+            "reach guard: the legal recipient must actually receive the mana"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        // Negative: the CONTROLLER is not a legal "target opponent".
+        let mut state = GameState::new_two_player(42);
+        let illegal = build(PlayerId(0));
+        let mut events = Vec::new();
+        crate::game::effects::mana::resolve(&mut state, &illegal, &mut events)
+            .expect("an illegal recipient still resolves the effect, adding nothing");
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "CR 608.2b: an illegal recipient receives nothing and the mana is NOT \
+             redirected to the controller"
+        );
+        assert_eq!(state.players[1].mana_pool.total(), 0);
+    }
+
+    /// CR 601.2c + CR 106.4: multi-authority provenance fixture for the two mana
+    /// roles. The identical `TargetFilter::Player` is emitted both as a RECIPIENT
+    /// (subject-led "target player adds", count target-independent) and as a
+    /// COUNT SOURCE ("Add {U} for each card in target player's hand", count =
+    /// `TargetZoneCardCount`). The ROLE now STATES which is which — the previous
+    /// `mana_count_reads_targets` quantity-shape inference that had to GUESS is
+    /// deleted, so its two assertions are deliberately NOT ported. Only the
+    /// recipient role redirects the pool; a count-source-only role (and Jeska's
+    /// Will's `Typed(Opponent)`) leaves the recipient on the controller. Tested at
+    /// the `mana_effect_recipient` seam to avoid coupling to count resolution;
+    /// the end-to-end runtime counterparts are
+    /// `target_player_recipient_deposits_into_the_target_not_controller` and the
+    /// `mana_target_recipient_and_count_source` integration test.
+    #[test]
+    fn mana_role_separates_recipient_from_count_source() {
+        use crate::types::ability::{ControllerRef, TypedFilter, ZoneRef};
+
+        let state = GameState::new_two_player(42);
+        let src = ObjectId(100);
+        let targets = vec![TargetRef::Player(PlayerId(1))];
+
+        // Count-source production: the count reads a player target.
+        let count_source = ManaProduction::AnyOneColor {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: crate::types::ability::CountBinding::Explicit,
+                },
+            },
+            color_options: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        };
+
+        // Recipient production: a target-independent count ("that much" →
+        // EventContextAmount).
+        let recipient_prod = ManaProduction::Colorless {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        };
+
+        let mk = |produced: ManaProduction, role: ManaTargetRole| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(role),
+                },
+                targets.clone(),
+                src,
+                PlayerId(0),
+            )
+        };
+
+        // (a) Recipient role, target-independent count → the target (P1).
+        let recipient_role = ManaTargetRole::Recipient {
+            recipient: TargetFilter::Player,
+        };
+        let recip = mk(recipient_prod.clone(), recipient_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &recip, Some(&recipient_role)),
+            Some(PlayerId(1)),
+            "a Recipient role resolves to its own chosen target"
+        );
+
+        // (b) The SAME `TargetFilter::Player`, now declared as a COUNT SOURCE →
+        // the controller (P0). This is the case the deleted quantity-shape
+        // inference used to guess; the role states it.
+        let count_role = ManaTargetRole::CountSource {
+            count_source: TargetFilter::Player,
+        };
+        let cs = mk(count_source.clone(), count_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &cs, Some(&count_role)),
+            Some(PlayerId(0)),
+            "a CountSource role declares no recipient → the controller adds the mana"
+        );
+
+        // (c) Jeska's Will `Typed(Opponent)` count source → controller (P0).
+        let opp = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let jeska_role = ManaTargetRole::CountSource {
+            count_source: opp.clone(),
+        };
+        let jeska = mk(count_source.clone(), jeska_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &jeska, Some(&jeska_role)),
+            Some(PlayerId(0)),
+            "Jeska's Will Typed(Opponent) count source → controller (unchanged)"
+        );
+
+        // (d) No role at all (Cabal Coffers) → the controller.
+        let bare = ResolvedAbility::new(
+            Effect::Mana {
+                produced: recipient_prod.clone(),
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            src,
+            PlayerId(0),
+        );
+        assert_eq!(
+            mana_effect_recipient(&state, &bare, None),
+            Some(PlayerId(0)),
+            "no declared role → the controller adds the mana"
+        );
+    }
+
+    /// CR 106.6 + CR 115.1: Jetfire's produced {C} carries the negative spend
+    /// restriction "this mana can't be spent to cast nonartifact spells"
+    /// (`SpellTypeOrAbilityActivation{ Artifact, Any }`), and it is deposited on
+    /// the targeted player's mana units.
+    #[test]
+    fn target_player_recipient_mana_carries_spend_restriction() {
+        use crate::types::mana::{AbilityActivationScope, ManaRestriction};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: AbilityActivationScope::Any,
+                }],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].mana_pool.total(), 2);
+        assert!(
+            state.players[1].mana_pool.units().all(|unit| {
+                unit.restrictions
+                    .contains(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Artifact".to_string(),
+                        ability: AbilityActivationScope::Any,
+                    })
+            }),
+            "each produced {{C}} must carry the artifact-spell spend restriction"
         );
     }
 
@@ -1308,7 +2328,7 @@ mod tests {
         )
         .unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.source_id, ObjectId(100));
     }
 
@@ -1417,6 +2437,7 @@ mod tests {
         handle_choose_mana_effect(
             &mut state,
             &pending_effect,
+            PlayerId(0),
             &choice,
             ManaChoice::Combination(vec![ManaType::Red, ManaType::Green]),
             &mut events,
@@ -1452,6 +2473,7 @@ mod tests {
         let result = handle_choose_mana_effect(
             &mut state,
             &pending_effect,
+            PlayerId(0),
             &choice,
             ManaChoice::Combination(vec![ManaType::Black, ManaType::Green]),
             &mut events,
@@ -1899,7 +2921,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.restrictions.len(), 1);
         assert_eq!(
             unit.restrictions[0],
@@ -1946,7 +2968,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.restrictions.len(), 1);
         assert_eq!(
             unit.restrictions[0],
@@ -1978,7 +3000,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // No source object → restriction can't resolve → mana is unrestricted
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert!(unit.restrictions.is_empty());
     }
 
@@ -1997,7 +3019,9 @@ mod tests {
                     contribution: ManaContribution::Base,
                 },
                 restrictions: vec![],
-                grants: vec![ManaSpellGrant::CantBeCountered],
+                grants: vec![ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Any,
+                }],
                 expiry: None,
                 target: None,
             },
@@ -2008,8 +3032,13 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
-        assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
+        assert_eq!(
+            unit.grants,
+            vec![ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }]
+        );
     }
 
     /// CR 106.7 + CR 106.1b: Reflecting Pool — produces one mana of any type
@@ -2341,6 +3370,107 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
+    /// Builds a two-player Commander board for issue #9525: P0 (the surveyor)
+    /// has a black/red commander, P1 has a mono-blue commander and controls a
+    /// Command Tower. The commanders deliberately share no color, so a survey
+    /// that reads the wrong player's commander produces visibly wrong mana.
+    fn commander_board_with_opponent_command_tower() -> GameState {
+        let mut state = GameState::new_two_player(42);
+
+        for (card_id, owner, name, colors) in [
+            (
+                CardId(501),
+                PlayerId(0),
+                "Rakdos, Lord of Riots",
+                vec![ManaColor::Black, ManaColor::Red],
+            ),
+            (
+                CardId(502),
+                PlayerId(1),
+                "Talrand, Sky Summoner",
+                vec![ManaColor::Blue],
+            ),
+        ] {
+            let commander =
+                create_object(&mut state, card_id, owner, name.to_string(), Zone::Command);
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.base_color = colors.clone();
+            obj.color = colors;
+        }
+
+        let tower = create_object(
+            &mut state,
+            CardId(503),
+            PlayerId(1),
+            "Command Tower".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&tower).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyInCommandersColorIdentity {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        state
+    }
+
+    /// CR 106.7 + CR 109.5 (issue #9525): Fellwar Stone / Exotic Orchard asks
+    /// what an opponent's Command Tower could produce. "Your commander" on the
+    /// tower means its controller's commander, so the survey yields only blue.
+    ///
+    /// Revert-failing discriminator: evaluating the tower as the activator reads
+    /// P0's black/red commander, offering {B, R} and producing no blue.
+    #[test]
+    fn opponent_land_colors_reads_command_tower_for_its_controller() {
+        let mut state = commander_board_with_opponent_command_tower();
+
+        let options = crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        assert_eq!(options, vec![ManaColor::Blue]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::OpponentLandColors {
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    /// CR 106.7 + CR 109.5 (issue #9525): the filter-scoped survey
+    /// (`AnyTypeProduceableBy`) evaluates each admitted land for its own
+    /// controller too, so an opponent-scoped filter over a Command Tower
+    /// yields that opponent's commander colors, not the activator's.
+    #[test]
+    fn produceable_types_by_opponent_filter_reads_command_tower_for_its_controller() {
+        let state = commander_board_with_opponent_command_tower();
+
+        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+            &state,
+            &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)),
+            PlayerId(0),
+            ObjectId(100),
+        );
+        assert_eq!(options, vec![ManaType::Blue]);
+    }
+
     #[test]
     fn colorless_production_counts_creatures_sharing_type_with_triggering_source() {
         use crate::game::zones::create_object;
@@ -2442,5 +3572,424 @@ mod tests {
             3,
             "Mana Echoes must produce one colorless per matching creature"
         );
+    }
+
+    fn real_caged_sun(sc: &mut crate::game::scenario::GameScenario) -> ObjectId {
+        use crate::game::scenario_db::GameScenarioDbExt;
+        sc.add_real_card(
+            crate::game::scenario::P0,
+            "Caged Sun",
+            Zone::Battlefield,
+            crate::test_support::shared_card_db(),
+        )
+    }
+
+    /// Toph when `toph`, a green Sun added by `add_sun`, and a Forest, under `mode`; returns the
+    /// Sun and its triggered mana ability as the Forest's production couples it.
+    fn sun_board(
+        toph: bool,
+        mode: crate::types::game_state::LoopDetectionMode,
+        add_sun: impl FnOnce(&mut crate::game::scenario::GameScenario) -> ObjectId,
+    ) -> (GameState, ObjectId, ResolvedAbility, GameEvent) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::ability::ChosenAttribute;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        sc.at_phase(crate::types::phase::Phase::PreCombatMain);
+        if toph {
+            sc.add_real_card(P0, "Toph, the First Metalbender", Zone::Battlefield, db);
+        }
+        let sun = add_sun(&mut sc);
+        let forest = sc.add_real_card(P0, "Forest", Zone::Battlefield, db);
+        let mut state = sc.state;
+        state.loop_detection = mode;
+        state
+            .objects
+            .get_mut(&sun)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Green));
+        crate::game::layers::flush_layers(&mut state);
+        crate::game::trigger_index::ensure_ready(&mut state);
+        let forest_event = GameEvent::ManaAbilityProduced {
+            player_id: P0,
+            source_id: forest,
+            produced: vec![ManaType::Green],
+            trigger_state: ManaAbilityTriggerState::Pending,
+        };
+        let candidates = crate::game::trigger_index::candidates_for_event(&state, &forest_event);
+        let (_, ability) = crate::game::triggers::inline_tap_mana_trigger_abilities(
+            &state,
+            &forest_event,
+            candidates,
+        )
+        .into_iter()
+        .find(|(definition_ref, _)| definition_ref.source.object_id == sun)
+        .expect("the Forest's production triggers the Sun");
+        (state, sun, ability, forest_event)
+    }
+
+    fn resolve_sun(
+        state: &mut GameState,
+        ability: &ResolvedAbility,
+        forest_event: &GameEvent,
+    ) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        crate::game::mana_abilities::resolve_triggered_mana_ability_inline(
+            state,
+            ability,
+            Some(forest_event),
+            &mut events,
+            None,
+        );
+        events
+    }
+
+    fn produced_by(events: &[GameEvent], source: ObjectId) -> Vec<&GameEvent> {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == source)
+            })
+            .collect()
+    }
+
+    fn game_overs(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count()
+    }
+
+    /// CR 605.1b is traded away under Off: a Caged Sun land's production is no event, so the
+    /// resolution neither retriggers the Sun nor ends the game.
+    #[test]
+    fn a_caged_sun_land_under_off_emits_no_production_event() {
+        use crate::types::game_state::LoopDetectionMode;
+
+        let (mut state, sun, ability, forest_event) =
+            sun_board(true, LoopDetectionMode::Off, real_caged_sun);
+        let events = resolve_sun(&mut state, &ability, &forest_event);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "reach: the Sun added its mana"
+        );
+        assert!(produced_by(&events, sun).is_empty());
+        assert_eq!(game_overs(&events), 0);
+        assert_eq!(state.game_end, None);
+    }
+
+    /// CR 104.4b + CR 605.1b: under Interactive, a Caged Sun land's production triggers the Sun
+    /// again mandatorily, so the resolution ends the game in a draw instead of emitting it.
+    #[test]
+    fn a_caged_sun_land_under_interactive_draws_at_its_production() {
+        use crate::types::game_state::{GameEnd, LoopDetectionMode};
+
+        let (mut state, sun, ability, forest_event) =
+            sun_board(true, LoopDetectionMode::Interactive, real_caged_sun);
+        let events = resolve_sun(&mut state, &ability, &forest_event);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "reach: the Sun added its mana"
+        );
+        assert!(produced_by(&events, sun).is_empty());
+        assert_eq!(game_overs(&events), 1);
+        assert_eq!(state.game_end, Some(GameEnd { winner: None }));
+        assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: None });
+    }
+
+    /// CR 104.1 + CR 104.4b: an echo whose answered type choice retriggers itself mandatorily
+    /// ends the game, so the answer neither restores priority nor resumes the parked chain.
+    #[test]
+    fn an_answered_echo_that_retriggers_itself_ends_the_game_without_resuming() {
+        use crate::game::scenario::P0;
+        use crate::types::game_state::{GameEnd, LoopDetectionMode};
+
+        let (mut state, _, mut ability, mut event) =
+            sun_board(true, LoopDetectionMode::Interactive, |sc| {
+                sc.add_creature(P0, "Test Echo", 0, 0)
+                    .as_artifact()
+                    .from_oracle_text(
+                        "Whenever a land's ability causes you to add one or more mana of \
+                         the chosen color, add one mana of any type that land produced.",
+                    )
+                    .id()
+            });
+        let GameEvent::ManaAbilityProduced { produced, .. } = &mut event else {
+            panic!("the board's production is a ManaAbilityProduced event");
+        };
+        *produced = vec![ManaType::Green, ManaType::Blue];
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            ability.source_id,
+            P0,
+        )));
+        state.current_trigger_event = Some(event);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let (prompt, pending) = match state.waiting_for.clone() {
+            WaitingFor::ChooseManaColor {
+                choice,
+                context: ManaChoiceContext::ResolvingEffect(pending),
+                ..
+            } => (choice, pending),
+            other => panic!("reach: the echo pauses for its type, got {other:?}"),
+        };
+        assert!(state.active_ability_continuation().is_some());
+
+        let wait = handle_choose_mana_effect(
+            &mut state,
+            &pending,
+            P0,
+            &prompt,
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "reach: the echo added the chosen type"
+        );
+        assert_eq!(state.game_end, Some(GameEnd { winner: None }));
+        assert_eq!(wait, WaitingFor::GameOver { winner: None });
+        assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: None });
+        assert!(state.active_ability_continuation().is_some());
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            0
+        );
+    }
+
+    /// CR 104.1 + CR 104.4b: an echo answered through the reducer whose production retriggers
+    /// itself ends the game, and the suspended land activation does not resume.
+    #[test]
+    fn an_echo_that_draws_on_its_answered_type_does_not_resume_the_tapped_land() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{GameEnd, LoopDetectionMode};
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        sc.at_phase(crate::types::phase::Phase::PreCombatMain);
+        sc.add_real_card(P0, "Toph, the First Metalbender", Zone::Battlefield, db);
+        let echo = sc
+            .add_creature(P0, "Test Echo", 0, 0)
+            .as_artifact()
+            .from_oracle_text(
+                "Whenever a land's ability causes you to add one or more mana of \
+                 the chosen color, add one mana of any type that land produced.",
+            )
+            .id();
+        let chamber = sc.add_real_card(P0, "Simic Growth Chamber", Zone::Battlefield, db);
+        let mut runner = sc.build();
+        let state = runner.state_mut();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state.objects.get_mut(&chamber).unwrap().tapped = false;
+        state
+            .objects
+            .get_mut(&echo)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Green));
+        crate::game::layers::flush_layers(state);
+        crate::game::trigger_index::ensure_ready(state);
+        let tap =
+            crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0)
+                .into_iter()
+                .find(|action| {
+                    matches!(action, GameAction::TapLandForMana { selection }
+                    | GameAction::ActivateManaSource { selection }
+                    if selection.source.object_id == chamber)
+                })
+                .expect("the Chamber can tap for mana");
+        let tapped = runner.act(tap).expect("the tap applies");
+        assert!(
+            matches!(
+                tapped.waiting_for,
+                WaitingFor::ChooseManaColor {
+                    context: ManaChoiceContext::ResolvingEffect(_),
+                    ..
+                }
+            ),
+            "reach: the echo pauses for its type, got {:?}",
+            tapped.waiting_for
+        );
+        assert!(runner.state().pending_triggered_mana_resume.is_some());
+
+        let answered = runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            })
+            .expect("the type choice applies");
+        assert_eq!(runner.state().game_end, Some(GameEnd { winner: None }));
+        assert_eq!(answered.waiting_for, WaitingFor::GameOver { winner: None });
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: None }
+        );
+        assert!(runner.state().pending_triggered_mana_resume.is_none());
+        assert_eq!(
+            runner
+                .state()
+                .pending_trigger_construction_priority_recipient,
+            None
+        );
+    }
+
+    /// CR 605.1b: a Caged Sun that is not a land does not trigger on its own production, so the
+    /// event is emitted and the game goes on.
+    #[test]
+    fn a_caged_sun_that_is_not_a_land_emits_its_production() {
+        use crate::types::game_state::LoopDetectionMode;
+
+        let (mut state, sun, ability, forest_event) =
+            sun_board(false, LoopDetectionMode::Interactive, real_caged_sun);
+        let events = resolve_sun(&mut state, &ability, &forest_event);
+        let emitted = produced_by(&events, sun);
+        assert_eq!(emitted.len(), 1, "reach: the Sun's production is an event");
+        let emitted = emitted[0].clone();
+        assert!(
+            !crate::game::triggers::mana_production_retriggers_itself_mandatorily(
+                &mut state, &ability, &emitted,
+            )
+        );
+        assert_eq!(game_overs(&events), 0);
+        assert_eq!(state.game_end, None);
+    }
+
+    /// CR 104.4b: a "may", an intervening-if, an effect condition or a trigger limit can stop a
+    /// self-retrigger, so only a trigger with none of them certifies as a mandatory loop.
+    #[test]
+    fn only_a_self_retrigger_nothing_can_stop_certifies_as_mandatory() {
+        use crate::game::scenario::P0;
+        use crate::types::game_state::LoopDetectionMode;
+
+        const TRIGGER: &str =
+            "Whenever a land's ability causes you to add one or more mana of the chosen color, ";
+        for (rider, certified) in [
+            ("add an additional one mana of that color.", true),
+            ("you may add an additional one mana of that color.", false),
+            (
+                "if you control a Forest, add an additional one mana of that color.",
+                false,
+            ),
+            (
+                "add an additional one mana of that color if you control a Forest.",
+                false,
+            ),
+            (
+                "add an additional one mana of that color. This ability triggers only once each turn.",
+                false,
+            ),
+        ] {
+            let text = format!("{TRIGGER}{rider}");
+            let (mut state, sun, ability, _) =
+                sun_board(true, LoopDetectionMode::Interactive, |sc| {
+                    sc.add_creature(P0, "Test Sun", 0, 0)
+                        .as_artifact()
+                        .from_oracle_text(&text)
+                        .id()
+                });
+            let production = GameEvent::ManaAbilityProduced {
+                player_id: P0,
+                source_id: sun,
+                produced: vec![ManaType::Green],
+                trigger_state: ManaAbilityTriggerState::Pending,
+            };
+            assert_eq!(
+                crate::game::triggers::mana_production_retriggers_itself_mandatorily(
+                    &mut state,
+                    &ability,
+                    &production,
+                ),
+                certified,
+                "{rider}"
+            );
+        }
+    }
+
+    /// CR 605.1b: Extraplanar Lens echoing a Simic Growth Chamber pauses for the type; the
+    /// answered production is an event wherever loop detection samples, as an unpaused one is.
+    #[test]
+    fn an_echo_answered_after_its_type_choice_emits_its_production() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{ExileLink, ExileLinkKind, LoopDetectionMode};
+
+        for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::Off] {
+            let db = crate::test_support::shared_card_db();
+            let mut sc = GameScenario::new();
+            sc.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let lens = sc.add_real_card(P0, "Extraplanar Lens", Zone::Battlefield, db);
+            let chamber = sc.add_real_card(P0, "Simic Growth Chamber", Zone::Battlefield, db);
+            let imprinted = sc.add_real_card(P0, "Simic Growth Chamber", Zone::Exile, db);
+            let mut runner = sc.build();
+            let state = runner.state_mut();
+            state.loop_detection = mode;
+            state.objects.get_mut(&chamber).unwrap().tapped = false;
+            state.exile_links.push(ExileLink {
+                source_id: lens,
+                exiled_id: imprinted,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+            let mana_actions =
+                crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0);
+            let tap = mana_actions
+                .into_iter()
+                .find(|action| {
+                    matches!(action, GameAction::TapLandForMana { selection }
+                        | GameAction::ActivateManaSource { selection }
+                        if selection.source.object_id == chamber)
+                })
+                .expect("the Chamber can tap for mana");
+            let tapped = runner.act(tap).expect("the tap applies");
+            assert!(
+                matches!(
+                    tapped.waiting_for,
+                    WaitingFor::ChooseManaColor {
+                        context: ManaChoiceContext::ResolvingEffect(_),
+                        ..
+                    }
+                ),
+                "{mode:?}: reach: the echo pauses for its type, got {:?}",
+                tapped.waiting_for
+            );
+            let answered = runner
+                .act(GameAction::ChooseManaColor {
+                    choice: ManaChoice::SingleColor(ManaType::Green),
+                    count: 1,
+                })
+                .expect("the type choice applies");
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Green),
+                2,
+                "{mode:?}: reach: the echo added the chosen type"
+            );
+            assert_eq!(
+                produced_by(&answered.events, lens).len(),
+                usize::from(mode.samples()),
+                "{mode:?}"
+            );
+        }
     }
 }

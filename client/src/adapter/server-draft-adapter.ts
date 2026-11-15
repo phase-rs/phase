@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   GameAction,
@@ -7,47 +8,109 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectAction,
   ObjectId,
   PlayerId,
   SubmitResult,
+  WithheldFrame,
 } from "./types";
-import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
+import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
+  writeSetupFrame,
   type PhaseSocket,
+  type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
+import {
+  SETUP_CONFIRMATION_TIMEOUT_MS,
+  settledWithin,
+  SetupBufferBudget,
+  SetupConfirmation,
+  reportUncaughtError,
+  whenAborted,
+  type SetupConfirmationOutcome,
+  type SetupFrameMessage,
+} from "../services/setupConfirmation";
+import i18n from "i18next";
 import { isValidWebSocketUrl } from "../services/serverDetection";
+import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
   DraftPlayerView,
   StandingEntry,
   TournamentFormat,
   PodPolicy,
+  DraftKind,
+  SharedStackPileDecision,
 } from "./draft-adapter";
-import type { ServerInfo } from "./ws-adapter";
+import { draftViewPresentation } from "./draft-adapter";
+import { SubmissionSlot } from "./submissionSlot";
+import type { FullSessionKey, ServerInfo } from "./ws-adapter";
+import { getSharedAdapter } from "./wasm-adapter";
+import type { StateCodecSession } from "./state-codec-runtime";
+import {
+  STATE_CODEC_PREPARATION_TIMEOUT_MS,
+  StateCodecPreparationAbortError,
+  prepareStateCodecSession as prepareBoundedStateCodecSession,
+  StateCodecAttachment,
+  StateCodecSocket,
+  type StateCodecBootstrapBinding,
+  type StateCodecSessionProvider,
+} from "../services/stateCodecSocket";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
 export type DraftPhase =
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "match"
   | "between_rounds"
   | "complete";
 
+/**
+ * Client intent for a server-hosted set draft. This is intentionally not the
+ * persisted engine `DraftSource`: a Chaos request names candidate sets only,
+ * and the native server privately resolves its per-seat pack assignments.
+ */
+export type DraftSourceIntent =
+  | { type: "Uniform"; data: { set_codes: string[] } }
+  | { type: "Chaos"; data: { candidate_codes: string[] } };
+
 /** Settings for creating a new server-hosted draft pod. */
 export interface CreateDraftSettings {
   displayName: string;
-  setCode: string;
-  kind: "Premier" | "Traditional";
+  /**
+   * The set filling each booster, in pack order. One entry per pack the pod
+   * opens; the same set may fill several, and a one-element list fills every
+   * booster (the server repeats the last entry). Mirrors the wire field
+   * Legacy UI input for a Uniform source. New callers may pass `source`
+   * directly; the adapter always serializes the tagged source boundary.
+   */
+  setCodes?: string[];
+  /** Canonical server source intent. Never contains Chaos assignments. */
+  source?: DraftSourceIntent;
+  kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
   timerSeconds?: number;
   tournamentFormat: TournamentFormat;
   podPolicy: PodPolicy;
   podSize: number;
+}
+
+function draftSourceIntent(settings: CreateDraftSettings): DraftSourceIntent {
+  return settings.source ?? {
+    type: "Uniform",
+    data: { set_codes: settings.setCodes ?? [] },
+  };
 }
 
 /** Events emitted by ServerDraftAdapter for UI state updates. */
@@ -61,12 +124,79 @@ export type ServerDraftAdapterEvent =
   | { type: "draftActionRejected"; reason: string }
   | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "opponentDisconnected"; graceSeconds: number }
+  | { type: "opponentReconnected" }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "disconnected" }
   | { type: "reconnected" }
   | { type: "error"; message: string };
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
+
+/** The state-bearing fields shared by the `GameStarted` and `StateUpdate` payloads. */
+interface StateBearingPayload {
+  state: GameState;
+  state_revision?: number;
+  legal_actions?: GameAction[];
+  auto_pass_recommended?: boolean;
+  end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
+  mana_payment_shortcut_actions?: GameAction[];
+  spell_costs?: Record<string, ManaCost>;
+  legal_actions_by_object?: Record<string, ObjectAction[]>;
+  activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+  viewer_interaction?: LegalActionsResult["viewerInteraction"];
+  derived?: GameState["derived"];
+}
+
+type DraftInit = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+} & (
+  | { kind: "create" }
+  | { kind: "reconnect"; draftCode: string; playerToken: string }
+);
+
+type AttachmentOwner =
+  | { type: "init"; init: DraftInit }
+  | {
+    type: "join";
+    resolve: (view: DraftPlayerView) => void;
+    reject: (error: Error) => void;
+  };
+
+interface DraftAttachment {
+  controller: AbortController;
+  owner: AttachmentOwner;
+  socket: PhaseSocketTransport | null;
+}
+
+interface PendingInteractionPreview {
+  resolve: (preview: InteractionPreview) => void;
+  reject: (error: Error) => void;
+}
+
+function fullSessionKeysEqual(
+  left: FullSessionKey | null | undefined,
+  right: FullSessionKey | null | undefined,
+): boolean {
+  return left !== null
+    && left !== undefined
+    && right !== null
+    && right !== undefined
+    && left.game_code === right.game_code
+    && left.generation === right.generation;
+}
+
+export interface ServerDraftAdapterOptions {
+  /**
+   * Supplies the negotiated StateCodecV1 decoder session for an attachment.
+   * `undefined` uses the shared engine only if already ready, otherwise starts
+   * with snapshots while it warms in the background. Explicit providers retain
+   * bounded preparation and may wait for startup. `null` keeps snapshot-only
+   * delivery with no newly introduced await before the handshake.
+   */
+  stateCodecSessionProvider?: StateCodecSessionProvider | null;
+}
 
 // ── ServerDraftAdapter ──────────────────────────────────────────────────
 
@@ -84,6 +214,19 @@ type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
  * Per D-05: single adapter, single socket, full lifecycle.
  * Per T-59-09: does NOT send ReportMatchResult on GameOver — server
  * handles match result reporting automatically.
+ *
+ * Creation completes on DraftCreated; reconnect completes on DraftStateUpdate
+ * after installing the authoritative view/phase, not on match progress frames.
+ * A new attachment supersedes pending initialization and cancels an attachment
+ * whose setup has not been sent; setup-sent draft actions retain their replies.
+ * DraftActionRejected rejects initialization without retiring the transport:
+ * the seat may already be reattached and a later state update remains valid.
+ * A reconnect candidate is adopted on its positive bootstrap or on that
+ * rejection (`SetupConfirmation`), so the rejection replays on the adopted
+ * candidate as before; an `Error`, a close, an abort or no answer within
+ * `SETUP_CONFIRMATION_TIMEOUT_MS` retires it and its incumbent. Create and
+ * Join impose no setup-response deadline; a silent server can leave them
+ * pending.
  */
 export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft-phase state ──────────────────────────────────────────────
@@ -100,29 +243,90 @@ export class ServerDraftAdapter implements EngineAdapter {
    * `getState`/`getLegalActions` can never straddle two updates.
    */
   private snapshot: EngineSnapshot | null = null;
+  /** The transport whose frame produced {@link snapshot}; null when there is none. */
+  private snapshotSource: PhaseSocketTransport | null = null;
+  /** Newest applied server state revision; an older Full must not replace it. */
+  private cachedStateRevision: number | null = null;
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
+  /** Full match lifetime announced by DraftMatchStart. */
+  private activeFullKey: FullSessionKey | null = null;
+  /** Full match lifetime whose matching GameStarted has been accepted. */
+  private acceptedFullKey: FullSessionKey | null = null;
+  /** Only this socket's accepted GameStarted authorizes new game requests. */
+  private acceptedGameSocket: PhaseSocketTransport | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
-  private ws: WebSocket | null = null;
-  private pendingResolve: ((result: SubmitResult) => void) | null = null;
-  private pendingReject: ((error: Error) => void) | null = null;
+  private ws: PhaseSocketTransport | null = null;
+  /** Current and retired transports remain owned until their permitted replies settle. */
+  private readonly sockets = new Set<PhaseSocketTransport>();
+  private readonly submission = new SubmissionSlot();
   private nextManaPaymentPreviewRequestId = 1;
+  // Each pending preview records the socket it was sent on, so a retired
+  // socket's close settles only its own previews.
   private pendingManaPaymentPreviews = new Map<
     number,
-    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+    {
+      socket: PhaseSocketTransport;
+      resolve: (sourceIds: ObjectId[]) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+  private pendingInteractionPreviews = new Map<
+    PhaseSocketTransport,
+    Map<string, PendingInteractionPreview>
   >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
-  private initResolve: (() => void) | null = null;
-  private initReject: ((error: Error) => void) | null = null;
+  // Meaningful only while the callback pair owns an action.
+  private draftActionStage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply";
+  private draftActionSocket: PhaseSocketTransport | null = null;
+  private draftPick: {
+    draftCode: string;
+    playerToken: string | null;
+    instanceId: string;
+    completeSelection: boolean;
+  } | null = null;
+  private pendingInit: DraftInit | null = null;
+  private unfinishedAttachment: DraftAttachment | null = null;
+  /**
+   * The reattach whose interval is open (ReconnectDraft written, the server's
+   * answer not yet received). While it is, the current socket is the incumbent
+   * and the server may already route the draft seat to the candidate.
+   */
+  private confirmingAttachment: DraftAttachment | null = null;
+  /**
+   * A match transition the incumbent saw while `confirmingAttachment` was open
+   * and left to that reattach. If the reattach's setup turns out not to have
+   * been written, the kept incumbent still owns the seat and sends it itself.
+   */
+  private deferredMatchReattach: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private _serverInfo: ServerInfo | null = null;
+  /** Undefined uses the best-effort shared default; explicit providers prepare before dialing. */
+  private readonly stateCodecProvider: StateCodecSessionProvider | null | undefined;
+  /**
+   * Application-bootstrap authority and recovery state for the current socket,
+   * published when its attachment's socket is adopted. A new draft match resets
+   * the bootstrap to pending; only an accepted GameStarted completes it.
+   */
+  private readonly stateCodec = new StateCodecAttachment();
+  /** The socket the in-flight game command was sent on, if any. */
+  private submissionSocket: PhaseSocketTransport | null = null;
+  /** Full match lifetime owning the command, independent of later match bootstraps. */
+  private submissionFullKey: FullSessionKey | null = null;
+  /** True once this claim was handed to the transport for the owning match. */
+  private submissionSent = false;
 
-  constructor(private readonly serverUrl: string) {}
+  constructor(
+    private readonly serverUrl: string,
+    options: ServerDraftAdapterOptions = {},
+  ) {
+    this.stateCodecProvider = options.stateCodecSessionProvider;
+  }
 
   // ── Public accessors ───────────────────────────────────────────────
 
@@ -178,22 +382,124 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
     }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(this.ws, this.activeFullKey);
 
-    this.emit({ type: "actionPendingChanged", pending: true });
+    return this.submitGameFrame(
+      { type: "Action", data: { action } },
+      new AdapterError("WS_CLOSED", "Failed to send action", true),
+    );
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    this.assertGameReady(this.ws, this.activeFullKey);
+
+    return this.submitGameFrame(
+      { type: "Interaction", data: { submission } },
+      new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertGameReady(
+    socket: PhaseSocketTransport | null,
+    ownerKey: FullSessionKey | null,
+  ): void {
+    if (socket !== null && socket === this.ws && this.acceptedGameSocket === socket
+      && fullSessionKeysEqual(ownerKey, this.activeFullKey)
+      && fullSessionKeysEqual(this.acceptedFullKey, ownerKey)) return;
+    throw new AdapterError(
+      AdapterErrorCode.ACTION_NOT_SENT,
+      "This connection has not accepted the current draft match; the request was not sent.",
+      true,
+    );
+  }
+
+  private assertNoPendingSubmission(): void {
+    this.stateCodec.assertNotRecovering();
+    this.assertNoReattachInterval();
+    if (this.submission.occupied) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "Another game submission is pending; this submission was not sent.",
+        true,
+      );
+    }
+  }
+
+  private submitGameFrame(frame: object, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      if (!this.send({ type: "Action", data: { action } })) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
+      // Claim before emitting: event listeners run synchronously and may submit
+      // again while handling actionPendingChanged.
+      const submission = this.submission.claim(
+        resolve,
+        reject,
+        this._serverInfo?.commandCorrelation === "CommandIdV1",
+      );
+      // Bind the claimed socket and its owning match together BEFORE any
+      // listener can run: a synchronous match change must not bless this
+      // command with the replacement match.
+      const claimedSocket = this.ws;
+      const claimedKey = this.activeFullKey;
+      this.submissionSocket = claimedSocket;
+      this.submissionFullKey = claimedKey;
+      this.submissionSent = false;
+      try {
+        this.emit({ type: "actionPendingChanged", pending: true });
+      } catch (error) {
+        if (this.submission.release(submission)) {
+          this.submissionSocket = null;
+          this.submissionFullKey = null;
+          this.retireIdleSockets();
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // A synchronous listener may close/dispose the adapter or otherwise
+      // settle this slot. Do not send after that owner has been released.
+      if (!this.submission.owns(submission)) return;
+      try {
+        // Pending notifications may synchronously announce another match.
+        // Never stamp or send with authority revoked by that reentry.
+        this.assertGameReady(claimedSocket, claimedKey);
+      } catch (error) {
+        // Only an owned slot is ours to release; a listener that already
+        // settled it keeps its own outcome and notification.
+        if (this.submission.release(submission)) {
+          this.submissionSocket = null;
+          this.submissionFullKey = null;
+          this.submissionSent = false;
+          this.retireIdleSockets();
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // From here the frame leaves this adapter, so a later match revocation
+      // must settle the caller instead of leaving the slot fenced.
+      this.submissionSent = true;
+      if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
+        this.submissionSocket = null;
+        this.submissionFullKey = null;
+        this.submissionSent = false;
+        this.retireIdleSockets();
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+        reject(sendFailure);
       }
     });
   }
@@ -202,16 +508,48 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
     }
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
+    this.assertGameReady(socket, this.activeFullKey);
 
     const requestId = this.nextManaPaymentPreviewRequestId++;
     return new Promise<ObjectId[]>((resolve, reject) => {
-      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      this.pendingManaPaymentPreviews.set(requestId, { socket, resolve, reject });
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+        this.retireIdleSockets();
+      }
+    });
+  }
+
+  async previewInteraction(
+    request: InteractionPreviewRequest,
+    _actor: PlayerId,
+  ): Promise<InteractionPreview> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    this.assertGameReady(socket, this.activeFullKey);
+
+    return new Promise<InteractionPreview>((resolve, reject) => {
+      let previews = this.pendingInteractionPreviews.get(socket);
+      if (!previews) {
+        previews = new Map<string, PendingInteractionPreview>();
+        this.pendingInteractionPreviews.set(socket, previews);
+      }
+      previews.set(request.requestId, { resolve, reject });
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
+      if (!this.send({ type: "PreviewInteraction", data: { request } })) {
+        this.takeInteractionPreview(socket, request.requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
+        this.retireIdleSockets();
       }
     });
   }
@@ -221,10 +559,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.snapshot.state;
-  }
-
-  getAiAction(): GameAction | null {
-    return null;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
@@ -240,9 +574,40 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   /** Rebuild the cached pair from an inbound state-bearing message, stamping
    *  it with a fresh globally-monotonic seq at arrival. */
-  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+  private cacheSnapshot(
+    state: GameState,
+    legalResult: LegalActionsResult,
+    source: PhaseSocketTransport,
+  ): EngineSnapshot {
     this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    this.snapshotSource = source;
     return this.snapshot;
+  }
+
+  /** Drop the cached pair together with the record of which transport produced it. */
+  private clearSnapshot(): void {
+    this.snapshot = null;
+    this.snapshotSource = null;
+    this.cachedStateRevision = null;
+  }
+
+  /** Turn a state-bearing payload into the pair {@link cacheSnapshot} stores. */
+  private static snapshotPair(
+    data: StateBearingPayload,
+  ): { state: GameState; legalResult: LegalActionsResult } {
+    return {
+      state: { ...data.state, derived: data.derived ?? data.state.derived },
+      legalResult: {
+        actions: data.legal_actions ?? [],
+        autoPassRecommended: data.auto_pass_recommended ?? false,
+        endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
+        manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
+        spellCosts: data.spell_costs,
+        legalActionsByObject: data.legal_actions_by_object,
+        activationBlockReasons: data.activation_block_reasons,
+        viewerInteraction: data.viewer_interaction,
+      },
+    };
   }
 
   restoreState(): void {
@@ -260,22 +625,15 @@ export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft lifecycle methods ────────────────────────────────────────
 
   async createDraft(settings: CreateDraftSettings): Promise<void> {
+    if (!isValidWebSocketUrl(this.serverUrl)) {
+      throw new AdapterError("WS_ERROR", "Invalid WebSocket URL", false);
+    }
     return new Promise<void>((resolve, reject) => {
-      this.initResolve = resolve;
-      this.initReject = reject;
-
-      if (!isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
-
-      this.attachSocket({
+      this.beginAttachment({ type: "init", init: { kind: "create", resolve, reject } }, {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
-          set_code: settings.setCode,
+          source: draftSourceIntent(settings),
           kind: settings.kind,
           public: settings.public,
           password: settings.password ?? null,
@@ -284,10 +642,68 @@ export class ServerDraftAdapter implements EngineAdapter {
           pod_policy: settings.podPolicy,
           pod_size: settings.podSize,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via initReject; swallow here.
       });
     });
+  }
+
+  /**
+   * The reattach interval is open: a seat-bound request on the incumbent would
+   * meet the server's draft-seat authority refusal once the candidate owns the
+   * seat, so it is not sent. Gated: game commands (`assertNoPendingSubmission`),
+   * picks, shared-stack decisions and deck submissions (also rechecked when deck
+   * preparation finishes). The same typed, localized refusal as during codec
+   * recovery.
+   */
+  private assertNoReattachInterval(): void {
+    if (this.confirmingAttachment !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        i18n.t("stateCodec.reconnectSubmissionNotSent"),
+        true,
+      );
+    }
+  }
+
+  /**
+   * Claim the single `draftResolve`/`draftReject` pair for one action.
+   *
+   * THE PAIR IS ONE SLOT, AND EVERY ACTION WANTED IT. `joinDraft`, `submitPick`,
+   * `submitSharedStackDecision` and `submitDeck` each assigned straight into it.
+   * A second action overwrote the first's callbacks, and the next
+   * `DraftStateUpdate` resolved only the survivor and nulled both -- so the
+   * first caller's promise never settled at all. Not a lost result: a
+   * permanently pending `await`, with whatever UI awaited it stuck behind it.
+   *
+   * Single-flight rather than request correlation, because the wire carries no
+   * correlation id: `DraftAction` frames are unlabelled and the server answers
+   * with a bare `DraftStateUpdate`. Adding an id is a protocol change; refusing
+   * to have two in flight is not, and these actions are user-initiated and
+   * mutually exclusive by phase anyway. The refusal is explicit and immediate,
+   * which is the part that matters -- the caller learns now instead of awaiting
+   * forever.
+   *
+   * The callback pair is the pending authority; settlement clears it together
+   * with its socket owner before retiring an otherwise idle attachment.
+   */
+  private claimDraftAction(
+    action: string,
+    resolve: (view: DraftPlayerView) => void,
+    reject: (error: Error) => void,
+    stage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply",
+  ): boolean {
+    if (this.draftResolve !== null || this.draftReject !== null) {
+      reject(new AdapterError(
+        "PHASE_ERROR",
+        `Another draft action is still in flight; ${action} was not sent`,
+        false,
+      ));
+      return false;
+    }
+    this.draftResolve = resolve;
+    this.draftReject = reject;
+    this.draftActionStage = stage;
+    this.draftActionSocket = this.ws;
+    return true;
   }
 
   async joinDraft(
@@ -296,25 +712,20 @@ export class ServerDraftAdapter implements EngineAdapter {
     password?: string,
   ): Promise<DraftPlayerView> {
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("JoinDraft", resolve, reject)) return;
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.draftResolve = null;
-        this.draftReject = null;
+        this.settleDraftAction(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
         return;
       }
 
-      this.attachSocket({
+      this.beginAttachment({ type: "join", resolve, reject }, {
         type: "JoinDraftWithPassword",
         data: {
           draft_code: draftCode,
           display_name: displayName,
           password: password ?? null,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via draftReject; swallow here.
       });
     });
   }
@@ -323,177 +734,915 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    this.assertNoReattachInterval();
+    const view = this.draftView;
+    if (view?.pool.some((card) => card.instance_id === cardInstanceId)) {
+      // An already-owned instance can never be the outcome of this request,
+      // and a later broadcast (any source) would otherwise look like one.
+      // Refuse before claiming the slot so nothing is sent.
+      throw new AdapterError("PHASE_ERROR", "That card is already in your draft pool", false);
+    }
+    const draftCode = this.draftCode;
+    const playerToken = this.draftToken;
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("Pick", resolve, reject)) return;
+      this.draftPick = {
+        draftCode,
+        playerToken,
+        instanceId: cardInstanceId,
+        completeSelection: view?.required_pick_count === 1
+          && view.current_pack?.some((card) => card.instance_id === cardInstanceId) === true
+          && !view.pool.some((card) => card.instance_id === cardInstanceId),
+      };
       const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
           action: {
             type: "Pick",
-            data: { seat: this.seatIndex, card_instance_id: cardInstanceId },
+            data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
           },
         },
       });
       if (!sent) {
-        this.draftResolve = null;
-        this.draftReject = null;
-        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+        this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
       }
     });
   }
 
-  async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+  /**
+   * One whole shared-stack turn decision on the server-authoritative path.
+   *
+   * This exists because `CreateDraftSettings.kind` is
+   * `Exclude<DraftKind, "Quick">`, which admits `"Winston"` the moment the
+   * union widens — a creatable kind with no way to send its only action would
+   * be a half-extension. No shipped UI drives this path today (a P2P pod is
+   * where Winston is played), but a wire client and any future UI use it.
+   *
+   * `pile` is the optimistic-concurrency check against the engine's cursor;
+   * legality is `shared_stack::refusal_for`'s, server-side.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    this.assertNoReattachInterval();
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
           action: {
-            type: "SubmitDeck",
-            data: { seat: this.seatIndex, main_deck: mainDeck },
+            type: "SharedStackDecision",
+            data: { seat: this.seatIndex, pile, decision },
           },
         },
       });
       if (!sent) {
-        this.draftResolve = null;
-        this.draftReject = null;
-        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+        this.settleDraftAction(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
       }
+    });
+  }
+
+  /**
+   * Submit names with optional owner printings selected from one snapshot of
+   * the submitter's pins/chain. Only main-deck cards are decorated, including
+   * commander-labelled main cards; pool art is not an entry source. Empty or
+   * timed-out decoration omits the sidecar, replacing previous submission art.
+   * Preparation reserves the action slot and cannot be acknowledged by a
+   * broadcast. After sending, acknowledgements remain uncorrelated as before.
+   */
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
+    if (this.seatIndex === null || this.draftCode === null) {
+      throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
+    }
+    this.assertNoReattachInterval();
+    return new Promise<DraftPlayerView>((resolve, reject) => {
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject, "PreparingDeck")) return;
+      const ws = this.ws;
+      const draftCode = this.draftCode;
+      const draftToken = this.draftToken;
+      const seat = this.seatIndex;
+      const prepare = async () => {
+        const capturedMain = [...mainDeck];
+        const capturedCommanders = [...commanders];
+        const snapshot = captureSubmissionArtPreferences();
+        const deck = await submitDeckList({ main_deck: capturedMain, sideboard: [] }, snapshot);
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
+        if (this.disposed || this.ws !== ws || !ws || ws.readyState !== WebSocket.OPEN
+            || this.draftCode !== draftCode || this.draftToken !== draftToken || this.seatIndex !== seat) {
+          throw new AdapterError("WS_CLOSED", "Draft session changed during deck preparation", true);
+        }
+        // A reattach written while the deck was being prepared gates it too.
+        this.assertNoReattachInterval();
+        this.draftActionStage = "AwaitingReply";
+        const sent = this.send({
+          type: "DraftAction",
+          data: {
+            draft_code: draftCode,
+            action: {
+              type: "SubmitDeck",
+              // Key order matches the Rust carrier (`seat`, `main_deck`,
+              // `commanders`, `companion`, `printings`); absent companion and
+              // art keep old bytes.
+              data: {
+                seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+                ...(companion !== undefined ? { companion } : {}),
+                ...(deck.printings?.length ? { printings: deck.printings } : {}),
+              },
+            },
+          },
+        });
+        if (!sent) throw new AdapterError("WS_CLOSED", "Failed to send draft action", true);
+      };
+      void prepare().catch((error: unknown) => {
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
+        this.settleDraftAction(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
   // ── Socket management ──────────────────────────────────────────────
 
-  /**
-   * Opens a PhaseSocket via the shared handshake helper, caches the
-   * ServerInfo, wires the post-handshake message/close handlers, and
-   * sends setupFrame. Mirrors WebSocketAdapter.attachSocket.
-   */
-  private async attachSocket(setupFrame: unknown): Promise<void> {
-    let socket: PhaseSocket;
-    try {
-      socket = await openPhaseSocket(this.serverUrl);
-    } catch (err) {
-      if (err instanceof HandshakeError) {
-        const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
-        const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
-        if (this.initReject) {
-          this.initReject(adapterErr);
-          this.initResolve = null;
-          this.initReject = null;
-        }
-        if (this.draftReject) {
-          this.draftReject(adapterErr);
-          this.draftResolve = null;
-          this.draftReject = null;
-        }
-        if (err.kind === "protocol_mismatch" && err.serverInfo) {
-          this._serverInfo = err.serverInfo;
-          this.emit({
-            type: "serverHello",
-            info: err.serverInfo,
-            compatible: false,
-          });
-        }
-        return;
-      }
-      const adapterErr = new AdapterError("WS_ERROR", String(err), true);
-      if (this.initReject) {
-        this.initReject(adapterErr);
-        this.initResolve = null;
-        this.initReject = null;
-      }
-      if (this.draftReject) {
-        this.draftReject(adapterErr);
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-      return;
+  /** Only actual pending work retains a retired transport, never a stale source pointer. */
+  private ownsSocketReply(socket: PhaseSocketTransport): boolean {
+    if (this.unfinishedAttachment?.socket === socket) return true;
+    if (this.submission.occupied && this.submissionSocket === socket) return true;
+    if (this.draftReject !== null && this.draftActionStage === "AwaitingReply"
+      && this.draftActionSocket === socket) return true;
+    for (const pending of this.pendingManaPaymentPreviews.values()) {
+      if (pending.socket === socket) return true;
     }
+    return this.pendingInteractionPreviews.has(socket);
+  }
 
-    this.ws = socket.ws;
-    this._serverInfo = socket.serverInfo;
-    this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
-    this.startPing();
+  /** Remove ownership and callbacks before close: native close may synchronously reenter. */
+  private releaseSocket(socket: PhaseSocketTransport, close = true): void {
+    if (!this.sockets.delete(socket)) return;
+    if (this.acceptedGameSocket === socket) this.acceptedGameSocket = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    if (close) socket.close();
+  }
 
-    socket.ws.onmessage = (event) => {
-      this.handleMessage(JSON.parse(event.data as string));
-    };
+  private retireIdleSockets(): void {
+    for (const socket of this.sockets) {
+      if (socket !== this.ws && !this.ownsSocketReply(socket)) this.releaseSocket(socket);
+    }
+  }
 
-    socket.ws.onerror = () => {
-      const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
-      if (this.initReject) {
-        this.initReject(err);
-        this.initResolve = null;
-        this.initReject = null;
+  private settleDraftAction(result: DraftPlayerView | Error, onlySocket?: PhaseSocketTransport): boolean {
+    if (!this.draftResolve || !this.draftReject
+      || (onlySocket && this.draftActionSocket !== onlySocket)) return false;
+    const resolve = this.draftResolve;
+    const reject = this.draftReject;
+    this.draftResolve = null;
+    this.draftReject = null;
+    this.draftActionSocket = null;
+    this.draftPick = null;
+    if (result instanceof Error) reject(result);
+    else resolve(result);
+    this.retireIdleSockets();
+    return true;
+  }
+
+  /**
+   * A pick sent without the engine's complete selection can only be proven by
+   * its own sending socket's inventory. Once a different socket is adopted the
+   * server's success fan-out follows the registered sender, so the original
+   * request may never be answered on its sender. Retire it as unconfirmed
+   * (recoverable) instead of leaving the caller awaiting forever.
+   */
+  private retireUnprovablePick(replacement: PhaseSocketTransport): void {
+    if (this.draftReject === null || this.draftActionStage !== "AwaitingReply") return;
+    const pick = this.draftPick;
+    if (!pick || pick.completeSelection || this.draftActionSocket === replacement) return;
+    this.settleDraftAction(new AdapterError(
+      "WS_CLOSED",
+      "The draft connection changed before this pick was confirmed",
+      true,
+    ));
+  }
+
+  /**
+   * Draft broadcasts are not acknowledgements. A pick completes when its
+   * inventory proves the exact newly selected instance. A request backed by the
+   * complete selection offered in the original view can complete from any
+   * source with the captured draft identity; a request without that authority
+   * can only be completed by its own sending socket, which is the
+   * request-scoped receipt and never a replacement's snapshot.
+   * Counter/phase changes and reply ownership alone are not outcome evidence.
+   * The wire cannot distinguish a timer selecting that same instance.
+   */
+  private settleDraftView(
+    view: DraftPlayerView,
+    sourceSocket: PhaseSocketTransport,
+    initOwner: DraftInit | null,
+  ): void {
+    if (this.draftActionStage !== "AwaitingReply") return;
+    const pick = this.draftPick;
+    if (pick) {
+      if (!view.pool.some((card) => card.instance_id === pick.instanceId)) return;
+      const ownsAction = this.draftActionSocket === sourceSocket;
+      if (!ownsAction) {
+        const sameDraft = initOwner?.kind === "reconnect"
+          && initOwner.draftCode === pick.draftCode
+          && initOwner.playerToken === pick.playerToken;
+        if (!pick.completeSelection || !sameDraft) return;
       }
-      if (this.draftReject) {
-        this.draftReject(err);
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-    };
+    }
+    // Non-pick actions retain the legacy current-stream completion semantics;
+    // retired frames have already been restricted to their own pending reply.
+    this.settleDraftAction(view);
+  }
 
-    socket.ws.onclose = () => {
+  private takeInteractionPreview(socket: PhaseSocketTransport, requestId: string) {
+    const previews = this.pendingInteractionPreviews.get(socket);
+    if (!previews) return null;
+    const pending = previews.get(requestId);
+    if (pending) {
+      previews.delete(requestId);
+      if (previews.size === 0) this.pendingInteractionPreviews.delete(socket);
+    }
+    return pending ?? null;
+  }
+
+  /** Legacy current-stream replies still belong to the command's match. */
+  private matchesSubmissionMatch(source: PhaseSocketTransport): boolean {
+    return source !== this.ws || !this.submission.occupied
+      || fullSessionKeysEqual(this.submissionFullKey, this.activeFullKey);
+  }
+
+  /** Preserve legacy current-stream acknowledgement while fencing stamped and retired sources. */
+  private takeSubmission(source: PhaseSocketTransport, commandId: unknown) {
+    if (!this.matchesSubmissionMatch(source)) return null;
+    if (this.submissionSocket !== source && (this.submission.stamped || source !== this.ws)) return null;
+    const pending = this.submission.take(commandId);
+    if (pending) {
+      this.submissionSocket = null;
+      this.submissionFullKey = null;
+      this.submissionSent = false;
+    }
+    return pending;
+  }
+
+  private settleInit(expected: DraftInit | null, error?: Error): boolean {
+    if (expected === null || this.pendingInit !== expected) return false;
+    this.pendingInit = null;
+    if (error) expected.reject(error);
+    else expected.resolve();
+    return true;
+  }
+
+  private rejectAttachment(owner: AttachmentOwner, error: Error): void {
+    switch (owner.type) {
+      case "init":
+        this.settleInit(owner.init, error);
+        break;
+      case "join":
+        if (this.draftResolve === owner.resolve && this.draftReject === owner.reject) {
+          this.settleDraftAction(error);
+        }
+        break;
+    }
+  }
+
+  private cancelAttachment(error: Error): void {
+    const attachment = this.unfinishedAttachment;
+    if (!attachment) return;
+    this.unfinishedAttachment = null;
+    this.rejectAttachment(attachment.owner, error);
+    attachment.controller.abort(error);
+  }
+
+  private beginAttachment(owner: AttachmentOwner, setupFrame: unknown): void {
+    const superseded = new AdapterError("WS_CLOSED", "Draft attachment superseded by a new operation", true);
+    this.settleInit(this.pendingInit, superseded);
+    this.cancelAttachment(superseded);
+    if (owner.type === "init") this.pendingInit = owner.init;
+    const attachment: DraftAttachment = { owner, controller: new AbortController(), socket: null };
+    this.unfinishedAttachment = attachment;
+    // attachSocket settles the owner for transport/listener failures; this
+    // final catch only keeps an exception thrown after settlement (e.g. by a
+    // protocol-mismatch diagnostic listener) from becoming an unhandled
+    // rejection.
+    void this.attachSocket(attachment, setupFrame).catch((error: unknown) => {
+      this.rejectAttachment(owner, error instanceof Error ? error : new Error(String(error)));
+    });
+  }
+
+  private ownsAttachment(attachment: DraftAttachment): boolean {
+    return this.unfinishedAttachment === attachment
+      && !attachment.controller.signal.aborted
+      // Draft replies are uncorrelated: another socket can release a join's
+      // pair before its handshake resumes. It still must send the claimed join.
+      && (attachment.owner.type === "join" || this.pendingInit === attachment.owner.init);
+  }
+
+  /**
+   * Drops the pending command slot for a codec recovery of the current socket
+   * and rejects it with `error`. A stamped command that was claimed on a
+   * still-open retired socket is not this recovery's to drop: that socket's
+   * completion or close still settles it (see {@link settleRetiredCompletion}
+   * and {@link settleSocketClose}). An unstamped (legacy) slot still accepts
+   * the current stream's first completion, and a slot with no recorded socket
+   * has no retired owner, so both are dropped as before.
+   */
+  private interruptPendingSubmission(error: AdapterError): void {
+    const claimedOnRetiredSocket = this.submission.stamped
+      && this.submissionSocket !== null
+      && this.submissionSocket !== this.ws;
+    if (claimedOnRetiredSocket) return;
+    const dropped = this.submission.drop();
+    this.submissionSocket = null;
+    this.submissionFullKey = null;
+    this.submissionSent = false;
+    try {
+      if (dropped) {
+        dropped.reject(error);
+        this.emit({ type: "actionPendingChanged", pending: false });
+      }
+    } finally {
+      this.retireIdleSockets();
+    }
+  }
+
+  /** A close settles only the command, previews and draft action sent on that source. */
+  private settleSocketClose(source: PhaseSocketTransport, settleAction = true): void {
+    // Previews sent on the retired socket can no longer be answered; previews
+    // sent on the current socket are not its to reject.
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      source,
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+      source,
+    );
+    if (settleAction) {
+      this.settleDraftAction(
+        new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
+        source,
+      );
+    }
+    if (this.submissionSocket !== source) return;
+    const dropped = this.submission.drop();
+    this.submissionSocket = null;
+    this.submissionFullKey = null;
+    this.submissionSent = false;
+    if (!dropped) return;
+    dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
+    this.emit({ type: "actionPendingChanged", pending: false });
+  }
+
+  /**
+   * A retired socket's StateUpdate is withheld from game delivery, but it still
+   * answers the command that was claimed on it, exactly as it did before the
+   * replacement. Callers read the snapshot as soon as the command resolves, so
+   * the reply's own state is cached first, but only for the same active match
+   * while the replacement has delivered no game state. A later match must not
+   * borrow this reply as its empty snapshot. The reply never emits a game event
+   * and never touches the accepted Full-session key.
+   */
+  private settleRetiredCompletion(
+    retired: PhaseSocketTransport,
+    msg: { data?: unknown; command_id?: unknown },
+  ): void {
+    if (this.submissionSocket !== retired) return;
+    const data = (msg.data ?? {}) as Partial<StateBearingPayload> & {
+      events?: GameEvent[];
+      log_entries?: GameLogEntry[];
+      full_key?: FullSessionKey;
+    };
+    // Completion belongs to the command's match, not the replacement's current
+    // bootstrap (which may be empty or already accepting another Full key).
+    if (!fullSessionKeysEqual(data.full_key, this.submissionFullKey)) return;
+    const pending = this.takeSubmission(retired, msg.command_id);
+    if (!pending) return;
+    // The retired reply answers its command either way, but its state joins the
+    // applied-revision authority like any other snapshot: one older than the
+    // applied revision is not applied, and one that is applied advances it.
+    const revision = typeof data.state_revision === "number" ? data.state_revision : null;
+    const regresses = this.cachedStateRevision !== null && revision !== null
+      && revision < this.cachedStateRevision;
+    if (data.state && !regresses && fullSessionKeysEqual(data.full_key, this.activeFullKey)
+      && this.snapshotSource !== this.ws) {
+      const { state, legalResult } = ServerDraftAdapter.snapshotPair(
+        data as StateBearingPayload,
+      );
+      this.cacheSnapshot(state, legalResult, retired);
+      this.cachedStateRevision = revision ?? this.cachedStateRevision;
+    }
+    pending.resolve({ events: data.events ?? [], log_entries: data.log_entries });
+    this.emit({ type: "actionPendingChanged", pending: false });
+  }
+
+  /**
+   * The server replaces a seat's sender on `ReconnectDraft` and never closes
+   * the predecessor, so after that frame is written the incumbent may no longer
+   * receive the seat's broadcasts. A candidate that is cancelled, closes, is
+   * refused or times out before the server answers on it must not leave the
+   * incumbent as the current socket: the incumbent stops being current, the
+   * work it owns is settled and it is released. Create and Join attach a different seat and
+   * leave the incumbent's seat untouched.
+   */
+  private retireSwappedIncumbent(
+    incumbent: PhaseSocketTransport | null,
+    candidate: PhaseSocketTransport,
+    owner: AttachmentOwner,
+  ): void {
+    if (owner.type !== "init" || owner.init.kind !== "reconnect") return;
+    // Only the incumbent this candidate's setup replaced: a successor that
+    // became current meanwhile owns the seat and is left alone.
+    if (incumbent === null || incumbent === candidate || this.ws !== incumbent) return;
+    this.ws = null;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    this.stateCodec.clearRecovery();
+    // Its seat sender is gone: nothing it was owed can arrive, so settle it,
+    // except the action slot of a join that superseded this reattach: that
+    // claim is bound to the incumbent only until the join's own socket
+    // handshakes, and its attachment is still dialing.
+    const superseding = this.unfinishedAttachment?.owner;
+    const joinOwnsAction = superseding?.type === "join" && this.draftResolve === superseding.resolve;
+    try {
+      this.settleSocketClose(incumbent, !joinOwnsAction);
+    } finally {
+      this.releaseSocket(incumbent);
+    }
+  }
+
+  /**
+   * Retires a candidate this adapter never adopted. A terminal codec failure
+   * it reported before adoption (during ClientHello, or after its setup frame
+   * was written) still moves this adapter's sticky delivery policy, so the
+   * next attachment is snapshot-only; `consumeFailure` leaves the incumbent's
+   * or a newer attachment's binding, bootstrap status and recovery gate alone.
+   */
+  private abandonCandidate(socket: PhaseSocket, bootstrap: StateCodecBootstrapBinding): void {
+    if (!this.disposed && bootstrap.failure !== null) this.stateCodec.consumeFailure(bootstrap);
+    this.abandonSocket(socket);
+  }
+
+  private abandonSocket(socket: PhaseSocket): void {
+    // Invalidate the candidate before notifications can reenter on a successor.
+    if (this.ws === socket.ws) {
+      this.ws = null;
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
-      if (this.pendingReject) {
-        this.emit({ type: "actionPendingChanged", pending: false });
-        this.pendingReject(
-          new AdapterError("WS_CLOSED", "Connection closed during action", true),
-        );
-        this.pendingResolve = null;
-        this.pendingReject = null;
-      }
-      this.rejectPendingManaPaymentPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
-      );
-      if (this.draftReject) {
-        this.draftReject(
-          new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
-        );
-        this.draftResolve = null;
-        this.draftReject = null;
-      }
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Connection closed before draft started", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
-      } else if (this.draftToken && !this.disposed) {
-        this.emit({ type: "disconnected" });
-      }
-    };
+    }
+    try {
+      this.settleSocketClose(socket.ws);
+    } finally {
+      // Source-scoped settlement must not strand the lease if a listener throws.
+      this.releaseSocket(socket.ws);
+    }
+  }
 
-    if (!this.send(setupFrame)) {
-      socket.close();
-      const err = new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
-      if (this.initReject) {
-        this.initReject(err);
-        this.initResolve = null;
-        this.initReject = null;
+  /**
+   * Ownership spans codec preparation, handshake completion, setup send and
+   * synchronous hello listeners; replaced sockets retain only permitted pending replies.
+   */
+  private async attachSocket(attachment: DraftAttachment, setupFrame: unknown): Promise<void> {
+    let socket: PhaseSocket | null = null;
+    let prepared: StateCodecSession | null = null;
+    const initOwner = attachment.owner.type === "init" ? attachment.owner.init : null;
+    const bootstrap = this.stateCodec.begin();
+    // Published as the adapter's binding only when this attachment's socket is
+    // adopted below: until then a still-current older socket keeps its own
+    // binding and recovery gate, and `ownsAttachment` tracks supersession.
+    try {
+      // Only explicit providers prepare before dialing. The shared default
+      // races capability discovery without delaying socket creation.
+      const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
+      if (provider) {
+        try {
+          prepared = await prepareBoundedStateCodecSession(
+            provider,
+            attachment.controller.signal,
+            STATE_CODEC_PREPARATION_TIMEOUT_MS,
+          );
+        } catch (error) {
+          if (error instanceof StateCodecPreparationAbortError) throw error;
+          prepared = null;
+        }
       }
-      if (this.draftReject) {
-        this.draftReject(err);
-        this.draftResolve = null;
-        this.draftReject = null;
+      if (!this.ownsAttachment(attachment)) {
+        prepared?.close();
+        prepared = null;
+        return;
       }
+      // Ownership of the lease moves into the handshake helper, which releases
+      // it on every failure path and on non-negotiation. A lease that arrives
+      // after this adapter degraded is closed here and not offered.
+      const handed = provider === undefined
+        ? getSharedAdapter().openStateCodecSession("ifReady")
+          .then((session) => this.stateCodec.selectLease(session))
+        : this.stateCodec.selectLease(prepared);
+      prepared = null;
+      socket = await openPhaseSocket(this.serverUrl, {
+        signal: attachment.controller.signal,
+        stateCodecSession: handed,
+        stateCodecBootstrap: () => this.stateCodec.status(bootstrap, this.ws, this.disposed),
+        onStateCodecRecovery: (state) => this.stateCodec.handleRecovery(
+          bootstrap, state, this.ws, this.disposed,
+          (error) => this.interruptPendingSubmission(error),
+        ),
+      });
+      attachment.socket = socket.ws;
+      this.sockets.add(socket.ws);
+      if (!this.ownsAttachment(attachment)) {
+        this.abandonCandidate(socket, bootstrap);
+        return;
+      }
+      const sourceSocket = socket.ws;
+      // Do not publish a request-capable candidate until its setup is sent
+      // (Create, Join) or, for a ReconnectDraft, until its positive bootstrap.
+      // Raw transports can synchronously reenter during send; retain those
+      // messages until both setup ordering and attachment ownership are safe.
+      const setupMessages: Parameters<NonNullable<PhaseSocketTransport["onmessage"]>>[0][] = [];
+      // The uncertain interval of a reattach (setup sent, bootstrap not yet
+      // received) has one owner; Create and Join attach a different seat.
+      // Created at the setup write, so no earlier return leaves its timer behind.
+      let confirmation: SetupConfirmation | null = null;
+      // Envelopes the confirmation interval already parsed, by frame: the
+      // drain dispatches them without materializing the frame a second time.
+      const parsedSetupFrames = new WeakMap<object, SetupFrameMessage>();
+      const bufferBudget = new SetupBufferBudget("draft");
+      // Set while an unconfirmed attachment waits for its setup receipt: a
+      // frame the candidate receives then is the server's answer to that setup.
+      let noteSetupAnswer: (() => void) | null = null;
+      sourceSocket.onmessage = (event) => {
+        setupMessages.push(event);
+        if (noteSetupAnswer !== null) {
+          // The answer to an unconfirmed attachment's setup settles its wait and
+          // is drained next, so, like a confirmed interval's settling bootstrap
+          // (which may be a large Full), it is not charged to the backlog.
+          noteSetupAnswer();
+          noteSetupAnswer = null;
+          bufferBudget.waive(event.data);
+          return;
+        }
+        // The positive bootstrap or the server's `DraftActionRejected` answer
+        // adopts (the seat may already be this candidate's); an `Error` ends
+        // the interval.
+        const parsed = confirmation?.observe("draft", event.data);
+        if (parsed !== undefined) {
+          parsedSetupFrames.set(event, parsed);
+          return;
+        }
+        // The buffer's own bound: the codec releases its receive charge once
+        // this handler has the frame, and the text stays retained here until
+        // the drain, so a peer that never settles the setup is cut off by size.
+        if (confirmation !== null && confirmation.current !== null) return;
+        if (bufferBudget.admit(event.data)) return;
+        if (confirmation !== null) {
+          confirmation.overflow();
+        } else if (this.unfinishedAttachment === attachment) {
+          this.cancelAttachment(new AdapterError(
+            "WS_CLOSED", "The server sent too much before the setup was confirmed", true,
+          ));
+        }
+      };
+      const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
+        if (!this.sockets.has(sourceSocket)) return;
+        try {
+          const message: { type: string; data?: unknown; command_id?: unknown } = parsedSetupFrames.get(event)
+            ?? JSON.parse(event.data);
+          if (this.ws !== sourceSocket) {
+            switch (message.type) {
+              case "StateUpdate":
+                this.settleRetiredCompletion(sourceSocket, message);
+                return;
+              case "ActionNoOp":
+              case "ActionRejected":
+              case "ActionFailed":
+              case "StateWithheld":
+                if (!this.submission.occupied || this.submissionSocket !== sourceSocket) return;
+                break;
+              case "DraftJoined":
+              case "DraftStateUpdate":
+              case "DraftActionRejected":
+                if (!this.draftReject || this.draftActionStage !== "AwaitingReply"
+                  || this.draftActionSocket !== sourceSocket) return;
+                break;
+              case "ManaPaymentPreview":
+              case "ManaPaymentPreviewRejected":
+              case "ManaPaymentPreviewFailed":
+              case "InteractionPreview":
+              case "InteractionPreviewFailed":
+                break;
+              default:
+                return;
+            }
+          }
+          return this.handleMessage(message, initOwner, sourceSocket);
+        } finally {
+          this.retireIdleSockets();
+        }
+      };
+      sourceSocket.onerror = () => {
+        if (!this.sockets.has(sourceSocket)) return;
+        try {
+          const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
+          if (this.ws === sourceSocket || this.unfinishedAttachment === attachment) this.settleInit(initOwner, err);
+          this.settleDraftAction(err, sourceSocket);
+        } finally {
+          this.retireIdleSockets();
+        }
+      };
+      sourceSocket.onclose = () => {
+        confirmation?.closed();
+        if (!this.sockets.has(sourceSocket)) return;
+        const current = this.ws === sourceSocket;
+        // The transport already observed raw death; do not close the raw socket again.
+        this.releaseSocket(sourceSocket, false);
+        if (current && this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        if (current) this.stateCodec.clearRecovery();
+        // Settle initialization before synchronous notifications can throw.
+        const settledOwn = (current || this.unfinishedAttachment === attachment)
+          && this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
+        try {
+          this.settleSocketClose(sourceSocket);
+          if (current && !settledOwn && this.pendingInit === null && this.draftToken && !this.disposed) {
+            this.emit({ type: "disconnected" });
+          }
+        } finally {
+          this.retireIdleSockets();
+        }
+      };
+
+      if (attachment.owner.type === "join"
+        && this.draftResolve === attachment.owner.resolve && this.draftReject === attachment.owner.reject) {
+        this.draftActionSocket = sourceSocket;
+      }
+      if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
+        // A terminal codec failure may have arrived during ClientHello: this
+        // candidate never owned a setup-capable attachment.
+        this.abandonCandidate(socket, bootstrap);
+        return;
+      }
+      // Same policy consumption for a live candidate; the incumbent socket and
+      // its credentials stay current until this candidate's setup is on the wire
+      // and, for a ReconnectDraft, until the server answers on the candidate.
+      if (bootstrap.failure !== null) {
+        this.stateCodec.consumeFailure(bootstrap);
+      }
+      // Address the local candidate, not the still-current previous socket.
+      let written: boolean;
+      // Why the interval after the write did not end in a positive bootstrap.
+      let unconfirmed: SetupConfirmationOutcome | null = null;
+      // Whether the incumbent left a match transition to this reattach.
+      let deferredMatch = false;
+      // The incumbent this setup replaces: only it is retired if the
+      // candidate is not adopted (a successor may be current by then).
+      const incumbent = this.ws;
+      try {
+        if (initOwner?.kind === "reconnect") {
+          this.confirmingAttachment = attachment;
+          confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
+            sourceSocket instanceof StateCodecSocket ? sourceSocket.decodeInFlight : null
+          ));
+        }
+        // Armed before the transport is invoked, because its send may deliver
+        // the answer synchronously. After the handshake the server speaks on
+        // this socket only in answer to the setup, so a frame received since
+        // the write proves it has the frame: the receipt, which the transport
+        // may still hold, is then not waited for, as on a confirmed reconnect.
+        let answered: Promise<true> | null = null;
+        if (confirmation === null) {
+          answered = new Promise<true>((resolve) => { noteSetupAnswer = () => resolve(true); });
+        }
+        const write = writeSetupFrame(
+          sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
+        );
+        if (confirmation === null) {
+          // Every private candidate has an abort owner independent of the
+          // write: a cancellation that lands while the receipt is pending
+          // retires the candidate and its lease at once, not when the encoder
+          // answers. The receipt's fate still decides the post-write paths.
+          const candidate = socket!;
+          const onAbort = () => this.abandonCandidate(candidate, bootstrap);
+          attachment.controller.signal.addEventListener("abort", onAbort, { once: true });
+          // The transport's send may itself have cancelled the attachment
+          // (disposal or supersession inside the receipt callback), before the
+          // listener above existed: an aborted signal fires no later event.
+          if (attachment.controller.signal.aborted) onAbort();
+          try {
+            // The receipt belongs to the transport and may never settle on a
+            // socket that stays open: past the bound the frame counts as unsent
+            // and the candidate is retired with the failed attachment.
+            // (A transport without a receipt wrote synchronously: nothing to bound.)
+            written = sourceSocket.sendReceipt === undefined
+              ? await write
+              : await Promise.race([
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered!,
+              ]);
+          } finally {
+            noteSetupAnswer = null;
+            attachment.controller.signal.removeEventListener("abort", onAbort);
+          }
+        } else {
+          // A receipt that never settles is bounded by the same owner. An abort
+          // that lands while the receipt is pending releases the interval's
+          // gate and retires the candidate at once, since the successor owns
+          // the attachment now; the incumbent still waits for the receipt's
+          // fate (the same bound applies), as an abort before it settles says
+          // nothing about whether the frame went out.
+          const first = await Promise.race([write, confirmation.settled, whenAborted(attachment.controller.signal)]);
+          if (first === "abort") {
+            if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
+            this.abandonCandidate(socket, bootstrap);
+            const fate = await Promise.race([write, confirmation.settled]);
+            written = typeof fate === "boolean" ? fate : true;
+            unconfirmed = written ? "aborted" : null;
+          } else if (typeof first === "boolean") {
+            written = first;
+          } else if (first === "confirmed") {
+            // The server answered the setup, so it has the frame: the receipt,
+            // which the transport may still hold, is not waited for.
+            written = true;
+          } else {
+            // The receipt is still pending, so the frame's fate is unknown.
+            // The server may already have it and have moved the seat's sender,
+            // so it counts as written: the incumbent is not kept as if current.
+            written = true;
+            unconfirmed = first;
+          }
+          if (written && unconfirmed === null) {
+            confirmation.watchAbort(attachment.controller.signal);
+            const outcome = await confirmation.settled;
+            if (outcome !== "confirmed") unconfirmed = outcome;
+          }
+        }
+      } finally {
+        confirmation?.dispose();
+        if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
+        deferredMatch = this.deferredMatchReattach === attachment;
+        if (deferredMatch) this.deferredMatchReattach = null;
+      }
+      if (!written) {
+        // The setup never reached the wire, so the kept incumbent still owns the
+        // seat: a match transition it left to this reattach is its own to attach.
+        if (deferredMatch && incumbent !== null && this.ws === incumbent && this.draftCode && this.draftToken) {
+          this.send({
+            type: "ReconnectDraft",
+            data: { draft_code: this.draftCode, player_token: this.draftToken },
+          }, incumbent);
+        }
+        throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
+      }
+      if (unconfirmed !== null) {
+        // Ownership of the seat is unknown: retire the incumbent (settling its
+        // work) and the candidate. A close or an abort has already settled the
+        // initialization; a timeout or a refusal settles it here. Nothing
+        // retries a reattach: this adapter schedules no retry and, as on main,
+        // no product code calls `reconnectDraft`.
+        this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
+        // The server's `Error`, surfaced as the `Error` handler surfaces it on
+        // an adopted socket: the reattach rejects with its reason and the same
+        // event follows. A `DraftActionRejected` never reaches here: it is the
+        // server's answer on a candidate that may hold the seat, so it adopts.
+        const refusal = unconfirmed === "refused" ? confirmation!.refusal : null;
+        if (unconfirmed === "timeout") {
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            "WS_CLOSED", "Reconnect was not confirmed in time", true,
+          ));
+        } else if (unconfirmed === "overflow") {
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            "WS_CLOSED", "The server sent too much before the reattach was confirmed", true,
+          ));
+        } else if (refusal !== null) {
+          this.rejectAttachment(attachment.owner, new AdapterError("WS_ERROR", refusal.message, true));
+        }
+        // Retired before any listener runs, so a throwing listener strands
+        // nothing. A terminal codec failure that closed the candidate after
+        // its setup was written stays with this adapter's next attachment.
+        this.abandonCandidate(socket, bootstrap);
+        if (this.disposed) return;
+        if (refusal !== null) this.emit({ type: "error", message: refusal.message });
+        return;
+      }
+      if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
+        // The frame is on the wire: a ReconnectDraft may already have moved
+        // the seat's sender to this candidate, so the incumbent may be deaf.
+        this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
+        this.abandonCandidate(socket, bootstrap);
+        return;
+      }
+      // Adoption retires the previous binding only after setup is on the wire
+      // and, for a ReconnectDraft, after the server answered on the candidate.
+      this.stateCodec.adopt(bootstrap, sourceSocket);
+      this.ws = sourceSocket;
+      this.acceptedGameSocket = null;
+      // A pick awaiting proof on the replaced socket can no longer be
+      // confirmed here: retire it before any listener observes the successor.
+      this.retireUnprovablePick(sourceSocket);
+      if (initOwner?.kind !== "reconnect") {
+        // Create/Join attach a new draft seat, not the previous draft's Full
+        // game. Only replies on this attachment may establish its authority.
+        // Pending A work keeps its captured source/key until its own reply.
+        this.phase = "lobby";
+        this.draftCode = null;
+        this.draftToken = null;
+        this.seatIndex = null;
+        this.draftView = null;
+        this.clearSnapshot();
+        this._playerId = null;
+        this.activeMatchId = null;
+        this._gameCode = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
+      }
+      this._serverInfo = socket.serverInfo;
+      this.retireIdleSockets();
+      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+      // A setup reply may already have settled initialization. Attachment
+      // identity, not an unsettled initializer, owns the remaining handoff.
+      if (this.unfinishedAttachment !== attachment || attachment.controller.signal.aborted
+        || this.ws !== sourceSocket) {
+        this.abandonSocket(socket);
+        return;
+      }
+      this.startPing();
+      // The buffer stays installed through hello callbacks and this whole
+      // drain: their synchronous replies must follow the frames admitted before
+      // the candidate was published. Index, not an iterator, so appended
+      // replies are drained in wire order.
+      for (let index = 0; index < setupMessages.length; index++) {
+        if (!this.sockets.has(sourceSocket)) return;
+        // The buffered frames are the server's answers, which the merge base
+        // delivered to the live socket handler. A throw there, or a frame that
+        // does not parse, does not undo a committed attachment: it is reported
+        // as an uncaught error (as a raw socket's handler reports it; the gzip
+        // and codec transports swallow it on live delivery) and the socket and
+        // the remaining frames carry on, so a settled initialization never
+        // outlives its transport. The exception is a frame that settles the
+        // initialization itself (a view, a rejection) throwing before it did:
+        // nothing else would, so it fails the attachment.
+        try {
+          handleMessage(setupMessages[index]!);
+        } catch (error) {
+          // For a confirmed reattach, a `DraftMatchStart` confirms the candidate
+          // but does not settle the reattach (its `DraftStateUpdate` does), so a
+          // subscriber that throws on it leaves the bootstrap's remaining frames
+          // to settle it. An unconfirmed attachment has no confirming frame: its
+          // pending initialization alone decides.
+          const settling = parsedSetupFrames.get(setupMessages[index]!);
+          const mayStillSettle = confirmation === null
+            || (settling !== undefined && settling.type !== "DraftMatchStart");
+          if (initOwner !== null && this.pendingInit === initOwner && mayStillSettle) {
+            throw error;
+          }
+          reportUncaughtError(error);
+        }
+      }
+      if (!this.sockets.has(sourceSocket)) return;
+      sourceSocket.onmessage = handleMessage;
+      // Drained: release the admitted frames (and their parsed envelopes).
+      setupMessages.length = 0;
+    } catch (error) {
+      const failure = error instanceof HandshakeError
+        ? new AdapterError("WS_ERROR", error.message, error.kind !== "protocol_mismatch" && error.kind !== "invalid_url")
+        // Before a socket exists the failure is an acquisition failure, and the
+        // caller gets the normalized WS_ERROR the base adapter produced.
+        // After acquisition it is a listener/setup failure and keeps its
+        // identity (the setup-send path already throws an AdapterError).
+        : socket === null
+          ? new AdapterError("WS_ERROR", String(error), true)
+          : error instanceof Error ? error : new Error(String(error));
+      this.rejectAttachment(attachment.owner, failure);
+      if (socket) this.abandonCandidate(socket, bootstrap);
+      if (error instanceof HandshakeError
+        && error.kind === "protocol_mismatch" && error.serverInfo
+        && this.unfinishedAttachment === attachment && !attachment.controller.signal.aborted) {
+        this._serverInfo = error.serverInfo;
+        this.emit({ type: "serverHello", info: error.serverInfo, compatible: false });
+      }
+    } finally {
+      if (this.unfinishedAttachment === attachment) this.unfinishedAttachment = null;
     }
   }
 
   // ── Message handling ───────────────────────────────────────────────
 
-  private handleMessage(msg: { type: string; data?: unknown }): void {
+  private handleMessage(
+    msg: { type: string; data?: unknown; command_id?: unknown },
+    initOwner: DraftInit | null,
+    sourceSocket: PhaseSocketTransport,
+  ): true | void {
     switch (msg.type) {
       // ── Draft-phase messages ──────────────────────────────────────
       case "DraftCreated": {
@@ -505,12 +1654,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.draftCode = data.draft_code;
         this.draftToken = data.player_token;
         this.seatIndex = data.seat_index;
+        if (initOwner?.kind === "create" && this.ws === sourceSocket) this.settleInit(initOwner);
         this.emit({ type: "waitingForPlayers" });
-        if (this.initResolve) {
-          this.initResolve();
-          this.initResolve = null;
-          this.initReject = null;
-        }
         break;
       }
 
@@ -521,29 +1666,31 @@ export class ServerDraftAdapter implements EngineAdapter {
           seat_index: number;
           view: DraftPlayerView;
         };
-        this.draftCode = data.draft_code;
-        this.draftToken = data.player_token;
-        this.seatIndex = data.seat_index;
-        this.draftView = data.view;
-        this.updatePhaseFromView(data.view);
-        if (this.draftResolve) {
-          this.draftResolve(data.view);
-          this.draftResolve = null;
-          this.draftReject = null;
+        if (this.ws === sourceSocket) {
+          this.draftCode = data.draft_code;
+          this.draftToken = data.player_token;
+          this.seatIndex = data.seat_index;
+          this.draftView = data.view;
+          this.updatePhaseFromView(data.view);
         }
+        this.settleDraftView(data.view, sourceSocket, initOwner);
         break;
       }
 
       case "DraftStateUpdate": {
         const data = msg.data as { view: DraftPlayerView };
-        this.draftView = data.view;
-        this.updatePhaseFromView(data.view);
-        this.emit({ type: "draftViewUpdated", view: data.view });
-        if (this.draftResolve) {
-          this.draftResolve(data.view);
-          this.draftResolve = null;
-          this.draftReject = null;
+        const current = this.ws === sourceSocket;
+        if (current) {
+          this.draftView = data.view;
+          this.updatePhaseFromView(data.view);
+          if (initOwner?.kind === "reconnect") this.settleInit(initOwner);
         }
+        // Reconnect captures B's bootstrap after installing its sender. An A
+        // selection accepted before that cutover is already in B's pool; a
+        // later A selection is rejected on A. Either stream must prove the
+        // captured selection, and A can settle only its reply, never B's view.
+        this.settleDraftView(data.view, sourceSocket, initOwner);
+        if (current) this.emit({ type: "draftViewUpdated", view: data.view });
         break;
       }
 
@@ -552,21 +1699,111 @@ export class ServerDraftAdapter implements EngineAdapter {
           match_id: string;
           round: number;
           game_code: string;
+          full_key?: FullSessionKey;
           player_token: string;
           your_player: PlayerId;
           opponent_name: string;
         };
+        if (
+          !data.full_key
+          || data.full_key.game_code !== data.game_code
+          || data.full_key.generation < 1
+        ) {
+          this.emit({
+            type: "error",
+            message: "Server omitted a valid Full session identity for the draft match.",
+          });
+          break;
+        }
+        const sameMatch =
+          this.activeMatchId === data.match_id
+          && this._gameCode === data.game_code
+          && this._playerId === data.your_player
+          && fullSessionKeysEqual(this.activeFullKey, data.full_key);
+        if (!sameMatch) {
+          this.clearSnapshot();
+          this.acceptedFullKey = null;
+          this.acceptedGameSocket = null;
+          // A new match needs its own GameStarted: reset before any listener
+          // can observe the transition.
+          this.stateCodec.reset(sourceSocket);
+        }
+        // Publish the new match authority BEFORE any listener can observe the
+        // transition. A synchronous retry from the pending callback must not be
+        // stamped for the outgoing match, whose addressed reply is fenced by
+        // the new key published here.
         this.phase = "match";
         this.activeMatchId = data.match_id;
         this._playerId = data.your_player;
         this._gameCode = data.game_code;
-        this.emit({
-          type: "matchStarting",
-          matchId: data.match_id,
-          round: data.round,
-          opponentName: data.opponent_name,
-          gameCode: data.game_code,
-        });
+        this.draftToken = data.player_token;
+        this.activeFullKey = data.full_key;
+        let releasedPending = false;
+        if (!sameMatch) {
+          // A command already SENT for the outgoing match on this same socket
+          // can never complete: its addressed reply is fenced by the new match
+          // key above. Release the slot before listeners can observe it; a
+          // command still being claimed is released unsent by its own recheck.
+          // The notification itself is deferred until this transition's own
+          // setup frame is on the wire, so a throwing subscriber cannot skip it.
+          if (this.submission.occupied && this.submissionSocket === sourceSocket
+            && this.submissionSent) {
+            const revoked = this.submission.drop();
+            this.submissionSocket = null;
+            this.submissionFullKey = null;
+            this.submissionSent = false;
+            if (revoked) {
+              revoked.reject(new AdapterError(
+                "REQUEST_FAILED",
+                "The draft match changed before this command completed",
+                true,
+              ));
+              releasedPending = true;
+            }
+          }
+        }
+        if (!sameMatch) {
+          try {
+            if (this.confirmingAttachment !== null) {
+              // A reattach interval is open, so this frame came from the
+              // incumbent (the candidate's frames are buffered). Once the
+              // candidate's ReconnectDraft is on the wire the server attaches
+              // the current match on it (`attach_current_draft_match`,
+              // phase-server main.rs:2795-2815), and the same request on the
+              // incumbent would meet the seat-authority refusal (:13042-13053).
+              // The reattach sends it on the incumbent instead if its setup
+              // turns out not to have been written.
+              this.deferredMatchReattach = this.confirmingAttachment;
+            } else if (this.draftCode && this.draftToken) {
+              this.send({
+                type: "ReconnectDraft",
+                data: {
+                  draft_code: this.draftCode,
+                  player_token: this.draftToken,
+                },
+              });
+            } else {
+              this.emit({
+                type: "error",
+                message: "Cannot attach draft match without draft credentials.",
+              });
+            }
+            this.emit({
+              type: "matchStarting",
+              matchId: data.match_id,
+              round: data.round,
+              opponentName: data.opponent_name,
+              gameCode: data.game_code,
+            });
+          } finally {
+            // The pending clear is the transition's guaranteed completion: a
+            // throwing matchStarting subscriber must not suppress it, and a
+            // repeated announcement cannot replay it later.
+            if (releasedPending) {
+              this.emit({ type: "actionPendingChanged", pending: false });
+            }
+          }
+        }
         break;
       }
 
@@ -578,14 +1815,17 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "DraftActionRejected": {
         const data = msg.data as { reason: string };
-        this.emit({ type: "draftActionRejected", reason: data.reason });
-        if (this.draftReject) {
-          this.draftReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
-          );
-          this.draftResolve = null;
-          this.draftReject = null;
+        if (this.ws === sourceSocket) {
+          this.settleInit(initOwner, new AdapterError("ACTION_REJECTED", data.reason, true));
         }
+        // The wire carries no correlation id, and preparation has not sent a
+        // frame yet: while SubmitDeck is still `PreparingDeck`, a rejection can
+        // only answer an EARLIER action, so it must not abort this submission
+        // with another action's reason.
+        if (this.draftActionStage === "AwaitingReply") {
+          this.settleDraftAction(new AdapterError("ACTION_REJECTED", data.reason, true), sourceSocket);
+        }
+        this.emit({ type: "draftActionRejected", reason: data.reason });
         break;
       }
 
@@ -601,60 +1841,101 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as {
           state: GameState;
           your_player: PlayerId;
+          state_revision?: number;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
-        const startedSnapshot = this.cacheSnapshot(
-          { ...data.state, derived: data.derived ?? data.state.derived },
-          {
-            actions: data.legal_actions ?? [],
-            autoPassRecommended: data.auto_pass_recommended ?? false,
-            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
-            spellCosts: data.spell_costs,
-            legalActionsByObject: data.legal_actions_by_object,
-          },
-        );
+        if (
+          this.activeMatchId === null
+          || this._gameCode === null
+          || this._playerId !== data.your_player
+          || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
+        ) {
+          break;
+        }
+        const revision = typeof data.state_revision === "number" ? data.state_revision : null;
+        this.acceptedFullKey = data.full_key ?? null;
+        if (this.cachedStateRevision !== null && revision !== null
+          && revision < this.cachedStateRevision) {
+          // A same-key bootstrap that regresses the applied revision must not
+          // roll the snapshot back, release the codec's recovery gate, or be
+          // announced. On a socket that has not yet been accepted (a
+          // replacement whose predecessor's completion already applied a newer
+          // revision) it is still the validated bootstrap, so it authorizes the
+          // socket: the reattach would otherwise settle on a connection that
+          // can never submit.
+          if (this.acceptedGameSocket !== sourceSocket) {
+            this._playerId = data.your_player;
+            this.acceptedGameSocket = sourceSocket;
+          }
+          break;
+        }
+        const started = ServerDraftAdapter.snapshotPair(data);
+        const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
+        this.cachedStateRevision = revision ?? this.cachedStateRevision;
         this._playerId = data.your_player;
+        this.acceptedGameSocket = sourceSocket;
+        // Accepted after the match/player/full-key guards above and after the
+        // snapshot is cached, but before the listener emit.
+        this.stateCodec.accept(sourceSocket);
         this.emit({
           type: "gameStateUpdated",
           state: startedSnapshot.state,
           events: [],
           legalResult: startedSnapshot.legalResult,
         });
-        break;
+        return true;
       }
 
       case "StateUpdate": {
         const data = msg.data as {
           state: GameState;
           events: GameEvent[];
+          state_revision?: number;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
-        const updateSnapshot = this.cacheSnapshot(
-          { ...data.state, derived: data.derived ?? data.state.derived },
-          {
-            actions: data.legal_actions ?? [],
-            autoPassRecommended: data.auto_pass_recommended ?? false,
-            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
-            spellCosts: data.spell_costs,
-            legalActionsByObject: data.legal_actions_by_object,
-          },
-        );
-        if (this.pendingResolve) {
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
+        if (this.cachedStateRevision !== null && typeof data.state_revision === "number"
+          && data.state_revision < this.cachedStateRevision) {
+          // A decoded recovery Full older than the applied revision must not
+          // replace it, and it is not an accepted bootstrap: the codec recovery
+          // gate stays closed until a current revision arrives. It may still
+          // answer this socket's own correlated command.
+          const stale = this.takeSubmission(sourceSocket, msg.command_id);
+          if (stale) {
+            stale.resolve({ events: data.events, log_entries: data.log_entries });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+          break;
+        }
+        const updated = ServerDraftAdapter.snapshotPair(data);
+        const updateSnapshot = this.cacheSnapshot(updated.state, updated.legalResult, sourceSocket);
+        this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
+        // A peer's StateUpdate is not an acknowledgement of our command.
+        const pending = this.takeSubmission(sourceSocket, msg.command_id);
+        if (pending) {
+          pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingResolve({ events: data.events, log_entries: data.log_entries });
-          this.pendingResolve = null;
-          this.pendingReject = null;
         } else {
           this.emit({
             type: "gameStateUpdated",
@@ -664,13 +1945,14 @@ export class ServerDraftAdapter implements EngineAdapter {
             logEntries: data.log_entries,
           });
         }
-        break;
+        return true;
       }
 
       case "ActionRejected": {
-        const data = msg.data as { reason: string };
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingReject) {
+        if (!this.matchesSubmissionMatch(sourceSocket)) break;
+        const data = msg.data as { rejection?: unknown };
+        const pending = this.takeSubmission(sourceSocket, msg.command_id);
+        if (pending) {
           // Game-phase action rejection. `ServerDraftAdapter` is a full
           // `EngineAdapter` once the pod's game starts, so it must classify the
           // engine's stale verdicts exactly as the WebSocket and P2P transports
@@ -683,9 +1965,62 @@ export class ServerDraftAdapter implements EngineAdapter {
           // carries a pick/pass rejection, which is not a `GameAction` at all,
           // so no stale-action verdict is possible — it is a separate draft
           // protocol concern and stays a plain recoverable rejection.
-          this.pendingReject(actionRejectionError(data.reason));
-          this.pendingResolve = null;
-          this.pendingReject = null;
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false),
+          );
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+        break;
+      }
+
+      case "ActionFailed": {
+        if (!this.matchesSubmissionMatch(sourceSocket)) break;
+        const data = msg.data as { message: string };
+        const pending = this.takeSubmission(sourceSocket, msg.command_id);
+        if (pending) {
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).surfaces) {
+          this.emit({ type: "error", message: data.message });
+        }
+        break;
+      }
+
+      case "StateWithheld": {
+        if (!this.matchesSubmissionMatch(sourceSocket)) break;
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        const completionKey = sourceSocket === this.ws ? this.acceptedFullKey : this.submissionFullKey;
+        if (data.withheld.type === "StateUpdate" && fullSessionKeysEqual(data.full_key, completionKey)) {
+          const pending = this.takeSubmission(sourceSocket, msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        this.emit({ type: "error", message: data.reason });
+        break;
+      }
+
+      case "ActionNoOp": {
+        if (!this.matchesSubmissionMatch(sourceSocket)) break;
+        const pending = this.takeSubmission(sourceSocket, msg.command_id);
+        if (pending) {
+          pending.resolve({ events: [], log_entries: [] });
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }
@@ -693,7 +2028,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       case "ManaPaymentPreview": {
         const data = msg.data as { request_id: number; source_ids: ObjectId[] };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
-        if (pending) {
+        if (pending?.socket === sourceSocket) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
           pending.resolve(data.source_ids);
         }
@@ -701,9 +2036,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
 
       case "ManaPaymentPreviewRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
-        if (pending) {
+        if (pending?.socket === sourceSocket) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
           // Same shared classifier as the action path above. A preview is
           // answered against the same engine state an action would be, so it
@@ -711,7 +2046,39 @@ export class ServerDraftAdapter implements EngineAdapter {
           // the request — and a stale preview is likewise void rather than
           // retryable. Non-stale reasons still classify as recoverable
           // ACTION_REJECTED, so existing surface/retry behavior is unchanged.
-          pending.reject(actionRejectionError(data.reason));
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending?.socket === sourceSocket) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+        }
+        break;
+      }
+
+      case "InteractionPreview": {
+        const data = msg.data as { preview: InteractionPreview };
+        const pending = this.takeInteractionPreview(sourceSocket, data.preview.requestId);
+        if (pending) {
+          pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "InteractionPreviewFailed": {
+        const data = msg.data as { request_id: string; message: string };
+        const pending = this.takeInteractionPreview(sourceSocket, data.request_id);
+        if (pending) {
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -720,16 +2087,57 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { winner: PlayerId | null; reason: string };
         // Transition back to between_rounds — server auto-reports the
         // match result. Per T-59-09: adapter does NOT send ReportMatchResult.
+        // A command already sent for the ending match on this socket can no
+        // longer be answered by an exact completion: the match key it is
+        // addressed to is cleared below. Settle it here, as a match transition
+        // does, so its promise and slot do not outlive the match.
+        if (this.submission.occupied && this.submissionSocket === sourceSocket && this.submissionSent) {
+          const revoked = this.submission.drop();
+          this.submissionSocket = null;
+          this.submissionFullKey = null;
+          this.submissionSent = false;
+          revoked?.reject(new AdapterError(
+            "REQUEST_FAILED",
+            "The draft match ended before this command completed",
+            true,
+          ));
+        }
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
-        this.snapshot = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
+        if (this.acceptedGameSocket === sourceSocket) this.acceptedGameSocket = null;
+        this.clearSnapshot();
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
           type: "gameOver",
           winner: data.winner,
           reason: data.reason,
         });
+        break;
+      }
+
+      case "OpponentDisconnected": {
+        const data = msg.data as {
+          grace_seconds: number;
+          full_key?: FullSessionKey;
+        };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
+        this.emit({
+          type: "opponentDisconnected",
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          this.emit({ type: "opponentReconnected" });
+        }
         break;
       }
 
@@ -740,6 +2148,9 @@ export class ServerDraftAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string };
+        if (this.ws === sourceSocket) {
+          this.settleInit(initOwner, new AdapterError("WS_ERROR", data.message, true));
+        }
         this.emit({ type: "error", message: data.message });
         break;
       }
@@ -751,32 +2162,32 @@ export class ServerDraftAdapter implements EngineAdapter {
    * Called after receiving DraftJoined and DraftStateUpdate.
    */
   private updatePhaseFromView(view: DraftPlayerView): void {
-    switch (view.status) {
-      case "Lobby":
+    switch (draftViewPresentation(view).podPhase) {
+      case "lobby":
         this.phase = "lobby";
         break;
-      case "Drafting":
+      case "drafting":
         this.phase = "drafting";
         break;
-      case "Deckbuilding":
+      case "review":
+        this.phase = "review";
+        break;
+      case "deckbuilding":
         this.phase = "deckbuilding";
         break;
-      case "Pairing":
-      case "RoundComplete":
+      case "pairing":
+      case "roundComplete":
         this.phase = "between_rounds";
         break;
-      case "MatchInProgress":
+      case "matchInProgress":
         // Don't override "match" — DraftMatchStart sets it with game details.
         if (this.phase !== "match") {
           this.phase = "between_rounds";
         }
         break;
-      case "Complete":
-      case "Abandoned":
+      case "complete":
+      case "error":
         this.phase = "complete";
-        break;
-      case "Paused":
-        // Keep current phase during pause.
         break;
     }
   }
@@ -784,21 +2195,19 @@ export class ServerDraftAdapter implements EngineAdapter {
   // ── Reconnect ──────────────────────────────────────────────────────
 
   async reconnectDraft(): Promise<void> {
-    if (!this.draftCode || !this.draftToken) {
+    const draftCode = this.draftCode;
+    const playerToken = this.draftToken;
+    if (!draftCode || !playerToken) {
       throw new AdapterError("WS_ERROR", "No draft session to reconnect to", false);
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.initResolve = resolve;
-      this.initReject = reject;
-      this.attachSocket({
+      this.beginAttachment({ type: "init", init: { kind: "reconnect", draftCode, playerToken, resolve, reject } }, {
         type: "ReconnectDraft",
         data: {
-          draft_code: this.draftCode,
-          player_token: this.draftToken,
+          draft_code: draftCode,
+          player_token: playerToken,
         },
-      }).catch(() => {
-        // attachSocket handles rejection via initReject.
       });
     });
   }
@@ -814,8 +2223,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     }, 5000);
   }
 
-  private send(msg: unknown): boolean {
-    const ws = this.ws;
+  private send(msg: unknown, ws: PhaseSocketTransport | null = this.ws): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       this.emit({
         type: "error",
@@ -837,11 +2245,21 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
-  private rejectPendingManaPaymentPreviews(error: Error): void {
-    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+  /** Rejects every pending preview, or only those sent on `onlySocket` when given. */
+  private rejectPendingManaPaymentPreviews(error: Error, onlySocket?: PhaseSocketTransport): void {
+    for (const [requestId, { socket, reject }] of this.pendingManaPaymentPreviews) {
+      if (onlySocket && socket !== onlySocket) continue;
+      this.pendingManaPaymentPreviews.delete(requestId);
       reject(error);
     }
-    this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectPendingInteractionPreviews(error: Error, onlySocket?: PhaseSocketTransport): void {
+    for (const [socket, previews] of this.pendingInteractionPreviews) {
+      if (onlySocket && socket !== onlySocket) continue;
+      this.pendingInteractionPreviews.delete(socket);
+      for (const { reject } of previews.values()) reject(error);
+    }
   }
 
   dispose(): void {
@@ -850,11 +2268,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-    this.snapshot = null;
+    // Publish disposal before closing any source; native close may synchronously reenter.
+    this.ws = null;
+    this.clearSnapshot();
     this._playerId = null;
     this._gameCode = null;
     this.draftCode = null;
@@ -862,15 +2278,27 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    this.activeFullKey = null;
+    this.acceptedFullKey = null;
+    this.acceptedGameSocket = null;
+    this.stateCodec.release();
+    this.submission.drop()?.reject(
+      new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+    );
+    this.submissionSocket = null;
+    this.submissionFullKey = null;
+    this.submissionSent = false;
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );
-    this.draftResolve = null;
-    this.draftReject = null;
-    this.initResolve = null;
-    this.initReject = null;
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
+    );
+    this.settleDraftAction(new AdapterError("WS_CLOSED", "Adapter disposed during draft operation", true));
+    const disposed = new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true);
+    this.settleInit(this.pendingInit, disposed);
+    this.cancelAttachment(disposed);
+    for (const socket of this.sockets) this.releaseSocket(socket);
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.listeners = [];

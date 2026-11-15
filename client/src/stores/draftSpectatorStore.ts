@@ -6,6 +6,7 @@ import {
   type DraftSpectatorSession,
 } from "../services/draftSpectatorSession";
 import { detectServerUrl } from "../services/serverDetection";
+import { getEffectiveOffline } from "./connectivityStore";
 
 interface DraftSpectatorState {
   draftCode: string | null;
@@ -14,11 +15,21 @@ interface DraftSpectatorState {
   error: string | null;
   session: DraftSpectatorSession | null;
 
-  watchDraft: (draftCode: string) => Promise<void>;
+  /**
+   * Watch a draft. `serverUrl` is the origin the `/draft-spectator` route
+   * carried — the authority that listed the draft. Absent → this client's
+   * hosting server via `detectServerUrl()`.
+   */
+  watchDraft: (draftCode: string, serverUrl?: string) => Promise<void>;
   leave: () => void;
 }
 
 let draftSpectatorRequestId = 0;
+
+/** Spectator codes are server-issued identities, not five-character P2P room codes. */
+export function normalizeSpectatorDraftCode(draftCode: string): string {
+  return draftCode.trim().toUpperCase();
+}
 
 export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => ({
   draftCode: null,
@@ -27,19 +38,27 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
   error: null,
   session: null,
 
-  watchDraft: async (draftCode) => {
+  watchDraft: async (draftCode, serverUrl) => {
+    const requestedCode = normalizeSpectatorDraftCode(draftCode);
+    if (!requestedCode || getEffectiveOffline()) return;
+
     get().leave();
     const requestId = ++draftSpectatorRequestId;
-    set({ draftCode, status: "connecting", error: null, view: null });
+    set({ draftCode: requestedCode, status: "connecting", error: null, view: null });
     try {
-      const serverUrl = import.meta.env.VITE_WS_URL ?? (await detectServerUrl());
-      const session = await connectDraftSpectator(serverUrl, draftCode);
-      if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) {
+      const url = import.meta.env.VITE_WS_URL ?? serverUrl ?? (await detectServerUrl());
+      if (
+        requestId !== draftSpectatorRequestId
+        || get().draftCode !== requestedCode
+        || getEffectiveOffline()
+      ) return;
+      const session = await connectDraftSpectator(url, requestedCode);
+      if (requestId !== draftSpectatorRequestId || get().draftCode !== requestedCode) {
         session.close();
         return;
       }
       const unsub = session.onEvent((event) => {
-        if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) return;
+        if (requestId !== draftSpectatorRequestId || get().draftCode !== requestedCode) return;
         if (event.type === "view") {
           set({ view: event.view, status: "connected" });
         } else if (event.type === "error") {
@@ -58,7 +77,7 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
         },
       });
     } catch (err) {
-      if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) return;
+      if (requestId !== draftSpectatorRequestId || get().draftCode !== requestedCode) return;
       set({
         status: "error",
         error: err instanceof Error ? err.message : String(err),

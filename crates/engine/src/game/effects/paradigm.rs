@@ -158,12 +158,15 @@ pub fn cast_paradigm_copy(
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::zones::Zone;
 
-    let (src_clone, card_id) = {
+    let (mut src_clone, card_id, origin_zone) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("paradigm source {source_id:?} not found"));
         };
-        (src_obj.clone(), src_obj.card_id)
+        (src_obj.clone(), src_obj.card_id, src_obj.zone)
     };
+    // CR 123.1 + CR 707.2 + CR 707.10: stickers on the exiled source and their
+    // changes aren't copiable values; stripped before the spell ability is derived.
+    crate::game::stickers::remove_stickers_from_copy(&mut src_clone);
     // Verify this is an exiled paradigm source owned by the acting player.
     let has_link = state.exile_links.iter().any(|link| {
         link.exiled_id == source_id
@@ -172,6 +175,8 @@ pub fn cast_paradigm_copy(
     if !has_link {
         return Err("no ParadigmSource link for this source/player".to_string());
     }
+    crate::game::ledger::validate_spell_cast_recording(state, controller)
+        .map_err(crate::game::effects::cast_copy_of_card::cast_copy_spell_cast_ledger_error)?;
     // CR 608.2 + CR 707.10: Mirror the normal cast path — a spell's on-resolve
     // chain is the union of every `AbilityKind::Spell` entry (each with its own
     // `sub_ability` tail) folded by `combined_spell_ability_def`. Taking only
@@ -193,6 +198,11 @@ pub fn cast_paradigm_copy(
     copy_obj.is_token = true;
     copy_obj.tapped = false;
     copy_obj.prepared = None;
+    copy_obj.prepared_copy_source = None;
+    copy_obj.cast_from_zone = Some(origin_zone);
+    // CR 707.10: the paradigm copy is put on the stack without paying mana —
+    // reset the cast-payment stamps inherited from the exiled source's cast.
+    copy_obj.clear_cast_payment_stamps();
     // Back-face is preserved from clone — not needed for copy behavior.
     state.objects.insert(copy_id, copy_obj);
 
@@ -200,27 +210,120 @@ pub fn cast_paradigm_copy(
     // definition preserving sub-ability chains, optional flags, and duration
     // metadata. `build_resolved_from_def` is the authoritative constructor
     // used by normal casting (see `ability_utils`).
-    let resolved = build_resolved_from_def(&ability_def, copy_id, controller);
+    let mut resolved = build_resolved_from_def(&ability_def, copy_id, controller);
+    resolved.context.cast_from_zone = Some(origin_zone);
+    // CR 707.12: a cast copy declares only the targets chosen for it.
+    resolved.start_target_record_recursive();
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(resolved),
-            casting_variant: CastingVariant::Normal,
-            actual_mana_spent: 0,
+    // CR 707.10: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(Box::new(resolved)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        None,
+        events,
+    );
 
+    // CR 702.192a + CR 601.2i: accepting the Paradigm offer casts the
+    // synthesized copy; it becomes cast once its announcement is complete
+    // (`casting_costs::commit_copy_cast`, called by the offer handler).
     Ok(copy_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 707.10 (issue #5943): the paradigm copy is put on the stack without
+    /// paying mana — it must carry NO cast-payment record even though it
+    /// clones the exiled source object. The source keeps its own record
+    /// (reach-guard).
+    #[test]
+    fn paradigm_copy_resets_cast_payment_stamps() {
+        use std::sync::Arc;
+
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Paradigm Source".to_string(),
+            Zone::Exile,
+        );
+        {
+            let lki = state.objects[&source_id].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("paradigm test spell", "paradigm test spell body"),
+            )]);
+            // Stamp all five cast-payment fields non-default, including a
+            // synthetic Phyrexian life payment, to verify the copy reset.
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
+        }
+        // Production arming path — creates the ParadigmSource exile link that
+        // `cast_paradigm_copy` validates.
+        assert!(arm_paradigm(
+            &mut state,
+            source_id,
+            controller,
+            "Paradigm Source"
+        ));
+
+        let mut events = Vec::new();
+        let copy_id = cast_paradigm_copy(&mut state, source_id, controller, &mut events)
+            .expect("paradigm copy cast succeeds");
+
+        assert_ne!(copy_id, source_id, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the SOURCE keeps its payment record.
+        assert_eq!(
+            state.objects[&source_id].mana_spent_to_cast_amount, 2,
+            "exiled source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "exiled source keeps its own Phyrexian life-payment record"
+        );
+    }
 
     #[test]
     fn arm_paradigm_primes_once_per_name() {
@@ -532,7 +635,7 @@ mod tests {
         );
         if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
             if let StackEntryKind::Spell { ability, .. } = &mut entry.kind {
-                *ability = Some(resolved);
+                *ability = Some(Box::new(resolved));
             }
         }
 

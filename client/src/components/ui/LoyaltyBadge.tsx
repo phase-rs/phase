@@ -7,12 +7,23 @@ type LoyaltyBadgeProps = {
   kind: "cost" | "total";
   size?: "default" | "battlefield";
   reinforcedTopRim?: boolean;
+  isUnbounded?: boolean;
   className?: string;
   style?: CSSProperties;
 };
 
-function loyaltyText(amount: number, kind: LoyaltyBadgeProps["kind"]): string {
-  if (kind === "total") return String(amount);
+function loyaltyText(
+  amount: number,
+  kind: LoyaltyBadgeProps["kind"],
+  isUnbounded: boolean,
+): string {
+  // CR 306.5c: a planeswalker's loyalty IS its loyalty-counter count, so an accepted
+  // counter-growth loop on that counter makes the TOTAL unbounded.
+  // CR 606.4: a loyalty ABILITY COST is a number of loyalty counters to put on or
+  // remove, shown by the ability's loyalty symbol — a different game fact from the
+  // total, and never unbounded. The `kind === "total"` guard makes an `∞` cost badge
+  // structurally unrepresentable, whatever a caller passes.
+  if (kind === "total") return isUnbounded ? "∞" : String(amount);
   if (amount > 0) return `+${amount}`;
   return String(amount).replace("-", "−");
 }
@@ -35,10 +46,14 @@ export function LoyaltyBadge({
   kind,
   size = "default",
   reinforcedTopRim = false,
+  isUnbounded = false,
   className,
   style,
 }: LoyaltyBadgeProps) {
-  const text = loyaltyText(amount, kind);
+  // `aria-label={text}` below, so the accessible name becomes "∞" automatically.
+  // `data-loyalty-value={amount}` deliberately stays the real number: the DOM attribute
+  // stays truthful and existing selectors keep working.
+  const text = loyaltyText(amount, kind, isUnbounded);
   const iconClass = loyaltyShapeClass(amount, kind);
 
   return (

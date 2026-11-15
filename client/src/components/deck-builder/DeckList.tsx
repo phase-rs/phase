@@ -3,25 +3,31 @@ import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import {
   detectAndParseDeck,
-  exportDeck,
   parsedDeckHasCards,
-  resolveCommander,
 } from "../../services/deckParser";
-import type { ExportFormat } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
 import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
-import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
+import type { CardHoverHandler } from "./hoverPreview";
+import { groupAccent, groupKey, groupOrder, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  /** Adds one more copy of an existing entry, in place. See
+   *  `CardEntryRowProps.onIncrement`. */
+  onIncrementCard: (name: string, section: "main" | "sideboard") => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate paired with
+   *  `onIncrementCard`. See `CardEntryRowProps.canIncrement`. */
+  canIncrementCard: (name: string) => boolean;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -31,7 +37,7 @@ interface DeckListProps {
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
   /** Touch path for art selection — forwarded to each row's ✦ badge. */
-  onOpenArtPicker?: (name: string) => void;
+  onOpenArtPicker?: (name: string, launcher: HTMLButtonElement) => void;
   /** Designated commander(s). Rendered as a pinned section above the section
    *  tabs (mirroring the visual stack's Commander lane) so the commander stays
    *  visible/removable in list view — on mobile the Info-panel CommanderPanel
@@ -55,6 +61,8 @@ function totalCards(entries: DeckEntry[]): number {
 export function DeckList({
   deck,
   onRemoveCard,
+  onIncrementCard,
+  canIncrementCard,
   onMoveCard,
   onImport,
   onCardHover,
@@ -69,15 +77,12 @@ export function DeckList({
   cardDataCache,
   groupMode,
 }: DeckListProps) {
-  const { t } = useTranslation("deck-builder");
+  const { t } = useTranslation(["deck-builder", "common"]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [pasteLoading, setPasteLoading] = useState(false);
-  const [showExportModal, setShowExportModal] = useState(false);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("dck");
-  const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<"main" | "sideboard">("main");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
@@ -134,7 +139,7 @@ export function DeckList({
   }, [compatibility?.coverage?.unsupported_cards]);
 
   const importParsedDeck = async (content: string): Promise<boolean> => {
-    const parsed = await resolveCommander(detectAndParseDeck(content));
+    const parsed = await resolveCommander(await canonicalizeDeckNames(detectAndParseDeck(content)));
     if (!parsedDeckHasCards(parsed)) {
       setPasteError(t("deckList.parseError"));
       return false;
@@ -171,24 +176,6 @@ export function DeckList({
     }
   };
 
-  const exportText = showExportModal ? exportDeck(deck, exportFormat) : "";
-
-  const handleSaveToFile = () => {
-    const blob = new Blob([exportText], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = exportFormat === "mtga" ? "deck.txt" : "deck.dck";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleCopyToClipboard = async () => {
-    await navigator.clipboard.writeText(exportText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
   return (
     <div className="flex flex-col">
       <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/8 pb-2">
@@ -205,14 +192,6 @@ export function DeckList({
             title={t("deckList.importTitle")}
           >
             {t("deckList.import")}
-          </button>
-          <button
-            onClick={() => setShowExportModal(true)}
-            disabled={mainTotal === 0}
-            className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
-            title={t("deckList.exportTitle")}
-          >
-            {t("deckList.export")}
           </button>
           <input
             ref={fileInputRef}
@@ -244,8 +223,13 @@ export function DeckList({
             >
               <span
                 className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
-                onClick={() => onCardHover?.(name)}
-                {...mouseHoverPreview(onCardHover, name)}
+                onClick={() =>
+                  onCardHover?.({ name, scryfallId: cardDataCache.get(name)?.id })
+                }
+                {...mouseHoverPreview(onCardHover, {
+                  name,
+                  scryfallId: cardDataCache.get(name)?.id,
+                })}
               >
                 {name}
               </span>
@@ -309,11 +293,13 @@ export function DeckList({
           ? groupOrder(groupMode).map((key) => (
               <MoveList
                 key={key}
-                title={t(`deckList.${groupTitleKey(groupMode, key)}`)}
+                title={t(`deckList.${key}`)}
                 accent={groupAccent(key)}
                 entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
@@ -331,6 +317,8 @@ export function DeckList({
                 entries={deck.sideboard}
                 section="sideboard"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
@@ -399,71 +387,6 @@ export function DeckList({
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
                   {pasteLoading ? t("deckList.parsing") : t("deckList.parse")}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Export modal */}
-      {showExportModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={() => {
-              setShowExportModal(false);
-              setCopied(false);
-            }}
-          />
-          <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">{t("deckList.exportModalTitle")}</h3>
-              <div className="flex rounded bg-gray-800 p-0.5 text-xs">
-                <button
-                  onClick={() => { setExportFormat("dck"); setCopied(false); }}
-                  className={`rounded px-2 py-1 ${exportFormat === "dck" ? "bg-gray-600 text-white" : "text-gray-400 hover:text-gray-200"}`}
-                >
-                  .dck
-                </button>
-                <button
-                  onClick={() => { setExportFormat("mtga"); setCopied(false); }}
-                  className={`rounded px-2 py-1 ${exportFormat === "mtga" ? "bg-gray-600 text-white" : "text-gray-400 hover:text-gray-200"}`}
-                >
-                  MTGA
-                </button>
-              </div>
-            </div>
-            <textarea
-              value={exportText}
-              readOnly
-              rows={12}
-              className="mb-3 w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
-              autoFocus
-              onFocus={(e) => e.target.select()}
-            />
-            <div className="flex justify-between">
-              <button
-                onClick={handleSaveToFile}
-                className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
-              >
-                {t("deckList.saveToFile")}
-              </button>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    setShowExportModal(false);
-                    setCopied(false);
-                  }}
-                  className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
-                >
-                  {t("common:actions.close")}
-                </button>
-                <button
-                  onClick={handleCopyToClipboard}
-                  className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
-                >
-                  {copied ? t("deckList.copied") : t("deckList.copy")}
                 </button>
               </div>
             </div>

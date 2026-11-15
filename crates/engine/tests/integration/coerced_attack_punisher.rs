@@ -112,14 +112,17 @@ fn test1_active_player_coerce_binds_controller() {
     typed_controllers(&coerce, &mut ctrls);
     // Revert-failing: without Step 3 the controller parses to `You`, not `ActivePlayer`.
     assert_eq!(ctrls, vec![Some(ControllerRef::ActivePlayer)]);
-    // Reach-guard: the coerce clause produced a real effect, no Unimplemented.
-    let has_unimpl_coerce = p.abilities.iter().any(
-        |a| matches!(a.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "creatures"),
-    );
-    assert!(
-        !has_unimpl_coerce,
-        "coerce clause must not be Unimplemented"
-    );
+    // Paired positive reach-guard: the `ActivePlayer` controller assertion immediately
+    // above proves the coerce clause produced a real typed effect. The negative is keyed
+    // on the CLAUSE a gap would record, not on the gap's name — a name compare against
+    // the clause's old first word can never be true once gaps are named by verdict.
+    const COERCE_PHRASE: &str = "active player controls attack this turn if able";
+    let has_unimpl_coerce = p.abilities.iter().any(|a| {
+        a.effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(COERCE_PHRASE))
+    });
+    assert!(!has_unimpl_coerce, "coerce clause must not be a gap node");
 }
 
 // Sibling: "creatures you control attack this turn if able" still → controller:You.
@@ -662,9 +665,7 @@ fn activation_restrictions(p: &ParsedAbilities) -> Vec<ActivationRestriction> {
 
 fn opponents_turn() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
-        condition: Some(ParsedCondition::Not {
-            condition: Box::new(ParsedCondition::IsYourTurn),
-        }),
+        condition: Some(ParsedCondition::IsOpponentsTurn),
     }
 }
 
@@ -715,21 +716,14 @@ fn test10_nettling_comma_form_fixed_for_free() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 10b — the compound restriction feeds the EXISTING runtime gate. We drive
-// the actual runtime condition evaluation (Not(IsYourTurn)) through
-// player_matches_target_filter_in_state analog: assert the parsed condition
-// evaluates active-player-relative (own turn illegal, opponent turn legal).
-// The runtime arm is `state.active_player != player`.
+// Test 10b — the compound restriction retains the team-aware opponent-turn
+// predicate that the production restriction gate evaluates.
 // ---------------------------------------------------------------------------
 #[test]
 fn test10b_opponents_turn_condition_semantics() {
-    // The parsed restriction's condition is Not(IsYourTurn); the runtime arm at
-    // restrictions.rs:1385 evaluates IsYourTurn as `state.active_player ==
-    // player`. We validate the enforced *shape* the runtime consumes, and that
-    // it is NOT the vacuous None (which would always pass). The full runtime
-    // path is exercised by the existing restriction-enforcement suite; here we
-    // pin that the parser hands it the enforced condition (revert of Step 6b
-    // would yield None → always-legal on the controller's own turn).
+    // The parsed restriction's condition is IsOpponentsTurn, evaluated through
+    // game::players::is_opponent by the production gate. Pin its non-vacuous
+    // shape here; the production-path test below proves its runtime behavior.
     let p = parse("Maddening Imp", MADDENING_IMP, &["Creature"], &["Imp"]);
     let restrictions = activation_restrictions(&p);
     let turn_gate = restrictions
@@ -740,12 +734,7 @@ fn test10b_opponents_turn_condition_semantics() {
         })
         .expect("a RequiresCondition timing gate is present");
     // Revert-failing: Step 6b turns the vacuous None into the enforced condition.
-    assert_eq!(
-        turn_gate,
-        Some(ParsedCondition::Not {
-            condition: Box::new(ParsedCondition::IsYourTurn),
-        })
-    );
+    assert_eq!(turn_gate, Some(ParsedCondition::IsOpponentsTurn));
     // The combat-window half is present and enforced.
     assert!(restrictions
         .iter()
@@ -945,7 +934,7 @@ fn test_a_sirens_call_cast_pipeline_multiplayer_discrimination() {
 // TEST B — Maddening Imp activation legality through the production restriction
 // evaluator.
 //
-// Feeds the parsed compound activation timing ([Not(IsYourTurn),
+// Feeds the parsed compound activation timing ([IsOpponentsTurn,
 // BeforeAttackersDeclared]) into the production `check_activation_restrictions`
 // and drives it across three turn/phase states. Before Step 6b the parser
 // emitted a single vacuous `RequiresCondition{None}`, which is ALWAYS legal — so
@@ -987,7 +976,7 @@ fn test_b_maddening_imp_activation_legality_production_path() {
         check_activation_restrictions(runner.state(), P0, imp, 0, &restrictions)
     };
 
-    // Case 1: the controller's OWN turn, pre-combat. `Not(IsYourTurn)` fails —
+    // Case 1: the controller's OWN turn, pre-combat. IsOpponentsTurn fails —
     // illegal.
     {
         let st = runner.state_mut();
@@ -998,13 +987,13 @@ fn test_b_maddening_imp_activation_legality_production_path() {
     }
     assert!(
         check(&runner).is_err(),
-        "activation on the controller's own turn must be illegal (Not(IsYourTurn) fails)"
+        "activation on the controller's own turn must be illegal (IsOpponentsTurn fails)"
     );
 
     // Case 2: an OPPONENT's pre-combat main. The activating (non-active) player
-    // P0 realistically holds priority to activate the ability. `Not(IsYourTurn)`
-    // passes (P0 != active P1) AND `BeforeAttackersDeclared` passes (a phase-based
-    // window, independent of who holds priority — CR 508.1/508.2) — legal.
+    // P0 realistically holds priority to activate the ability. IsOpponentsTurn
+    // passes AND `BeforeAttackersDeclared` passes (a phase-based window,
+    // independent of who holds priority — CR 508.1/508.2) — legal.
     {
         let st = runner.state_mut();
         st.active_player = P1;

@@ -37,8 +37,7 @@ pub fn resolve(
     // SelfRef short-circuit, chain target propagation in
     // `effects::mod.rs::resolve_ability_chain` would inherit the parent's
     // targets and reveal the wrong object).
-    let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
-    let object_ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
+    let object_ids = crate::game::effects::resolved_effect_object_ids(state, ability, &target);
 
     if !object_ids.is_empty() {
         let card_names: Vec<String> = object_ids
@@ -51,10 +50,11 @@ pub fn resolve(
         // follow-up ("turn it face up") both read `last_revealed_ids`. Record
         // the revealed objects so the sub-ability's `RevealedHasCardType`
         // condition and `it` pronoun resolve to the just-revealed permanent.
-        state.last_revealed_ids = object_ids.clone();
+        super::record_revealed_result(state, object_ids.clone());
 
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&object_ids),
             card_ids: object_ids,
             card_names,
         });
@@ -106,6 +106,7 @@ mod tests {
                 player,
                 card_ids,
                 card_names,
+                ..
             } => Some((*player, card_ids.clone(), card_names.clone())),
             _ => None,
         });

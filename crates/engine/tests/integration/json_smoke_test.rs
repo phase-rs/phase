@@ -217,7 +217,8 @@ fn test_smoke_game_combat_damage() {
 
     assert_eq!(runner.life(P1), 20);
 
-    // Advance from PreCombatMain to DeclareAttackers
+    // Pass the precombat-main and beginning-of-combat priority windows.
+    runner.pass_both_players();
     runner.pass_both_players();
 
     assert!(

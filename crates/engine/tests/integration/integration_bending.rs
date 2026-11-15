@@ -3,6 +3,7 @@
 
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility,
@@ -40,6 +41,8 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
 // ---------------------------------------------------------------------------
 // Step 1: Earthbend event emission
 // ---------------------------------------------------------------------------
+
+const BADGERMOLE_CUB_ORACLE: &str = "When this creature enters, earthbend 1. (Target land you control becomes a 0/0 creature with haste that's still a land. Put a +1/+1 counter on it. When it dies or is exiled, return it to the battlefield tapped.)\nWhenever you tap a creature for mana, add an additional {G}.";
 
 #[test]
 fn test_earthbending_registers_event_and_turn_tracking() {
@@ -120,6 +123,137 @@ fn test_generic_animate_does_not_register_earthbend() {
     assert!(!player.bending_types_this_turn.contains(&BendingType::Earth));
 }
 
+/// Real-card regression for Earthbend's delayed-return provenance: the land
+/// must be recovered from the dies event, not from the Earthbend trigger's
+/// creation-time event context.
+#[test]
+fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let yawgmoth = scenario.add_real_card(P0, "Yawgmoth, Thran Physician", Zone::Battlefield, db);
+    scenario.add_card_to_library_top(P0, "Yawgmoth draw");
+
+    let mut runner = scenario.build();
+    runner.cast(cub).target_object(garden).resolve();
+    let animated_garden = &runner.state().objects[&garden];
+    assert!(
+        animated_garden
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "Earthbend must animate Khalni Garden"
+    );
+    assert_eq!(
+        animated_garden.counters.get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "Earthbend must put its +1/+1 counter on Khalni Garden"
+    );
+
+    let sacrifice_ability = runner.state().objects[&yawgmoth]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                ability.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    ..
+                }
+            )
+        })
+        .expect("Yawgmoth's printed -1/-1 counter ability must be available");
+    let outcome = runner
+        .activate(yawgmoth, sacrifice_ability)
+        .pay_with(&[garden])
+        .resolve();
+
+    assert_eq!(outcome.hand_drawn(P0), 1, "Yawgmoth must draw a card");
+    assert_eq!(runner.state().objects[&garden].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&garden].tapped,
+        "Earthbend returns the land tapped"
+    );
+    assert!(
+        runner.state().objects.values().any(|object| {
+            object.zone == Zone::Battlefield
+                && object.is_token
+                && object.name == "Plant"
+                && object.owner == P0
+        }),
+        "Khalni Garden's real ETB must create its Plant token after returning"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the full interaction must settle"
+    );
+}
+
+/// The same delayed return must bind the land's exile event, rather than the
+/// earlier ETB event that created the delayed trigger.
+#[test]
+fn badgermole_cub_earthbend_returns_khalni_garden_after_exile() {
+    let db = crate::support::shared_card_db().expect("curated real-card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let exile = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exile spell", true, "Exile target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(cub).target_object(garden).resolve();
+    assert!(
+        runner.state().objects[&garden]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "the live-parsed Earthbend trigger must animate the land"
+    );
+
+    // CR 603.7c: the delayed trigger observes the land's own later exile event.
+    runner.cast(exile).target_object(garden).resolve();
+    runner.advance_until_stack_empty();
+
+    let returned = &runner.state().objects[&garden];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert!(
+        returned.tapped,
+        "the delayed trigger returns the land tapped"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Step 2: Waterbend event emission + zone check
 // ---------------------------------------------------------------------------
@@ -135,6 +269,13 @@ fn test_waterbending_tap_to_pay() {
 
     // Set up ManaPayment state with Waterbend mode.
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -334,6 +475,13 @@ fn test_ai_waterbend_candidates() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -399,6 +547,13 @@ fn test_ai_convoke_ignores_summoning_sickness() {
 
     let mut runner = scenario.build();
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -448,7 +603,7 @@ fn test_convoke_white_creature_pays_white() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::White
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -494,7 +649,7 @@ fn test_convoke_multicolor_creature_accepts_either_color_payment() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Green
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -554,7 +709,7 @@ fn test_convoke_colorless_always_valid() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Colorless
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -618,6 +773,13 @@ fn test_waterbend_tap_does_emit_waterbend_event() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -827,6 +989,8 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -844,6 +1008,8 @@ fn test_search_changezone_shuffle_continuation_completes() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -919,6 +1085,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1167,6 +1334,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1184,6 +1353,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -1293,6 +1464,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1858,11 +2030,22 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         cause: None,
         attach_to: None,
         enter_tapped: EtbTapState::Tapped,
+        enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: None,
         controller_override: Some(P0),
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
+        chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
+        discard_frame: None,
+        performed_by: None,
+        ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
 
@@ -1934,11 +2117,22 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         cause: None,
         attach_to: None,
         enter_tapped: EtbTapState::Unspecified,
+        enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
+        chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
+        discard_frame: None,
+        performed_by: None,
+        ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
 
@@ -1995,6 +2189,8 @@ fn build_earthbend_ability(
     let return_effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,
@@ -2100,6 +2296,7 @@ fn cast_synthetic_earthbend(
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(state, entry, &mut vec![]);
@@ -2384,14 +2581,17 @@ fn earthbended_land_returns_tapped_after_exile() {
     );
     let exile_ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
             enters_under: None,
             enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
+            library_shuffle: Default::default(),
             random_order: false,
         },
         vec![TargetRef::Object(land_id)],
@@ -2413,6 +2613,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);

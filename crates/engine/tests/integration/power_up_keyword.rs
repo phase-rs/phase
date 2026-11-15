@@ -7,12 +7,11 @@
 //! re-parses the Oracle text with the new parser; `GameRunner` drives `apply()`),
 //! and each carries a revert-failing assertion (not an AST-shape assertion).
 //!
-//! CR 602.5b (verified docs/MagicCompRules.txt:2541): activate only once.
-//! CR 602.2b + CR 601.2f + CR 302.6: cost reduced by source MV if it entered
-//! this turn.
-//! CR 106.6: tag-scoped mana spend restriction (Quinjet).
-//! CR 500.7 + CR 514.2: Kang's extra-turn power-up prohibition.
-//! CR 603.1b: Marvel Boy's dual-condition trigger.
+//! CR 602.5b: activate only once. CR 602.2b + CR 601.2f + CR 302.6: cost
+//! reduced by source MV if it entered this turn. CR 106.6: tag-scoped mana
+//! spend restriction (Quinjet). CR 500.7 + CR 514.2: Kang's extra-turn
+//! power-up prohibition. CR 603.2c: Marvel Boy's dual-condition trigger
+//! fires once for each event.
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
@@ -24,6 +23,18 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
+
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text + body fingerprint), not the index —
+/// derived through the production constructor so the fingerprint matches.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    engine::game::restrictions::ability_usage_key(state, id, idx)
+        .expect("the tested slot resolves through the activation lookup")
+}
 
 /// Locate the index of the (only) power-up-tagged ability on `object`.
 fn power_up_index(runner: &GameRunner, object: ObjectId) -> usize {
@@ -96,7 +107,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game activation counter must record exactly one activation"
@@ -112,6 +123,7 @@ fn power_up_activates_only_once_per_game() {
     let retry = runner.act(GameAction::ActivateAbility {
         source_id: hero,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         retry.is_err(),
@@ -121,7 +133,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game counter must remain 1 after the rejected second activation"
@@ -159,6 +171,7 @@ fn once_each_turn_ability_resets_across_turns() {
     let same_turn = runner.act(GameAction::ActivateAbility {
         source_id: pinger,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         same_turn.is_err(),
@@ -175,6 +188,7 @@ fn once_each_turn_ability_resets_across_turns() {
     let retry = runner.act(GameAction::ActivateAbility {
         source_id: pinger,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         retry.is_ok(),
@@ -279,6 +293,7 @@ fn power_up_cost_not_reduced_when_entered_prior_turn() {
     let attempt = runner.act(GameAction::ActivateAbility {
         source_id: hulk,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         attempt.is_err(),
@@ -348,6 +363,7 @@ fn hulk_static_reduces_other_power_up_abilities() {
     let own = runner.act(GameAction::ActivateAbility {
         source_id: hulk,
         ability_index: hulk_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         own.is_err(),
@@ -380,6 +396,7 @@ fn power_up_without_hulk_static_is_not_reduced() {
     let attempt = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         attempt.is_err(),
@@ -432,6 +449,7 @@ fn wonder_man_static_raises_power_up_limit_to_two() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         second.is_ok(),
@@ -444,6 +462,7 @@ fn wonder_man_static_raises_power_up_limit_to_two() {
     let third = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         third.is_err(),
@@ -497,6 +516,7 @@ fn wonder_man_does_not_raise_non_power_up_once_limit() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: other,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         second.is_err(),
@@ -559,6 +579,7 @@ fn tagged_mana_pays_power_up_but_not_other_activations() {
     let other_attempt = runner.act(GameAction::ActivateAbility {
         source_id: other,
         ability_index: other_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         other_attempt.is_err(),
@@ -593,11 +614,12 @@ fn set_tagged_mana(runner: &mut GameRunner, player: PlayerId, n: usize) {
 // 6. Marvel Boy trigger — fires on power-up activation only.
 // ---------------------------------------------------------------------------
 
-/// CR 602.1 + CR 603.1b: "whenever you activate a power-up ability" triggers.
+/// CR 602.1 + CR 603.2c: "whenever you activate a power-up ability" triggers
+/// once for each qualifying activation event.
 ///
 /// Revert-failing assertion: activating a power-up ability puts a +1/+1 counter
-/// on Marvel Boy; activating a NON-power-up ability does not. If the trigger arm
-/// is reverted, the parser drops the condition and no counter ever lands.
+/// on Marvel Boy; activating a NON-power-up ability does not. If the trigger
+/// registry entry is reverted, Marvel Boy is marked unsupported before play.
 #[test]
 fn marvel_boy_triggers_only_on_power_up_activation() {
     let mut scenario = GameScenario::new();
@@ -609,7 +631,7 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
             "Marvel Boy",
             2,
             2,
-            "Whenever you activate a power-up ability, put a +1/+1 counter on Marvel Boy.",
+            "Whenever another creature you control enters and whenever you activate a power-up ability, put a +1/+1 counter on Marvel Boy.",
         )
         .id();
     let hero = scenario
@@ -633,6 +655,10 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
 
     let mut runner = scenario.build();
 
+    assert!(
+        !runner.state().objects[&marvel].has_unimplemented_mechanics(),
+        "the production Marvel Boy Oracle must be fully supported"
+    );
     let before = p1p1_on(&runner, marvel);
 
     // Activate the NON-power-up ability first: must NOT trigger Marvel Boy.
@@ -655,9 +681,10 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
     refill_colorless(&mut runner, P0, 1);
     runner.activate(hero, power_idx).resolve();
     runner.advance_until_stack_empty();
-    assert!(
-        p1p1_on(&runner, marvel) > before,
-        "a power-up activation must trigger Marvel Boy (+1/+1 counter)"
+    assert_eq!(
+        p1p1_on(&runner, marvel),
+        before + 1,
+        "CR 603.2c: one power-up activation event must trigger Marvel Boy exactly once"
     );
 }
 
@@ -804,7 +831,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     // Kang granted P0 an extra turn and added a power-up-scoped, pre-armed
     // prohibition.
     assert!(
-        runner.state().extra_turns.contains(&P0),
+        runner.state().extra_turns.iter().any(|et| et.player == P0),
         "Kang must grant its controller an extra turn"
     );
     let prohibition_is_prearmed = runner.state().restrictions.iter().any(|r| {
@@ -834,6 +861,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let creation_turn_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero,
         ability_index: hero_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         creation_turn_attempt.is_ok(),
@@ -855,6 +883,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let extra_turn_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero2,
         ability_index: hero2_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         extra_turn_attempt.is_err(),
@@ -872,6 +901,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let plain_attempt = runner.act(GameAction::ActivateAbility {
         source_id: plain,
         ability_index: plain_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         plain_attempt.is_ok(),
@@ -907,6 +937,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let post_expiry_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero2,
         ability_index: hero2_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         post_expiry_attempt.is_ok(),

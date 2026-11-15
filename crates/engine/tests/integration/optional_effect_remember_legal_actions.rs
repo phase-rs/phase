@@ -8,7 +8,8 @@ use engine::game::zones::create_object;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceScope,
+    MayTriggerAutoChoiceSelector, MayTriggerOrigin, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::player::PlayerId;
@@ -32,8 +33,10 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
         source_id,
+        decision_subject_id: None,
         description: None,
         may_trigger_key: Some(key.clone()),
+        same_card_may_trigger_choice_available: false,
     };
     let mut ability = ResolvedAbility::new(
         Effect::GainLife {
@@ -48,14 +51,18 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
     state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
         ability: Box::new(ability),
         trigger_event: None,
+        trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
 
     let accept = GameAction::DecideOptionalEffectAndRemember {
         choice: AutoMayChoice::Accept,
+        scope: MayTriggerAutoChoiceScope::ExactInstance,
     };
     let decline = GameAction::DecideOptionalEffectAndRemember {
         choice: AutoMayChoice::Decline,
+        scope: MayTriggerAutoChoiceScope::ExactInstance,
     };
     let actions = legal_actions(&state);
     assert!(
@@ -80,8 +87,8 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
 
     apply_as_current(&mut state, accept).expect("remembered accept must be legal");
     assert_eq!(state.players[0].life, 21);
-    assert!(state
-        .may_trigger_auto_choices
-        .iter()
-        .any(|record| record.key == key && record.choice == AutoMayChoice::Accept));
+    assert!(state.may_trigger_auto_choices.iter().any(|record| {
+        record.selector == MayTriggerAutoChoiceSelector::exact(key.clone())
+            && record.choice == AutoMayChoice::Accept
+    }));
 }

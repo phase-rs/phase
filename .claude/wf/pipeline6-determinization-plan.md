@@ -323,4 +323,4 @@ All tests in `determinize.rs` `#[cfg(test)]` unless noted. Runtime tests drive t
 | **402.1** | "The hand is where a player holds cards that have been drawn." (hand size countable ⇒ preserved) | `unknown_slots` (hand slot count preserved). |
 | **701.20a** | "To reveal a card, show that card to all players for a brief time." | `pinned_known_ids` (revealed cards pinned). |
 
-All five verified present in `docs/MagicCompRules.txt` (lines 1935, 1996, 1998, 2010, 3438 respectively) during planning.
+All five verified present in `docs/MagicCompRules.txt` during planning.

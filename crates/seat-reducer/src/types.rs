@@ -84,6 +84,10 @@ pub enum SeatMutation {
     SetKind {
         seat_index: u8,
         kind: SeatKind,
+        /// Compare with the live kind before resolving a deck. A mismatch is a
+        /// successful empty delta; omission deliberately edits the current occupant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_kind: Option<SeatKind>,
     },
     #[serde(rename_all = "camelCase")]
     Remove {

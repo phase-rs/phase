@@ -3,7 +3,7 @@
 The official phase.rs lobby broker, running as a single global Cloudflare
 Durable Object. The DO body (`src/lobby-do.ts`) is a thin imperative shell
 around the compiled Rust `lobby-broker` core (`broker-wasm` →
-`src/broker-wasm-pkg`) — the SAME code `phase-server` runs natively, so the two
+`broker-wasm-pkg`) — the SAME code `phase-server` runs natively, so the two
 deployments behave identically by construction. See
 `.planning/lobby-failover-federation-plan.md`.
 
@@ -64,6 +64,16 @@ The client (`client/src/network/connection.ts`) fetches this from
 `TURN_CREDENTIALS_URL` and caches it for 6h. **Do CF TURN setup before deploying
 the client change**, or relay degrades to STUN-only until the endpoint is live.
 Free tier: 1,000 GB/mo relayed (≫ the prior Metered 20 GB).
+
+## Jev relay (`POST /jev/systemone`)
+
+TypeSafe's Jev API refuses browser CORS, and the client relays a Jev AI opponent
+through the server it is connected to. The official lobby hostnames are served by
+this Worker, so it carries the relay too: a stateless twin of `phase-server`'s
+`jev_relay` (keep the two in step). No configuration is needed. The player's API
+key travels in the request body, is forwarded as a bearer token, and is never
+logged or stored; redirects are never followed. `TYPESAFE_API_URL` (https, or
+http on loopback) overrides the upstream and exists for tests.
 
 ## Test against the live app WITHOUT touching the production server
 

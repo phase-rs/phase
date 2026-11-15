@@ -1,0 +1,41 @@
+# Example values for prometheus-community/prometheus-adapter, to expose the
+# chart's recording rule to the HPA as an external metric.
+#
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     -n monitoring -f prometheus-adapter-values.yaml
+#
+# Without an adapter the HPA has nothing to read: Kubernetes ships no
+# external.metrics.k8s.io provider of its own. Check it is wired up with
+#
+#   kubectl get --raw \
+#     "/apis/external.metrics.k8s.io/v1beta1/namespaces/<ns>/phase_wanted_replicas"
+#
+# The rename is deliberate. `phase:wanted_replicas` is the Prometheus recording
+# rule (the colon is the convention for a recorded series); `phase_wanted_replicas`
+# is the metric name the HPA asks for, because a colon is not valid in a
+# Kubernetes metric name. Keep `autoscaling.recordName` and
+# `autoscaling.metricName` in the chart matching the two halves below.
+
+prometheus:
+  # Adjust to your kube-prometheus-stack release name and namespace.
+  url: http://prometheus-operated.monitoring.svc
+  port: 9090
+
+rules:
+  # The stock rule set maps container CPU/memory. None of it is needed here, and
+  # leaving it on makes the adapter re-scan a lot of series it will never serve.
+  default: false
+  external:
+    - seriesQuery: '{__name__="phase:wanted_replicas"}'
+      resources:
+        # Associate the series with the namespace it carries, so the adapter can
+        # answer the namespaced External Metrics API path the HPA calls.
+        overrides:
+          namespace:
+            resource: namespace
+      name:
+        matches: "^phase:wanted_replicas$"
+        as: "phase_wanted_replicas"
+      # `service` must survive the aggregation: the HPA selects on it, so that
+      # two releases cannot read each other's answer.
+      metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (namespace, service)'

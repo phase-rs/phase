@@ -11,12 +11,11 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 fn desperate_gambit_mana() -> ManaCost {
     ManaCost::Cost {
@@ -316,7 +315,7 @@ fn desperate_gambit_win_branch_installs_double_shield_on_chosen_source() {
     let source = scenario.add_creature(P0, "Damage Source", 2, 2).id();
 
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(0);
+    runner.state_mut().rng = GameRng::seed_from_u64(0);
     add_mana(&mut runner, &[ManaType::Red]);
     resolve_desperate_gambit_through_source_choice(&mut runner, gambit, source);
 
@@ -336,7 +335,7 @@ fn desperate_gambit_lose_branch_installs_prevention_shield_on_chosen_source() {
     let source = scenario.add_creature(P0, "Damage Source", 2, 2).id();
 
     let mut runner = scenario.build();
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(1);
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
     add_mana(&mut runner, &[ManaType::Red]);
     resolve_desperate_gambit_through_source_choice(&mut runner, gambit, source);
 

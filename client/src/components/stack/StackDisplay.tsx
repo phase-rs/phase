@@ -8,7 +8,12 @@ import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { getSeatCount, isSplitBoardActive } from "../../viewmodel/gameStateView.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import {
+  getSeatCount,
+  getWaitingForObjectChoiceIds,
+  isSplitBoardActive,
+} from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
@@ -16,6 +21,35 @@ import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 const EMPTY_STACK: StackEntryType[] = [];
 const EMPTY_GROUPS: StackDisplayGroup[] = [];
 const EMPTY_DETAILS: Record<string, StackEntryDisplay> = {};
+
+interface DisplayStackEntry {
+  entry: StackEntryType;
+  choiceObjectId?: ObjectId;
+  groupedObjectIds?: ObjectId[];
+  groupCount: number;
+}
+
+function ownerArtKey(details: StackEntryDisplay | undefined): string {
+  const p = details?.printing;
+  const ref = details?.printed_ref;
+  return JSON.stringify(p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null);
+}
+
+/** A missing details row is missing comparison authority, not an absent printing. */
+function shouldSplitStackGroup(
+  group: StackDisplayGroup,
+  legalMemberIds: readonly ObjectId[],
+  detailsByEntry: Readonly<Record<string, StackEntryDisplay>>,
+  showOwnerPrintings: boolean,
+): boolean {
+  if (legalMemberIds.length >= 2) return true;
+  if (!showOwnerPrintings) return false;
+  const firstKey = ownerArtKey(detailsByEntry[String(group.member_ids[0])]);
+  return group.member_ids.some((id) => {
+    const details = detailsByEntry[String(id)];
+    return !details || ownerArtKey(details) !== firstKey;
+  });
+}
 
 const STAGGER_Y = 24;
 const STAGGER_X = 10;
@@ -35,7 +69,11 @@ function getViewportSize() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-export function StackDisplay() {
+export function StackDisplay({
+  effectiveMultiplayerBoardLayout,
+}: {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
+}) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const stack = gameState?.stack ?? EMPTY_STACK;
@@ -51,6 +89,7 @@ export function StackDisplay() {
   const stackEntryDetails = useGameStore(
     (s) => s.gameState?.derived?.stack_entry_details ?? EMPTY_DETAILS,
   );
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [viewport, setViewport] = useState(getViewportSize);
   const [hoveredStackEntryId, setHoveredStackEntryId] = useState<ObjectId | null>(null);
@@ -59,11 +98,11 @@ export function StackDisplay() {
   // choice on every resolution.
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
-  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const dockedLeft = stackDockSide === "left";
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
   const userStackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
 
   useEffect(() => {
     function handleResize() {
@@ -82,27 +121,44 @@ export function StackDisplay() {
 
   if (stack.length === 0) return null;
 
-  // When engine-authored groups are available and actually coalesce anything,
-  // render one entry per group (with ×N badge) instead of per raw entry.
-  // Falling back to the raw stack when groups are unavailable preserves the
-  // prior behavior for adapters that don't proxy the call yet.
+  // Engine groups remain authoritative. One display-only split decision governs
+  // both the drawn entries and the DOM representatives used by target arcs.
   const entryById = new Map(stack.map((e) => [e.id, e] as const));
-  const groupedStack: { entry: StackEntryType; count: number }[] =
-    groups.length > 0 && groups.some((g) => g.count > 1)
-      ? groups
-          .map((g) => {
-            const entry = entryById.get(g.representative);
-            return entry ? { entry, count: g.count } : null;
-          })
-          .filter((x): x is { entry: StackEntryType; count: number } => x !== null)
-      : stack.map((entry) => ({ entry, count: 1 }));
-  const displayStack = groupedStack.map((g) => g.entry);
+  const choiceObjectIds = new Set(getWaitingForObjectChoiceIds(waitingFor));
   const stackEntryRepresentatives = new Map<ObjectId, ObjectId>();
-  for (const group of groups) {
-    for (const memberId of group.member_ids) {
-      stackEntryRepresentatives.set(memberId, group.representative);
+  for (const entry of stack) {
+    stackEntryRepresentatives.set(entry.id, entry.id);
+  }
+  const groupedStack: DisplayStackEntry[] = [];
+  if (groups.length > 0 && groups.some((g) => g.count > 1)) {
+    for (const group of groups) {
+      const legalMemberIds = group.member_ids.filter((id) => choiceObjectIds.has(id));
+      const split = shouldSplitStackGroup(group, legalMemberIds, stackEntryDetails, showOwnerPrintings);
+      for (const memberId of group.member_ids) {
+        stackEntryRepresentatives.set(memberId, split ? memberId : group.representative);
+      }
+      const representative = entryById.get(group.representative);
+      if (!representative) continue;
+      if (split) {
+        for (const memberId of group.member_ids) {
+          const entry = entryById.get(memberId);
+          if (entry) groupedStack.push({ entry, groupCount: 1 });
+        }
+      } else {
+        groupedStack.push({
+          entry: representative,
+          choiceObjectId: legalMemberIds[0],
+          groupedObjectIds: group.member_ids,
+          groupCount: group.count,
+        });
+      }
+    }
+  } else {
+    for (const entry of stack) {
+      groupedStack.push({ entry, groupCount: 1 });
     }
   }
+  const displayStack = groupedStack.map((g) => g.entry);
   const rawCardSize = getStackCardSize(displayStack.length);
   const widthScale =
     viewport.width < 640 ? 0.58 :
@@ -127,7 +183,7 @@ export function StackDisplay() {
   // clamped to a pixel top below so the panel header — the only controls (swap,
   // collapse, count) — can never be pushed off the top edge when the pile is
   // taller than the viewport.
-  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
   const topFraction = splitBoardActive
     ? viewport.width < 640 ? 0.52 : viewport.width < 1024 ? 0.58 : 0.66
     : viewport.width < 640 ? 0.38 :
@@ -162,11 +218,14 @@ export function StackDisplay() {
         right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
       };
 
-  const entryStyles = displayStack.map((_, index) => ({
+  const entryStyles = displayStack.map((entry, index) => ({
     position: "absolute" as const,
     top: index * staggerY,
     left: index * staggerX,
-    zIndex: index + 1,
+    // Cards overlap to form the stack pile. Raise the inspected card above
+    // every sibling so its engine-provided targets, modes, and paid-cost chips
+    // remain readable even when it is below the top stack entry.
+    zIndex: entry.id === hoveredStackEntryId ? displayStack.length + 1 : index + 1,
   }));
 
   return (
@@ -221,7 +280,7 @@ export function StackDisplay() {
             </button>
           )}
 
-          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/96 shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/40 shadow-[0_16px_36px_rgba(0,0,0,0.25)] backdrop-blur-sm">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">
@@ -279,10 +338,12 @@ export function StackDisplay() {
                   const pacing = pressureMultiplier(
                     effectiveStackPressure(displayStack.length),
                   );
-                  return groupedStack.map(({ entry, count }, index) => (
+                  return groupedStack.map(({ entry, choiceObjectId, groupedObjectIds, groupCount }, index) => (
                     <StackEntry
                       key={entry.id}
                       entry={entry}
+                      choiceObjectId={choiceObjectId}
+                      groupedObjectIds={groupedObjectIds}
                       index={index}
                       isTop={index === displayStack.length - 1}
                       isPending={stackEntryDetails[String(entry.id)]?.is_pending}
@@ -290,7 +351,7 @@ export function StackDisplay() {
                       onHoverChange={(hovered) => handleStackEntryHover(entry.id, hovered)}
                       style={entryStyles[index]}
                       pacingMultiplier={pacing}
-                      groupCount={count}
+                      groupCount={groupCount}
                       details={stackEntryDetails[String(entry.id)]}
                     />
                   ));

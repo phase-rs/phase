@@ -18,6 +18,10 @@ interface MenuShellProps {
    *  home dashboard's `max-w-[1180px]` so every pane centers identically as the
    *  viewport widens. Override per-pane (e.g. a narrow lobby form). */
   contentWidthClass?: string;
+  /** Reduce embedded top padding when page progress already lives in shell chrome. */
+  compactTopPadding?: boolean;
+  /** Allow a responsive embedded pane to consume the shell's available height. */
+  fillEmbeddedHeight?: boolean;
 }
 
 export function MenuShell({
@@ -29,12 +33,15 @@ export function MenuShell({
   children,
   layout = "split",
   contentWidthClass,
+  compactTopPadding = false,
+  fillEmbeddedHeight = false,
 }: MenuShellProps) {
   // Inside the modern shell every pane reads left-aligned and top-anchored, the
   // way the design-system handoff embeds them (Scene's `embedded ? flex-start :
   // center`). A page's stacked/split choice only governs its *standalone* look;
   // the shell forces the left-aligned, full-width presentation regardless.
   const embedded = useInShell();
+  const embeddedHeightFill = embedded && fillEmbeddedHeight;
   const centered = layout === "stacked" && !embedded;
   // Match the home dashboard exactly: a single centered container the content
   // fills, so header and content share a left edge AND the whole block stays
@@ -51,15 +58,23 @@ export function MenuShell({
       className={[
         "relative z-10 mx-auto flex w-full flex-col justify-start",
         widthClass,
-        embedded ? "px-6 py-9 lg:px-9" : "min-h-screen px-6 py-16 lg:px-10",
+        embeddedHeightFill ? "h-full min-h-0 flex-1" : "",
+        embedded
+          ? compactTopPadding
+            ? "px-6 pb-9 pt-1 lg:px-9"
+            : "px-6 py-9 lg:px-9"
+          : "min-h-screen px-6 py-16 lg:px-10",
       ].join(" ")}
     >
       <div
-        className={centered
-          ? "flex flex-col items-center gap-8"
-          : layout === "stacked"
-            ? "flex flex-col items-start gap-8"
-            : "grid items-start gap-8 lg:grid-cols-[minmax(0,0.84fr)_minmax(0,1.16fr)]"}
+        className={[
+          centered
+            ? "flex flex-col items-center gap-8"
+            : layout === "stacked"
+              ? "flex flex-col items-start gap-8"
+              : "grid items-start gap-8 lg:grid-cols-[minmax(0,0.84fr)_minmax(0,1.16fr)]",
+          embeddedHeightFill ? "min-h-0 flex-1 flex flex-col" : "",
+        ].filter(Boolean).join(" ")}
       >
         {hasHeader && (
           <section className={`flex w-full flex-col ${centered ? "items-center" : "items-start"}`}>
@@ -101,7 +116,14 @@ export function MenuShell({
           </section>
         )}
 
-        <section className={centered ? "flex w-full max-w-5xl justify-center" : "w-full"}>{children}</section>
+        <section
+          className={[
+            centered ? "flex w-full max-w-5xl justify-center" : "w-full",
+            embeddedHeightFill ? "min-h-0 flex-1 flex flex-col" : "",
+          ].filter(Boolean).join(" ")}
+        >
+          {children}
+        </section>
       </div>
       {!embedded && <MenuFooterDisclaimer />}
     </div>

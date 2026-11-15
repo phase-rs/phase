@@ -2,8 +2,7 @@ import { useCallback, useRef } from "react";
 import type React from "react";
 
 import { useUiStore } from "../stores/uiStore.ts";
-import { useCanHover } from "./useCanHover.ts";
-import { useIsMobile } from "./useIsMobile.ts";
+import type { PreviewPlacement } from "../stores/uiStore.ts";
 import { useLongPress } from "./useLongPress.ts";
 import type { ObjectId } from "../adapter/types.ts";
 
@@ -11,15 +10,20 @@ import type { ObjectId } from "../adapter/types.ts";
  * Returns a hover-props factory for list-render sites where useCardHover cannot
  * be called per-item (cards rendered in a `.map()`).
  *
- * Desktop: onMouseEnter/onMouseLeave drive inspectObject for hover preview.
+ * Both gestures are always wired, each gated on the event's own `pointerType`:
+ * hover preview for anything that isn't a finger, long-press → sticky preview
+ * for fingers. Gating per-event instead of on a device-capability media query
+ * is what makes this work on hosts that misreport their input — a remote-desktop
+ * session advertises no hover-capable input while still sending
+ * `pointerType: "mouse"`. See useCardHover, which splits the same way.
  *
- * Touch: the synthesized mouseenter is skipped (it would open the dismiss-looping
- * MobilePreviewOverlay and block card selection), and long-press → sticky preview
- * is wired instead, matching useCardHover on the board so modal/zone card lists
- * get the same gesture. Because hooks can't run per-item, a single shared
- * long-press timer serves the whole list: only one pointer is active at a time,
- * so each card's onPointerDown records its id in pressedIdRef and the timer reads
- * it when it fires. The click a browser synthesizes after a long press is
+ * The touch-synthesized enter stays suppressed: it would open the
+ * dismiss-looping MobilePreviewOverlay and block card selection.
+ *
+ * Because hooks can't run per-item, a single shared long-press timer serves the
+ * whole list: only one pointer is active at a time, so each card's onPointerDown
+ * records its id in pressedIdRef and the timer reads it when it fires. The click
+ * a browser synthesizes after a long press is
  * swallowed in the CAPTURE phase (which runs before the caller's bubble-phase
  * onClick), so the preview gesture never also toggles selection — callers keep a
  * plain onClick and need no firedRef plumbing.
@@ -32,56 +36,82 @@ import type { ObjectId } from "../adapter/types.ts";
 export function useInspectHoverProps() {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
-  const isMobile = useIsMobile();
-  const canHover = useCanHover();
 
   // Which card most recently began a press — lets the single shared long-press
   // timer resolve the correct id on fire (one active pointer at a time).
   const pressedIdRef = useRef<ObjectId | null>(null);
+  const pressedPlacementRef = useRef<PreviewPlacement>("cursor");
   const { handlers: longPressHandlers, firedRef } = useLongPress(
     useCallback(() => {
       if (pressedIdRef.current != null) {
         // Long-press is explicit intent (a hold past the timer), so bypass hover
         // latency and show the sticky preview immediately, mirroring useCardHover.
-        inspectObject(pressedIdRef.current, undefined, "immediate");
+        inspectObject(
+          pressedIdRef.current,
+          undefined,
+          "immediate",
+          pressedPlacementRef.current,
+        );
         setPreviewSticky(true);
       }
     }, [inspectObject, setPreviewSticky]),
   );
 
+  // `useLongPress` returns a fresh object literal every render, so capture the
+  // two methods this composes with rather than depending on the object.
+  const armLongPress = longPressHandlers.onPointerDown;
+  const cancelLongPress = longPressHandlers.onPointerLeave;
+
   return useCallback(
-    (id: ObjectId) => {
-      // Touch-only devices: skip mouse handlers (synthesized mouseenter loops the
-      // preview) and wire long-press → preview instead.
-      if (isMobile || !canHover) {
-        return {
-          ...longPressHandlers,
-          onPointerDown: (e: React.PointerEvent) => {
-            pressedIdRef.current = id;
-            longPressHandlers.onPointerDown(e);
-          },
-          // Capture phase runs before the caller's bubble-phase onClick, so a
-          // stopPropagation here swallows the post-long-press click without the
-          // caller needing to guard onClick with firedRef.
-          onClickCapture: (e: React.MouseEvent) => {
-            if (firedRef.current) {
-              e.stopPropagation();
-              firedRef.current = false;
-            }
-          },
-          // Required for usePreviewDismiss's elementFromPoint poll.
-          "data-card-hover": true,
-        };
-      }
-      return {
-        onMouseEnter: () => inspectObject(id),
-        onMouseLeave: () => inspectObject(null),
-        // Required for usePreviewDismiss's elementFromPoint poll — without this
-        // attribute the 300ms dismiss loop clears the preview while the cursor is
-        // still over the card (choice modals, zone lists).
-        "data-card-hover": true,
-      };
-    },
-    [isMobile, canHover, inspectObject, longPressHandlers, firedRef],
+    (id: ObjectId) => ({
+      // Spread first so the composed handlers below deterministically win the
+      // `onPointerDown` / `onPointerLeave` key collisions.
+      ...longPressHandlers,
+      // Long-press exists to stand in for hover, so arm it only for the pointer
+      // that cannot hover. Arming it for a mouse would open a sticky preview on
+      // any 500ms hold and then — via `onClickCapture` below — swallow the click
+      // that ended it, which on a choice modal reads as a dead card. This is an
+      // allowlist where the hover gates are denylists, and the two are
+      // complementary: an unrecognized pointerType still hovers, and only a
+      // known finger gets the long-press substitute.
+      onPointerDown: (e: React.PointerEvent) => {
+        if (e.pointerType !== "touch" || !e.isPrimary || e.button !== 0) return;
+        pressedIdRef.current = id;
+        pressedPlacementRef.current = e.currentTarget.closest("[data-card-preview-dock='side']")
+          ? "side"
+          : "cursor";
+        armLongPress(e);
+      },
+      onPointerEnter: (e: React.PointerEvent) => {
+        if (e.pointerType === "touch") return;
+        inspectObject(
+          id,
+          undefined,
+          "hover",
+          e.currentTarget.closest("[data-card-preview-dock='side']") ? "side" : "cursor",
+        );
+      },
+      onPointerLeave: (e: React.PointerEvent) => {
+        cancelLongPress(e);
+        // On touch the finger-lift fires a leave, which would wipe the sticky
+        // preview the long-press just opened.
+        if (e.pointerType === "touch") return;
+        inspectObject(null);
+      },
+      // Capture phase runs before the caller's bubble-phase onClick, so a
+      // stopPropagation here swallows the post-long-press click without the
+      // caller needing to guard onClick with firedRef.
+      onClickCapture: (e: React.MouseEvent) => {
+        if (firedRef.current) {
+          e.stopPropagation();
+          firedRef.current = false;
+        }
+      },
+      // Required for usePreviewDismiss's elementFromPoint poll — without this
+      // attribute the 300ms dismiss loop clears the preview while the cursor is
+      // still over the card (choice modals, zone lists).
+      "data-card-hover": true,
+    }),
+    [armLongPress, cancelLongPress, firedRef, inspectObject, longPressHandlers],
   );
 }

@@ -62,10 +62,13 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
             .counters
             .insert(CounterType::Generic("invitation".to_string()), 2);
         object.back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Wedding Festivity".to_string(),
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -96,6 +99,7 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         wedding
     };

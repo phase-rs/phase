@@ -94,10 +94,13 @@ fn add_aang_dfc(state: &mut GameState) -> ObjectId {
     };
     obj.base_card_types = obj.card_types.clone();
     obj.back_face = Some(BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Avatar Aang, Master of Elements".to_string(),
         power: Some(6),
         toughness: Some(6),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -118,6 +121,7 @@ fn add_aang_dfc(state: &mut GameState) -> ObjectId {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
     id
 }

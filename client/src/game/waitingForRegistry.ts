@@ -13,16 +13,17 @@ import type { GameState, WaitingFor } from "../adapter/types";
 
 /**
  * CR 601.2g + CR 107.4f: WaitingFor variants resolved by the single
- * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt and the per-shard
- * `PhyrexianPayment` prompt share one panel because both are caster-only cost
- * decisions for the same spell — `ManaPaymentUI` discriminates internally.
+ * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt, the per-shard
+ * `PhyrexianPayment` prompt, and a mana ability's own payment window
+ * (`ManaAbilityManaPayment`, CR 605.3a) share one panel because all are
+ * caster-only cost decisions — `ManaPaymentUI` discriminates internally.
  *
  * This set is the single source of truth: `GamePage` gates the overlay's
  * mount on it, and `HANDLED_WAITING_FOR_TYPES` spreads it. Wiring the overlay
  * and registering it as "handled" therefore cannot drift apart.
  */
 export const MANA_PAYMENT_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
-  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment"]);
+  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment", "ManaAbilityManaPayment"]);
 
 /**
  * Discriminator strings the frontend has a user-facing UI handler for.
@@ -33,11 +34,17 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
+    // Resolve All's explicit standing-pass authorization. The final Grant
+    // materializes the shared engine session directly; there is no client-side
+    // Ready hand-off to drive.
+    "ResolveAllConsent",
     // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
     "MeldPairChoice",
     "MeldAttackTargetChoice",
+    "EntryAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
+    "ManaSourceSelection",
     "ChooseXValue",
     "PayAmountChoice",
     "TargetSelection",
@@ -45,6 +52,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "OptionalCostChoice",
     "ActivationCostOneOfChoice",
     "DefilerPayment",
+    // CR 601.2f: caster-elected cost-reduction ordering
+    // (CostReductionOrderModal).
+    "OrderCostReductions",
     "ModeChoice",
     "AbilityModeChoice",
     "ModalFaceChoice",
@@ -90,21 +100,32 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "PrecastCopyShortcutOffer",
     "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
+    "EntryControllerChoice",
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",
     // CR 303.4 + CR 115.1: return-as-Aura / non-spell Aura entry host pick.
     // Resolved on the board (object hosts) or via player HUD glow (Curse /
-    // enchant-player Auras) — see TargetingOverlay + PlayerHud/OpponentHud.
+    // enchant-player Auras). Legal picks come from `getWaitingForClickTargetRefs`
+    // (viewmodel/gameStateView.ts), which every click surface reads.
     "ReturnAsAuraTarget",
+    // Digital-only Alchemy (no CR entry): batch boon "one of them" token-host
+    // pick. Same board/HUD click route as ReturnAsAuraTarget above.
+    "ChooseTokenHost",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",
     "SaddleMount",
     "ScryChoice",
+    "RippleRevealChoice",
+    "RippleBottomOrder",
+    "RevealUntilBottomOrder",
+    "DigBottomOrder",
     "ArrangePlanarDeckTopChoice",
     "CoinFlipKeepChoice",
+    "DieKeepChoice",
     "DigChoice",
+    "DigRestSplitChoice",
     "SurveilChoice",
     "RevealChoice",
     "SearchChoice",
@@ -114,9 +135,17 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
     // list (BeholdChoiceModal, rendered via CardChoiceModal).
     "BeholdChoice",
+    // CR 701.71a: empower Jace N — single-pick among the controller's Jace
+    // planeswalker tokens (EmpowerJaceChoiceModal, rendered via CardChoiceModal).
+    "EmpowerJaceChoice",
+    // CR 405.3 + CR 707.10: pick the spell whose copy goes on the stack next
+    // (SpellCopyOrderChoiceModal, rendered via CardChoiceModal).
+    "SpellCopyOrderChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
+    // Turtle Team-Up hero-choice Events (HeroEventModal, rendered via CardChoiceModal).
+    "HeroEventChoice",
     "EffectZoneChoice",
     "DrawnThisTurnTopdeckChoice",
     "LearnChoice",
@@ -127,7 +156,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // choosing opponent (ZoneOpponentChooserModal).
     "ChooseFromZoneOpponentChooser",
     "ChooseAnnouncingOpponent",
+    "ChooseGiftRecipient",
     "ClashCardPlacement",
+    // Eye to Eye / Mouth to Mouth: real-time clicking contest (ContestOverlay).
+    "PhysicalContest",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
     "AssistChoosePlayer",
@@ -157,6 +189,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "PairChoice",
     "OpponentMayChoice",
     "OptionalEffectChoice",
+    "ResolutionOptionalPaymentChoice",
     "UnlessPayment",
     "UnlessPaymentChooseCost",
     "WardDiscardChoice",
@@ -184,6 +217,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseUntapSubset",
     "ExertChoice",
     "EnlistChoice",
+    "SecretAgendaChoice",
     "CompanionReveal",
     // Game lifecycle
     "GameOver",
@@ -191,6 +225,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
+    "ChooseStartingPlayer",
   ]);
 
 /**
@@ -205,21 +240,38 @@ export function isWaitingForHandled(
   return HANDLED_WAITING_FOR_TYPES.has(waitingFor.type);
 }
 
-/** A localized-reason descriptor: an i18n key plus optional interpolation params. */
+/** A waiting-reason id: the shared suffix of its `status.reason.*` and `status.seat.*` keys. */
+export type WaitingReasonId =
+  | "declareAttackers"
+  | "declareBlockers"
+  | "assigningDamage"
+  | "choosingTargets"
+  | "payingCost"
+  | "mulligan"
+  | "discarding"
+  | "orderingTriggers"
+  | "orderingCostReductions"
+  | "respondingToStack"
+  | "priorityCombat"
+  | "priorityMain"
+  | "priority"
+  | "thinking";
+
+/** A localized-reason descriptor: a reason id plus optional interpolation params. */
 export interface WaitingReason {
-  key: string;
+  id: WaitingReasonId;
   params?: Record<string, unknown>;
 }
 
 /**
- * Map a pending decision to a human-readable *reason* (an i18n key under
- * `status.reason.*`) describing WHY the game is waiting. This is display
+ * Map a pending decision to a human-readable *reason* (an id naming its
+ * `status.reason.*` key) describing WHY the game is waiting. This is display
  * formatting over engine-provided facts (the `waiting_for` variant, plus
  * `phase` / `stack` for the generic priority window) — it labels a state the
  * engine already decided; it never infers game state.
  *
  * Returns `null` when there is nothing to narrate (no pending decision or the
- * game is over). Unknown variants fall through to a generic key so a new
+ * game is over). Unknown variants fall through to a generic reason so a new
  * engine `WaitingFor` variant degrades gracefully instead of breaking the
  * build (coverage of the common variants is asserted in tests, not via a
  * compile-time exhaustiveness check).
@@ -232,38 +284,42 @@ export function waitingForReason(
 
   switch (waitingFor.type) {
     case "DeclareAttackers":
-      return { key: "status.reason.declareAttackers" };
+      return { id: "declareAttackers" };
     case "DeclareBlockers":
-      return { key: "status.reason.declareBlockers" };
+      return { id: "declareBlockers" };
     case "AssignCombatDamage":
     case "AssignBlockerDamage":
     case "DistributeAmong":
-      return { key: "status.reason.assigningDamage" };
+      return { id: "assigningDamage" };
     case "TargetSelection":
     case "TriggerTargetSelection":
     case "MultiTargetSelection":
     case "CopyRetarget":
     case "RetargetChoice":
-      return { key: "status.reason.choosingTargets" };
+      return { id: "choosingTargets" };
     case "ManaPayment":
+    case "ManaSourceSelection":
     case "PhyrexianPayment":
     case "PayCost":
     case "PayManaAbilityMana":
+    case "ManaAbilityManaPayment":
     case "UnlessPayment":
-      return { key: "status.reason.payingCost" };
+      return { id: "payingCost" };
     case "MulliganDecision":
     case "OpeningHandBottomCards":
-      return { key: "status.reason.mulligan" };
+      return { id: "mulligan" };
     case "DiscardToHandSize":
     case "DiscardChoice":
-      return { key: "status.reason.discarding" };
+      return { id: "discarding" };
     case "OrderTriggers":
-      return { key: "status.reason.orderingTriggers" };
+      return { id: "orderingTriggers" };
+    case "OrderCostReductions":
+      return { id: "orderingCostReductions" };
     case "Priority": {
       // CR 117: the priority window. The engine-provided stack depth and phase
       // tell us what kind of window this is — purely descriptive labeling.
       if ((gameState?.stack.length ?? 0) > 0) {
-        return { key: "status.reason.respondingToStack" };
+        return { id: "respondingToStack" };
       }
       switch (gameState?.phase) {
         case "BeginCombat":
@@ -271,28 +327,15 @@ export function waitingForReason(
         case "DeclareBlockers":
         case "CombatDamage":
         case "EndCombat":
-          return { key: "status.reason.priorityCombat" };
+          return { id: "priorityCombat" };
         case "PreCombatMain":
         case "PostCombatMain":
-          return { key: "status.reason.priorityMain" };
+          return { id: "priorityMain" };
         default:
-          return { key: "status.reason.priority" };
+          return { id: "priority" };
       }
     }
     default:
-      return { key: "status.reason.thinking" };
+      return { id: "thinking" };
   }
-}
-
-/**
- * Map a reason to its standalone seat-badge key. `status.seat.*` mirrors
- * `status.reason.*` key-for-key but holds self-contained chip labels
- * ("Responding") instead of sentence fragments meant for composition
- * ("Your priority — responding to the stack").
- */
-export function seatStatusKey(reason: WaitingReason | null): string {
-  return (reason?.key ?? "status.reason.thinking").replace(
-    "status.reason.",
-    "status.seat.",
-  );
 }

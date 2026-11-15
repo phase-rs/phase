@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
@@ -11,8 +12,8 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
-import { mouseHoverPreview } from "./hoverPreview";
-import { groupAccent, groupKey, groupRank, groupTitleKey, type GroupMode } from "./deckGrouping";
+import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
+import { groupAccent, groupKey, groupRank, type DeckGroup, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckStackProps {
@@ -20,15 +21,20 @@ interface DeckStackProps {
   commanders: string[];
   cardDataCache: Map<string, ScryfallCard>;
   onAddCard: (name: string) => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate — disables the `+` on a
+   *  card already at its ceiling for this format. */
+  canAddCard: (name: string) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
   format?: GameFormat;
   /** Whether the main deck is sub-grouped by card type or by color. */
   groupMode: GroupMode;
+  /** Stable deck surface restored after the nested printing picker closes. */
+  pickerReturnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -37,14 +43,17 @@ interface DeckStackItem {
   count: number;
   name: string;
   section: DeckStackSection;
-  groupTitle: string;
+  groupTitle: DeckGroup | null;
   sortKey: [number, number, string];
+  scryfallId?: string;
   sourcePrinting?: SourcePrinting;
 }
 
+type DeckStackTitle = DeckGroup | "maybeboardGroup" | "sideboardGroup";
+
 interface DeckStackGroup {
   key: string;
-  title: string;
+  title: DeckStackTitle | null;
   entries: DeckStackItem[];
 }
 
@@ -75,8 +84,9 @@ function createDeckStackItems(
     commandersItems.push({
       count: 1,
       name,
+      scryfallId: card?.id,
       section: "commander",
-      groupTitle: "",
+      groupTitle: null,
       sortKey: [0, card?.cmc ?? 0, name.toLowerCase()],
     });
   }
@@ -87,9 +97,10 @@ function createDeckStackItems(
     mainItems.push({
       count: entry.count,
       name: entry.name,
+      scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "main",
-      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
@@ -100,9 +111,10 @@ function createDeckStackItems(
     sideboardItems.push({
       count: entry.count,
       name: entry.name,
+      scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "sideboard",
-      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
@@ -122,7 +134,7 @@ function buildGroups(entries: DeckStackItem[]): DeckStackGroup[] {
   if (entries.length === 0) return [];
 
   const groups: DeckStackGroup[] = [];
-  let currentTitle: string | null = null;
+  let currentTitle: DeckGroup | null = null;
   let currentEntries: DeckStackItem[] = [];
 
   const flush = () => {
@@ -170,15 +182,20 @@ function DeckStackCard({
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
-  const { src, isLoading } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const isCommander = item.section === "commander";
+  const hoverInfo = {
+    name: item.name,
+    scryfallId: item.scryfallId,
+    sourcePrinting: item.sourcePrinting,
+  };
   const showAddButton = item.section === "main";
   // The commander isn't part of the main/maybeboard partition, so it has no
   // move target. Main cards move out to the sideboard/maybeboard; second-section
@@ -221,8 +238,8 @@ function DeckStackCard({
       style={{ zIndex, width: CARD_WIDTH }}
       // Tap previews the card on touch; hover previews on mouse (guarded so the
       // touch-compat mouseleave can't tear down the overlay the tap just opened).
-      onClick={() => onCardHover?.(item.name)}
-      {...mouseHoverPreview(onCardHover, item.name)}
+      onClick={() => onCardHover?.(hoverInfo)}
+      {...mouseHoverPreview(onCardHover, hoverInfo)}
       onContextMenu={(e) => {
         if (onContextMenu) {
           e.preventDefault();
@@ -286,8 +303,10 @@ function DeckStackCard({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={item.name}
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
             className="object-cover"
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}
           />
@@ -346,17 +365,16 @@ function DeckStackSectionLane({
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
   const groups = useMemo(() => {
     const base = showGroupSections
       ? buildGroups(entries)
-      : [{ key: "all", title: "", entries }];
+      : [{ key: "all", title: null, entries }];
     return extraGroups && extraGroups.length > 0 ? [...base, ...extraGroups] : base;
   }, [entries, showGroupSections, extraGroups]);
-  const showGroupHeaders = showGroupSections || (extraGroups?.length ?? 0) > 0;
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -376,13 +394,13 @@ function DeckStackSectionLane({
           <div className="flex min-w-0 flex-col gap-6">
             {groups.map((group, groupIndex) => (
               <div key={group.key} className={groupIndex > 0 ? "pt-1" : undefined}>
-                {showGroupHeaders && (() => {
-                  const accent = groupAccent(group.title);
+                {group.title !== null && ((title: DeckStackTitle) => {
+                  const accent = groupAccent(title);
                   return (
                   <div className="mb-3 flex items-center gap-3">
                     <span className={`h-3.5 w-1 shrink-0 rounded-full ${accent.bar}`} aria-hidden="true" />
                     <div className={`text-[0.68rem] font-semibold uppercase tracking-[0.22em] ${accent.text}`}>
-                      {t(`stack.${group.title}`)}
+                      {t(`stack.${title}`)}
                     </div>
                     <div className="h-px flex-1 bg-white/8" />
                     <div className="text-[11px] text-slate-500">
@@ -392,7 +410,7 @@ function DeckStackSectionLane({
                     </div>
                   </div>
                   );
-                })()}
+                })(group.title)}
                 <div
                   className="grid justify-start gap-4"
                   style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, ${CARD_WIDTH}px))` }}
@@ -427,12 +445,14 @@ export function DeckStack({
   commanders,
   cardDataCache,
   onAddCard,
+  canAddCard,
   onRemoveCard,
   onMoveCard,
   onRemoveCommander,
   onCardHover,
   format,
   groupMode,
+  pickerReturnFocusRef,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
   const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
@@ -446,9 +466,11 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
-  const canAddCard = useMemo(
-    () => (item: DeckStackItem) => item.section === "main",
-    [],
+  // CR 100.2a: only main-deck lanes carry a `+`, and only up to the card's
+  // engine-resolved copy ceiling for this format.
+  const canAddStackCard = useCallback(
+    (item: DeckStackItem) => item.section === "main" && canAddCard(item.name),
+    [canAddCard],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
@@ -529,7 +551,7 @@ export function DeckStack({
                 emptyLabel={t("stack.noCommander")}
                 isMaybeboard={isMaybeboard}
                 onAddCard={onAddCard}
-                canAddCard={canAddCard}
+                canAddCard={canAddStackCard}
                 onRemoveCard={onRemoveCard}
                 onMoveCard={onMoveCard}
                 onRemoveCommander={onRemoveCommander}
@@ -552,7 +574,7 @@ export function DeckStack({
               extraGroups={sideboardGroups}
               isMaybeboard={isMaybeboard}
               onAddCard={onAddCard}
-              canAddCard={canAddCard}
+              canAddCard={canAddStackCard}
               onRemoveCard={onRemoveCard}
               onMoveCard={onMoveCard}
               onRemoveCommander={onRemoveCommander}
@@ -582,6 +604,7 @@ export function DeckStack({
           oracleId={pickerCard.oracleId}
           onCardHover={onCardHover}
           onClose={() => setPickerCard(null)}
+          returnFocusRef={pickerReturnFocusRef}
         />
       )}
     </div>

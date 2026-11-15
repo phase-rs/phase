@@ -1,12 +1,29 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import type { GameAction, GameState, WaitingFor } from "../../adapter/types";
+import {
+  boundProfileForSeat,
+  profileForSeat,
+  useLlmStore,
+  type LlmState,
+} from "../../stores/llmStore";
+import { executeLlmRequest } from "../../services/llm/llmClient";
+import { loadProviderCatalog } from "../../services/llm/catalog";
+import { reportLlmFailure } from "../../services/llm/diagnostics";
+import { recordLlmUsage } from "../../services/llm/usage";
+import { resolvedEndpointOf } from "../../services/llm/endpoint";
+import { endpointOf } from "../../services/llm/types";
+import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
+import {
+  clearAiDecisionDiagnostic,
+  recordAiDecisionDiagnostic,
+} from "../aiDecisionDiagnostics";
 import { debugLog } from "../debugLog";
-import { dispatchAction } from "../dispatch";
+import { dispatchAiActionProposal, isDispatchIdle, processRemoteUpdate } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
+import { stateFingerprint } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 /**
@@ -23,6 +40,17 @@ const MAX_TOTAL_FAILURES = 6;
 export interface AISeatBinding {
   playerId: number;
   difficulty: string;
+  /**
+   * Index of this seat in `preferencesStore.aiSeats` / `llmStore.seatBindings`
+   * (0 = first AI opponent). Present so the controller can look up an LLM
+   * binding at DECISION time rather than copying one in: the player may edit or
+   * delete a profile mid-game, and a stale copy would keep calling a key they
+   * revoked.
+   *
+   * Absent for callers that do not configure per-seat opponents; such a seat is
+   * always heuristic.
+   */
+  llmSeatIndex?: number;
 }
 
 export interface AIControllerConfig {
@@ -62,12 +90,228 @@ function waitingForFingerprint(waitingFor: WaitingFor | null | undefined): strin
   return JSON.stringify(waitingFor ?? null);
 }
 
+type EnginePromptFence = { identity: string; revision: number };
+type AttemptPrompt = { fence: EnginePromptFence | null; waitingFor: WaitingFor };
+
+function enginePromptFence(state: GameState | null): EnginePromptFence | null {
+  const identity = state?.derived?.waiting_for_identity;
+  const revision = state?.derived?.state_revision;
+  return identity == null || revision == null ? null : { identity, revision };
+}
+
+function sameAttemptPrompt(a: AttemptPrompt, b: AttemptPrompt): boolean {
+  if (a.fence && b.fence) {
+    return a.fence.identity === b.fence.identity && a.fence.revision === b.fence.revision;
+  }
+  return waitingForFingerprint(a.waitingFor) === waitingForFingerprint(b.waitingFor);
+}
+
 function waitingForDebugLabel(waitingFor: WaitingFor | null | undefined): string {
   if (waitingFor == null) return "none";
   const data = (waitingFor as { data?: { player?: number } }).data;
   const player = data?.player == null ? "unknown" : String(data.player);
   if (waitingFor.type !== "NamedChoice") return `${waitingFor.type} for player ${player}`;
   return `${waitingFor.type}/${choiceTypeKey(waitingFor.data.choice_type)} for player ${player}`;
+}
+
+/**
+ * How many engine-authored log entries an LLM decision is given as history.
+ *
+ * The engine decides what of this it actually renders (by difficulty, via
+ * `phase_llm::prompt::history_budget`): the turn cycle in progress verbatim and
+ * the last few completed cycles as one line per turn, so the PROMPT stays
+ * bounded however long the game runs. This is only the bound on what crosses
+ * the boundary — sized to cover those cycles in a four-seat game, where a cycle
+ * logs a few hundred entries — so a thousand-entry Commander game does not
+ * serialize its whole log on every priority pass.
+ */
+const LLM_HISTORY_TRANSFER_LIMIT = 600;
+
+/**
+ * Consecutive LLM failures a seat may take before the controller stops trying
+ * the provider for the rest of the session.
+ *
+ * Without this, a provider that is down, rate-limited, or simply hanging costs
+ * the full request timeout on EVERY decision, turning one misconfiguration into
+ * a permanently unplayable game. The seat keeps playing throughout — it just
+ * plays with the engine AI, which is what it was already falling back to.
+ */
+const MAX_CONSECUTIVE_LLM_FAILURES = 3;
+
+/**
+ * How many times one decision is asked again after the provider declines to
+ * continue the seat's message thread.
+ *
+ * A thread is best effort (the API drops one after five idle minutes), so a
+ * thread error is recovery, not failure: the engine has already dropped the
+ * seat's thread, and the resend goes out as a fresh, complete request inside
+ * the same attempt, so a recovered thread error never counts toward
+ * {@link MAX_CONSECUTIVE_LLM_FAILURES}. One resend is enough, because a fresh
+ * request has no thread left to lose.
+ */
+const LLM_THREAD_RESENDS = 1;
+
+/**
+ * The provider settings an LLM seat's decisions are asked with, as one
+ * comparable value: the endpoint of the profile bound to the seat (the
+ * message-thread toggle included), or `null` when none is. The profile is
+ * resolved as `profileForSeat` resolves it, but without the provider catalog,
+ * which a store listener cannot wait for, so a change counts whether or not
+ * the profile is usable.
+ */
+function seatProviderSettings(state: LlmState, seatIndex: number): string | null {
+  const profile = boundProfileForSeat(state, seatIndex);
+  return profile ? JSON.stringify(endpointOf(profile)) : null;
+}
+
+/**
+ * Run one LLM-driven decision for `playerId`.
+ *
+ * Returns `null` for EVERY failure — no configured profile, an adapter without
+ * the capability, a network or provider error, a reply the engine would not
+ * bind to a legal option, a decision that moved on mid-flight. The caller then
+ * takes the ordinary heuristic path, so an LLM seat degrades to a normal AI
+ * seat rather than stalling the game.
+ *
+ * The engine owns everything of consequence here: it builds the prompt, it
+ * builds the HTTP request, and it is the only thing that turns a reply back
+ * into an action. This function performs the call and passes bytes along.
+ *
+ * `setCharged` says whether the outcome is the provider's: set once the
+ * provider is in play, and withdrawn when the player's own settings change
+ * ends the decision instead. `settingsRevision` reads the seat's settings
+ * revision, which the controller advances at every change to the seat's
+ * provider settings.
+ */
+async function llmActionProposal(
+  playerId: number,
+  difficulty: string,
+  llmSeatIndex: number | undefined,
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+  setCharged: (charged: boolean) => void,
+  settingsRevision: () => number,
+): Promise<AiActionProposal | null> {
+  if (llmSeatIndex == null) return null;
+  const catalog = await loadProviderCatalog();
+  if (signal.aborted || !isCurrent()) return null;
+  const profile = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
+  if (!profile) return null;
+  // Read with the profile: the revision the engine keeps the seat's message
+  // thread under, and the one any change since is measured against.
+  const revision = settingsRevision();
+
+  const { adapter, logHistory } = useGameStore.getState();
+  if (!adapter?.buildLlmDecisionRequest || !adapter.getAiActionProposalFromLlmResponse) {
+    return null;
+  }
+
+  const history = (logHistory ?? []).slice(-LLM_HISTORY_TRANSFER_LIMIT);
+  const endpointJson = JSON.stringify(resolvedEndpointOf(profile));
+  const historyJson = JSON.stringify(history);
+  // The seat's settings can change during any await below: message threads
+  // turned off, or another endpoint, model or key. A request is built and sent
+  // only for the configuration `endpointJson` captured, so the settings are
+  // read again after each await that precedes a build or a send. A change
+  // undone within one await, such as threads turned off and on again, still
+  // advanced the seat's revision. When they changed, nothing more goes to the
+  // provider, and the decision ends as the player's choice rather than the
+  // provider's failure.
+  const endedBySettingsChange = (): boolean => {
+    const current = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
+    if (
+      settingsRevision() === revision
+      && current
+      && JSON.stringify(resolvedEndpointOf(current)) === endpointJson
+    ) {
+      return false;
+    }
+    console.info(`[LLM] seat ${llmSeatIndex}: the provider settings changed; not asking`);
+    setCharged(false);
+    return true;
+  };
+  for (let resends = 0; ; resends += 1) {
+    const built = await adapter.buildLlmDecisionRequest(
+      difficulty,
+      playerId,
+      endpointJson,
+      historyJson,
+      revision,
+      // Both clocks as the request is built. The request goes out no earlier,
+      // so an idle time measured from this reading errs long.
+      { wallMs: Date.now(), monotonicMs: performance.now() },
+    );
+    if (signal.aborted || !isCurrent()) return null;
+    // A decision this provider cannot be asked at all (a forced move has no
+    // question to pose) is not the provider failing: the heuristic plays it, and
+    // it does not count toward giving the seat's provider up.
+    if (built?.errorKind?.kind === "unsupportedDecision") return null;
+    // If the engine recognized a standing decision (e.g. PassPriority with no new
+    // information), return the authorized proposal immediately without contacting
+    // the provider or charging an attempt.
+    if (built?.proposal) {
+      return built.proposal;
+    }
+    if (endedBySettingsChange()) return null;
+    // From here the provider is in play, so an outcome without a proposal counts.
+    setCharged(true);
+    if (!built?.request || !built.fingerprint) {
+      // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
+      // the game log is prompt-renderable. Only the Phase-authored summary is
+      // logged; the detail goes to the console.
+      reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built?.error);
+      return null;
+    }
+
+    const { status, body } = await executeLlmRequest(built.request, { signal });
+    if (signal.aborted || !isCurrent()) return null;
+    // Status travels with the body so the engine can refuse a non-2xx reply
+    // however it parses — an error page or gateway failure must never be bound to
+    // a game action.
+    // The thread turn travels back too, so the engine records the reply
+    // against the request that produced it and no other.
+    const resolved = await adapter.getAiActionProposalFromLlmResponse(
+      playerId,
+      built.fingerprint,
+      built.threadTurn ?? null,
+      profile.provider,
+      status,
+      body,
+      // Both clocks as the reply arrived, no earlier than the API read the
+      // request. A thread the reply reports lost is judged by its idle time up
+      // to now, so a sleep while the request was built or out is counted, or
+      // leaves the two clocks apart, which the engine reads as a thread that
+      // may have expired.
+      { wallMs: Date.now(), monotonicMs: performance.now() },
+    );
+    // The call was paid for whether or not its reply is usable.
+    recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
+    // A decision that moved on while its reply was being read is never asked
+    // again: a resend would build a request for whatever is current now.
+    if (signal.aborted || !isCurrent()) return null;
+    if (resolved?.proposal) {
+      // The model's reasoning is deliberately NOT logged. `debugLog` writes a
+      // `visibility: "Public"` entry into `logHistory` -- the shared game log,
+      // which is also the history this engine feeds back into later prompts.
+      // Publishing a seat's private deliberation there would leak it to every
+      // player and echo it into subsequent decisions. It stays on
+      // `resolved.reasoning` for a future private channel (the local-only AI
+      // decision receipt is the established one).
+      return resolved.proposal;
+    }
+    if (resolved?.errorKind?.kind === "threadUnavailable" && resends < LLM_THREAD_RESENDS) {
+      // Settings changed while the request was out leave nothing to resend.
+      if (endedBySettingsChange()) return null;
+      // Console only, like every provider diagnostic: the game log is
+      // prompt-renderable (see `diagnostics.ts`).
+      console.info(
+        `[LLM] seat ${llmSeatIndex}: the provider dropped its message thread; asking again`,
+      );
+      continue;
+    }
+    reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) reply was refused`, resolved?.error);
+    return null;
+  }
 }
 
 export function createAIController(config: AIControllerConfig): AIController {
@@ -80,12 +324,9 @@ export function createAIController(config: AIControllerConfig): AIController {
   interface AIAttempt {
     generation: number;
     gameSessionGeneration: number;
-    waitingForFingerprint: string;
+    prompt: AttemptPrompt;
     playerId: number;
-    isPriority: boolean;
   }
-
-  let currentAttempt: AIAttempt | null = null;
 
   // Failure tracking on the same WaitingFor state to break infinite loops.
   // `MAX_CONSECUTIVE_FAILURES` gates the normal→fallback transition; the
@@ -98,7 +339,58 @@ export function createAIController(config: AIControllerConfig): AIController {
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   const difficultyByPlayerId = new Map(config.seats.map((s) => [s.playerId, s.difficulty]));
+  // Only the INDEX is retained, never the profile: the lookup happens at
+  // decision time so an edited or deleted profile takes effect immediately.
+  const llmSeatIndexByPlayerId = new Map(
+    config.seats.map((s) => [s.playerId, s.llmSeatIndex]),
+  );
   const aiPlayerIds = new Set(difficultyByPlayerId.keys());
+  /** Aborts an in-flight LLM call whose decision is no longer current. */
+  let llmAbort: AbortController | null = null;
+  /** Consecutive LLM failures per seat, reset by the first success. */
+  const llmFailures = new Map<number, number>();
+  /** Seats whose provider has failed enough to be given up on this session. */
+  const llmDisabled = new Set<number>();
+  /**
+   * Each LLM seat's settings revision, advanced at every change to the
+   * provider settings its decisions are asked with
+   * ({@link seatProviderSettings}). The engine keeps a seat's message thread
+   * only under the revision it was opened under, so a change no decision saw,
+   * such as message threads turned off and on again between two decisions,
+   * still starts the seat's next thread over.
+   */
+  const llmSettingsRevisions = new Map<number, number>();
+  let unsubscribeLlmSettings: (() => void) | null = null;
+
+  function watchLlmSettings(): void {
+    unsubscribeLlmSettings?.();
+    unsubscribeLlmSettings = useLlmStore.subscribe((state, previous) => {
+      for (const [playerId, seatIndex] of llmSeatIndexByPlayerId) {
+        if (seatIndex == null) continue;
+        if (seatProviderSettings(state, seatIndex) === seatProviderSettings(previous, seatIndex)) {
+          continue;
+        }
+        llmSettingsRevisions.set(playerId, (llmSettingsRevisions.get(playerId) ?? 0) + 1);
+      }
+    });
+  }
+
+  function recordLlmOutcome(playerId: number, succeeded: boolean): void {
+    if (succeeded) {
+      llmFailures.delete(playerId);
+      return;
+    }
+    const failures = (llmFailures.get(playerId) ?? 0) + 1;
+    llmFailures.set(playerId, failures);
+    if (failures >= MAX_CONSECUTIVE_LLM_FAILURES) {
+      llmDisabled.add(playerId);
+      debugLog(
+        `LLM opponent (player ${playerId}) failed ${failures} times in a row; `
+          + "this seat will use the engine AI for the rest of the game",
+        "warn",
+      );
+    }
+  }
 
   /**
    * Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}.
@@ -154,6 +446,10 @@ export function createAIController(config: AIControllerConfig): AIController {
     ) {
       return null;
     }
+    if (waitingFor.type === "ResolveAllConsent") {
+      const { representative } = waitingFor.data;
+      return aiPlayerIds.has(representative) ? representative : null;
+    }
     if (
       !("data" in waitingFor) ||
       !waitingFor.data ||
@@ -166,16 +462,14 @@ export function createAIController(config: AIControllerConfig): AIController {
     return state.priority_player === PLAYER_ID ? null : state.priority_player;
   }
 
-  function beginAttempt(waitingFor: WaitingFor, playerId: number): AIAttempt {
+  function beginAttempt(state: GameState, playerId: number): AIAttempt {
     const store = useGameStore.getState();
     const attempt: AIAttempt = {
       generation: ++attemptGeneration,
       gameSessionGeneration: store.gameSessionGeneration,
-      waitingForFingerprint: waitingForFingerprint(waitingFor),
+      prompt: { fence: enginePromptFence(state), waitingFor: state.waiting_for },
       playerId,
-      isPriority: waitingFor.type === "Priority",
     };
-    currentAttempt = attempt;
     pending = true;
     return attempt;
   }
@@ -187,22 +481,25 @@ export function createAIController(config: AIControllerConfig): AIController {
     const state = store.gameState;
     const waitingFor = state?.waiting_for ?? null;
     if (!state || !waitingFor) return false;
-    if (waitingForFingerprint(waitingFor) !== attempt.waitingForFingerprint) return false;
+    if (!sameAttemptPrompt(attempt.prompt, { fence: enginePromptFence(state), waitingFor })) return false;
     if (authorizedAiPlayer(waitingFor, state) !== attempt.playerId) return false;
-    return !attempt.isPriority || !store.isResolvingAll;
+    return true;
   }
 
   function finishAttempt(attempt: AIAttempt): boolean {
     if (attempt.generation !== attemptGeneration) return false;
-    currentAttempt = null;
     pending = false;
     return true;
   }
 
   function invalidateAttempt(): void {
     attemptGeneration++;
-    currentAttempt = null;
     pending = false;
+    clearAiDecisionDiagnostic();
+    // A decision that moved on must not keep a provider call alive: the engine
+    // would refuse the stale reply anyway, and the socket is worth reclaiming.
+    llmAbort?.abort();
+    llmAbort = null;
     if (timeoutId != null) {
       clearTimeout(timeoutId);
       timeoutId = null;
@@ -230,11 +527,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     const waitingPlayerId = authorizedAiPlayer(waitingFor, state);
     if (waitingPlayerId === null) return;
 
-    // Resolve All is an explicit, user-started owner of Priority passing. The
-    // AI only steps aside while that session is actually active; stack depth is
-    // never consent. Mandatory non-Priority decisions continue normally.
-    if (waitingFor.type === "Priority" && useGameStore.getState().isResolvingAll) return;
-
     // Reset failure counters when the WaitingFor state changes (type or player).
     // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`
     // is the absolute hard stop that kills the controller.
@@ -261,88 +553,97 @@ export function createAIController(config: AIControllerConfig): AIController {
       return;
     }
 
-    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    const useTacticalFallback = consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+    if (useTacticalFallback && !useGameStore.getState().adapter?.getAiTacticalActionProposal) {
       debugLog(
-        `AI stuck: ${MAX_CONSECUTIVE_FAILURES} consecutive failures on ${waitingFor.type}, dispatching fallback`,
-        "warn",
+        `AI controller halted after ${MAX_CONSECUTIVE_FAILURES} failed proposals on ${waitingFor.type}; no tactical fallback is available`,
+        "error",
       );
-      const attempt = beginAttempt(waitingFor, waitingPlayerId);
-      runEscapeFallback(waitingFor, waitingPlayerId, attempt).finally(() => {
-        if (finishAttempt(attempt) && active) checkAndSchedule();
-      });
+      notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
+      stop();
       return;
     }
 
-    scheduleAction(waitingPlayerId);
+    scheduleAction(waitingPlayerId, useTacticalFallback);
   }
 
-  function pickEscapeAction(
-    waitingFor: WaitingFor,
-    state: GameState,
-  ): Promise<GameAction> {
-    if (state.has_pending_cast) {
-      return Promise.resolve({ type: "CancelCast" });
-    }
-    const { adapter } = useGameStore.getState();
-    if (!adapter) return Promise.resolve({ type: "PassPriority" });
-    return adapter.getLegalActions().then((result) => {
-      if (waitingFor.type === "Priority") {
-        return (
-          result.actions.find((a) => a.type === "PassPriority") ??
-          { type: "PassPriority" }
-        );
-      }
-      return result.actions[0] ?? { type: "PassPriority" };
-    });
-  }
-
-  async function runEscapeFallback(
-    waitingFor: WaitingFor,
-    waitingPlayerId: number,
-    attempt: AIAttempt,
-  ): Promise<void> {
-    const state = useGameStore.getState().gameState;
-    if (!state || !isAttemptCurrent(attempt)) return;
-    try {
-      const fallback = await pickEscapeAction(waitingFor, state);
-      if (!isAttemptCurrent(attempt)) return;
-      await dispatchAction(fallback, waitingPlayerId);
-      if (!isAttemptCurrent(attempt)) return;
-      consecutiveFailures = 0;
-      totalFailures = 0;
-      lastDispatchError = null;
-    } catch (e) {
-      if (!isAttemptCurrent(attempt)) return;
-      consecutiveFailures++;
-      totalFailures++;
-      lastDispatchError = e instanceof Error ? e.message : String(e);
-      debugLog(
-        `AI fallback also failed (${consecutiveFailures}/${totalFailures}): ${lastDispatchError}`,
-        "warn",
-      );
-    }
-  }
-
-  function scheduleAction(playerId: number) {
+  function scheduleAction(playerId: number, useTacticalFallback: boolean) {
     if (pending) return;
 
     // Start computing immediately — in parallel with the artificial delay.
     // This turns additive latency (delay + compute) into max(delay, compute),
-    // which matters most for VeryHard where the pool search takes 1-2 seconds.
+    // which matters most for deeper engine-owned searches.
     const { adapter, gameState } = useGameStore.getState();
+    let proposalAdapter = adapter;
     // Each seat has its own difficulty — a controller driving three AI players
     // can simultaneously run Easy, Medium, and VeryHard policies.
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
     const waitingForType = gameState?.waiting_for?.type;
     const scheduledWaitingFor = gameState?.waiting_for ?? null;
-    if (!scheduledWaitingFor) return;
-    const attempt = beginAttempt(scheduledWaitingFor, playerId);
-    const actionPromise: Promise<GameAction | null> = Promise.resolve(
-      adapter?.getAiAction(difficulty, playerId, waitingForType) ?? null,
-    );
+    if (!gameState || !scheduledWaitingFor) return;
+    const getProposal = useTacticalFallback
+      ? adapter?.getAiTacticalActionProposal
+      : adapter?.getAiActionProposal;
+    if (!getProposal) return;
+    const attempt = beginAttempt(gameState, playerId);
+    const waitingFor = waitingForDebugLabel(scheduledWaitingFor);
+    recordAiDecisionDiagnostic({
+      stage: "awaiting-proposal",
+      playerId,
+      difficulty,
+      waitingFor,
+    });
+    // Defer invocation into the promise chain. `Promise.resolve(call())`
+    // evaluates `call()` first, so a synchronous adapter exception used to
+    // bypass the timeout callback's catch/finally and strand `pending = true`.
+    const heuristicProposal = (): Promise<AiActionProposal | null> =>
+      Promise.resolve().then(() => getProposal.call(adapter, difficulty, playerId));
+    // An LLM seat is tried first and falls back to the heuristic AI on any
+    // failure. The tactical-fallback path deliberately skips the LLM entirely:
+    // it exists to recover a seat whose proposals keep failing, and adding a
+    // network round trip to a recovery path is the wrong trade.
+    const llmSeatIndex = llmSeatIndexByPlayerId.get(playerId);
+    const llmState = useLlmStore.getState();
+    const seatChoice = llmSeatIndex == null ? null : llmState.seatBindings[llmSeatIndex];
+    const candidateId = seatChoice === undefined ? llmState.defaultOpponentProfileId : seatChoice;
+    let proposalPromise: Promise<AiActionProposal | null>;
+    if (useTacticalFallback || llmSeatIndex == null || !candidateId || llmDisabled.has(playerId)) {
+      proposalPromise = heuristicProposal();
+    } else {
+      llmAbort?.abort();
+      const abort = new AbortController();
+      llmAbort = abort;
+      let chargedToProvider = false;
+      proposalPromise = llmActionProposal(
+        playerId,
+        difficulty,
+        llmSeatIndex,
+        abort.signal,
+        () => isAttemptCurrent(attempt),
+        (charged) => { chargedToProvider = charged; },
+        () => llmSettingsRevisions.get(playerId) ?? 0,
+      )
+        .catch((error) => {
+          if (abort.signal.aborted || !isAttemptCurrent(attempt)) return null;
+          reportLlmFailure(
+            `LLM opponent (player ${playerId}) failed; using the engine AI`,
+            error,
+          );
+          return null;
+        })
+        .then((proposal) => {
+          if (!isAttemptCurrent(attempt)) return null;
+          // A cancelled call is not the provider's fault — the decision simply
+          // moved on — so it must not count toward giving up on the seat.
+          if (!abort.signal.aborted && chargedToProvider) {
+            recordLlmOutcome(playerId, proposal != null);
+          }
+          return proposal ?? heuristicProposal();
+        });
+    }
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
     // before it fires and nothing else awaits this promise.
-    actionPromise.catch(() => {});
+    proposalPromise.catch(() => {});
 
     // Mulligan is a binary keep/mulligan decision with no strategic complexity to
     // humanize — skip the artificial delay so the decision resolves as soon as the
@@ -361,14 +662,14 @@ export function createAIController(config: AIControllerConfig): AIController {
       timeoutId = null;
       let failed = false;
       try {
-        let action: GameAction | null;
+        let proposal: AiActionProposal | null;
         try {
-          action = await actionPromise;
+          proposal = await proposalPromise;
         } catch (err) {
           if (!isAttemptCurrent(attempt)) return;
           // Engine panic: re-running the same AI search against the same
           // (deterministic) state will re-panic. This is the path the
-          // user-reported "ai-getAction-retry" came from — short-circuit
+            // user-reported AI retry came from — short-circuit
           // with the captured panic so the modal can show the real cause.
           if (isEnginePanic(err)) {
             await routePanic("ai-getAction-panic", err.panic);
@@ -381,7 +682,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           // action once. If recovery fails (or the retry still throws because
           // restoreState silently failed in the worker), escalate to the
           // user-prompt path.
-          debugLog("AI getAiAction hit STATE_LOST; attempting rehydrate", "warn");
+          debugLog("AI proposal lookup hit STATE_LOST; attempting rehydrate", "warn");
           if (!isAttemptCurrent(attempt)) return;
           const recovered = await attemptStateRehydrate();
           if (!isAttemptCurrent(attempt)) return;
@@ -391,7 +692,13 @@ export function createAIController(config: AIControllerConfig): AIController {
           }
           try {
             if (!isAttemptCurrent(attempt)) return;
-            action = await adapter!.getAiAction(difficulty, playerId, waitingForType);
+            const retryAdapter = useGameStore.getState().adapter;
+            const retryGetProposal = useTacticalFallback
+              ? retryAdapter?.getAiTacticalActionProposal
+              : retryAdapter?.getAiActionProposal;
+            if (!retryGetProposal) return;
+            proposalAdapter = retryAdapter;
+            proposal = await retryGetProposal.call(retryAdapter, difficulty, playerId);
           } catch (retryErr) {
             if (!isAttemptCurrent(attempt)) return;
             if (isEnginePanic(retryErr)) {
@@ -404,50 +711,81 @@ export function createAIController(config: AIControllerConfig): AIController {
           }
         }
         // Re-check the complete attempt identity after every await. A matching
-        // WaitingFor payload in a new game/session is still stale, as is a
-        // Priority action computed before Resolve All took ownership.
+        // WaitingFor payload in a new game/session is still stale.
         if (!isAttemptCurrent(attempt)) {
           const currentWaitingFor = useGameStore.getState().gameState?.waiting_for ?? null;
           debugLog(
-            `AI ignored stale ${action?.type ?? "action"} for player ${playerId + 1}: waitingFor changed from ${waitingForDebugLabel(scheduledWaitingFor)} to ${waitingForDebugLabel(currentWaitingFor)}`,
+            `AI ignored stale ${proposal?.action.type ?? "proposal"} for player ${playerId + 1}: waitingFor changed from ${waitingForDebugLabel(scheduledWaitingFor)} to ${waitingForDebugLabel(currentWaitingFor)}`,
             "info",
           );
           return;
         }
         const currentGameState = useGameStore.getState().gameState;
         const currentWaitingFor = currentGameState?.waiting_for ?? null;
-        if (action == null) {
+        if (proposal == null) {
           debugLog(
-            `AI getAiAction returned null for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"}), dispatching legal-action fallback`,
+            `AI returned no engine-bounded proposal for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"})`,
             "warn",
           );
-          const waitingFor = currentWaitingFor;
-          if (waitingFor != null) {
-            await runEscapeFallback(waitingFor, playerId, attempt);
-          } else {
-            failed = true;
-          }
+          failed = true;
           return;
         }
-        const guess = describeAiCardPredicateGuess(action, currentWaitingFor, currentGameState);
+        if (
+          scheduledWaitingFor.type === "Priority"
+          && proposal.semanticOwner !== scheduledWaitingFor.data.player
+        ) {
+          // The live engine may have advanced beyond the displayed prompt.
+          // Reconcile its atomic snapshot before scheduling another decision.
+          if (!proposalAdapter || useGameStore.getState().adapter !== proposalAdapter) return;
+          const snapshot = await proposalAdapter.getSnapshot();
+          if (!isAttemptCurrent(attempt)) return;
+          const currentStore = useGameStore.getState();
+          if (currentStore.adapter !== proposalAdapter || !currentStore.gameState) return;
+          if (stateFingerprint(snapshot.state) !== stateFingerprint(currentStore.gameState)) {
+            // Do not queue a snapshot that could outlive this game session.
+            // With no events, an idle dispatch commits synchronously.
+            if (!isDispatchIdle()) return;
+            await processRemoteUpdate(snapshot, []);
+            return;
+          }
+          failed = true;
+          return;
+        }
+        const guess = describeAiCardPredicateGuess(proposal.action, currentWaitingFor, currentGameState);
         if (guess != null) {
           debugLog(`AI player ${playerId + 1} randomly ${guess}`, "info");
         }
-        // Pass `playerId` (the AI seat we're driving) as actor. The engine
-        // guard in `apply` verifies actor matches the authorized submitter;
-        // dispatching as the human here would be rejected.
-        // dispatch.ts has its own STATE_LOST recovery; any error that reaches
-        // here after that retry is genuinely unrecoverable for this attempt.
+        // The proposal carries the engine-derived authorized actor. The UI
+        // never substitutes `playerId` or reconstructs an action from the
+        // prompt, which keeps controlled turns and simultaneous decisions in
+        // the authority boundary.
         if (!isAttemptCurrent(attempt)) return;
-        await dispatchAction(action, playerId);
+        recordAiDecisionDiagnostic({
+          stage: "submitting-proposal",
+          playerId,
+          difficulty,
+          waitingFor,
+        });
+        const submission = await dispatchAiActionProposal(proposal);
         if (!isAttemptCurrent(attempt)) return;
-        // Successful dispatch — reset both failure counters
-        consecutiveFailures = 0;
-        totalFailures = 0;
-        lastDispatchError = null;
+        // The proposal boundary returns a tagged stale result without mutating
+        // the store. That is a normal race, not a failed AI decision: leave
+        // the counters untouched and let the final scheduler re-query the
+        // engine's newly issued finite domain.
+        if (submission.status === "stale") {
+          debugLog(`AI proposal was stale for player ${playerId + 1}; re-querying`, "info");
+          return;
+        }
       } catch (e) {
         if (!isAttemptCurrent(attempt)) return;
         lastDispatchError = e instanceof Error ? e.message : String(e);
+        recordAiDecisionDiagnostic({
+          stage: "failed",
+          playerId,
+          difficulty,
+          waitingFor,
+          error: lastDispatchError,
+        });
         debugLog(`AI error choosing action: ${lastDispatchError}`);
         failed = true;
       } finally {
@@ -456,7 +794,10 @@ export function createAIController(config: AIControllerConfig): AIController {
             consecutiveFailures++;
             totalFailures++;
           }
-          if (active) checkAndSchedule();
+          if (active && useGameStore.getState().gameSessionGeneration === attempt.gameSessionGeneration) {
+            checkAndSchedule();
+            if (!pending) clearAiDecisionDiagnostic();
+          }
         }
       }
     }, delay);
@@ -464,53 +805,50 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function start() {
     active = true;
+    clearAiDecisionDiagnostic();
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
     }
+    watchLlmSettings();
     debugLog(`AI controller started (configured seats: [${[...aiPlayerIds].join(",")}], dynamic for all non-human)`, "warn");
     // Event-driven design: subscribe to WaitingFor changes and let each
     // seat's turn naturally surface via the store. This means reconnect
     // is implicit — whichever seat holds priority after a reconnect
     // triggers `checkAndSchedule`, regardless of how many AI seats the
     // controller supervises. No per-seat iteration needed; the bug that
-    // previously stalled P3/P4 was caused by `getAiAction` accepting a
+    // previously stalled P3/P4 was caused by an action-only API accepting a
     // default `playerId` elsewhere, not by this loop.
-    let observedWaitingFor = useGameStore.getState().waitingFor;
-    let observedSessionGeneration = useGameStore.getState().gameSessionGeneration;
-    let observedResolveAll = useGameStore.getState().isResolvingAll;
+    const initialStore = useGameStore.getState();
+    let observedWaitingFor = initialStore.waitingFor;
+    let observedFence = enginePromptFence(initialStore.gameState);
+    let observedSessionGeneration = initialStore.gameSessionGeneration;
+    let observedActor = initialStore.gameState
+      ? authorizedAiPlayer(initialStore.gameState.waiting_for, initialStore.gameState)
+      : null;
     unsubscribe = useGameStore.subscribe(
       (s) => s,
       () => {
         if (!active) return;
         const store = useGameStore.getState();
-        const waitingForChanged = store.waitingFor !== observedWaitingFor;
+        const fence = enginePromptFence(store.gameState);
+        const actor = store.gameState
+          ? authorizedAiPlayer(store.gameState.waiting_for, store.gameState)
+          : null;
+        const promptChanged = observedFence && fence
+          ? observedFence.identity !== fence.identity || observedFence.revision !== fence.revision || actor !== observedActor
+          : store.waitingFor !== observedWaitingFor;
         const sessionChanged = store.gameSessionGeneration !== observedSessionGeneration;
-        const resolveAllStarted = store.isResolvingAll && !observedResolveAll;
-        const resolveAllEnded = !store.isResolvingAll && observedResolveAll;
-
         observedWaitingFor = store.waitingFor;
+        observedFence = fence;
         observedSessionGeneration = store.gameSessionGeneration;
-        observedResolveAll = store.isResolvingAll;
+        observedActor = actor;
 
-        if (waitingForChanged || sessionChanged) {
+        if (promptChanged || sessionChanged) {
           invalidateAttempt();
           // A new snapshot gets a fresh failure budget even for an A→A
           // transition whose serialized WaitingFor payload is identical.
           lastWaitingForKey = null;
-        } else if (resolveAllStarted && currentAttempt?.isPriority) {
-          invalidateAttempt();
-        }
-
-        // Resolve All owns Priority while active. Mandatory non-Priority
-        // decisions continue, and ending Resolve All schedules exactly once.
-        if (
-          resolveAllEnded ||
-          waitingForChanged ||
-          sessionChanged ||
-          !store.isResolvingAll ||
-          store.gameState?.waiting_for?.type !== "Priority"
-        ) {
           checkAndSchedule();
         }
       },
@@ -521,6 +859,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   function stop() {
     active = false;
     invalidateAttempt();
+    clearAiDecisionDiagnostic();
   }
 
   function dispose() {
@@ -529,6 +868,8 @@ export function createAIController(config: AIControllerConfig): AIController {
       unsubscribe();
       unsubscribe = null;
     }
+    unsubscribeLlmSettings?.();
+    unsubscribeLlmSettings = null;
   }
 
   return { start, stop, dispose };

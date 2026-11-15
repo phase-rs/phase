@@ -77,6 +77,11 @@ export interface TriageItem {
    *  report item so publish-time oracle verification always accepts it. */
   explicitCards?: string[];
   summary: string;
+  /** Full reported text. The summary is only its first sentence, so the issue
+   *  body must carry this or the reproduction detail never reaches GitHub. */
+  body?: string;
+  /** Screenshots and game-state saves attached to the report. */
+  attachments?: RawDiscordMessage["attachments"];
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";

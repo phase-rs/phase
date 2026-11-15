@@ -3,19 +3,22 @@
 //! Parser AST verification (pre-verified against codebase) — VERIFIED:
 //! - `TriggerMode::ChangesZone` with `origin = Some(Battlefield)`,
 //!   `destination = Some(Graveyard)` is the dies-trigger shape
-//!   (`crates/engine/src/types/triggers.rs:26-27`, CR 603.6c).
+//!   (`crates/phase-ast/src/types/triggers.rs`, CR 603.6c).
 //! - `CostCategory::SacrificesPermanent` is the sacrifice-cost gate
-//!   (`crates/engine/src/types/ability.rs:1858`, CR 701.21).
+//!   (`crates/phase-ast/src/types/ability.rs`, CR 701.21).
 //! - Anti-fetchland disambiguator: rejects abilities that match the canonical
 //!   fetchland shape (`SearchLibrary` for Land + `ChangeZone` to Battlefield).
 //!   Delegates to `features::landfall::ability_searches_library_for_land` —
 //!   landfall is the canonical owner of fetchland semantics.
 //! - `Effect::Token { types: Vec<String>, .. }` at `ability.rs:2131`.
 //!   Creature tokens have `types.iter().any(|s| s == "Creature")`.
-//! - `Effect::ChangeZone { origin: Some(Graveyard), destination: Battlefield,
-//!   .. }` is the recursion shape (`ability.rs:2271`). Recursion does not
-//!   correspond to a single CR keyword action — it's a generic zone-change
-//!   effect, so no specific CR annotation applies here.
+//! - `Effect::ChangeZone` (in `engine::types::ability`) with
+//!   `destination: Battlefield` is the recursion shape. The graveyard
+//!   constraint may ride `origin: Some(Graveyard)` **or** the target filter's
+//!   `FilterProp::InZone { Graveyard }` — `features::reanimator` owns that
+//!   question. Recursion does not correspond to a single CR keyword action —
+//!   it's a generic zone-change effect, so no specific CR annotation applies
+//!   here.
 //! - `AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter, 1))` at `ability.rs:1757`
 //!   — after the `CostCategory::SacrificesPermanent` gate confirms the cost
 //!   type, the `target` field is inspected to verify creature-you-control scope.
@@ -27,8 +30,8 @@ use std::collections::BTreeSet;
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ControllerRef, CostCategory, Effect, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCost, AbilityDefinition, ControllerRef, CostCategory, Effect, FilterProp, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -38,6 +41,7 @@ use engine::types::zones::Zone;
 use crate::ability_chain::collect_chain_effects;
 use crate::features::commitment;
 use crate::features::landfall::ability_searches_library_for_land;
+use crate::features::reanimator::change_zone_leaves_graveyard;
 
 /// CR 701.21 + CR 603.6c + CR 111.1: per-deck aristocrats classification.
 ///
@@ -305,6 +309,19 @@ pub(crate) fn typed_filter_is_creature_you_control_or_any(typed: &TypedFilter) -
     if matches!(typed.controller, Some(ControllerRef::Opponent)) {
         return false;
     }
+    // CR 400.3: "put into an opponent's graveyard" scopes the dying card's OWNER
+    // (`FilterProp::Owned`), not its controller — an opponent-owned creature goes to
+    // the opponent's graveyard, so the AI sacrificing its own creatures never feeds it.
+    if typed.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent
+            }
+        )
+    }) {
+        return false;
+    }
     typed.type_filters.iter().any(type_filter_is_creature)
 }
 
@@ -316,8 +333,11 @@ pub(crate) fn typed_filter_is_creature_you_control_or_any(typed: &TypedFilter) -
 /// - Creature token generator: `Effect::Token { types, .. }` with
 ///   `types.iter().any(|s| s == "Creature")`. Treasure/Clue/Food tokens do NOT
 ///   count — their `types` lacks "Creature". CR 111.1.
-/// - Creature recursion: `Effect::ChangeZone { origin: Some(Graveyard),
-///   destination: Battlefield, target, .. }` where `target` references a creature.
+/// - Creature recursion: `Effect::ChangeZone { destination: Battlefield, target,
+///   .. }` where `target` references a creature and the graveyard is positively
+///   asserted — by `origin: Some(Graveyard)` or by the target filter's
+///   `FilterProp::InZone { Graveyard }` (see
+///   [`crate::features::reanimator::change_zone_leaves_graveyard`]).
 ///   Generic zone-change effect — no CR keyword action applies.
 fn is_fodder_source(face: &CardFace) -> bool {
     // Check abilities.
@@ -343,14 +363,17 @@ fn is_creature_fodder_effect(e: &&Effect) -> bool {
         // CR 111.1: creature token production.
         Effect::Token { types, .. } => types.iter().any(|s| s == "Creature"),
         // Recursion from graveyard to battlefield targeting a creature.
-        // No CR keyword action — generic zone-change effect.
+        // No CR keyword action — generic zone-change effect. The graveyard
+        // constraint may ride `origin` or the target filter — `reanimator` owns
+        // that question (mirrors this module's use of `landfall` for land-fetch
+        // semantics).
         Effect::ChangeZone {
             origin,
             destination,
             target,
             ..
         } => {
-            *origin == Some(Zone::Graveyard)
+            change_zone_leaves_graveyard(origin, target)
                 && *destination == Zone::Battlefield
                 && filter_references_creature(target)
         }
@@ -378,8 +401,8 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, QuantityExpr,
-        SacrificeCost, TargetFilter, TriggerDefinition, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, PtValue,
+        QuantityExpr, SacrificeCost, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -502,6 +525,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -543,6 +568,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -625,6 +652,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
@@ -647,6 +676,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
@@ -658,9 +689,44 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
+    /// The filter-borne recursion shape: [`recursion_ability`] with `origin`
+    /// unset, so the graveyard constraint must come from the target filter.
+    /// Mirrors Ashen Powder / Borg Queen's measured filter.
+    fn filter_borne_recursion_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
@@ -779,6 +845,61 @@ mod tests {
         assert!(feature.death_trigger_names.is_empty());
     }
 
+    /// The single `ChangesZone` trigger parsed from verbatim `oracle` text through the
+    /// public production parser (`engine::parser::oracle`).
+    fn parsed_zone_change_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let mut zone_changes = parsed
+            .triggers
+            .into_iter()
+            .filter(|trigger| trigger.mode == TriggerMode::ChangesZone);
+        let trigger = zone_changes
+            .next()
+            .unwrap_or_else(|| panic!("{name} must parse a ChangesZone trigger"));
+        assert!(
+            zone_changes.next().is_none(),
+            "{name} has exactly one ChangesZone trigger"
+        );
+        trigger
+    }
+
+    /// CR 400.3: "put into [your | an opponent's] graveyard" scopes the dying card's owner.
+    /// Grim Feast's "a creature is put into an opponent's graveyard from the battlefield"
+    /// stays out of the "creature dies" payoff axis (an opponent-owned creature dying never
+    /// feeds off the AI's own sacrifices), while Mortuary's "your graveyard" trigger stays in.
+    #[test]
+    fn graveyard_possessive_triggers_keep_their_dies_axis_verdict() {
+        let grim_feast = parsed_zone_change_trigger(
+            "Grim Feast",
+            "At the beginning of your upkeep, this enchantment deals 1 damage to you.\nWhenever a creature is put into an opponent's graveyard from the battlefield, you gain life equal to its toughness.",
+        );
+        // Reach guard: it is a battlefield -> graveyard creature trigger, so the opponent
+        // rejection below is the possessive guard and not an upstream short-circuit.
+        assert_eq!(grim_feast.origin, Some(Zone::Battlefield));
+        assert_eq!(grim_feast.destination, Some(Zone::Graveyard));
+        let Some(TargetFilter::Typed(feast_filter)) = grim_feast.valid_card.as_ref() else {
+            panic!("Grim Feast scopes a typed creature filter");
+        };
+        assert!(feast_filter
+            .type_filters
+            .iter()
+            .any(type_filter_is_creature));
+        assert!(!is_creature_dies_trigger(&grim_feast));
+
+        let mortuary = parsed_zone_change_trigger(
+            "Mortuary",
+            "Whenever a creature is put into your graveyard from the battlefield, put that card on top of your library.",
+        );
+        assert!(is_creature_dies_trigger(&mortuary));
+        assert!(is_creature_dies_trigger(&dies_trigger_yours()));
+    }
+
     #[test]
     fn no_controller_dies_trigger_counts() {
         // "Whenever a creature dies" — no controller scope → wildcard → accepted.
@@ -826,6 +947,22 @@ mod tests {
 
         let feature = detect(&deck);
         assert_eq!(feature.fodder_source_count, 1);
+    }
+
+    #[test]
+    fn fodder_detection_sees_filter_borne_graveyard_recursion() {
+        // Ashen Powder / Borg Queen shape: "from an opponent's graveyard"
+        // leaves `origin` unset and carries the graveyard on the target filter.
+        // Driven through the public `detect` surface, not the private helper.
+        let mut face = creature_face("Ashen Powder");
+        face.abilities.push(filter_borne_recursion_ability());
+
+        let feature = detect(&[entry(face, 1)]);
+
+        assert_eq!(
+            feature.fodder_source_count, 1,
+            "a graveyard constraint carried on the target filter must count as fodder recursion"
+        );
     }
 
     #[test]

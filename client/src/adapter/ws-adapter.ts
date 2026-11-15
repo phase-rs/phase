@@ -1,8 +1,15 @@
+import { PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL as MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL } from "../generated/protocol-versions";
+import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
+import { observeSocketDiagnostics, type SocketDiagnosticObserver } from "../services/socketDiagnostics";
+import { completeSocketDiagnostics, DIAGNOSTIC_HISTORY_LIMIT, type SocketReconnectOutcome } from "../services/troubleshooting";
+import { GzipEnvelopeSocket } from "../services/gzipEnvelopeSocket";
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   GameAction,
   GameEvent,
+  GameFormat,
   GameLogEntry,
   GameState,
   LegalActionsResult,
@@ -11,23 +18,71 @@ import type {
   ObjectId,
   PlayerId,
   PersistedGameState,
+  RewindOption,
+  RewindTarget,
+  StateWithheldNotice,
   SubmitResult,
   FormatConfig,
+  DeckPrinting,
+  TakebackEvent,
+  TakebackResolution,
+  WithheldFrame,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
+import { SubmissionSlot } from "./submissionSlot";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, isCustomGameFormat, nextSnapshotSeq } from "./types";
+import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
+  writeSetupFrame,
   type PhaseSocket,
   type PhaseSocketFactory,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
+import {
+  SETUP_CONFIRMATION_TIMEOUT_MS,
+  settledWithin,
+  SetupBufferBudget,
+  SetupConfirmation,
+  reportUncaughtError,
+  whenAborted,
+  type SetupConfirmationOutcome,
+  type SetupFrameMessage,
+} from "../services/setupConfirmation";
+import i18n from "i18next";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
-import type { WsSessionData } from "../services/multiplayerSession";
+import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
+import { sameFullSessionKey } from "../services/fullSessionKey";
+import {
+  commitFullTerminalDelivery,
+  isValidFullTerminalDelivery,
+  type FullTerminalDelivery,
+} from "../services/fullTerminalResult";
+import {
+  STATE_CODEC_PREPARATION_TIMEOUT_MS,
+  StateCodecSocket,
+  StateCodecPreparationAbortError,
+  prepareStateCodecSession as prepareBoundedStateCodecSession,
+  StateCodecAttachment,
+  type StateCodecBootstrapBinding,
+  type StateCodecJoinCredentials,
+  type StateCodecName,
+  type StateCodecSessionProvider,
+} from "../services/stateCodecSocket";
+import type { StateCodecSession } from "./state-codec-runtime";
+import { getSharedAdapter } from "./wasm-adapter";
+import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
+  bracket_tier?: CommanderBracketTier;
+  /** The owner's explicit printing choices; display-only. Omitted when empty. */
+  printings?: DeckPrinting[];
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
@@ -36,6 +91,137 @@ export interface DeckData {
   planar_deck?: string[];
   scheme_deck?: string[];
   sticker_sheets?: string[];
+}
+
+export type { FullSessionKey } from "../services/multiplayerSession";
+
+/**
+ * Performs one terminal-only request on a fresh raw websocket. This never
+ * constructs a WebSocketAdapter, so a recovered terminal cannot initialize a
+ * game loop or acquire a normal Full attachment.
+ */
+async function terminalSocketRequest(
+  serverUrl: string,
+  request: unknown,
+  socketFactory?: PhaseSocketFactory,
+): Promise<{ type: string; data?: unknown }> {
+  const socket = await openPhaseSocket(serverUrl, { socketFactory });
+  return new Promise((resolve, reject) => {
+    const closeAndResolve = (message: { type: string; data?: unknown }) => {
+      socket.ws.close();
+      resolve(message);
+    };
+    socket.ws.onmessage = (event) => {
+      try {
+        closeAndResolve(JSON.parse(event.data as string) as { type: string; data?: unknown });
+      } catch (error) {
+        socket.ws.close();
+        reject(error);
+      }
+    };
+    socket.ws.onerror = () => {
+      socket.ws.close();
+      reject(new Error("Terminal websocket request failed"));
+    };
+    socket.ws.onclose = () => {
+      reject(new Error("Terminal websocket closed before a response"));
+    };
+    socket.ws.send(JSON.stringify(request));
+  });
+}
+
+/**
+ * The delivery a terminal reply carries, total over JSON input: `null` when the
+ * server reports none, and an error when one is present but malformed (an
+ * absent result would otherwise send the caller to an ordinary reconnect).
+ */
+function terminalReplyDelivery(data: unknown): FullTerminalDelivery | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("Malformed terminal reply");
+  }
+  const record = data as Record<string, unknown>;
+  if (!("delivery" in record) || record.delivery === undefined) {
+    return null;
+  }
+  const delivery = record.delivery;
+  if (!isValidFullTerminalDelivery(delivery)) {
+    throw new Error("Malformed terminal delivery");
+  }
+  return delivery;
+}
+
+export async function bootstrapFullTerminalDelivery(
+  serverUrl: string,
+  key: FullSessionKey,
+  playerToken: string,
+  requestId: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<FullTerminalDelivery | null> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    {
+      type: "BootstrapTerminalDelivery",
+      data: {
+        request: {
+          key,
+          playerToken,
+          requestId,
+        },
+      },
+    },
+    socketFactory,
+  );
+  if (response.type !== "TerminalBootstrapResult") {
+    throw new Error("Unexpected terminal bootstrap response");
+  }
+  const delivery = terminalReplyDelivery(response.data);
+  // The reply is bound to the seat it was asked for: a delivery for another
+  // game or generation is a misrouted reply, never this seat's result.
+  if (delivery && !sameFullSessionKey(delivery.key, key)) {
+    throw new Error("Mismatched terminal bootstrap key");
+  }
+  return delivery;
+}
+
+export async function readFullTerminalResult(
+  serverUrl: string,
+  credential: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<FullTerminalDelivery | null> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    { type: "ReadTerminalResult", data: { credential } },
+    socketFactory,
+  );
+  if (response.type !== "TerminalResult") {
+    throw new Error("Unexpected terminal result response");
+  }
+  const delivery = terminalReplyDelivery(response.data);
+  // The server reads by credential, so a delivery carrying another credential
+  // answers a different request.
+  if (delivery && delivery.credential !== credential) {
+    throw new Error("Mismatched terminal delivery read");
+  }
+  return delivery;
+}
+
+export async function acknowledgeFullTerminalDelivery(
+  serverUrl: string,
+  deliveryId: string,
+  credential: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<boolean> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    { type: "AckTerminalDelivery", data: { delivery_id: deliveryId, credential } },
+    socketFactory,
+  );
+  if (response.type !== "TerminalDeliveryAcknowledged") return false;
+  // Only an acknowledgement naming this delivery releases it.
+  const data = response.data;
+  return typeof data === "object"
+    && data !== null
+    && (data as { delivery_id?: unknown }).delivery_id === deliveryId;
 }
 
 /** AI seat configuration for the private native-engine host path. */
@@ -65,24 +251,36 @@ export interface NativeSocketAdapterOptions {
   socketFactory: PhaseSocketFactory;
   /** Present on release only; preview parity is verified by the shell. */
   expectedServerVersion?: string;
+  /** Native P2P owns terminal fan-out and ACK ordering across local seat sockets. */
+  callerManagedTerminalDelivery?: boolean;
 }
 
 /** Native server setup for one local P2P seat. The PeerJS connection remains
  * the guest-facing transport; these sockets never leave the desktop host. */
 export type NativePregameAdapterOptions =
-  | ({ kind: "host"; aiSeats: NativeAiSeat[]; playerCount: number; formatConfig?: FormatConfig; matchConfig?: MatchConfig } & NativeSocketAdapterOptions)
+  | ({ kind: "host"; aiSeats: NativeAiSeat[]; playerCount: number; formatConfig?: FormatConfig; matchConfig?: MatchConfig; boosterPackPool?: string[] | null } & NativeSocketAdapterOptions)
   | ({ kind: "guest" } & NativeSocketAdapterOptions)
-  | ({ kind: "reconnect"; gameCode: string; playerId: PlayerId; playerToken: string } & NativeSocketAdapterOptions);
+  | ({ kind: "reconnect"; gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } & NativeSocketAdapterOptions);
 
 export interface NativeSessionAttachment {
   gameCode: string;
   playerId: PlayerId;
   playerToken: string;
+  fullKey: FullSessionKey;
 }
 
 export interface WebSocketAdapterOptions {
   nativeAi?: NativeAiAdapterOptions;
   nativePregame?: NativePregameAdapterOptions;
+  /**
+   * Supplies the negotiated StateCodecV1 decoder session for an attachment.
+   * `undefined` keeps native sidecar sockets snapshot-only; remote sockets use
+   * the shared engine only if already ready, otherwise start with snapshots
+   * while it warms in the background. Explicit providers retain bounded
+   * preparation and may wait for startup. An explicit `null` opts out with
+   * no newly introduced await before the handshake.
+   */
+  stateCodecSessionProvider?: StateCodecSessionProvider | null;
 }
 
 export class NativeEngineVersionMismatchError extends Error {
@@ -97,9 +295,734 @@ export class NativeEngineVersionMismatchError extends Error {
 
 /**
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
- * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
- * adds, removes, renames, or changes the type of a protocol variant field.
+ * `crates/server-core/src/protocol.rs`. Record incompatible changes with
+ * `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * The entries below are historical introduction versions.
  *
+ * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
+ *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
+ *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
+ *       PROTOCOL_VERSION's own `/// 159` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v158 or older peer reads a multi-flip or
+ *       until-loss run as one flip; the exact-match version check at connect
+ *       refuses the pairing. Wire 141 moves with it.
+ * 157 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *      choices and ability state. Old native readers cannot decode the new tag.
+ *      Wire 139 moves with it.
+ * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
+ *      QuantityQuality { quantity, quality } with the new NumberQuality
+ *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried
+ *      in GameState ability definitions (CR 107.1, CR 603.4) — see
+ *      PROTOCOL_VERSION's own `/// 156` entry in
+ *      crates/lobby-broker/src/protocol.rs. A pre-v156 peer cannot parse the
+ *      tag; the exact-match version check at connect refuses the pairing.
+ *      The same bump adds the optional per-seat `created_tokens` channel (each
+ *      seat's pinned creation result) to the private
+ *      player-scope tail sidecar that `PendingContinuation` carries under its
+ *      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+ *      tokens every seat created, for a paused "each player creates … The
+ *      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+ *      as the linked-exile-only sidecar. Wire 138 moves with it.
+ * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
+ *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
+ *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v154 peer cannot parse a parked
+ *      ChangeZone frame and refuses the version-7 resolution state. Wire 137 moves
+ *      with it.
+ * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
+ *       cost paused on a CR 616.1 replacement choice; the activation reads the
+ *       settled count, CR 118.11) and ManaAbilityCostCursor gains
+ *       counter_removal, carried in GameState.pending_cost_move_resume — see
+ *       PROTOCOL_VERSION's own `/// 154` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v153 peer cannot parse the tag;
+ *       the exact-match version check at connect refuses the pairing. Wire 136
+ *       moves with it. PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
+ * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
+ *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
+ *       activated authority; the loyalty-grant sibling variant is
+ *       removed). A v152 peer drops the defaulted field silently and
+ *       over-grants every activated ability of every other planeswalker,
+ *       so the exact-match handshake refuses the pairing. P2P moves in
+ *       lockstep (wire 135).
+ * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
+ *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
+ *      with it.
+ * 151: Populated GameObject.bestow_form carries the removed creature subtypes
+ *      as an object instead of a boolean. Old native readers cannot decode it.
+ *      Wire 133 moves with it.
+ * 150 — The cast-this-way gains rider's serialized payload is reshaped: the
+ *      ExileWithAltCost permission's enters_with_modifications becomes a
+ *      PendingEntersModifications object (was a ContinuousModification array) and
+ *      Effect.AddPendingEntersModifications carries its rider object in place of
+ *      the required modifications array — a v149 server or client cannot parse
+ *      either new shape. Full-game peers and P2P move in lockstep (wire 132); see
+ *      PROTOCOL_VERSION's own `/// 150` entry in
+ *      crates/lobby-broker/src/protocol.rs.
+ * 149 — The CR 608.2n final part of a spell's resolution is owed on the
+ *      resolution carrier: `GameState::deferred_spell_delivery` (v110) is removed
+ *      and `GameState::resolving_spell_final_part` (`{ spell }`) marks an instant
+ *      or sorcery whose paused instructions have not finished. A v148 peer drops
+ *      the key and would move the spell too early (or leave it on the stack after
+ *      a free-cast window). Wire 131 moves with it; no lobby frame names it.
+ * 148 — Timesifter's top-card exile contest: Effect::ExileTopCardContest and
+ *      BatchCompletion::TopCardContestRoundComplete in GameState — see
+ *      PROTOCOL_VERSION's own `/// 148` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v147 peer cannot parse them. Wire 130 moves with it.
+ * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v146 peer cannot parse them.
+ *      Wire 129 moves with it.
+ * 146 — ConfirmedPeriod gains counted_by (CR 732.2a: a loop offer counted by
+ *      replaying its period, with the seats that left in each repetition, a
+ *      per_cycle scope stating one repetition, and an optional win_kind with
+ *      the count it is decided at) and performance, carried in
+ *      WaitingFor::LoopShortcut — see PROTOCOL_VERSION's own `/// 146` entry in
+ *      crates/lobby-broker/src/protocol.rs. Wire 128 moves with it.
+ * 145 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *      on ResolvedAbility.parent_target_missing_reason; a v144 peer cannot
+ *      parse the tag. P2P moves in lockstep (wire 127); lobby messages unchanged.
+ * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
+ *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
+ *       edit retypes power_delta/toughness_delta to required QuantityExpr
+ *       power/toughness. A v143 peer cannot parse the new shapes; the
+ *       exact-match handshake refuses the pairing. P2P moves in lockstep
+ *       (wire 126).
+ * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
+ *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
+ *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
+ *      see PROTOCOL_VERSION's own `/// 143` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v142 peer's typed decoder
+ *      cannot read the object-shaped key; the exact-match version check at
+ *      connect refuses the pairing. Wire 125 moves with it.
+ * 142 — LinkedExileSnapshot gains incarnation (CR 400.7), carried in
+ *      GameState.linked_exile_lki and the trigger and zone-change
+ *      linked_exile_snapshot lists — see PROTOCOL_VERSION's own `/// 142`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v141 peer re-encoding
+ *      state drops the key; the exact-match version check at connect refuses
+ *      the pairing. Wire 124 moves with it.
+ * 141 — ExileLinkKind gains CastCost (CR 607.2q: a card exiled to pay a cost
+ *      of casting a permanent spell, linked to the permanent it becomes),
+ *      carried in GameState.exile_links — see PROTOCOL_VERSION's own `/// 141`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v140 peer cannot parse
+ *      the tag; the exact-match version check at connect refuses the pairing.
+ *      Wire 123 moves with it.
+ * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
+ *      event's attackers attacked), carried in an ability's player_scope
+ *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v139 peer cannot parse the tag;
+ *      the exact-match version check at connect refuses the pairing. Wire 122
+ *      moves with it.
+ * 139 — CR 702.122c per-turn crew relation: GameState gains
+ *      crew_history_this_turn and FilterProp gains CrewedThisTurn — see
+ *      PROTOCOL_VERSION's own `/// 139` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v138 peer cannot parse the new filter tag. Wire 121 moves with it.
+ * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
+ *      stack-using activation created, carried in GameState's trigger events —
+ *      see PROTOCOL_VERSION's own `/// 134` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v133 peer drops it silently and
+ *      resolves an activation trigger's "copy that ability" differently; the
+ *      exact-match version check at connect refuses the pairing. Wire 116
+ *      moves with it.
+ * 133 — CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
+ *      PendingEntry (WaitingFor.NamedChoice.source.binding), and the parked
+ *      entry event / PendingReplacement carry the answers and the paused
+ *      delivery's boundary — see PROTOCOL_VERSION's own `/// 133` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v132 peer cannot parse the new
+ *      binding tag. Wire 115 moves with it.
+ * 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
+ *      incarnation (`ObjectIncarnationRef`, CR 400.7); a v131 peer cannot
+ *      decode a set rider. Wire 114 moves with it; no lobby frame names it.
+ * 131 — PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
+ *      (the first declared player target), carried in an ability's
+ *      player_scope inside GameState — see PROTOCOL_VERSION's own `/// 131`
+ *      entry in crates/lobby-broker/src/protocol.rs. A v130 peer cannot parse
+ *      either tag; the exact-match version check at connect refuses the
+ *      pairing. Wire 113 moves with it.
+ * 130 — `GameState::linked_exile_lki` holds one incarnation-bounded
+ *      `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+ *      non-empty map. Wire 112 moves with it; no lobby frame names it.
+ * 129 — Loop-shortcut and period-confirmation shapes, one bump over 128:
+ *      ShortcutDecisionSchema replaced max_iterations with the pair
+ *      measured_repetition_bound and deliverable_capacity, so
+ *      WaitingFor.LoopShortcut publishes the threshold the reduction measured
+ *      separately from the count this engine will deliver (every field
+ *      involved carries a serde default, so a v128 peer reads a count neither
+ *      side measured, and the handshake is the only place that can be
+ *      refused); WaitingFor.LoopShortcut and ShortcutProposal gained a
+ *      required road naming the producer that minted the offer, which a v128
+ *      peer drops from every frame it re-encodes;
+ *      WaitingFor.ManaAbilityManaPayment and its ManaAbilityResume root are
+ *      new variants a v128 peer cannot parse, and ResolvedAbility gains the
+ *      optional delayed_origin; GameState drops the recorded loop-action
+ *      sequence; ConfirmedPeriod gains its reach and PeriodicDelta its
+ *      cleanup pair. Wire 111 moves with it; no lobby frame names it.
+ * 127 — FilterProp's attachment-referent siblings (AttachedToSource,
+ *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
+ *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
+ *      PROTOCOL_VERSION's own `/// 127` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v126 client would take the new shape with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead. The same version makes retarget picks positional:
+ *      RetargetSpell.new_targets is (TargetRef | null)[] (null keeps), and the
+ *      copy walk's keep/decline permissions (CopyTargetSlot.can_keep and
+ *      can_decline, CopyRetarget.can_keep_rest) are engine fields this client
+ *      renders without a fallback; CopyRetarget.controller names the copy's
+ *      controller when a slot's chooser answers, and
+ *      CopyRetarget.announcer_election carries a copy announcement's
+ *      announcing-opponent election.
+ *      (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+ * 128 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v127 peer
+ *      cannot deserialize it; the exact-match handshake refuses the pairing.
+ *      SpellContext also gains outer_declared_players (CR 603.7a), the players a
+ *      delayed ability's creating chain named by group, omitted when empty;
+ *      amended in place, not bumped. P2P moves in lockstep (wire 110); lobby
+ *      messages are unchanged.
+ * 126 — `ZoneChangeRecord` gains `arrival` (the owner and controller the
+ *      destination object holds) inside `GameState` and the resolved-rules
+ *      journal's zone-change commands; a v125 peer rejects the journal when the
+ *      departure owner differs from the command owner. Wire 108 moves with it;
+ *      no lobby frame names it.
+ * 125 — `MulliganDecisionEntry` and `MulliganDeclaration` (inside
+ *      `WaitingFor::MulliganDecision`) gain `free_reveals_taken`. Wire 107
+ *      moves with it; no lobby frame names it.
+ * 124 — the resolved-rules journal admits a land-play `rebound_from`
+ *      (Library/Graveyard/Exile -> Battlefield) inside
+ *      GameState.resolved_rules_journal; a v123 peer rejects the state. Wire
+ *      106 moves with it; no lobby frame names it.
+ * 123 — FilterProp PrepareSpell ("a prepared spell" cast-trigger qualifier,
+ *      CR 722.3d), scope on Effect BecomePrepared / BecomeUnprepared (mass
+ *      "each creature you control becomes prepared", CR 722.3a + CR 115.10a),
+ *      prepared_copy_source on SpellCastRecord, and prepare_face on
+ *      CopiableValues and GameObject.copied_prepare_face (a copy of a
+ *      preparation creature keeps its prepare spell, CR 722.2b). A v122 peer
+ *      cannot parse the new FilterProp tag and would read a mass scope as a
+ *      single-target prepare; the exact-match handshake refuses the pairing.
+ *      P2P moves in lockstep (wire 105); lobby messages are unchanged.
+ * 122 — PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
+ *      controller of the object that caused the trigger, CR 603.2 + CR 109.4),
+ *      serialized in the ability definitions of GameState; damage events carry
+ *      the source incarnation. A v121 peer cannot deserialize the tag. Wire 104
+ *      moves with it; no lobby frame names it.
+ * 121 — GameState's triggered-ability mana ledger records the actual
+ *       receiving player alongside the exact trigger definition. A v120 peer
+ *       cannot decode a nonempty pair ledger; the exact-match handshake
+ *       refuses it. P2P moves in lockstep (wire 103).
+ * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
+ *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
+ *      gains the targeter that announced the target. A v119 peer cannot
+ *      deserialize the new state. P2P moves in lockstep to wire 102. (119 is
+ *      reserved for the Legends of Jidoor PR.)
+ * 118 — ManaColorSpent on AbilityCondition and TriggerCondition retypes `color` from a
+ *      bare ManaColor to SpentColor (ColorWord or ManaSymbol), serialized in the ability
+ *      and trigger definitions of GameState. A v117 peer cannot deserialize the tagged
+ *      color. Wire 100 moves with it; no lobby frame names it.
+ * 117 — DerivedViews gains `shared_piles`, the seat whose Player container stores a
+ *      shared library and graveyard, omitted for a per-player format. A v116 peer
+ *      drops the key and renders per-seat piles for a state whose other seat's
+ *      containers are empty. Wire 99 moves with it; no lobby frame names it.
+ * 116 — DrawSequenceFrame gains `dealer`, the in-game simultaneous-draw dealer,
+ *      serialized in the resolution frames behind RESOLUTION_STATE_WIRE_VERSION 5.
+ *      A v115 peer refuses the version-5 resolution state. Wire 98 moves with it;
+ *      no lobby frame names it.
+ * 115 — MulliganChoice gains `FreeReveal` and MulliganDeclaration gains `kind`:
+ *      the Dandan free reveal mulligan, a MulliganDecision action payload and a
+ *      held declaration in GameState.waiting_for. A v114 peer cannot parse the
+ *      choice and would carry out a held free reveal as a regular mulligan.
+ *      Wire 97 moves with it; no lobby frame names it.
+ * 114 — WaitingFor::MulliganDecision gains `declared`, the mulligans recorded
+ *      in a CR 103.5 declare round until every player has declared. It is
+ *      serialized in GameState.waiting_for, so a v113 peer would drop it
+ *      silently. Wire 96 moves with it; no lobby frame names it.
+ * 113 — ResolvedZoneChangeCommand gains `rebound_from`, the owner a card had
+ *      before a Hand entry from a shared zone rebound it to the taker
+ *      (CR 108.3 as modified by the Dandan announcement). It is serialized
+ *      inside GameState.resolved_rules_journal, so a v112 peer would drop it
+ *      silently. Wire 95 moves with it; no lobby frame names it.
+ * 112 — ContinuousModification gains `SubstituteTextWord` (CR 612.1), serialized
+ *      inside GameState's transient continuous effects, so a v111 peer cannot
+ *      parse the tag.
+ * 111 — GameFormat gains `Dandan`. It serializes as its Display string and
+ *      deserializes through FromStr, so a v110 peer cannot parse a GameState or
+ *      a lobby FormatConfig that names it. Wire 93 and lobby 16 move with it;
+ *      see PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs.
+ * 110 — GameState.deferredSpellDelivery holds a resolving spell's move to
+ *       its zone while it is paused on its own free-cast window. Older peers
+ *       would leave the spell on the stack in no zone; P2P moves in lockstep
+ *       (wire 92).
+ * 109 — CR 201.5a granter binding: ObjectScope gains GrantingObject and
+ *      SpecificObject, TargetFilter.GrantingObject gains `bound`, PlayerFilter
+ *      gains GrantingObjectCaster, and ability, trigger, static, replacement, spell and
+ *      trigger-source contexts gain the `granting_object` stamp. A v108 peer
+ *      cannot deserialize the new state. P2P moves in lockstep to wire 91.
+ * 108 — Serialized IllegalTargetsDisposition.StillResolves preserves a root
+ *       ability's printed resolution rule when its chosen target becomes
+ *       illegal. Older peers would silently apply ordinary non-resolution;
+ *       P2P moves in lockstep (wire 90).
+ * 107 — UntilCondition NextMatches gains count ("until you exile two nonland
+ *      cards …" — Invasion of Alara, CR 608.2c), the paused exile loop keeps
+ *      its hits, ZoneChoiceCandidateSource gains ParentTargets, and
+ *      SpellContext gains exile_until_batch. A v106 peer would run a counted
+ *      loop as a one-card loop; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 89); lobby messages are unchanged.
+ * 106 — Full-game replacement-choice preferences, exact source/definition
+ *       identities, remembered ordering/optional actions, and prompt
+ *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
+ *       messages are unchanged.
+ * 105 — Deferred mana-source selections carry a nominal base quantity.
+ *      Full-game peers must agree on the tagged output shape; P2P moves in
+ *      lockstep (wire 87). Lobby-only messages are unchanged.
+ * 104 — PendingCast gains `delved_cards` and the pending cost-move resume
+ *      swaps DelveManaPayment for the FinalizeDelvedCast completion: delve
+ *      fuel is exiled when the total cost is paid (#9400). A v103 peer
+ *      cannot parse the new state; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 86); lobby is unchanged.
+ * 103 — FormatConfig loses `allow_experimental_dungeons`: the per-session
+ *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
+ *      (Freeform and Freeform Commander only). A v102 peer would parse the
+ *      frame but fail the pool closed; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 85); lobby carriers move too
+ *      (LOBBY_PROTOCOL_VERSION 15).
+ * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
+ *      ability definitions and saved state. Keep this version in lockstep
+ *      with the server and the preceding mana-activation schema.
+ * 101 — GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
+ *      activations now emit it) and an optional departed_source_lki — see
+ *      PROTOCOL_VERSION's own `/// 101` entry in
+ *      crates/lobby-broker/src/protocol.rs. The exact-match version check at
+ *      connect refuses a v100 pairing.
+ * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
+ *      phase, followed_by holds TurnSegments, and recipient, an
+ *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own
+ *      `/// 100` entry in crates/lobby-broker/src/protocol.rs. This client
+ *      hands server frames to JSON.parse, so a v99 client would take the new
+ *      shape with no decode error; the exact-match version check at connect
+ *      refuses the pairing instead.
+ * 99 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+ *      Work). A v98 peer would default it to the own graveyard and refuse a
+ *      cast the permission allows; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 81); lobby messages are unchanged.
+ * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
+ *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
+ *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
+ *      the parked per-player zone-choice frame gains current and nominee. A v97 peer cannot deserialize them; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 80); lobby messages
+ *      are unchanged.
+ * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
+ *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
+ *      reads the object its immediately preceding instruction announced
+ *      (CR 115.1 + CR 608.2c) and announces no target slot of its own. A v96
+ *      peer would default the field; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 79); lobby messages are unchanged.
+ * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
+ *      to GameState ability definitions. A v95 peer cannot decode the new tag;
+ *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
+ *      unchanged.
+ * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
+ *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
+ *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
+ *      combat once blocked) are expressible. The legacy "Unblocked" tag still
+ *      deserializes via a serde alias with a defaulted status, but a v94 peer
+ *      cannot parse the new "BlockStatus" tag carried in GameState ability
+ *      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
+ *      messages are unchanged.
+ * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
+ *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
+ *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
+ *      object's layered mana cost (CR 707.2 + CR 708.2a). A v93 peer would drop
+ *      both; the exact-match handshake refuses the pairing. P2P moves in
+ *      lockstep (wire 76); lobby messages are unchanged.
+ * 93 — ReductionProvenance gains SacrificedForCost, the reduction an Emerge
+ *      or Offering sacrifice earns before a deferred target declaration. A
+ *      v92 peer cannot deserialize it. P2P moves in lockstep to wire 75.
+ * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
+ *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
+ *      the reveal-until whiff verdict read by the new
+ *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
+ *      the CR 701.20a reveal lease (ResolvedInformationLifetime
+ *      UntilStackObjectLeaves and GameState.stack_bound_reveals, presented
+ *      through the new DerivedViews.stack_revealed_cards). A v91
+ *      peer cannot parse the new tags; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
+ *      are unchanged.
+ * 91 — PendingManaAbility.chosen_counter_count is retyped to the required
+ *      chosen_counter_counts array (#9207). A v90 peer cannot deserialize
+ *      the new state. P2P moves in lockstep to wire 73.
+ * 90 — FormatConfig gains `allow_experimental_dungeons`, the per-session
+ *      capability flag behind the experimental dungeon pool. A v89 peer
+ *      parses a v90 GameState but runs the game without the host's pool;
+ *      the exact-match handshake refuses the pairing. P2P moves in lockstep
+ *      (wire 72); lobby carriers move too (LOBBY_PROTOCOL_VERSION 13).
+ * 89 — CR 118.9b graveyard permissions that require a casting method (Sabin,
+ *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
+ *      required_cast_keyword and casting-menu options gain additional_cost. A
+ *      v88 peer would drop the method silently and admit a printed-cost cast.
+ *      The same bump carries the announced graveyard permission (CR 601.2a-b):
+ *      casting-menu options gain authority, ChoosePermanentTypeSlot gains
+ *      permission, and the cast's context gains graveyard_permission_latch.
+ * 88 — WaitingFor.DeclareBlockers gains block_capacities (CR 509.1a +
+ *      CR 101.1): each able blocker's block limit, null for any number — see
+ *      PROTOCOL_VERSION's own `/// 88` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client renders the map
+ *      directly as the pile stepper's ceiling; the exact-match version check
+ *      at connect refuses a mismatched pairing.
+ * 87 — WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
+ *      extend serialized game state for Telling Time-class rest piles. The
+ *      exact handshake refuses v86 peers; P2P moves in lockstep (wire 69).
+ *      Lobby messages are unchanged.
+ * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
+ *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
+ *      lockstep (wire 68); lobby messages are unchanged.
+ * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
+ *      display event. StateUpdate carries GameEvent[]; older peers would
+ *      accept the connection but omit ignored dice from the roll overlay.
+ *      P2P moves in lockstep; lobby messages are unchanged.
+ * 84 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
+ *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
+ *      choice, so the prompt previews each card instead of describing only
+ *      its entry room. A PARSE bump like 67, not a capability bump like 24:
+ *      none of the fields is serde-optional, so a v83 peer fails
+ *      deserialization on a snapshot paused at the dungeon choice, and the
+ *      reverse skew throws in render — this client reads `card`
+ *      unconditionally to resolve the preview art. Saved games still load
+ *      through the choice-preview migration. P2P moves in lockstep; lobby
+ *      messages are unchanged.
+ * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+ *      Kopala): ReduceAbilityCost statics carry targets and frequency,
+ *      GameState journals each turn's activations, and the activation cost
+ *      carrier holds the target-settlement lock. A v82 peer would drop these
+ *      silently and price one activation differently.
+ * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
+ *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
+ *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
+ *      minted id, and steps_started_this_turn replaces the two per-turn step
+ *      counters — see PROTOCOL_VERSION's own `/// 82` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v81 client would take the new shapes with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
+ * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
+ *      GameState (CR 702.117a); an older client's modal cannot render it. The
+ *      exact-match version check at connect refuses the pairing.
+ * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
+ *      source_incarnation } in serialized GameState, and
+ *      DerivedViews.linked_exile_ids is new and rendered directly. The
+ *      exact-match version check at connect refuses the pairing.
+ * 78 — Duration::UntilEvent (the event-deadline duration) and
+ *      TransientContinuousEffect's duration_event_source are new in serialized
+ *      GameState. This client hands server frames to JSON.parse, so a v77
+ *      client would take the new shape with no decode error; the exact-match
+ *      version check at connect refuses the pairing instead.
+ * 77 — Prospective: no GameState or GameAction shape change lands in this
+ *      bump. Moved ahead of new GameFormat variants — see PROTOCOL_VERSION's
+ *      own `/// 77` entry in
+ *      crates/lobby-broker/src/protocol.rs. Full-game sessions stay
+ *      exact-match on both ends (MIN_SUPPORTED_SERVER_PROTOCOL below and
+ *      MIN_SUPPORTED_PROTOCOL in crates/server-core/src/protocol.rs), so no
+ *      older peer ever receives a v77 GameState at all.
+ * 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
+ *      Fuse split-card menu an exact `(variant, face)` tuple. This integrated
+ *      state also carries a resolution-owned modal choice's additional cost so
+ *      a paid graveyard cast cannot lose it across face election. Old snapshots
+ *      cannot safely bind either payload, so full-game peers must refuse skew.
+ * 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window filter,
+ *      and `WaitingFor.CastOffer { kind: GraveyardPaidCast }` carries two additive
+ *      fields: additional_cost (Ogre Battlecaster's "{R}{R} in addition to its
+ *      other costs", CR 601.2b) and installed_triggers (the delayed triggers a
+ *      declined offer withdraws). Both are serde-defaulted, so a v71 peer
+ *      parses a v72 offer — and then pays the offered card at its printed
+ *      cost alone while the v72 host charges the addition. The offer also
+ *      opens for seven more printed cards (the paid "cast target … card from
+ *      your graveyard" class, CR 608.2g) that v71 granted a lingering
+ *      permission instead. Exact-match refuses the pairing. P2P moves in
+ *      lockstep (wire 54); lobby messages are unchanged. See PROTOCOL_VERSION
+ *      in crates/lobby-broker/src/protocol.rs for the full entry.
+ * 71 — DraftKind.Winston and DraftAction::SharedStackDecision are serialized
+ *      by draft WebSocket messages. A PARSE bump like 27 and 34, not a
+ *      capability bump like 24 — but a CONDITIONAL one: neither type carries
+ *      a serde fallback variant, so a v70 peer fails deserialization outright
+ *      on "Winston" or on the SharedStackDecision tag, and a v71 peer cannot
+ *      round-trip a frame a v70 peer would have to invent. The break runs in
+ *      BOTH directions, and for the types named so far only for a Winston
+ *      pod's frames.
+ *      DraftDelta::SharedStackDecisionApplied, the two shared-stack
+ *      DraftError variants (InvalidSharedStackConfiguration and
+ *      SharedStackDecisionRefused — a third, SharedStackRequiresHumanSeats,
+ *      existed while this entry was first written and was deleted when
+ *      shared-stack pods gained bot seats) and PickStatus.Waiting ride the
+ *      same condition.
+ *      TWO FIELDS DO NOT RIDE IT, and they are the exception to the sentence
+ *      above: SeatPublicView.drafted_card_count and
+ *      DraftPlayerView.distribution are REQUIRED, non-optional fields on
+ *      every kind's frames, so a v70 server's view fails to satisfy a v71
+ *      client's shape for Premier, Traditional, Sealed and CommanderDraft too
+ *      — not just Winston. That is what this version gate is for and it
+ *      already refuses the mismatch. drafted_card_count is a count and never
+ *      an identity, and is public in every kind (a pick-and-pass seat's total
+ *      follows from the pick number); distribution is a procedure fact
+ *      published for the same reason launch_capability is, and deliberately
+ *      NOT status-gated so a surface outliving the draft can still tell a pile
+ *      pod from a passing one.
+ *      DraftPlayerView.{shared_stack, play_first_chooser},
+ *      SpectatorDraftView.shared_stack and DraftSession.shared_stack are
+ *      additive and serde-optional, which is why their TypeScript mirrors are
+ *      declared optional — they are listed because 71 carries them, not
+ *      because they force it. play_first_chooser is ADVISORY: no engine path
+ *      enforces it, because game one's starting player still comes from
+ *      CR 103.1's contest. Lobby messages are unchanged: draftKind is a
+ *      length-bounded string. See PROTOCOL_VERSION in
+ *      crates/lobby-broker/src/protocol.rs for the full entry.
+ * 70 — OutsideGameChoiceSource.BoosterPack replaced set_code with a required
+ *      origin: PackOrigin ({ type: "Set", data } or { type: "Cube" }), so an
+ *      opened pack's OutsideGameChoice no longer decodes on a v69 peer and a
+ *      v69 frame renders no pack origin here. The exact handshake refuses the
+ *      pairing. P2P moves in lockstep; lobby messages are unchanged.
+ * 69 — GameEvent gained the tagged variant ExtraTurnCreated { player_id,
+ *      anchor }. Event-bearing full-server frames can now carry that tag, so
+ *      the exact handshake must refuse v68 peers that do not share the variant
+ *      contract. P2P moves in lockstep; lobby messages are unchanged.
+ * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
+ *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
+ *      stage nobody has answered. A PARSE bump like 67: the field carries no
+ *      serde default, so the pre-68 unanswered shape — which omitted the field
+ *      entirely — is a missing-field error rather than a silent decode. The
+ *      reverse skew is what made the bump mandatory: Some([]) serializes as
+ *      `chosen_tappers: []`, which a v67 build reads through its is_empty()
+ *      gate as *unanswered*, re-surfacing the same PayCost prompt forever.
+ * 67 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
+ *      fields, carrying the dungeon card's Scryfall identity and the whole
+ *      room graph (each room's edges plus its position on the printed card).
+ *      A PARSE bump like 66, not a capability bump like 24: neither field is
+ *      serde-optional, so a v66 peer fails deserialization on any snapshot
+ *      where a player is venturing rather than degrading silently. The
+ *      reverse skew is equally hard — this client destructures `card`
+ *      unconditionally to resolve the card art, so a v66 host would throw in
+ *      render, not merely omit the map panel.
+ * 65 — DraftMatchStart now announces the exact Full-session identity for the
+ *      spawned match. Draft reconnect attaches the authenticated draft seat
+ *      to that Full-session lifetime, and Full follow-up frames carry the key
+ *      needed to reject stale-generation traffic. Lobby messages are unchanged.
+ * 61 — Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
+ *      population a counter-kind choice draws from, and whether the game draws
+ *      one at random instead of prompting. Serde-additive, so an older payload
+ *      reads as the on-target/controller form; the other direction drops the
+ *      printed list and the random draw silently, which is the #7796 defect
+ *      itself. Abilities ride inside GameObject, so every GameState frame
+ *      carries the shape. The full handshake refuses stale peers. Lobby
+ *      messages are unchanged.
+ * 60 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ *      may cast whose player chooses a spell face at cast time (a split card
+ *      such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
+ *      cost of the OTHER face; spell_costs reports the live face only. The
+ *      cost badge renders both faces from this map. Serde-additive, but the
+ *      client renders the map directly, so an older server would silently
+ *      show a Room's single-face badge again. The full handshake refuses
+ *      stale peers. Lobby messages are unchanged.
+ * 59 — InteractionResponseSpec.shortcut.preview changed from a single optional
+ *      InteractionShortcutPreview to an Array<InteractionShortcutPreview>, one
+ *      element per offerable count, and each element gained an allocation list
+ *      stating the declaration's shape over that element's count. The retype is
+ *      the break; the added list is not — it is default and skip-if-empty and
+ *      parses in both directions. A PARSE bump like 23, 36 and 42, not a
+ *      capability bump like 24, and asymmetric: a v58 peer always emits the
+ *      preview key (null or an object) and neither deserializes into a list, so
+ *      v58 → v59 fails on every shortcut offer; v59 → v58 fails only when a
+ *      preview is actually carried, because an empty list omits the key and a
+ *      v58 peer reads that as absent. No shim ships.
+ *      MIN_SUPPORTED_SERVER_PROTOCOL below and MIN_SUPPORTED_PROTOCOL in
+ *      crates/server-core/src/protocol.rs are each equal to their own
+ *      PROTOCOL_VERSION, so the pairing is refused at the handshake — which
+ *      matters here because this client parses server frames with JSON.parse and
+ *      would otherwise read the new shape silently. See PROTOCOL_VERSION in
+ *      crates/lobby-broker/src/protocol.rs for the full entry.
+ * 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
+ *      commander designation count. The client renders designation controls
+ *      from this required field rather than inferring them from `DraftKind`.
+ * 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+ *      binds only the requester and resolves immediately; `Shared` opens the
+ *      table-wide consent protocol), and `PriorityPassingMode` gained
+ *      `FullControl`, which is now engine-authoritative rather than a
+ *      frontend-only toggle.
+ * 56 — Host-only authoritative-state export request/response variants. Native
+ *      P2P sends each player a redacted view, so the host must ask its local
+ *      server for the trusted engine envelope rather than export that view.
+ * 55 — DerivedViews.room_half_identities publishes both halves of every
+ *      battlefield Room in printed order, resolved through the COPIED halves
+ *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *      offer names the half and shows its unlock cost (CR 709.5e) from this
+ *      map; an enter-as-copy recipient carries neither on its own printed
+ *      card. Serde-additive, but the client renders the map directly, so an
+ *      older server would silently label every door "Tap for Mana" again. The
+ *      full handshake refuses stale peers. Lobby messages are unchanged.
+ * 54 — CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
+ *      Chaos client sends candidate set codes only; the Full server resolves
+ *      and persists the private seat-by-round assignment matrix. The full
+ *      handshake refuses stale peers. Lobby messages are unchanged.
+ * 53 — DraftPlayerView.launch_capability publishes the engine-authorized
+ *      post-draft multiplayer launch. The client renders this procedure-owned
+ *      capability instead of inferring it from DraftKind; an older server
+ *      would omit it and silently hide a completed Commander pod's launch.
+ *      The full-game handshake refuses that capability mismatch. Lobby
+ *      messages are unchanged.
+ * 52 — DerivedViews.storm_count publishes the engine-owned number of copies a
+ *      current Storm trigger will create, or a newly cast Storm spell would
+ *      create. The field is serde-additive, but this client renders that
+ *      scalar directly rather than deriving Storm from raw state; a v51 host
+ *      would silently omit the HUD status. The full-game handshake refuses
+ *      that capability mismatch. Lobby messages are unchanged.
+ * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ *      gained duration and source_id, ExileWithAltCost gained source_id beside
+ *      the duration it already had (additive, serde
+ *      defaults), and Duration gained the WhileControllingHost and
+ *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
+ *      one-way parse break — a v50 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
+ *      degrading.
+ * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
+ *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
+ *      and the deck-compatibility admission path now both read, replacing
+ *      per-function hardcoded literals and bare-GameFormat-derived defaults
+ *      so the two authorities can't disagree. A CAPABILITY bump like 24: the
+ *      field is serde-optional (fail-closed UpTo(1), the tightest possible
+ *      cap), so a peer missing it still deserializes GameState cleanly — but
+ *      silently loses the format's real declared limit and falls back to the
+ *      singleton cap, wrongly rejecting a legal 4-of deck rather than
+ *      admitting one it shouldn't. Symmetric in both directions. See
+ *      PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs for the full
+ *      entry; lobby carriers move too, see LOBBY_PROTOCOL_VERSION 3 below.
+ * 49 — Full-server DraftPlayerView payloads require public-seat
+ *      active_pack_count. An older v48 server can complete the handshake yet
+ *      omit that additive field while this client accepts the JSON, leaving it
+ *      unable to render a seat's active-pack presence. The Full handshake
+ *      refuses that capability mismatch. Lobby messages are unchanged.
+ * 48 — Full-server DraftPlayerView payloads require the engine-owned
+ *      pick_selection_mode. An older server can omit it while this client
+ *      accepts the JSON, then silently treats an ordered Commander Draft pick
+ *      as direct selection. Lobby messages are unchanged.
+ * 47 — Resolution-time optional fixed sacrifice payments add a typed
+ *      replacement-resumable continuation to GameState.
+ * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
+ *      replaced in serialized GameState payloads by the canonical
+ *      QuantityRef.PropertyAggregate tag with a validated source object. New
+ *      peers migrate both old input tags, but a v45 peer cannot deserialize
+ *      the canonical tag emitted by v46, so the full-game handshake refuses
+ *      that one-way parse mismatch. Lobby messages are unchanged.
+ * 45 — GameState gained serialized cast-occurrence provenance and prepared-copy links.
+ * 44 — Resolution-time optional PayCost(OneOf) branch choice added a
+ *      serialized WaitingFor/GameAction pair.
+ * 43 — Engine-owned stack-resolution automation retired the legacy native
+ *      Resolve All request/result wire messages.
+ * 42 — FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *      tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
+ *      CR 903.13f(1) makes Commander Draft a command-zone format with a
+ *      minimum rather than an exact size, and GameFormat gained a
+ *      CommanderDraft variant (CR 903.13a). A PARSE bump like 23 and 36, not a
+ *      capability bump like 24: FormatConfig::deck_size carries neither a
+ *      serde default nor a deserialize_with, so a v41 peer's "deck_size": 60
+ *      fails against the adjacently tagged enum and a v42 peer's
+ *      {"type":"Minimum","data":60} fails against a v41 u16 — the break is
+ *      unconditional and runs in BOTH directions, for every format.
+ *      GameState.format_config's serde default does NOT rescue it: a
+ *      field-level default applies only when the key is ABSENT, and an old
+ *      peer sends the key present with the old inner shape, so the default
+ *      never runs. The GameFormat::CommanderDraft variant is the second and
+ *      narrower half — it breaks only when that variant is actually
+ *      serialized.
+ * 41 — Operational failure responses are correlated to their pending action.
+ * 40 — Action rejection responses carry engine-owned structured context.
+ * 39 — ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *      GameState/ManaUnit restriction used by Karolina Dean. Older peers
+ *      cannot deserialize that externally tagged enum variant.
+ * 38 — WaitingFor.ChooseObjectsSelection publishes the resolving effect's
+ *      min and optional max bounds. Older clients silently ignore these
+ *      additive fields and offer selections outside the engine-authoritative
+ *      range, so the full-game handshake refuses that capability mismatch.
+ * 37 — PayCostKind::TapCreatures changed from { aggregate:
+ *      Option<TapCreaturesAggregate> } to a required { mode:
+ *      TapCreaturesSelectionMode } (Fixed/VariableX/Aggregate) — the fix that
+ *      also unlocks the u32::MAX X-sentinel tap-cost form (Glacian,
+ *      Powerstone Engineer + 8 sibling cards, #7799). mode carries no serde
+ *      default: a GameState snapshot paused mid-TapCreatures payment
+ *      (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked X-sentinel form)
+ *      under the old aggregate shape now fails deserialization rather than
+ *      risk silently misclassifying an aggregate payment as fixed-count (or
+ *      vice versa) — exactly the ambiguity TapCreaturesSelectionMode exists to
+ *      make unrepresentable. Old and new peers can't parse each other's
+ *      serialized snapshots while such a payment is in flight.
+ * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *      required dungeon_name, and changed options from number[] to
+ *      RoomPreview[], so each option carries the room's printed name and
+ *      room-ability text (CR 309.4b-c). A PARSE bump like 23, not a capability
+ *      bump like 24: none of the new fields carry a serde default, so a v35
+ *      peer fails deserialization on a dungeon-choice GameState outright
+ *      rather than degrading silently. DerivedViews.dungeon_rooms rides along
+ *      in the same bump — it IS serde-optional, but this client deleted its
+ *      dungeon_progress room-index derivation, so a v35 server that omits it
+ *      would leave this client rendering no dungeon badge at all.
+ * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *      classification of the live target announcement. A CAPABILITY bump like
+ *      24 and 32, not a parse bump: the field is serde-optional, but this
+ *      client deleted inferTargetNoun, so a v34 server that omits it would
+ *      leave this client naming no target at all — silently, with no parse
+ *      error to catch it. The handshake is the only place that pairing is
+ *      refusable.
+ * 34 — DraftKind.CommanderDraft (CR 903.13a) is serialized by draft WebSocket
+ *      messages, and DraftAction::Pick renamed card_instance_id to
+ *      card_instance_ids: Vec<String> for a whole CR 903.13b pick step. A
+ *      PARSE bump, not a capability bump — the renamed field carries no serde
+ *      default. See PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs
+ *      for the full entry, including what it does and does not gate on the
+ *      lobby.
+ * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
+ *      not publish an affirmative original/copy identity.
+ * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
+ *      original/copy/token-copy identity for each active legend-rule choice. The
+ *      field is serde-optional, but the client deliberately no longer derives this
+ *      rules-sensitive identity from raw objects; an older server would silently
+ *      omit every choice identity.
+ * 31 — WaitingFor::LoopShortcut publishes the engine-issued declaration, and
+ *      InteractionResponseSpec::Shortcut publishes preview, the per-axis
+ *      consequence of the offered count. Both are optional and neither type
+ *      sets deny_unknown_fields, so a v30 peer still PARSES the frame — a
+ *      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left
+ *      for the capability gap to bite in, so this entry names no silent-drop
+ *      hazard: full-game floors are exact-match on BOTH sides
+ *      (MIN_SUPPORTED_SERVER_PROTOCOL below, and MIN_SUPPORTED_PROTOCOL in
+ *      crates/server-core/src/protocol.rs, each equal to their own
+ *      PROTOCOL_VERSION), so a v31/v30 full-game pair is refused at the
+ *      handshake and never sends an action frame. The one-version window that
+ *      does exist is lobby-only (LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL below /
+ *      MIN_SUPPORTED_PROTOCOL in crates/lobby-broker/src/protocol.rs) and it
+ *      cannot carry this capability either: DeclareShortcut rides
+ *      ClientMessage::Action, which LobbyClientMessage has no variant for at
+ *      all, and which reject_if_disabled in crates/phase-server/src/main.rs
+ *      answers under ServerMode::LobbyOnly with an explicit rejection rather
+ *      than a silent drop.
+ * 30 — Serialized player-action completion provenance and modal continuations.
+ * 27 — Added DraftKind.Sealed, serialized by draft WebSocket messages.
+ * 26 — Added ActionNoOp acknowledgement for accepted transport no-ops.
+ * 25 — DebugCardEntries added a serialized, private resolution frame for
+ *      multi-card sandbox battlefield entries that pause for replacement or
+ *      as-enters choices. Old peers cannot deserialize that GameState shape.
+ * 24 — DerivedViews.unbounded_families carries the engine-owned per-seat family
+ *      collapse state behind each ∞ badge. A CAPABILITY bump, not a parse bump:
+ *      the field is serde-optional, but this client deleted its row-flag
+ *      OR-fold derivation, so a v23 server that omits the field would leave
+ *      this client rendering NO infinity badges — silently, with no parse error
+ *      to catch it. The handshake is the only place that pairing is refusable.
+ * 23 — PayableResource::ManaGeneric changed from { per_x } to
+ *      { base_cost: ManaCost } (#6410) — a GameState payload field type
+ *      change, and base_cost intentionally carries no serde default (a
+ *      missing base_cost must fail deserialization, not silently resolve
+ *      to a zero-cost payment), so old and new peers can't parse each
+ *      other's serialized state.
+ * 22 — Viewer interaction projections and semantic object-action identities.
  * 21 — Native P2P host bridge identity and server-authored state revisions.
  * 20 — Actor-scoped priority-passing settings and filtered per-player state.
  * 19 — Connive exact subject snapshots and resident paused post-replacement
@@ -108,26 +1031,491 @@ export class NativeEngineVersionMismatchError extends Error {
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
+ * 75 — ResolutionCastCleanup, its delayed-trigger receipts, and each
+ *      receipt-eligible delayed-install origin carry the producer-issued paid
+ *      offer owner. Older peers cannot preserve cross-offer isolation through
+ *      a paused state handoff.
+ * 74 — ResolutionCastCleanup now carries exact delayed-trigger receipts for a
+ *      paused paid resolution cast. Older peers cannot preserve the receipt
+ *      authority through a state handoff, so this is an exact-match boundary.
+ *
  * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
+ *
+ * 79 — CR 601.2f + CR 602.2b activated-ability cost-reduction election:
+ *      ReductionProvenance gains AbilityCostRider and TransientEffect, which a
+ *      v78 peer cannot parse. The new CostReductionEntry.minimum_mana,
+ *      PendingCast.activation_cost_snapshot and AbilityModeChoice
+ *      activation_cost_snapshot fields are additive and skipped when empty, so
+ *      every spell frame is byte-identical to v78.
+ *
  */
-export const PROTOCOL_VERSION = 21;
+export { PROTOCOL_VERSION };
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
- * Planechase changed the wire message surface in a non-backward-compatible way,
- * so this release only accepts the current protocol.
+ * Engine-owned presentation fields may parse when absent but still need an
+ * exact full-game match when the client no longer derives a raw-state fallback.
  */
 export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
 
 /**
- * Lowest server protocol version this client accepts for lobby-only brokers.
- * LobbyOnly carries matchmaking metadata only, so it keeps a one-version
- * rollout window while Full servers stay current-only.
+ * Lowest server `protocol_version` this client accepts for lobby-only brokers
+ * that predate `lobby_protocol_version` — the LEGACY path only.
+ *
+ * Derived from PROTOCOL_VERSION, so it slides every time the full-game surface
+ * bumps. That is the defect LOBBY_PROTOCOL_VERSION below exists to fix; this
+ * constant survives only to keep already-deployed brokers reachable.
  */
 export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
+
+/**
+ * Wire version of the LOBBY message set, independent of PROTOCOL_VERSION.
+ * Must match `LOBBY_PROTOCOL_VERSION` in `crates/lobby-broker/src/protocol.rs`.
+ *
+ * Bump ONLY when a lobby message variant changes shape — OR when a lobby
+ * message's SEMANTICS change in a way this client must gate behavior on (see 9).
+ * A full-game bump must NOT move this number: no lobby variant carries GameState
+ * or GameAction, so full-game churn cannot break lobby traffic. Sharing one
+ * integer between the two surfaces is what took preview multiplayer down —
+ * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
+ * window went disjoint from the deployed broker's.
+ *
+ * 19 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `PlanechaseCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 19` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-19 Rust broker rejects a lobby frame naming
+ *      PlanechaseCommander; MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER
+ *      below is this client's floor for it.
+ * 18 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `ArchenemyCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 18` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-18 Rust broker rejects a lobby frame naming
+ *      ArchenemyCommander; MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER
+ *      below is this client's floor for it.
+ * 17 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `TwoHeadedGiantCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 17` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-17 Rust broker rejects a lobby frame naming
+ *      TwoHeadedGiantCommander; MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER
+ *      below is this client's floor for it.
+ * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
+ *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
+ *      is this client's frozen floor for that pairing.
+ * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
+ *      carriers (CreateGameWithSettings, JoinTargetInfo, PeerInfo): the
+ *      per-session toggle is gone and the Wilderness pool is format-derived.
+ *      A CAPABILITY bump like 13, not a parse bump — a v14 frame carrying
+ *      the stale key and a v15 frame omitting it both parse — so
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2.
+ * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
+ *      new variant), the "a field's type changed" trigger. No broker emits it
+ *      until server-authoritative hosting is wired behind
+ *      MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH (a later PR); mirrored in the
+ *      `ReportGate` union in types.ts so the wire type stays 1:1.
+ * 13 — FormatConfig gains `allow_experimental_dungeons` (#[serde(default)]) —
+ *      the "a lobby field is added" trigger — on its three lobby carriers:
+ *      CreateGameWithSettings (client → broker), JoinTargetInfo and PeerInfo
+ *      (broker → client). A CAPABILITY bump like 3, not a parse bump, so
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: against a pre-13
+ *      broker the flag is absent and this client classifies JoinTargetInfo
+ *      frames without it, while a v12 client keeps creating and joining
+ *      games that simply never carry the override.
+ * 12 — JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
+ *      already carries — the "a lobby field is added" trigger.
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2 and no capability floor is
+ *      added: against a pre-12 broker the field is absent and this client
+ *      classifies a typed code from its lobby snapshot alone.
+ * 11 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of new GameFormat variants — see LOBBY_PROTOCOL_VERSION's
+ *      own `/// 11` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2: this client already decodes broker → client frames with
+ *      JSON.parse, which arrives at an unknown-yet format name as an
+ *      ordinary string with no parse error either way, and moving the floor
+ *      would evict every v2–v10 broker over a value most of them will never
+ *      encounter. A pre-11 Rust broker rejects a lobby frame naming
+ *      Freeform or FreeformCommander; MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS
+ *      below is this client's floor for them.
+ * 10 — Requested room codes. CreateGameWithSettings gains an optional
+ *     `requested_code` (#[serde(default)]) — the "a lobby field is added"
+ *     trigger — a caller-pre-minted `[A-Z0-9]{6}` code the host claims instead
+ *     of a broker-minted one. ServerErrorCode, carried server -> client on
+ *     Error.code, gains `game_not_found` and `code_in_use`. Additive, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2. This client sends
+ *     `requested_code` for Discord-link hosts and reads `code_in_use` /
+ *     `game_not_found`. No capability floor: a pre-10 broker or server silently
+ *     drops the field and mints its own code, which the host detects as
+ *     `GameCreated.game_code !== requested` and handles; `game_not_found` falls
+ *     back to the legacy message classification.
+ * 9 — Recoverable credential rotation via idempotent-nonce replay.
+ *     RenewTournamentCredential gains an optional `rotation_nonce` field
+ *     (#[serde(default)]) — the "a lobby field is added" trigger;
+ *     TournamentCredentialRenewed is unchanged. A rotation mints ONLY from the
+ *     current secret (recording the superseded secret + that nonce); presenting
+ *     the superseded secret with the SAME nonce REPLAYS the already-committed
+ *     secret (minting nothing), so a lost renewal reply is recovered by retrying
+ *     the same (token, nonce) rather than by any overlap window — a superseded
+ *     secret never stays valid and never yields a fresh primary without the
+ *     initiator's nonce. This client gates on it: `maybeRenewNearExpiry`
+ *     (multiplayerStore) only rotates proactively — and only then relies on
+ *     same-nonce replay recovery — against a broker at or above
+ *     MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION below. Additive, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: every older broker still
+ *     parses every v9 frame (the nonce defaults away), and this client simply
+ *     does not proactively rotate against one.
+ * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
+ *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
+ *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
+ *     behaviour. TournamentSummary gains the resolved `match_type`, server →
+ *     client. This lets a 2-player event be Bo1 (e.g. single-game single
+ *     elimination). Purely ADDITIVE, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *     stays at 2 and no client-side floor is needed: a client's `match_type`
+ *     reaching a pre-8 broker deserializes away (the event runs the default
+ *     structure — a silent capability loss, not a parse error), and a pre-8
+ *     broker's summary omitting it is inert against a `JSON.parse` client.
+ * 7 — Tournament game-format label and an "automatic + N" round option. Two
+ *     fields added to CreateTournament, both optional (`#[serde(default)]`):
+ *     `format` (a GameFormat display label, mirroring the one a LobbyGame
+ *     listing already carries) and `plus_rounds` (add N to the auto-derived
+ *     round count — the "Swiss plus N" shape, mutually exclusive with
+ *     `total_rounds`). Separately, the DIFFERENT TournamentSummary message
+ *     gains a `format` echoed back resolved (server → client). Purely ADDITIVE
+ *     in BOTH directions, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below stays at
+ *     2 and — unlike 6's scoring relaxation — NO client-side floor is needed:
+ *     a client sending `format`/`plus_rounds` to a pre-7 broker has them
+ *     ignored as unknown fields (a silent capability loss, not a parse error),
+ *     and a pre-7 broker's summary omitting `format` is inert against this
+ *     client, whose consumer is `JSON.parse`.
+ * 6 — Broker-owned tournament action legality, broker-owned default scoring,
+ *     and expiring/rotating tournament credentials. Two lobby variants added —
+ *     RenewTournamentCredential and TournamentCredentialRenewed — which alone
+ *     makes this bump mandatory. PairingView gains a required report_gate;
+ *     TournamentSummary gains a required open_actions and a required resolved
+ *     scoring; TournamentCreated and TournamentJoined each gain a required
+ *     expires_at_ms beside the token they already carried. All of those are
+ *     server → client, and this client ignores fields it does not name, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — a
+ *     v2 broker still speaks everything this client already parses.
+ *     CreateTournament.scoring is RELAXED from required to optional, `None`
+ *     meaning "the broker applies its arity default". That direction is NOT
+ *     symmetric: a client that omits scoring against a pre-6 broker gets a
+ *     hard `missing field` parse error, not a degrade. It is gated on the
+ *     CLIENT side by MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING below — capability,
+ *     not parseability, exactly as 5 gated the ack — so a below-floor session
+ *     keeps sending an explicit policy instead of being evicted.
+ * 5 — Request-correlated settlement for the four GATED tournament actions.
+ *     Two LobbyServerMessage variants added — TournamentActionAck and
+ *     TournamentActionRejected — which is what makes this bump mandatory. Both
+ *     are requester-only point replies carrying the client-minted request_id,
+ *     so a caller can tell its own outcome from an ambient TournamentUpdate for
+ *     the same tournament. StartTournamentRound, ReportMatchResult,
+ *     DropFromTournament and EndTournament each gain one optional request_id.
+ *     Purely ADDITIVE in both directions — an omitted correlator deserializes
+ *     to None and a present one is ignored by a v4 broker — so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2.
+ *     Capability, not parseability, is what moves here: a pre-5 broker cannot
+ *     ANSWER a correlated action, which is what
+ *     MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK below exists to gate — separately,
+ *     and without evicting the session.
+ * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
+ *     and five LobbyServerMessage variants. Purely ADDITIVE, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
+ *     existing variant changed shape, so nothing this client already parses
+ *     can break against a version-2 broker.
+ * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
+ *     above for the full entry). Same three carriers as 2:
+ *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Unlike 2, this is a
+ *     CAPABILITY bump, not a parse bump — the field is serde-optional and
+ *     still deserializes cleanly on either side — so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below does NOT move: a v2 broker
+ *     can still create/join a game, it just can't declare or observe a
+ *     non-default deck-copy-limit override, silently getting the fail-closed
+ *     UpTo(1) fallback instead of the format's real default.
+ * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
+ *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
+ *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
+ *     crates/lobby-broker/src/protocol.rs for what the floor move evicts.
+ * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
+ *     since #1880.
+ */
+export { LOBBY_PROTOCOL_VERSION };
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
+ *
+ * There is deliberately NO ceiling. A broker newer than this client can only
+ * hurt it by sending a lobby variant the client does not know, and
+ * `handleMessage` already ignores unknown tags rather than tearing the session
+ * down. Refusing to connect at all would evict this client from a broker whose
+ * new variant it may never need — which is precisely how a protocol-bumping
+ * release used to strand every older desktop build.
+ */
+export { MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL };
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION that can answer a gated tournament
+ * action with a `TournamentActionAck` / `TournamentActionRejected` frame.
+ *
+ * This is a FLOOR frozen at the version that introduced correlated tournament
+ * settlement, not a moving target. It must NOT be bumped when
+ * LOBBY_PROTOCOL_VERSION moves: a v6 or v7 broker still answers the ack, and
+ * raising this to match the current version would refuse every one of them and
+ * silently disable organizer actions against servers that work perfectly. For
+ * the same reason it must never be written as an expression over
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it only
+ * against a bare integer literal, so re-deriving it fails the cross-language
+ * gate rather than shipping that bug.
+ *
+ * Like {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL} there is deliberately NO
+ * ceiling. It moves only if a future version REMOVES the ack, which would be a
+ * breaking change requiring its own floor decision.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION that accepts a `CreateTournament` with
+ * `scoring` omitted and applies its own arity default.
+ *
+ * A FLOOR frozen at the version that introduced broker-owned default scoring,
+ * on exactly the terms {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK} above is
+ * frozen — and it must NOT be bumped when LOBBY_PROTOCOL_VERSION moves: a v7
+ * or v8 broker still applies the default, and raising this to match the
+ * current version would push every one of them below the floor and make this
+ * client send an explicit policy forever.
+ *
+ * The gate it guards is sharper than the ack's, which is why the floor exists
+ * at all. Omitting `scoring` against a pre-6 broker is not a missing
+ * capability that degrades — it is a hard `missing field \`scoring\`` parse
+ * error on the broker side. Below this floor the client keeps sending an
+ * explicit policy; at or above it, it may omit one and read the resolved
+ * value back off `TournamentSummary.scoring`.
+ *
+ * Written as a bare integer literal and never as an expression over
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it
+ * only against a bare integer, so re-deriving it fails the cross-language gate
+ * instead of shipping the latent bug. Like the two floors above there is
+ * deliberately NO ceiling.
+ *
+ * Scope note (protocol v6, wire-contract-only): this floor is the frozen
+ * cross-language contract for the omit-`scoring` capability, and is enforced
+ * today only by `check-protocol-version.mjs`. It has no runtime send-path
+ * consumer yet — `tournamentClient.ts` still always sends an explicit
+ * `ScoringPolicy`, which is the conservative, always-correct direction. The
+ * version-gated omit-path this floor guards lands with the tournament
+ * client-rendering follow-up, alongside reading the resolved value back off
+ * `TournamentSummary.scoring`.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` that honors a per-event `match_type`
+ * (Bo1 / Bo3) on `CreateTournament`.
+ *
+ * Below this, a broker discards `match_type` as an unknown field and applies the
+ * arity default (Bo3 head-to-head, Bo1 pods). That silent substitution is
+ * harmless when the request already matches the default, but it turns an
+ * explicit **Bo1 head-to-head** choice into a Bo3 event with no signal — so the
+ * send path refuses that one request (see `matchTypeNeedsCapability` /
+ * `createTournament`) rather than let an organizer receive a structure they did
+ * not pick.
+ *
+ * Unlike the two floors above, this is a CLIENT-side send-path floor with no
+ * shared Rust constant to mirror, so it is deliberately NOT registered in
+ * `scripts/check-protocol-version.mjs`. Frozen at 8 (the version that introduced
+ * `match_type`) and, like the others, written as a bare literal rather than
+ * derived from `LOBBY_PROTOCOL_VERSION`, so a future bump cannot silently drag
+ * it forward and start refusing v8 brokers.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose credential rotation is
+ * RECOVERABLE — i.e. supports idempotent-nonce replay: it mints only from the
+ * current secret (recording the superseded secret + the client's nonce) and, on
+ * a retry presenting that superseded secret with the SAME nonce, REPLAYS the
+ * already-committed secret rather than minting again
+ * (`crates/lobby-broker/src/tournament.rs`, `renew`/`renew_kind`).
+ *
+ * This is the capability that makes proactive rotation SAFE. Against a broker at
+ * or above this floor, a renewal reply lost after the server commits is
+ * survivable: the client retries with the same (token, nonce) and the broker
+ * replays the committed secret. Against a broker below it there is no replay, so
+ * a retry with a superseded token would just be refused — hence
+ * `maybeRenewNearExpiry` (`stores/multiplayerStore`) does not proactively rotate
+ * at all below this floor, leaving the pre-rotation behavior (the credential
+ * simply lapses at its TTL) untouched rather than introducing a strand.
+ *
+ * A CLIENT-side behavioral floor with no shared Rust constant to mirror, so —
+ * like {@link MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE} — it is NOT value-pinned by an
+ * EXPECTED_* assertion in `scripts/check-protocol-version.mjs`, only listed in
+ * its authored-literals classifier. Frozen at 9 (the version that made rotation
+ * recoverable) and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a future bump cannot silently drag it forward and
+ * start refusing v9 brokers that recover perfectly.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION = 9;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `Freeform` and `FreeformCommander`; below it a lobby frame naming either is
+ * rejected as malformed.
+ *
+ * Frozen at 11 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v11 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS = 11;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `Dandan`; below it a lobby frame naming it is rejected as malformed.
+ *
+ * Frozen at 16 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v16 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_DANDAN = 16;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `Horde`; below it a lobby frame naming it is rejected as malformed.
+ *
+ * Frozen at 17 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward. Until a
+ * v17 broker ships, Horde lobby frames are refused — old brokers would
+ * reject the unknown format. `scripts/check-protocol-version.mjs` refuses a
+ * derived right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_HORDE = 17;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `TwoHeadedGiantCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 17 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v17 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER = 17;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `ArchenemyCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 18 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v18 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER = 18;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `PlanechaseCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Pinned to a bare literal, deliberately NOT derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v19 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER = 19;
+
+/**
+ * The lowest broker `LOBBY_PROTOCOL_VERSION` that parses `format` in a lobby
+ * frame, or `null` when every broker this client connects to parses it (see
+ * MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL). Consult it before sending any lobby
+ * frame that carries a `GameFormat`. The switch is exhaustive over
+ * `BuiltInGameFormat`, so a format added there does not type-check until it is
+ * classified here.
+ */
+export function lobbyProtocolRequiredForFormat(format: GameFormat): number | null {
+  if (isCustomGameFormat(format)) return null;
+  switch (format) {
+    case "Freeform":
+    case "FreeformCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS;
+    case "Dandan":
+      return MIN_LOBBY_PROTOCOL_FOR_DANDAN;
+    case "Horde":
+      return MIN_LOBBY_PROTOCOL_FOR_HORDE;
+    case "TwoHeadedGiantCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER;
+    case "ArchenemyCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER;
+    case "PlanechaseCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER;
+    case "Standard":
+    case "Commander":
+    case "Pioneer":
+    case "Modern":
+    case "Premodern":
+    case "Legacy":
+    case "Vintage":
+    case "Historic":
+    case "Timeless":
+    case "Pauper":
+    case "PauperCommander":
+    case "DuelCommander":
+    case "TinyLeaders":
+    case "Oathbreaker":
+    case "Brawl":
+    case "HistoricBrawl":
+    case "FreeForAll":
+    case "TwoHeadedGiant":
+    case "Archenemy":
+    case "Planechase":
+    case "Limited":
+    case "Momir":
+    case "CommanderDraft":
+      return null;
+    default: {
+      const unclassified: never = format;
+      return unclassified;
+    }
+  }
+}
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `FormatConfig` validator accepts
+ * a Brawl or Historic Brawl config with no commander-damage threshold
+ * (CR 903.12h) and today's Custom `uses_commander`; below it such a lobby
+ * frame is rejected as malformed.
+ *
+ * Frozen at 23 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v23 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES = 23;
+
+/**
+ * The lowest broker `LOBBY_PROTOCOL_VERSION` that accepts `config` in a lobby
+ * frame, or `null` when every broker this client connects to accepts it.
+ * Custom is gated as a whole: which Custom configs an older broker rejects is
+ * that broker's derivation, not one this client restates.
+ */
+export function lobbyProtocolRequiredForFormatConfig(config: FormatConfig): number | null {
+  if (isCustomGameFormat(config.format) || config.format === "Brawl" || config.format === "HistoricBrawl") {
+    return MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES;
+  }
+  // Brokers below the floor reject a Commander-survivor Horde config at decode.
+  if (config.format === "Horde" && config.horde_ruleset?.survivor_deck_format === "Commander") {
+    return MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES;
+  }
+  return lobbyProtocolRequiredForFormat(config.format);
+}
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
@@ -135,12 +1523,91 @@ export interface ServerInfo {
   buildCommit: string;
   protocolVersion: number;
   mode: "Full" | "LobbyOnly";
+  /** The server's LOBBY_PROTOCOL_VERSION, when it advertises one. `undefined`
+   * from brokers built before the lobby owned its own version — those are
+   * gated on `protocolVersion` instead. */
+  lobbyProtocolVersion?: number;
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+  /** Optional binary JSON envelopes understood by this server. */
+  wireFormats?: WireFormat[];
+  /**
+   * Negotiated-delivery capabilities this server offered in `ServerHello`.
+   * Only names this client implements are kept. Absent for servers that
+   * advertise none (lobby brokers, older Full servers).
+   */
+  stateCodecs?: StateCodecName[];
+  /** Advertised liveness budget; exceeding it is recorded in diagnostics, never acted on. */
+  heartbeat?: { pingIntervalMs: number; silenceBudgetMs: number };
+  /** A completion echoes only the command issued by this connection. */
+  commandCorrelation?: "CommandIdV1";
 }
 
-/** Events emitted by the WebSocketAdapter for UI state updates. */
+/**
+ * Which protocol surface a socket is opened for.
+ *
+ * The surface is a property of the CALLER's intent, not of the server: a `Full`
+ * server serves both. `ClientMessage::SubscribeLobby` and friends are "always
+ * allowed" in either server mode (`reject_if_disabled` in
+ * `crates/phase-server/src/main.rs`), and the whole lobby frame set —
+ * `LobbyClientMessage` / `LobbyServerMessage` in
+ * `crates/lobby-broker/src/protocol.rs` — carries no `GameState` and no
+ * `GameAction`. That is what lets the two surfaces version independently.
+ */
+export type ProtocolSurface = "full" | "lobby";
+
+/**
+ * Why this client cannot talk to `info` on `surface`, or `null` when it can.
+ *
+ * SINGLE AUTHORITY for the protocol window. The handshake in
+ * `openPhaseSocket.ts` and the compatibility badge in `multiplayerStore.ts`
+ * both route through here, so a server can never be rejected by one and shown
+ * as usable by the other.
+ *
+ * Three policies, by surface:
+ *  - Full-game surface: exact match. GameState/GameAction payloads are neither
+ *    forward- nor backward-compatible across a bump.
+ *  - Lobby surface, server advertising a lobby version: floor only, NO CEILING.
+ *    See {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
+ *  - Lobby surface, server predating the field: the legacy one-version window
+ *    on `protocolVersion`, unchanged, so already-deployed brokers stay
+ *    reachable.
+ *
+ * The surface comes from the caller, never from `info.mode`. A `Full` server
+ * serves the lobby too, so reading the mode alone refuses a lobby socket to a
+ * server whose `lobbyProtocolVersion` matches and whose only incompatibility is
+ * with a game that socket will never carry — which a browser can only report as
+ * "unreachable", not as "a version you cannot play on".
+ */
+export function serverProtocolRejection(
+  info: ServerInfo,
+  surface: ProtocolSurface = "full",
+): string | null {
+  // A `LobbyOnly` server has no full-game surface at all, so every socket to
+  // one is a lobby socket whatever the caller asked for.
+  const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+
+  if (onLobbySurface && info.lobbyProtocolVersion !== undefined) {
+    return info.lobbyProtocolVersion < MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+      ? `Lobby protocol version ${info.lobbyProtocolVersion} is older than supported (client speaks ${LOBBY_PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}).`
+      : null;
+  }
+
+  const minAccepted = onLobbySurface
+    ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+    : MIN_SUPPORTED_SERVER_PROTOCOL;
+  if (info.protocolVersion < minAccepted) {
+    return `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAccepted}). Please wait for the lobby to finish rolling out.`;
+  }
+  if (info.protocolVersion > PROTOCOL_VERSION) {
+    return `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
+  }
+  return null;
+}
+
+/** UI events: `error` is transport/session-terminal; `operationFailed` is
+ * toast-only and preserves connection status and adapter ownership. */
 export type WsAdapterEvent =
   | { type: "serverHello"; info: ServerInfo; compatible: boolean }
   | { type: "playerIdentity"; playerId: PlayerId; opponentName: string | null; playerNames?: Record<number, string> }
@@ -160,20 +1627,33 @@ export type WsAdapterEvent =
   | { type: "playerEliminated"; playerId: PlayerId; becameSpectator: boolean }
   | { type: "spectatorJoined"; name: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "aiDriverFault"; id: number; revision: number; message: string }
   | { type: "error"; message: string }
+  | { type: "operationFailed"; message: string }
   | { type: "deckRejected"; reason: string }
+  /** `maxAttempts` is 0 when the episode is bounded by time rather than attempt count. */
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
-  | { type: "reconnected" }
+  /** `inGame` is false when the session resumed into a hosting lobby (GameCreated). */
+  | { type: "reconnected"; inGame: boolean }
+  /** The authority sent this seat a fresh bootstrap; it replays a still-open takeback vote after this event. */
+  | { type: "bootstrapDelivered" }
   | { type: "reconnectFailed" }
+  | { type: "terminalDelivery"; delivery: FullTerminalDelivery }
+  | { type: "terminalUnavailable"; message: string }
   /** The engine pair travels as one `EngineSnapshot` — see the P2P adapter's
    *  `stateChanged` for why the halves must stay inseparable. */
-  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number }
+  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
+      /** Server-published turn boundaries. Always an array on this transport —
+       *  `[]` means "the server published none", never "unknown". */
+      rewindTargets?: RewindOption[] }
+  /** The server applied a state it could not send; `null` once a state arrives again. */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
+  | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
-  | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
-  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null };
+  | TakebackEvent;
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -187,13 +1667,324 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
   return playerNames;
 }
 
+const PING_INTERVAL_MS = 5000;
+
+interface ReconnectPolicy {
+  /** Wall-clock budget for one reconnect episode. */
+  readonly budgetMs: number;
+  /** Hard cap on dialed attempts per episode. */
+  readonly maxAttempts: number;
+  readonly initialDelayMs: number;
+  readonly maxDelayMs: number;
+}
+
+/** Remote servers keep a dropped seat for a 120 s grace window (plus one ping
+ *  interval of detection slack), so the client retries across all of it. The
+ *  attempt cap is a safety net; the time budget ends the episode first. */
+const REMOTE_RECONNECT_POLICY: ReconnectPolicy = {
+  budgetMs: 120_000 + PING_INTERVAL_MS,
+  maxAttempts: 64,
+  initialDelayMs: 1000,
+  maxDelayMs: 5000,
+};
+
+/** The loopback sidecar either answers immediately or is gone, so it keeps the
+ *  original schedule: 8 attempts over about 32 s, bounded by attempts alone. */
+const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
+  budgetMs: Number.POSITIVE_INFINITY,
+  maxAttempts: 8,
+  initialDelayMs: 1000,
+  maxDelayMs: 5000,
+};
+
+/**
+ * Where the credentials of an initial fallback came from.
+ *
+ *  - `salvaged`: the seat's first GameStarted `Full` failed in the codec and its
+ *    plain envelope carried the credentials. Nothing of the join was published
+ *    yet, so the credentials are provisional until a plain GameStarted
+ *    authenticates them.
+ *  - `held`: a waiting-room joiner whose SAME attachment had already accepted
+ *    SessionAttached with a valid token, seat and Full key. The session is
+ *    already published; the credentials are only reused.
+ */
+type InitialFallbackSource = "salvaged" | "held";
+
+/**
+ * Lifecycle of the initialization-owned fallback: a remote join whose bootstrap
+ * codec failed before its first GameStarted, recovered by a new snapshot-only
+ * attachment within the SAME initialization.
+ *
+ * Credential-only recovery, not same-socket resync: the failed state is never
+ * rendered, and the original initialization is settled exactly once.
+ *
+ *  - `unused`: no episode has been admitted.
+ *  - `reconnecting`: the episode is active. `deadlineTimer` is the episode's one
+ *    non-extending bound; it is cleared on every exit. `pregameReturn` tracks a
+ *    held source's pregame reply (the server answers a waiting seat's
+ *    `Reconnect` with GameCreated, then SessionAttached): `gameCreated` means
+ *    the first of the two matched the held identity.
+ *  - `awaitingGameStarted`: a held source's pregame return completed. Not an
+ *    active episode: no deadline, no event suppression, and it cannot admit
+ *    another fallback. Waiting for the game to start is base behavior; the
+ *    eventual GameStarted is preflighted against `credentials`.
+ *  - `finished`: the episode was consumed (success or failure) and never
+ *    re-admits.
+ */
+type InitialFallback =
+  | { readonly kind: "unused" }
+  | {
+      readonly kind: "reconnecting";
+      readonly source: InitialFallbackSource;
+      readonly credentials: StateCodecJoinCredentials;
+      readonly deadlineTimer: ReturnType<typeof setTimeout>;
+      readonly pregameReturn: "none" | "gameCreated";
+    }
+  | { readonly kind: "awaitingGameStarted"; readonly credentials: StateCodecJoinCredentials }
+  | { readonly kind: "finished" };
+
+/** The single failure the original initialization sees when the fallback cannot finish the join. */
+function initialFallbackFailure(): AdapterError {
+  return new AdapterError(
+    "WS_CLOSED",
+    "Could not finish joining after state delivery failed; reconnect failed.",
+    true,
+  );
+}
+
+/** The initialization failure a server `Error` carries (also the reply to an ordinary pending join). */
+function serverErrorInitializationError(data: { message: string; code?: string }): AdapterError {
+  return data.code === "deck_rejected"
+    ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
+    : actionRejectionError(data.message);
+}
+
+/**
+ * What an inbound server message does to an ACTIVE initial fallback episode
+ * (`reconnecting`). `terminal` ends the episode as the original initialization's
+ * single failure; `neutral` leaves the episode running and lets the message's
+ * ordinary handler (or the episode-owned reply handlers) process it.
+ */
+type EpisodeRouting =
+  | { readonly kind: "terminal"; readonly error: AdapterError }
+  | { readonly kind: "neutral" };
+
+const EPISODE_NEUTRAL: EpisodeRouting = { kind: "neutral" };
+
+/**
+ * The single place that decides how every inbound message type bears on an
+ * active initial fallback episode. Handlers never consult the episode to decide
+ * whether a message ends the join; adding a message type that can end or
+ * contradict the join means adding its row here.
+ *
+ * Terminal (the join cannot finish, or the game is no longer the one the
+ * original join was waiting for):
+ *  - `Error`: the server refused the join; the ordinary initialization error.
+ *  - `PasswordRequired`: the room demands a password the join cannot supply.
+ *  - `StateWithheld` of a `GameStarted`: the bootstrap cannot be delivered. A
+ *    withheld `StateUpdate` is neutral: the join stays pending until a real
+ *    `GameStarted` or the deadline.
+ *  - `RequestRejected`: the server refused a request while the join was pending.
+ *  - `TerminalResult`, `GameOver`: the game ended before the join recovered.
+ *    The result is for a game this join never started playing, so nothing is
+ *    published (no session, no terminal delivery, no game-over event) and the
+ *    original codec failure stays in the episode's diagnostics only.
+ *
+ * Neutral, listed because the reason is not obvious:
+ *  - `AiDriverFault`: a native AI driver fault is a fault of the game's driver,
+ *    not an outcome of this join; its ordinary handler reports it and the
+ *    episode stays pending.
+ *  - `GameCreated`, `SessionAttached`, `GameStarted`: the episode's own replies,
+ *    validated against the retained identity by their handlers.
+ *  - `StateUpdate`, `PlayerSlotsUpdate`, `ActionRejected`, `ActionFailed`, and
+ *    every other message: ordinary traffic that answers no part of the join.
+ *
+ * A join parked in `awaitingGameStarted` (a held seat returned to its waiting
+ * room) is not routed here: the episode's deadline is over and it waits for the
+ * game to start exactly as a joiner that never failed does, so `TerminalResult`
+ * and `GameOver` take their ordinary handlers there.
+ */
+function episodeRouting(msg: { type: string; data?: unknown }): EpisodeRouting {
+  switch (msg.type) {
+    case "Error":
+      return {
+        kind: "terminal",
+        error: serverErrorInitializationError(msg.data as { message: string; code?: string }),
+      };
+    case "PasswordRequired":
+      return {
+        kind: "terminal",
+        error: new AdapterError("PASSWORD_REQUIRED", "Room requires a password", true),
+      };
+    case "StateWithheld": {
+      const data = msg.data as { withheld: WithheldFrame; reason: string };
+      return data.withheld.type === "GameStarted"
+        ? { kind: "terminal", error: new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true) }
+        : EPISODE_NEUTRAL;
+    }
+    case "RequestRejected": {
+      const data = (msg.data ?? {}) as { reason?: unknown };
+      return {
+        kind: "terminal",
+        error: new AdapterError(
+          AdapterErrorCode.REQUEST_FAILED,
+          typeof data.reason === "string" ? data.reason : "Server rejected the request.",
+          true,
+        ),
+      };
+    }
+    case "TerminalResult":
+    case "GameOver":
+      return {
+        kind: "terminal",
+        error: new AdapterError(
+          "WS_CLOSED",
+          "The game ended before the join could finish after state delivery failed.",
+          false,
+        ),
+      };
+    case "AiDriverFault":
+    case "GameCreated":
+    case "SessionAttached":
+    case "GameStarted":
+    case "StateUpdate":
+    case "PlayerSlotsUpdate":
+    case "ActionRejected":
+    case "ActionFailed":
+    default:
+      return EPISODE_NEUTRAL;
+  }
+}
+
+/** The pregame frames a server may answer an initial fallback's `Reconnect` with. */
+interface FallbackPregameFrame {
+  readonly type: "GameCreated" | "SessionAttached";
+  readonly game_code: string;
+  readonly player_id?: PlayerId;
+  readonly player_token?: string;
+  readonly full_key?: FullSessionKey;
+}
+
+/** The identity a server reply is checked against. */
+interface ExpectedSessionIdentity {
+  readonly gameCode: string;
+  readonly playerId: PlayerId;
+  readonly playerToken: string;
+  readonly fullKey: FullSessionKey;
+}
+
+/** The identity fields a server reply carries; each is absent when the frame has no such field. */
+interface SessionIdentityFrame {
+  readonly gameCode?: string;
+  readonly playerId?: PlayerId;
+  readonly playerToken?: string;
+  readonly fullKey?: FullSessionKey;
+}
+
+/**
+ * How one reply is held to the expected identity. The game code, when the frame
+ * names one, and the Full key are always compared. The remaining axes vary with
+ * the frame's protocol shape:
+ *  - `seat`: `"required"` when the frame names a seat (a missing seat is a
+ *    mismatch, never a pass); `"ifPresent"` when the frame may omit it and is
+ *    only compared when present; `"absent"` for a frame whose protocol shape has
+ *    no seat, which is never compared.
+ *  - `token`: `"optional"` when the frame may omit the token (omitted, or exactly
+ *    the expected one); `"required"` when it must carry exactly the expected one.
+ *  - `label`: the prefix of the game, seat and token messages.
+ */
+interface SessionIdentityRules {
+  readonly label: string;
+  readonly seat: "required" | "ifPresent" | "absent";
+  readonly token: "optional" | "required";
+}
+
+/**
+ * The single authority for comparing a reply's identity with the expected one:
+ * the first mismatch's message, or null when the reply matches. Checked in a
+ * fixed order: game, Full key, seat, token. Every reply-identity guard (the
+ * native reconnect's frames, the initial fallback's replies, and the equality
+ * of two credential tuples) goes through here, so a future identity field is
+ * added once.
+ */
+function sessionIdentityMismatch(
+  expected: ExpectedSessionIdentity,
+  frame: SessionIdentityFrame,
+  rules: SessionIdentityRules,
+): string | null {
+  if (frame.gameCode !== undefined && frame.gameCode !== expected.gameCode) {
+    return `${rules.label} attached game ${frame.gameCode}, expected ${expected.gameCode}`;
+  }
+  if (!frame.fullKey) return "Server omitted a valid Full session identity";
+  if (!sameFullSessionKey(frame.fullKey, expected.fullKey)) {
+    return "Server changed the Full session identity";
+  }
+  const seatCompared = rules.seat === "required"
+    || (rules.seat === "ifPresent" && frame.playerId !== undefined);
+  if (seatCompared && frame.playerId !== expected.playerId) {
+    return `${rules.label} attached player ${frame.playerId}, expected ${expected.playerId}`;
+  }
+  if (
+    (frame.playerToken !== undefined || rules.token === "required")
+    && frame.playerToken !== expected.playerToken
+  ) {
+    return `${rules.label} changed the player token`;
+  }
+  return null;
+}
+
+/** The expected identity a credential tuple states. */
+function identityOfCredentials(credentials: StateCodecJoinCredentials): ExpectedSessionIdentity {
+  return {
+    gameCode: credentials.fullKey.game_code,
+    playerId: credentials.yourPlayer,
+    playerToken: credentials.playerToken,
+    fullKey: credentials.fullKey,
+  };
+}
+
+/** Whether two credential tuples name the same seat of the same Full session. */
+function sameJoinCredentials(a: StateCodecJoinCredentials, b: StateCodecJoinCredentials): boolean {
+  return sessionIdentityMismatch(identityOfCredentials(a), {
+    playerId: b.yourPlayer,
+    playerToken: b.playerToken,
+    fullKey: b.fullKey,
+  }, { label: "Credentials", seat: "required", token: "required" }) === null;
+}
+
+/**
+ * The rules an initial fallback's replies are held to. A reconnect's GameStarted
+ * names the seat but omits the token (omitted or exactly the retained one); the
+ * pregame frames always carry the token, and only SessionAttached names a seat
+ * (GameCreated's protocol shape has none to compare).
+ */
+const FALLBACK_GAME_STARTED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "required", token: "optional" };
+const FALLBACK_SESSION_ATTACHED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "required", token: "required" };
+const FALLBACK_GAME_CREATED_RULES: SessionIdentityRules = { label: "Reconnect", seat: "absent", token: "required" };
+
+/**
+ * The rules a native reconnect's frames are held to. Each frame type carries a
+ * different subset of the identity (GameCreated has no seat, GameStarted
+ * usually no token), so seat and token are compared only when present.
+ */
+const NATIVE_RECONNECT_RULES: SessionIdentityRules = {
+  label: "Native reconnect",
+  seat: "ifPresent",
+  token: "optional",
+};
+
 /**
  * WebSocket-backed implementation of EngineAdapter.
  * Communicates with the phase-server via WebSocket protocol
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {
+  readonly supportsMatchConcede = true;
+  readonly supportsTakeback = true;
+  readonly supportsTurnRewind = true;
   private ws: PhaseSocketTransport | null = null;
+  /** Idempotent release of the adopted wrapper, including its decoder lease. */
+  private closeSocket: (() => void) | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
    * state-bearing message. `getState`/`getLegalActions` both read from THIS
@@ -201,15 +1992,29 @@ export class WebSocketAdapter implements EngineAdapter {
    * server messages in order, so stamping on arrival reproduces engine order.
    */
   private snapshot: EngineSnapshot | null = null;
+  private cachedStateRevision: number | null = null;
+  private withheldState: StateWithheldNotice | null = null;
+  /** A withheld bootstrap failed this adapter's reconnect while its socket stayed attached. */
+  private withheldBootstrapFailed = false;
   private _playerId: PlayerId | null = null;
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
-  private pendingResolve: ((result: SubmitResult) => void) | null = null;
-  private pendingReject: ((error: Error) => void) | null = null;
+  private fullSessionKey: FullSessionKey | null = null;
+  private readonly submission = new SubmissionSlot();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
+  private pendingAuthoritativeStateExport: {
+    resolve: (state: string) => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  /** Keyed on the engine-minted `PreviewRequestId`, so this adapter mints no
+   *  counter of its own and the correlation key stays the caller's. */
+  private pendingInteractionPreviews = new Map<
+    string,
+    { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
   >();
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
@@ -233,13 +2038,90 @@ export class WebSocketAdapter implements EngineAdapter {
   private abandonReject: ((error: Error) => void) | null = null;
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
-  // A native bridge has no resumable server session: a dead loopback engine
-  // cannot recover through the multiplayer reconnect protocol.
+  private readonly reconnectPolicy: ReconnectPolicy;
   private readonly maxReconnectAttempts: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectStartedAt: number | null = null;
+  private socketOpening = false;
+  /**
+   * The attachment whose setup frame is awaiting its ordered write receipt
+   * and, for a reconnect, its positive bootstrap (`SetupConfirmation`).
+   * Tracked by identity so a superseded candidate's write cannot block its
+   * successor's retry scheduling.
+   */
+  private setupWritePreparation: AbortController | null = null;
+  /**
+   * The attachment whose reconnect interval is open (setup written, bootstrap
+   * not yet received). While it is, the current socket is the incumbent and the
+   * server may already route the seat to the candidate.
+   */
+  private confirmingPreparation: AbortController | null = null;
+  /**
+   * The attachment whose interval refuses new submissions on the incumbent.
+   * Released when that attachment is aborted (its successor's submissions are
+   * not the old interval's to refuse), while `confirmingPreparation` keeps
+   * fencing the incumbent's frames and transport events until the attachment's
+   * continuation has settled the incumbent's standing.
+   */
+  private submissionGatePreparation: AbortController | null = null;
+  /** The incumbent the open interval fences: only its frames and events are held back. */
+  private fencedIncumbent: PhaseSocketTransport | null = null;
+  /** The socket whose frame `handleMessage` is dispatching right now. */
+  private frameSource: PhaseSocketTransport | null = null;
+  /** Monotonic attach identity: a retry timer belongs to the attempt that scheduled it. */
+  private attachGeneration = 0;
+  private socketDiagnostics: SocketDiagnosticObserver | null = null;
+  private readonly pendingDiagnosticLosses = new Set<string>();
+  private sessionLifecycleListening = false;
+  private lastInboundAt = 0;
+  private lastPingTickAt = 0;
+  private readonly retryAfterResume = () => {
+    this.lastInboundAt = Date.now();
+    this.lastPingTickAt = this.lastInboundAt;
+    if (document.visibilityState === "hidden" || this.reconnectTimer === null) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    // The cancelled schedule never dialed: reuse its attempt number, don't spend another.
+    this.reconnectAttempt = Math.max(0, this.reconnectAttempt - 1);
+    this.attemptReconnect(true);
+  };
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
+  // Aborts a handshake still in flight when the adapter is disposed.
+  private readonly disposeAbort = new AbortController();
+  /**
+   * Decoder source resolved once at construction: `undefined` is the
+   * best-effort shared default; explicit providers retain bounded preparation.
+   * Native sidecars and `null` opt-outs stay snapshot-only.
+   */
+  private readonly stateCodecProvider: StateCodecSessionProvider | null | undefined;
+  /** Identifies the newest attachment; aborting it supersedes the older one. */
+  private stateCodecPreparation: AbortController | null = null;
+  /**
+   * Application-bootstrap authority and recovery state for the current socket.
+   * A fresh binding is created per attach and published when that attachment's
+   * socket is adopted: a surviving snapshot, token or codec baseline never
+   * authorizes a new bootstrap.
+   */
+  private readonly stateCodec = new StateCodecAttachment();
+  /** Initialization-owned fallback after a failed initial GameStarted `Full`. */
+  private initialFallback: InitialFallback = { kind: "unused" };
+  /**
+   * The credentials a join's own SessionAttached delivered, keyed by the socket
+   * that received it: provenance for the held fallback source. A tuple of
+   * another socket (or none) never authorizes admission, and it is never
+   * shared with the draft adapter's binding.
+   */
+  private heldAttachment: {
+    readonly socket: PhaseSocketTransport;
+    readonly credentials: StateCodecJoinCredentials;
+  } | null = null;
+  /** A rejected Full identity is terminal for this socket. */
+  private sessionIdentityRejected = false;
+  /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
+  private aiDriverFault: { gameCode: string | null; message: string } | null = null;
   private gameEnded = false;
+  private terminalCleanupPending = false;
   /**
    * Populated once the server's `ServerHello` arrives. `null` between the
    * WebSocket opening and the hello being delivered. Consumers see it via
@@ -270,7 +2152,16 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
-    this.maxReconnectAttempts = options.nativeAi || options.nativePregame ? 0 : 8;
+    // Keep retrying through the server's reconnect grace; pregame remains terminal.
+    this.reconnectPolicy = options.nativeAi ? NATIVE_AI_RECONNECT_POLICY : REMOTE_RECONNECT_POLICY;
+    this.maxReconnectAttempts = options.nativePregame ? 0 : this.reconnectPolicy.maxAttempts;
+    // Native sidecars keep snapshot bring-up unless explicitly overridden.
+    // The undefined remote default is started lazily during an actual attach.
+    this.stateCodecProvider = options.stateCodecSessionProvider !== undefined
+      ? options.stateCodecSessionProvider
+      : this.isNativeSocket()
+        ? null
+        : undefined;
   }
 
   get gameCode(): string | null {
@@ -281,6 +2172,23 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._playerId;
   }
 
+  /** Reconnect credentials for this session, or null until the server has
+   *  assigned them (i.e. game creation has completed). Solo-AI native games
+   *  persist this so a suspended game can be resumed by constructing a
+   *  `kind: "reconnect"` adapter. The player token is issued once at creation
+   *  and lives only client-side — it is the reconnect security boundary. */
+  get nativeSession(): { gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } | null {
+    if (this._gameCode === null || this._playerId === null || this.playerToken === null || this.fullSessionKey === null) {
+      return null;
+    }
+    return {
+      gameCode: this._gameCode,
+      playerId: this._playerId,
+      playerToken: this.playerToken,
+      fullKey: this.fullSessionKey,
+    };
+  }
+
   onEvent(listener: WsAdapterEventListener): () => void {
     this.listeners.push(listener);
     return () => {
@@ -289,6 +2197,9 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private emit(event: WsAdapterEvent): void {
+    if (event.type === "sessionChanged") {
+      this.setSessionLifecycleListeners(event.session !== null && !this.disposed);
+    }
     for (const listener of this.listeners) {
       listener(event);
     }
@@ -315,50 +2226,133 @@ export class WebSocketAdapter implements EngineAdapter {
       this.initResolve = resolve;
       this.initReject = reject;
 
-      if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+      const initializeConnection = async () => {
+        if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
+          await initializeLanCapabilities();
+          if (this.disposed) {
+            throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
+          }
+        }
 
-      // A ws:// target from an HTTPS page is blocked by the browser before the
-      // handshake — surface why instead of letting it fail as "unreachable".
-      const blockReason = this.isNativeSocket()
-        ? null
-        : mixedContentBlockReason(this.serverUrl);
-      if (blockReason) {
-        reject(new AdapterError("WS_ERROR", blockReason, false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+        if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
+          reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      const setupFrame =
-        this.options.nativeAi
-          ? this.nativeAiSetupFrame(this.options.nativeAi)
-          : this.options.nativePregame
-            ? this.nativePregameSetupFrame(this.options.nativePregame)
-          : this.mode === "host"
-          ? { type: "CreateGame", data: { deck: this.deckData } }
-          : this.mode === "spectate"
-            ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
-            : {
-                type: "JoinGameWithPassword",
-                data: {
-                  game_code: this.joinGameCode!,
-                  deck: this.deckData,
-                  display_name: this.displayName,
-                  password: this.joinPassword ?? null,
-                  reservation_token: this.reservationToken ?? null,
-                },
-              };
+        // A ws:// target from an HTTPS page is blocked by the browser before the
+        // handshake — surface why instead of letting it fail as "unreachable".
+        const blockReason = this.isNativeSocket()
+          ? null
+          : mixedContentBlockReason(this.serverUrl);
+        if (blockReason) {
+          reject(new AdapterError("WS_ERROR", blockReason, false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.attachSocket(setupFrame).catch(() => {
-        // `attachSocket` emits reject via initReject; swallow the
-        // rejection here so it doesn't surface as an unhandled promise.
-      });
+        if (this.mode === "host" && !this.isNativeSocket()) {
+          reject(new AdapterError("WS_ERROR", "A server game is created through the lobby", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
+
+        this.seedNativeReconnectSession();
+        const setupFrame =
+          this.options.nativeAi
+            ? this.nativeAiSetupFrame(this.options.nativeAi)
+            : this.options.nativePregame
+              ? this.nativePregameSetupFrame(this.options.nativePregame)
+            : this.mode === "spectate"
+              ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
+              : {
+                  type: "JoinGameWithPassword",
+                  data: {
+                    game_code: this.joinGameCode!,
+                    deck: this.deckData,
+                    display_name: this.displayName,
+                    password: this.joinPassword ?? null,
+                    reservation_token: this.reservationToken ?? null,
+                  },
+                };
+
+        this.attachSocket(setupFrame).catch(() => {
+          // `attachSocket` emits reject via initReject; swallow the
+          // rejection here so it doesn't surface as an unhandled promise.
+        });
+      };
+      void initializeConnection().catch((error: Error) => this.rejectInitialization(error));
     });
+  }
+
+  /**
+   * Bounded optional decoder preparation for one attachment. Expiry and
+   * provider failure select snapshot-only delivery; only an abort (dispose)
+   * stops the attachment before it opens a socket.
+   */
+  private async prepareStateCodecSession(
+    provider: StateCodecSessionProvider,
+    signal: AbortSignal,
+  ): Promise<{ kind: "session"; session: StateCodecSession | null } | { kind: "aborted" }> {
+    try {
+      return {
+        kind: "session",
+        session: await prepareBoundedStateCodecSession(
+          provider,
+          signal,
+          STATE_CODEC_PREPARATION_TIMEOUT_MS,
+        ),
+      };
+    } catch (error) {
+      if (error instanceof StateCodecPreparationAbortError) return { kind: "aborted" };
+      return { kind: "session", session: null };
+    }
+  }
+
+  /**
+   * Whether a newer `attachSocket` has replaced `preparation`'s attachment. A
+   * disposed adapter is not superseded: its attachments only wind down.
+   */
+  private isSupersededAttachment(preparation: AbortController): boolean {
+    return !this.disposed && this.stateCodecPreparation !== preparation;
+  }
+
+  /** Drops the pending command slot for a codec recovery and rejects it with `error`. */
+  private interruptPendingSubmission(error: AdapterError): void {
+    const dropped = this.submission.drop();
+    if (dropped) {
+      dropped.reject(error);
+      this.emit({ type: "actionPendingChanged", pending: false });
+    }
+  }
+
+  /**
+   * Retiring a socket loses its addressed replies just like a close. Clear
+   * every request owner before notifying consumers: a synchronous pending
+   * listener may already submit or preview on the replacement. Initialization
+   * and game-start waiters instead belong to the join/handoff, not this socket.
+   */
+  private rejectSocketRequests(notify = true): boolean {
+    const dropped = this.submission.drop();
+    dropped?.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+    );
+    this.rejectAuthoritativeStateExport(
+      new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+    );
+    this.rejectPregameMutation(
+      new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
+    );
+    this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
+    if (dropped && notify) this.emit({ type: "actionPendingChanged", pending: false });
+    return dropped !== null;
   }
 
   /** Connect to a local native full server and stop once this socket has a
@@ -369,11 +2363,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (!options) {
       throw new AdapterError("WS_ERROR", "Pregame initialization requires a native socket", false);
     }
-    if (options.kind === "reconnect") {
-      this._gameCode = options.gameCode;
-      this._playerId = options.playerId;
-      this.playerToken = options.playerToken;
-    }
+    this.seedNativeReconnectSession();
     return new Promise<NativeSessionAttachment>((resolve, reject) => {
       this.pregameResolve = resolve;
       this.pregameReject = reject;
@@ -436,14 +2426,82 @@ export class WebSocketAdapter implements EngineAdapter {
    * so the handshake policy lives in exactly one place.
    */
   private async attachSocket(setupFrame: unknown): Promise<void> {
+    if (this.disposed) return;
+    this.attachGeneration += 1;
+    this.socketOpening = true;
+    // A successor owns the episode now: an older timer must not linger and
+    // refuse this attempt's own retry if it fails quickly.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.stateCodecPreparation?.abort();
+    const preparation = new AbortController();
+    this.stateCodecPreparation = preparation;
     let socket: PhaseSocket<PhaseSocketTransport>;
+    let diagnostics: SocketDiagnosticObserver | null = null;
+    // Fresh bootstrap authority for this attachment: `pending` until a genuine
+    // GameStarted is accepted by the identity guards below. It is published as
+    // the adapter's current binding only when its socket is adopted: until
+    // then the previous socket (if still current) keeps its own binding, and
+    // this attachment's supersession is tracked by `preparation` alone.
+    const bootstrap = this.stateCodec.begin();
     try {
+      // Only explicit providers prepare before dialing. The shared default
+      // races capability discovery without delaying socket creation.
+      const provider = this.stateCodec.selectProvider(this.stateCodecProvider);
+      const prepared = provider
+        ? await this.prepareStateCodecSession(provider, preparation.signal)
+        : { kind: "session" as const, session: null };
+      if (this.disposed || this.stateCodecPreparation !== preparation || prepared.kind === "aborted") {
+        if (prepared.kind === "session") prepared.session?.close();
+        if (this.stateCodecPreparation === preparation) this.socketOpening = false;
+        return;
+      }
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
+        signal: this.disposeAbort.signal,
+        // A lease that arrives after this adapter degraded is closed and not offered.
+        stateCodecSession: provider === undefined
+          ? getSharedAdapter().openStateCodecSession("ifReady")
+            .then((session) => this.stateCodec.selectLease(session))
+          : this.stateCodec.selectLease(prepared.session),
+        stateCodecBootstrap: () => this.stateCodec.status(bootstrap, this.ws, this.disposed),
+        onStateCodecRecovery: (state) => this.stateCodec.handleRecovery(
+          bootstrap, state, this.ws, this.disposed,
+          (error) => this.interruptPendingSubmission(error),
+        ),
+        onSocketCreated: (raw) => {
+          // Diagnostics are best-effort: a failure here must never abort the handshake.
+          try {
+            diagnostics = observeSocketDiagnostics(
+              raw, this.reconnectAttempt,
+              (id) => this.socketDiagnostics === diagnostics
+                ? this.recordSocketLoss(id)
+                : this.disposed ? "not-attempted" : "resumed",
+              () => { if (this.socketDiagnostics === diagnostics) this.lastInboundAt = Date.now(); },
+            );
+          } catch {
+            diagnostics = null;
+          }
+          this.socketDiagnostics = diagnostics;
+        },
+        onFrameSent: () => diagnostics?.didSend(),
       });
     } catch (err) {
+      // A newer attachment owns the opening latch, the pending initialization
+      // and the reconnect episode: this older handshake's failure is not theirs.
+      if (this.isSupersededAttachment(preparation)) return;
+      this.socketOpening = false;
+      if (this.disposed) return;
+      const retryable = !(err instanceof HandshakeError)
+        || !["protocol_mismatch", "invalid_url", "aborted"].includes(err.kind);
+      if (this.reconnectInFlight && retryable) {
+        this.attemptReconnect();
+        return;
+      }
+      if (this.reconnectInFlight) this.finishSocketDiagnostics("failed");
       if (err instanceof HandshakeError) {
-        const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
         const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
         this.rejectInitialization(adapterErr);
         if (err.kind === "protocol_mismatch" && err.serverInfo) {
@@ -459,100 +2517,584 @@ export class WebSocketAdapter implements EngineAdapter {
             compatible: false,
           });
         }
+        if (this.reconnectInFlight) this.failReconnect();
         return;
       }
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
       return;
     }
-
-    if (
-      this.nativeSocketOptions()?.expectedServerVersion !== undefined
-      && socket.serverInfo.version !== this.nativeSocketOptions()!.expectedServerVersion
-    ) {
+    let closed = false;
+    let previousPending = false;
+    let setupMessages: MessageEvent<string>[] | null = null;
+    const closeSocket = () => {
+      if (closed) return;
+      closed = true;
       socket.close();
-      const error = new NativeEngineVersionMismatchError(
-        this.nativeSocketOptions()!.expectedServerVersion!,
-        socket.serverInfo.version,
-      );
-      this.rejectInitialization(error);
-      return;
-    }
-
-    this.ws = socket.ws;
-    this._serverInfo = socket.serverInfo;
-    this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
-    this.startPing();
-
-    socket.ws.onmessage = (event) => {
-      this.handleMessage(JSON.parse(event.data as string));
     };
-
-    socket.ws.onerror = () => {
-      const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
-      if (this.initReject || this.pregameReject || this.gameStartedReject) {
-        this.rejectInitialization(err);
-      } else {
-        this.emit({ type: "error", message: err.message });
+    const retireSocket = () => {
+      socket.ws.onmessage = null;
+      socket.ws.onerror = null;
+      socket.ws.onclose = null;
+      setupMessages = null;
+      try {
+        if (this.ws === socket.ws) {
+          this.ws = null;
+          this.closeSocket = null;
+          this.stateCodec.clearRecovery();
+          if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+          }
+          // This continuation still owns B. A listener may have claimed B
+          // before disposing, throwing, or starting C; never leave its work
+          // parked when B is retired, and never touch an already-adopted C.
+          previousPending = this.rejectSocketRequests(false) || previousPending;
+        }
+        // A never-adopted candidate's failure always moves the sticky policy,
+        // even when a successor already exists: a successor started from a
+        // listener selects its codec lease after this, against the policy. An
+        // adopted, since superseded one never poisons its replacement. Only an attachment that still owns the
+        // episode, with no current socket, records it as the latest binding.
+        const ownsEpisode = this.stateCodecPreparation === preparation;
+        if (!this.disposed && bootstrap.failure !== null && (ownsEpisode || bootstrap.socket === null)) {
+          if (this.ws === null && ownsEpisode) {
+            // No incumbent: record the notice as this adapter's latest
+            // attachment, exactly as before.
+            this.stateCodec.adopt(bootstrap, socket.ws);
+          } else {
+            // An incumbent keeps its binding, bootstrap status and recovery
+            // gate; only the sticky delivery policy moves.
+            this.stateCodec.consumeFailure(bootstrap);
+          }
+        }
+        if (previousPending) {
+          previousPending = false;
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+      } finally {
+        closeSocket();
       }
     };
-
-    socket.ws.onclose = () => {
-      if (this.pingInterval) {
-        clearInterval(this.pingInterval);
-        this.pingInterval = null;
+    // The uncertain interval of a reconnect (setup sent, bootstrap not yet
+    // received) has one owner. Two attachments keep main's attach path:
+    //  - Native sidecars (`nativeAi` / `nativePregame`): the desktop transport
+    //    keeps its existing behaviour; its bounded setup moves with the native
+    //    transport. Their peer is a private loopback server with no other
+    //    client for the seat, which answers at once or is gone (a close), and a
+    //    native pregame never retries (`maxReconnectAttempts` 0).
+    //  - An active initial-join fallback: it is admitted only by the close
+    //    consumer of the current socket after that socket has been detached
+    //    and its requests settled, with no GameStarted ever delivered, so there
+    //    is no live incumbent for the gate to keep or settle; the episode's one
+    //    non-extending deadline (`admitInitialFallback`) fails the join once
+    //    when no bootstrap arrives.
+    const confirmsSetup = !this.isNativeSocket()
+      && !this.initialFallbackActive()
+      && (setupFrame as { type?: unknown }).type === "Reconnect";
+    // Created at the setup write, so no earlier return leaves its timer behind.
+    let confirmation: SetupConfirmation | null = null;
+    // Until setup completes, this continuation owns cleanup even if a public
+    // listener throws, disposes the adapter, or starts another attachment.
+    let retained = false;
+    // An unconfirmed attachment's setup write is pending, and whether its
+    // candidate closed meanwhile: a close that lands then settles the attachment
+    // at once, not when the held write answers.
+    let writePending = false;
+    let closedDuringWrite = false;
+    // Set while an unconfirmed attachment waits for its setup receipt: a frame
+    // the candidate receives then is the server's answer to that setup.
+    let noteSetupAnswer: (() => void) | null = null;
+    const failUnwrittenSetup = (message: string) => {
+      if (this.initialFallbackActive()) {
+        this.failInitialFallback(initialFallbackFailure());
+        return;
       }
-      // Clear the "host waiting for opponent" latch on socket close —
-      // otherwise a host who received GameCreated, disconnected before
-      // GameStarted, and then reconnected through a different path would
-      // fire `opponentJoined` spuriously on the replayed GameStarted.
-      this.hostWaitingForOpponent = false;
-      if (this.pendingReject) {
+      this.rejectInitialization(new AdapterError("WS_CLOSED", message, true));
+      if (this.reconnectInFlight) this.attemptReconnect();
+    };
+    try {
+      const superseded = this.isSupersededAttachment(preparation);
+      // The opening latch belongs to the newest attachment.
+      if (!superseded) this.socketOpening = false;
+      // A handshake that settled before `dispose()` resumes here after it.
+      if (this.disposed || superseded) return;
+
+      if (
+        this.nativeSocketOptions()?.expectedServerVersion !== undefined
+        && socket.serverInfo.version !== this.nativeSocketOptions()!.expectedServerVersion
+      ) {
+        const error = new NativeEngineVersionMismatchError(
+          this.nativeSocketOptions()!.expectedServerVersion!,
+          socket.serverInfo.version,
+        );
+        this.rejectInitialization(error);
+        if (this.reconnectInFlight) this.failReconnect();
+        return;
+      }
+
+      const previous = this.ws;
+      const closePrevious = this.closeSocket;
+      // Keep the candidate private until setup has entered its transport's
+      // serialized write order and, for a gated `Reconnect`, until its
+      // positive bootstrap. This also keeps the incumbent usable: its
+      // transport, pending requests, recovery gate and codec lease are not
+      // touched unless this candidate's setup is written (and then they are
+      // retired, whether or not the candidate is adopted).
+      if (this.disposed || this.stateCodecPreparation !== preparation) return;
+
+      // Envelopes the confirmation interval already parsed, by frame: the
+      // drain dispatches them without materializing the frame a second time.
+      const parsedSetupFrames = new WeakMap<MessageEvent<string>, SetupFrameMessage>();
+      const handleSocketMessage = (event: MessageEvent<string>) => {
+        if (this.disposed || this.ws !== socket.ws) return;
+        this.lastInboundAt = Date.now();
+        let message: unknown = parsedSetupFrames.get(event);
+        if (message === undefined) try {
+          message = JSON.parse(event.data as string);
+        } catch {
+          this.rejectAuthoritativeStateExport(
+            new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+          );
+          return;
+        }
+        if (
+          typeof message !== "object"
+          || message === null
+          || !("type" in message)
+          || typeof message.type !== "string"
+        ) {
+          this.rejectAuthoritativeStateExport(
+            new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+          );
+          return;
+        }
+        const outer = this.frameSource;
+        this.frameSource = socket.ws;
+        try {
+          return this.handleMessage(message as { type: string; data?: unknown });
+        } finally {
+          this.frameSource = outer;
+        }
+      };
+      // Keep admission buffered through public handoff callbacks and the
+      // entire drain: their synchronous replies follow already-admitted frames.
+      const bufferBudget = new SetupBufferBudget("game");
+      socket.ws.onmessage = (event) => {
+        (setupMessages ??= []).push(event);
+        if (noteSetupAnswer !== null) {
+          // The answer to an unconfirmed attachment's setup settles its wait and
+          // is drained next, so, like a confirmed interval's settling bootstrap
+          // (which may be a large Full), it is not charged to the backlog.
+          noteSetupAnswer();
+          noteSetupAnswer = null;
+          bufferBudget.waive(event.data);
+          return;
+        }
+        // Only the positive bootstrap adopts; a refusal ends the interval.
+        const parsed = confirmation?.observe("game", event.data);
+        if (parsed !== undefined) {
+          parsedSetupFrames.set(event, parsed);
+          return;
+        }
+        // The buffer's own bound: the codec releases its receive charge once
+        // this handler has the frame, and the text stays retained here until
+        // the drain, so a peer that never settles the setup is cut off by size.
+        if (confirmation !== null && confirmation.current !== null) return;
+        if (bufferBudget.admit(event.data)) return;
+        if (confirmation !== null) {
+          confirmation.overflow();
+        } else if (this.initialFallbackActive()) {
+          this.failInitialFallback(initialFallbackFailure());
+        } else {
+          this.rejectInitialization(new AdapterError(
+            "WS_CLOSED", "The server sent too much before the setup was confirmed", true,
+          ));
+          preparation.abort();
+        }
+      };
+
+      socket.ws.onerror = () => {
+        // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
+        if (this.disposed || this.ws !== socket.ws) return;
+        // After a terminal result the game is over: a late bridge error is
+        // teardown, not a session failure.
+        if (this.sessionIdentityRejected || this.gameEnded) return;
+        // While a reconnect interval is open this socket is the incumbent, and
+        // the initialization it may still hold belongs to the candidate's
+        // episode (see `frameDecidesEpisode`): its transport error settles
+        // nothing here, and its close follows.
+        if (!this.frameDecidesEpisode(socket.ws)) return;
+        // The initialization is the single failure surface of an initial fallback.
+        if (this.initialFallbackActive()) {
+          this.failInitialFallback(initialFallbackFailure());
+          return;
+        }
+        const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
+        if (this.initReject || this.pregameReject || this.gameStartedReject) {
+          this.rejectInitialization(err);
+        } else {
+          this.emit({ type: "error", message: err.message });
+        }
+      };
+
+      socket.ws.onclose = () => {
+        // A natural close already released the wrapper's resources; later
+        // disposal must not request another physical close.
+        closed = true;
+        confirmation?.closed();
+        if (writePending && !this.disposed) {
+          closedDuringWrite = true;
+          const owns = this.stateCodecPreparation === preparation && !preparation.signal.aborted;
+          if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+          retireSocket();
+          // A successor owns its own initialization: only an attachment that
+          // still owns the episode settles it.
+          if (owns) failUnwrittenSetup("Connection closed during setup");
+          return;
+        }
+        if (this.ws !== socket.ws) return;
+        this.ws = null;
+        this.closeSocket = null;
+        // The attachment is gone; a retired transport can never keep gating
+        // submissions or report recovered state for its replacement.
+        this.stateCodec.clearRecovery();
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        // Request ownership and lifecycle settlement precede the notification:
+        // even a synchronous close listener that throws or starts C must not
+        // strand this socket's previews, export, or initialization.
+        const droppedSubmission = this.rejectSocketRequests(false);
+        try {
+          if (this.sessionIdentityRejected) return;
+          // A replayed GameStarted must not announce an already-lost opponent.
+          this.hostWaitingForOpponent = false;
+          // The incumbent's close settles its own requests (above) and its
+          // transport resources; the initialization and game-start waiters it
+          // may still hold transfer to the candidate's episode, whose result
+          // decides them.
+          if (!this.frameDecidesEpisode(socket.ws)) return;
+          // Initial fallback, unlike an ordinary reconnect, owns its join
+          // promise across retryable losses until its episode ends.
+          if (this.admitInitialFallback(bootstrap, socket.ws)) {
+            this.attemptReconnect(true);
+            return;
+          }
+          if (this.initialFallbackActive()) {
+            this.attemptReconnect();
+            return;
+          }
+          if (this.initReject) {
+            this.initReject(
+              new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+            );
+            this.initResolve = null;
+            this.initReject = null;
+          } else if (this.pregameReject) {
+            this.pregameReject(
+              new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
+            );
+            this.pregameResolve = null;
+            this.pregameReject = null;
+          } else if (this.gameStartedReject) {
+            this.gameStartedReject(
+              new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+            );
+            this.gameStartedResolve = null;
+            this.gameStartedReject = null;
+          } else if (this.snapshot !== null || this.playerToken !== null) {
+            this.attemptReconnect();
+          }
+        } finally {
+          if (droppedSubmission) this.emit({ type: "actionPendingChanged", pending: false });
+        }
+      };
+
+      // Installing a close consumer can deliver a retained close; public
+      // callbacks can dispose or supersede this attachment too. Its cleanup is
+      // source-scoped and must neither settle nor close the successor.
+      if (
+        this.disposed
+        || this.stateCodecPreparation !== preparation
+        || preparation.signal.aborted
+      ) return;
+      if (closed) {
+        this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
+
+      // Use this candidate's existing write seam, not the public socket: gzip
+      // enqueues setup before any subsequently notified consumer can enqueue
+      // a command. Raw transports can reply synchronously, so handlers above
+      // retain those replies until the send has returned successfully.
+      //
+      // A retry timer from an earlier attempt is obsolete while this attempt
+      // owns the write, and the write marker keeps an incumbent close from
+      // scheduling a new one over the candidate.
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.setupWritePreparation = preparation;
+      let written: boolean;
+      // Why the interval after the write did not end in a positive bootstrap.
+      let unconfirmed: SetupConfirmationOutcome | null = null;
+      try {
+        if (confirmsSetup) {
+          this.confirmingPreparation = preparation;
+          this.submissionGatePreparation = preparation;
+          this.fencedIncumbent = previous;
+          const transport = socket.ws;
+          confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
+            transport instanceof StateCodecSocket ? transport.decodeInFlight : null
+          ));
+        }
+        // Armed before the transport is invoked, because its send may deliver
+        // the answer synchronously. After the handshake the server speaks on
+        // this socket only in answer to the setup, so a frame received since
+        // the write proves it has the frame: the receipt, which the transport
+        // may still hold, is then not waited for, as on a confirmed reconnect.
+        let answered: Promise<true> | null = null;
+        if (confirmation === null) {
+          answered = new Promise<true>((resolve) => { noteSetupAnswer = () => resolve(true); });
+        }
+        // Armed before the transport is invoked: its send may deliver the
+        // candidate's close synchronously, which must settle the attachment
+        // then, not at the receipt's bound.
+        writePending = confirmation === null;
+        const write = writeSetupFrame(
+          socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
+        );
+        if (confirmation === null) {
+          // Every private candidate has an abort owner independent of the write:
+          // a cancellation that lands while the receipt is pending retires the
+          // candidate and its lease at once, not when the encoder answers. The
+          // receipt's fate still decides the post-write paths.
+          const onAbort = () => {
+            if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+            retireSocket();
+          };
+          preparation.signal.addEventListener("abort", onAbort, { once: true });
+          // The transport's send may itself have cancelled the attachment
+          // (disposal or supersession inside the receipt callback), before the
+          // listener above existed: an aborted signal fires no later event.
+          if (preparation.signal.aborted) onAbort();
+          try {
+            // The receipt belongs to the transport and may never settle on a
+            // socket that stays open: past the bound the frame counts as unsent
+            // and the candidate is retired with the failed attachment.
+            // (A transport without a receipt wrote synchronously: nothing to bound.)
+            written = socket.ws.sendReceipt === undefined
+              ? await write
+              : await Promise.race([
+                settledWithin(write, SETUP_CONFIRMATION_TIMEOUT_MS, false), answered!,
+              ]);
+          } finally {
+            writePending = false;
+            noteSetupAnswer = null;
+            preparation.signal.removeEventListener("abort", onAbort);
+          }
+        } else {
+          // A receipt that never settles is bounded by the same owner: a close
+          // or timeout first leaves the frame's fate unknown. An abort that
+          // lands while the receipt is pending releases the interval's gate and
+          // retires the candidate at once, since the successor owns the episode
+          // now; the incumbent still waits for the receipt's fate (the same
+          // bound applies), as an abort before it settles says nothing about
+          // whether the frame went out.
+          const first = await Promise.race([write, confirmation.settled, whenAborted(preparation.signal)]);
+          if (first === "abort") {
+            if (this.submissionGatePreparation === preparation) this.submissionGatePreparation = null;
+            retireSocket();
+            const fate = await Promise.race([write, confirmation.settled]);
+            written = typeof fate === "boolean" ? fate : true;
+            unconfirmed = written ? "aborted" : null;
+          } else if (typeof first === "boolean") {
+            written = first;
+          } else if (first === "confirmed") {
+            // The server answered the setup, so it has the frame: the receipt,
+            // which the transport may still hold, is not waited for.
+            written = true;
+          } else {
+            // The receipt is still pending, so the frame's fate is unknown.
+            // The server may already have it and have moved the seat's sender,
+            // so it counts as written: the incumbent is not kept as if current.
+            written = true;
+            unconfirmed = first;
+          }
+          if (written && unconfirmed === null) {
+            confirmation.watchAbort(preparation.signal);
+            const outcome = await confirmation.settled;
+            if (outcome !== "confirmed") unconfirmed = outcome;
+          }
+        }
+      } finally {
+        if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+        if (this.confirmingPreparation === preparation) {
+          this.confirmingPreparation = null;
+          this.fencedIncumbent = null;
+        }
+        if (this.submissionGatePreparation === preparation) this.submissionGatePreparation = null;
+        confirmation?.dispose();
+      }
+      // The candidate closed while the write was pending: its close already
+      // settled (or left to the successor) the attachment.
+      if (closedDuringWrite) return;
+      if (!written) {
+        if (this.disposed || this.stateCodecPreparation !== preparation) return;
+        failUnwrittenSetup("Failed to send setup frame");
+        return;
+      }
+      // The candidate's setup is on the wire (or its fate is unknown, above),
+      // and the server replaces the seat's sender on `Reconnect` without
+      // closing the predecessor (`install_full_sender_while_state_locked`).
+      // The incumbent may no longer receive the seat, so from here
+      // cancellation or failure retires BOTH sockets instead of preserving a
+      // possibly deaf one. An `Error` refusal installed nothing, but it ends the
+      // episode terminally, as the base `Error` handler does after its write-time
+      // cutover had already retired the incumbent.
+      //
+      // `detachIncumbent` is the single place that takes the incumbent down,
+      // whether the candidate is adopted or abandoned: detach it, settle its
+      // owned requests, release its decoder and stop its keepalive.
+      const detachIncumbent = (incumbent: PhaseSocketTransport) => {
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        incumbent.onmessage = null;
+        incumbent.onerror = null;
+        incumbent.onclose = null;
+        try {
+          previousPending = this.rejectSocketRequests(false) || previousPending;
+        } finally {
+          closePrevious?.();
+        }
+      };
+      const retireSwappedIncumbent = () => {
+        const incumbent = previous;
+        if (incumbent === null || this.ws !== incumbent) return;
+        this.ws = null;
+        this.closeSocket = null;
+        this.stateCodec.clearRecovery();
+        detachIncumbent(incumbent);
+        if (previousPending) {
+          previousPending = false;
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+      };
+      // Disposal already retired the incumbent and every owned request.
+      if (this.disposed) return;
+      if (unconfirmed !== null) {
+        // Ownership of the seat is unknown: retire the incumbent (and settle
+        // its requests); the candidate is retired by the `finally` below. A
+        // cancelled attachment leaves the episode to its successor; a close or
+        // timeout hands the retry to the one retry owner.
+        retireSwappedIncumbent();
+        if (unconfirmed === "aborted" || this.stateCodecPreparation !== preparation) return;
+        if (unconfirmed === "refused") {
+          // A refusal is terminal, exactly as the `Error` handler treats it:
+          // surface it and end the episode instead of retrying forever.
+          const refusal = confirmation!.refusal!;
+          this.rejectInitialization(serverErrorInitializationError(refusal));
+          if (this.reconnectInFlight) this.failReconnect();
+          this.emit({ type: "error", message: refusal.message });
+          return;
+        }
+        this.rejectInitialization(new AdapterError(
+          "WS_CLOSED",
+          unconfirmed === "timeout"
+            ? "Reconnect was not confirmed in time"
+            : unconfirmed === "overflow"
+              ? "The server sent too much before the reconnect was confirmed"
+              : "Connection closed before the reconnect was confirmed",
+          true,
+        ));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
+      if (this.stateCodecPreparation !== preparation || preparation.signal.aborted) {
+        // A newer attachment (or the end of an initial fallback) cancelled
+        // this one. It owns the episode, so no retry is scheduled from here:
+        // only the deaf incumbent is retired. The candidate follows through
+        // `retireSocket` in the `finally` below.
+        retireSwappedIncumbent();
+        return;
+      }
+      if (closed) {
+        retireSwappedIncumbent();
+        this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
+      // A cancelled candidate's post-write path may already have retired the
+      // incumbent (its seat sender is gone), so detach only a still-current one.
+      const incumbentIsCurrent = previous !== null && this.ws === previous;
+      this.ws = socket.ws;
+      this.closeSocket = closeSocket;
+      this.stateCodec.adopt(bootstrap, socket.ws);
+      this._serverInfo = socket.serverInfo;
+      // Setup is on the wire and confirmed, so the incumbent is now genuinely
+      // replaced. Only a candidate whose setup was never written leaves the
+      // incumbent usable; every written one that was not adopted retired it
+      // above while it was still current.
+      if (previous && incumbentIsCurrent) detachIncumbent(previous);
+      if (previousPending) {
+        previousPending = false;
         this.emit({ type: "actionPendingChanged", pending: false });
-        this.pendingReject(
-          new AdapterError("WS_CLOSED", "Connection closed during action", true),
-        );
-        this.pendingResolve = null;
-        this.pendingReject = null;
       }
-      this.rejectPendingManaPaymentPreviews(
-        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
-      );
-      this.rejectPregameMutation(
-        new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
-      );
-      this.rejectAbandon(new AdapterError("WS_CLOSED", "Connection closed while abandoning game", true));
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
-      } else if (this.pregameReject) {
-        this.pregameReject(
-          new AdapterError("WS_CLOSED", "Connection closed before native seat attachment", true),
-        );
-        this.pregameResolve = null;
-        this.pregameReject = null;
-      } else if (this.gameStartedReject) {
-        this.gameStartedReject(
-          new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-        );
-        this.gameStartedResolve = null;
-        this.gameStartedReject = null;
-      } else if (this.snapshot !== null || this.playerToken !== null) {
-        this.attemptReconnect();
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      this.startPing();
+      // The same buffer stays live while callbacks append synchronous replies.
+      const messages = setupMessages as MessageEvent<string>[] | null;
+      if (messages) {
+        // Index, not an iterator: a consumer callback may synchronously append
+        // its own reply, which must follow every already-admitted frame.
+        for (let index = 0; index < messages.length; index++) {
+          if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+          // The buffered frames are the server's answers, which the merge base
+          // delivered to the live socket handler. A throw there does not undo a
+          // committed attachment: it is reported as an uncaught error (as a raw
+          // socket's handler reports it; the gzip and codec transports swallow
+          // it on live delivery) and the socket and the remaining frames carry
+          // on, so a settled initialization never outlives its transport. The
+          // exception is a frame that was to settle the attachment throwing
+          // before it did (the confirming frame of a reconnect; for an
+          // unconfirmed attachment, the pending initialization): nothing else
+          // would settle it, so it fails the attachment.
+          try {
+            handleSocketMessage(messages[index]!);
+          } catch (error) {
+            const undecided = confirmation === null
+              ? this.initResolve !== null
+              : this.reconnectInFlight && parsedSetupFrames.has(messages[index]!);
+            if (undecided) throw error;
+            reportUncaughtError(error);
+          }
+        }
       }
-    };
-
-    if (!this.send(setupFrame)) {
-      socket.close();
-      if (this.initReject) {
-        this.initReject(
-          new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
-        );
-        this.initResolve = null;
-        this.initReject = null;
+      if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
+      setupMessages = null;
+      socket.ws.onmessage = handleSocketMessage;
+      retained = !this.disposed && this.ws === socket.ws
+        && this.stateCodecPreparation === preparation;
+    } catch (error) {
+      // A throwing listener only fails the attachment it interrupted. Reentry
+      // may already have transferred the pending join to a newer attachment.
+      try {
+        retireSocket();
+      } finally {
+        if (!this.disposed && !this.isSupersededAttachment(preparation)) {
+          this.rejectInitialization(error instanceof Error ? error : new Error(String(error)));
+          if (this.reconnectInFlight) this.failReconnect("failed");
+        }
       }
+    } finally {
+      if (!retained) retireSocket();
     }
   }
 
@@ -562,23 +3104,91 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
+    this.assertNoPendingSubmission();
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
+    }
+
+    return this.submitGameFrame(
+      { type: "Action", data: { action } },
+      new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true),
+    );
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
-    this.emit({ type: "actionPendingChanged", pending: true });
+    return this.submitGameFrame(
+      { type: "Interaction", data: { submission } },
+      new AdapterError("WS_CLOSED", "Failed to send interaction", true),
+    );
+  }
+
+  private assertNoPendingSubmission(): void {
+    // A faulted game never advances again (the fault survives reconnects and restarts);
+    // fail fast instead of parking a submission forever.
+    if (this.aiDriverFault !== null && this.aiDriverFault.gameCode === this._gameCode) {
+      throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
+    }
+    this.stateCodec.assertNotRecovering();
+    // The reconnect interval is open: a game command (Action, Interaction) on
+    // the incumbent would meet the server's seat-authority refusal once the
+    // candidate owns the seat, so it is not sent: the same typed, localized
+    // refusal as during codec recovery. Other requests (concede, emote,
+    // takeback, previews, export, seat mutation, abandon) are not gated: on the
+    // merge base they went to the candidate, adopted at the handshake. Now, with
+    // no incumbent (every product reconnect episode starts after the current
+    // socket closed), they meet the closed-socket path until the bootstrap
+    // adopts the candidate, as they do during the backoff and handshake:
+    // `send` reports an `error`. With a live incumbent (public API only) they
+    // go to it, where a refusal answers only that request.
+    if (this.submissionGatePreparation !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        i18n.t("stateCodec.reconnectSubmissionNotSent"),
+        true,
+      );
+    }
+    if (this.submission.occupied) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "Another game submission is pending; this submission was not sent.",
+        true,
+      );
+    }
+  }
+
+  private submitGameFrame(frame: Record<string, unknown>, sendFailure: AdapterError): Promise<SubmitResult> {
     return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      // If the frame cannot be sent, the server will never reply, so clear the
-      // pending state and reject now instead of leaving the caller hanging.
-      if (!this.send({ type: "Action", data: { action } })) {
-        this.pendingResolve = null;
-        this.pendingReject = null;
+      // Claim before emitting: event listeners run synchronously and may submit
+      // again while handling actionPendingChanged.
+      const submission = this.submission.claim(resolve, reject, this.commandCorrelationNegotiated());
+      try {
+        this.emit({ type: "actionPendingChanged", pending: true });
+      } catch (error) {
+        this.submission.release(submission);
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      // A synchronous listener may close/dispose the adapter or otherwise
+      // settle this slot. Do not send after that owner has been released.
+      if (!this.submission.owns(submission)) return;
+      if (!this.send(this.submission.stamp(frame, submission)) && this.submission.release(submission)) {
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+        reject(sendFailure);
       }
     });
+  }
+
+  /** Whether commands sent now should be stamped; the pending command, not this, decides settlement. */
+  private commandCorrelationNegotiated(): boolean {
+    return this._serverInfo?.commandCorrelation === "CommandIdV1";
   }
 
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
@@ -596,15 +3206,65 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Requests the server-owned trusted engine envelope. The server authorizes
+   * this separately from ordinary redacted state broadcasts.
+   */
+  async exportPersistenceState(): Promise<string> {
+    // An unredacted engine envelope must not cross a cleartext WebSocket. The
+    // native sidecar is a local trusted transport rather than a network socket.
+    if (
+      !this.serverUrl.startsWith("wss://")
+      && !this.isNativeSocket()
+    ) {
+      throw new AdapterError(
+        "WS_ERROR",
+        "Authoritative-state export requires a secure connection",
+        false,
+      );
+    }
+    if (this.sessionIdentityRejected) {
+      throw new AdapterError("WS_ERROR", "Session identity rejected", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    if (this.pendingAuthoritativeStateExport) {
+      throw new AdapterError("WS_ERROR", "Authoritative-state export already in progress", false);
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.pendingAuthoritativeStateExport = { resolve, reject };
+      if (!this.send({ type: "ExportAuthoritativeState" })) {
+        this.pendingAuthoritativeStateExport = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to request authoritative state", true));
+      }
+    });
+  }
+
+  async previewInteraction(
+    request: InteractionPreviewRequest,
+    _actor: PlayerId,
+  ): Promise<InteractionPreview> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return new Promise<InteractionPreview>((resolve, reject) => {
+      this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
+      if (!this.send({ type: "PreviewInteraction", data: { request } })) {
+        this.pendingInteractionPreviews.delete(request.requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
+      }
+    });
+  }
+
   async getState(): Promise<GameState> {
     if (!this.snapshot) {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.snapshot.state;
-  }
-
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
@@ -645,14 +3305,46 @@ export class WebSocketAdapter implements EngineAdapter {
     this.send({ type: "Concede" });
   }
 
+  /** Requests a whole-match concession for this authenticated session. */
+  sendMatchConcede(): void {
+    this.send({ type: "ConcedeMatch" });
+  }
+
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
   }
 
-  /** GH #1507: ask every other human player to approve rolling the game
-   * back to the state immediately before this player's last action. */
-  sendRequestTakeback(): void {
-    this.send({ type: "RequestTakeback" });
+  /**
+   * One click in the running Eye to Eye / Mouth to Mouth contest. The server
+   * authenticates the seat and stamps the instant from its own clock, so the
+   * frame carries only the contest's identity and a sequence number. Never queued:
+   * a click that cannot be sent now is stale by the time a reconnect could deliver
+   * it. Always `true` — the server hosts the contest, so the caller never stamps.
+   */
+  submitContestClick(contest: number, seq: number): boolean {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({ type: "ContestClick", data: { contest, seq } });
+    }
+    return true;
+  }
+
+  /**
+   * GH #1507: ask every other human player to approve rolling the game back.
+   * Defaults to the pre-existing last-action granularity, which keeps the
+   * existing zero-argument call site behaving identically.
+   *
+   * The last-action frame deliberately carries NO `data` key — byte-identical
+   * to the frame this client has always sent, and the shape the server's
+   * `Option<RewindTarget>` newtype variant exists to accept. Only a turn rewind
+   * carries a payload, and the client can only ask for a turn the server itself
+   * published in `rewind_targets`.
+   */
+  sendRequestTakeback(target: RewindTarget = { kind: "last_action" }): void {
+    if (target.kind === "last_action") {
+      this.send({ type: "RequestTakeback" });
+      return;
+    }
+    this.send({ type: "RequestTakeback", data: target });
   }
 
   /** Approve or decline a pending takeback request. */
@@ -682,10 +3374,22 @@ export class WebSocketAdapter implements EngineAdapter {
       this.sendConcede();
     }
     this.disposed = true;
+    this.setSessionLifecycleListeners(false);
+    this.disposeAbort.abort();
+    this.stateCodecPreparation?.abort();
+    this.stateCodecPreparation = null;
+    this.finishSocketDiagnostics("not-attempted");
+    // Native close can follow an error/dispose; its observer removes itself on close.
+    this.socketDiagnostics = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.initialFallback.kind === "reconnecting") {
+      clearTimeout(this.initialFallback.deadlineTimer);
+    }
+    if (this.initialFallback.kind !== "unused") this.initialFallback = { kind: "finished" };
+    this.heldAttachment = null;
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
@@ -693,50 +3397,72 @@ export class WebSocketAdapter implements EngineAdapter {
     this.rejectInitialization(
       new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true),
     );
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+    const closeSocket = this.closeSocket;
+    this.closeSocket = null;
+    closeSocket?.();
+    this.ws = null;
     this.snapshot = null;
+    this.withheldState = null;
+    this.withheldBootstrapFailed = false;
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    this.fullSessionKey = null;
+    this.submission.drop()?.reject(
+      new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+    );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectAuthoritativeStateExport(
+      new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
     );
     this.rejectPregameMutation(
       new AdapterError("WS_CLOSED", "Adapter disposed during seat mutation", true),
     );
     this.rejectAbandon(new AdapterError("WS_CLOSED", "Adapter disposed while abandoning game", true));
     this.reconnectInFlight = false;
+    this.setupWritePreparation = null;
     this._serverInfo = null;
     this.receivedGameStarted = false;
+    this.stateCodec.release();
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
-    if (this.gameEnded) {
+    if (this.gameEnded && !this.terminalCleanupPending) {
       this.emit({ type: "sessionChanged", session: null });
     }
-    this.listeners = [];
+    if (!this.terminalCleanupPending) {
+      this.listeners = [];
+    }
   }
 
   /** Attempt reconnection using stored session data. */
   tryReconnect(session: WsSessionData): boolean {
+    if (this.disposed || this.gameEnded || this.sessionIdentityRejected || this.socketOpening) return false;
+    if (this.reconnectInFlight && this.ws?.readyState === WebSocket.OPEN) return false;
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
+    this.fullSessionKey = session.fullKey;
 
     if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-      this.emit({ type: "reconnectFailed" });
+      // An active initial fallback reports through its initialization only.
+      if (this.initialFallbackActive()) this.failInitialFallback(initialFallbackFailure());
+      else this.emit({ type: "reconnectFailed" });
       return false;
     }
 
     this.reconnectInFlight = true;
+    this.reconnectStartedAt ??= Date.now();
+    this.setSessionLifecycleListeners(true);
     this.attachSocket({
       type: "Reconnect",
       data: {
         game_code: session.gameCode,
         player_token: session.playerToken,
+        full_key: session.fullKey,
       },
     }).catch(() => {
       // attachSocket handles reconnect-driven retries via `attemptReconnect`
@@ -745,36 +3471,470 @@ export class WebSocketAdapter implements EngineAdapter {
     return true;
   }
 
-  private attemptReconnect(): void {
-    if (this.disposed) return;
+  private attemptReconnect(immediate = false): void {
+    if (this.disposed || this.gameEnded || this.sessionIdentityRejected) return;
+    const writingCurrent = this.setupWritePreparation !== null
+      && this.setupWritePreparation === this.stateCodecPreparation;
+    if (this.reconnectTimer !== null || this.socketOpening || writingCurrent) return;
     const session = this.currentSession();
-    if (!session) {
-      this.emit({ type: "reconnectFailed" });
+    const policy = this.reconnectPolicy;
+    this.reconnectStartedAt ??= Date.now();
+    const remainingMs = policy.budgetMs - (Date.now() - this.reconnectStartedAt);
+    const backoff = Math.min(
+      policy.initialDelayMs * 2 ** this.reconnectAttempt,
+      policy.maxDelayMs,
+    );
+    const delay = immediate ? 0 : backoff * (0.8 + Math.random() * 0.2);
+    // An attempt that would only fire at the budget edge can never dial, so
+    // end the episode now rather than waiting out a timer that fails anyway.
+    if (
+      !session
+      || delay >= remainingMs
+      || this.reconnectAttempt >= this.maxReconnectAttempts
+    ) {
+      this.failReconnect();
       return;
     }
-    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
-      this.emit({ type: "reconnectFailed" });
-      return;
-    }
+    this.reconnectInFlight = true;
     this.reconnectAttempt++;
-    const delay = Math.min(Math.pow(2, this.reconnectAttempt - 1) * 1000, 5000);
-    this.emit({
-      type: "reconnecting",
-      attempt: this.reconnectAttempt,
-      maxAttempts: this.maxReconnectAttempts,
-    });
+    const scheduledGeneration = this.attachGeneration;
     this.reconnectTimer = setTimeout(() => {
-      this.tryReconnect(session);
+      this.reconnectTimer = null;
+      // A newer attachment owns the episode now: this timer belongs to the
+      // attempt that scheduled it and must neither settle nor replace it.
+      if (this.attachGeneration !== scheduledGeneration) return;
+      if (Date.now() - this.reconnectStartedAt! >= policy.budgetMs) {
+        this.failReconnect();
+      } else {
+        // The attempt that scheduled this retry is over. An incumbent may
+        // still be open (its transport was preserved through the failed
+        // candidate), so clearing the flag is what lets the retry own a new
+        // attempt instead of being refused by tryReconnect's in-flight guard.
+        this.reconnectInFlight = false;
+        this.tryReconnect(session);
+      }
     }, delay);
+    // The timer is installed before the notification: a listener that starts
+    // a successor retires this timer instead of leaving it under the successor.
+    // The initialization is the single surface of an initial fallback: its
+    // attempts are not announced as a reconnect episode.
+    if (!this.initialFallbackActive()) {
+      this.emit({
+        type: "reconnecting",
+        attempt: this.reconnectAttempt,
+        // Only the loopback schedule is bounded by attempts; a remote episode
+        // ends on its time budget, so no denominator is reported (0 = unbounded).
+        maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
+      });
+    }
+  }
+
+  private failReconnect(outcome: "gave-up" | "failed" = "gave-up"): void {
+    // Retries, budget or attempts ran out inside an initial fallback: the
+    // original initialization fails once and no reconnect episode is announced.
+    if (this.initialFallbackActive()) {
+      this.failInitialFallback(initialFallbackFailure());
+      return;
+    }
+    this.finishSocketDiagnostics(outcome);
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectInFlight = false;
+    // The episode is over: a later tryReconnect starts a fresh budget.
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    this.setSessionLifecycleListeners(false);
+    this.emit({ type: "reconnectFailed" });
+  }
+
+  /** Ends a reconnect episode: the next loss starts a fresh retry budget. */
+  private completeReconnect(inGame: boolean): void {
+    this.finishSocketDiagnostics("resumed");
+    this.reconnectInFlight = false;
+    this.withheldBootstrapFailed = false;
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (!this.initialFallbackActive()) this.emit({ type: "reconnected", inGame });
+  }
+
+  /**
+   * Whether a frame or transport event of `source` (by default the frame being
+   * dispatched) may decide the reconnect episode. While a reconnect interval is
+   * open the incumbent is fenced: its frames may apply their state and answer
+   * its own requests, but only the candidate's answer completes or fails the
+   * episode. The fence names the incumbent, so a successor attachment's own
+   * frames are never held back by it.
+   */
+  private frameDecidesEpisode(source: PhaseSocketTransport | null = this.frameSource): boolean {
+    return this.confirmingPreparation === null || source === null || source !== this.fencedIncumbent;
+  }
+
+  /** Whether the initialization-owned fallback is running right now. */
+  private initialFallbackActive(): boolean {
+    return this.initialFallback.kind === "reconnecting";
+  }
+
+  /**
+   * Admits the initialization-owned fallback for the attachment whose socket
+   * just closed, or returns false and changes nothing. Admission requires the
+   * original remote join to be pending with no GameStarted ever delivered, this
+   * failed attachment's bootstrap still pending, the sticky snapshot-only
+   * policy, and no earlier episode, successor or reconnect in flight. Retired,
+   * pending or foreign bindings never reach here: the caller is the close
+   * consumer of the CURRENT socket and passes its own binding.
+   *
+   * The credentials come from one of two sources, chosen by provenance:
+   *  - `held`, when this SAME socket already accepted SessionAttached: the held
+   *    tuple, admitted for a decode failure, bootstrap rejection or receive
+   *    overload of ANY frame kind (the failed frame need not carry credentials).
+   *    Credentials carried by the failed notice must agree exactly with the held
+   *    tuple; a disagreement is a terminal identity rejection.
+   *  - `salvaged`, otherwise: the credentials of the failed GameStarted `Full`.
+   * Both must name the game being joined.
+   *
+   * Admission publishes nothing. Salvaged credentials seed the session
+   * provisionally so the existing reconnect owners can send the exact
+   * `Reconnect`; held credentials are already published and a retained waiting
+   * snapshot is discarded silently (it is not the recovered board). The caller
+   * schedules the first attempt.
+   */
+  private admitInitialFallback(
+    bootstrap: StateCodecBootstrapBinding,
+    socket: PhaseSocketTransport,
+  ): boolean {
+    if (this.initialFallback.kind !== "unused") return false;
+    if (this.mode !== "join" || this.isNativeSocket()) return false;
+    const gameCode = this.joinGameCode;
+    if (!gameCode || this.initReject === null || this.receivedGameStarted) return false;
+    if (bootstrap.status !== "pending" || bootstrap.socket !== socket) return false;
+    if (this.stateCodec.deliveryPolicy.kind !== "snapshotOnly") return false;
+    if (this.reconnectInFlight || this.reconnectTimer !== null || this.socketOpening) return false;
+    const failure = bootstrap.failure;
+    if (failure === null) return false;
+
+    const held = this.heldAttachment?.socket === socket ? this.heldAttachment.credentials : null;
+    const source: InitialFallbackSource = held === null ? "salvaged" : "held";
+    let credentials: StateCodecJoinCredentials;
+    if (held === null) {
+      if (this.playerToken !== null || this.snapshot !== null) return false;
+      if (failure.joinCredentials === null) return false;
+      credentials = failure.joinCredentials;
+    } else {
+      // The held tuple came from this attachment's own SessionAttached, so
+      // the failed frame (of any kind) need not carry credentials itself.
+      if (
+        failure.reason !== "decodeFailure"
+        && failure.reason !== "bootstrapRejection"
+        && failure.reason !== "receiveOverload"
+      ) return false;
+      credentials = held;
+    }
+    if (credentials.fullKey.game_code !== gameCode) return false;
+    if (held !== null && failure.joinCredentials !== null && !sameJoinCredentials(failure.joinCredentials, held)) {
+      this.rejectSessionIdentity(new AdapterError(
+        "WS_ERROR",
+        "Failed state frame carried credentials that differ from this join's session",
+        false,
+      ));
+      return false;
+    }
+
+    if (held === null) {
+      // The Full key is validated before any credential is written, so a
+      // rejection leaves no provisional session behind.
+      const keyError = this.fullSessionKeyRejection(credentials.fullKey, gameCode);
+      if (keyError !== null) {
+        this.rejectSessionIdentity(keyError);
+        return false;
+      }
+      this._gameCode = gameCode;
+      this._playerId = credentials.yourPlayer;
+      this.playerToken = credentials.playerToken;
+      this.fullSessionKey = credentials.fullKey;
+    } else {
+      this.snapshot = null;
+      this.cachedStateRevision = null;
+    }
+    // One non-extending bound for the whole episode. It also covers an open
+    // socket that never answers, which the scheduling-only budget checks in
+    // attemptReconnect cannot see.
+    const deadlineTimer = setTimeout(
+      () => this.failInitialFallback(initialFallbackFailure()),
+      this.reconnectPolicy.budgetMs,
+    );
+    this.initialFallback = {
+      kind: "reconnecting",
+      source,
+      credentials,
+      deadlineTimer,
+      pregameReturn: "none",
+    };
+    this.heldAttachment = null;
+    return true;
+  }
+
+  /** The plain GameStarted authenticated the fallback: consume the episode silently. */
+  private completeInitialFallback(): void {
+    const episode = this.initialFallback;
+    if (episode.kind === "awaitingGameStarted") {
+      this.initialFallback = { kind: "finished" };
+      return;
+    }
+    if (episode.kind !== "reconnecting") return;
+    // Bookkeeping runs while the episode is still active, so it announces nothing.
+    this.completeReconnect(true);
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "finished" };
+  }
+
+  /** Fails the original initialization once and tears the active episode down. */
+  private failInitialFallback(error: AdapterError): void {
+    if (this.endInitialFallbackAsFailure()) this.rejectInitialization(error);
+  }
+
+  /**
+   * Terminal cleanup of an active episode that did not complete; false when none
+   * is active. Late messages and open continuations are fenced: the current
+   * socket is detached before it is closed, the attachment in flight is
+   * superseded (aborting alone is not enough, because the handshake follows
+   * `disposeAbort`), and every latch the episode owned is cleared. A later
+   * explicit `tryReconnect` may start over; the episode itself never re-admits.
+   */
+  private endInitialFallbackAsFailure(): boolean {
+    const episode = this.initialFallback;
+    if (episode.kind !== "reconnecting") return false;
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "finished" };
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectInFlight = false;
+    this.reconnectAttempt = 0;
+    this.reconnectStartedAt = null;
+    this.setSessionLifecycleListeners(false);
+    this.socketOpening = false;
+    this.withheldBootstrapFailed = false;
+    this.snapshot = null;
+    this.cachedStateRevision = null;
+    this.withheldState = null;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    this.stateCodecPreparation?.abort();
+    this.stateCodecPreparation = null;
+    this.finishSocketDiagnostics("failed");
+    const ws = this.ws;
+    if (ws) {
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      this.ws = null;
+      const closeSocket = this.closeSocket;
+      this.closeSocket = null;
+      closeSocket?.();
+    }
+    this.stateCodec.clearRecovery();
+    switch (episode.source) {
+      case "salvaged":
+        // The salvaged credentials were never authenticated, so none survives
+        // the failure, and no sessionChanged(null) announces a session never
+        // published.
+        this._gameCode = null;
+        this._playerId = null;
+        this.playerToken = null;
+        this.fullSessionKey = null;
+        break;
+      case "held":
+        // Already published by this join's SessionAttached: kept exactly as a
+        // base pending-initialization rejection keeps them, so the persisted
+        // session is not silently contradicted.
+        break;
+    }
+    return true;
+  }
+
+  /**
+   * The server answered the fallback's `Reconnect` with a pregame frame
+   * (GameCreated or SessionAttached) instead of the started game. What that
+   * means depends on where the credentials came from: a salvaged source's seat
+   * already had its first GameStarted delivered, so a pregame reply contradicts
+   * it; a held source's seat is still waiting, so it is the expected return.
+   */
+  private answerFallbackWithPregameFrame(
+    episode: Extract<InitialFallback, { kind: "reconnecting" }>,
+    frame: FallbackPregameFrame,
+  ): void {
+    switch (episode.source) {
+      case "salvaged":
+        this.rejectFallbackPregameReply();
+        break;
+      case "held":
+        this.acceptHeldPregameReply(episode, frame);
+        break;
+    }
+  }
+
+  /**
+   * The server answered a salvaged join's state-recovery `Reconnect` with a
+   * pregame session instead of the started game. The salvaged premise (the
+   * seat's first GameStarted was already delivered) makes that impossible, so
+   * it is an identity failure, never host handling.
+   */
+  private rejectFallbackPregameReply(): void {
+    this.rejectSessionIdentity(new AdapterError(
+      "WS_ERROR",
+      "Server answered the join's reconnect with a pregame session instead of the started game",
+      false,
+    ));
+  }
+
+  /**
+   * Identity preflight of the fallback's GameStarted, before any bootstrap,
+   * cache or episode completion: same game, Full key and seat, and the token
+   * omitted (a reconnect reply carries none) or exactly the retained one.
+   */
+  private acceptFallbackGameStarted(
+    expected: StateCodecJoinCredentials,
+    frame: { your_player: PlayerId; player_token?: string; full_key?: FullSessionKey },
+  ): boolean {
+    const message = sessionIdentityMismatch(identityOfCredentials(expected), {
+      playerId: frame.your_player,
+      playerToken: frame.player_token,
+      fullKey: frame.full_key,
+    }, FALLBACK_GAME_STARTED_RULES);
+    return message === null
+      ? true
+      : this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
+  }
+
+  /**
+   * Records the credentials this join's own SessionAttached delivered, against
+   * the socket that received them. Only a complete tuple counts (nonempty
+   * token, nonnegative safe-integer seat, and the Full key the identity guard
+   * above just accepted), and only for a remote initial join that can still
+   * take the held fallback. The tuple is copied so later frames cannot alias it.
+   */
+  private recordHeldAttachment(attachment: NativeSessionAttachment): void {
+    const socket = this.ws;
+    if (socket === null || this.mode !== "join" || this.isNativeSocket()) return;
+    if (this.initReject === null || this.initialFallback.kind !== "unused") return;
+    if (attachment.playerToken.length === 0 || !Number.isSafeInteger(attachment.playerId)) return;
+    if (attachment.playerId < 0) return;
+    this.heldAttachment = {
+      socket,
+      credentials: {
+        playerToken: attachment.playerToken,
+        yourPlayer: attachment.playerId,
+        fullKey: {
+          game_code: attachment.fullKey.game_code,
+          generation: attachment.fullKey.generation,
+        },
+      },
+    };
+  }
+
+  /**
+   * A held source's pregame reply to the fallback's `Reconnect`: GameCreated,
+   * then SessionAttached. GameCreated is validated against the held identity
+   * and announces nothing (it is the return of an existing seat, not a new
+   * host), and the matching SessionAttached completes the reconnect
+   * bookkeeping silently and parks the join in `awaitingGameStarted`: no waiting
+   * snapshot is sent on this route, and the original initialization resolves
+   * only at the eventual GameStarted. Any mismatch, or a SessionAttached
+   * without its GameCreated, fails the identity before anything is published.
+   */
+  private acceptHeldPregameReply(
+    episode: Extract<InitialFallback, { kind: "reconnecting" }>,
+    frame: FallbackPregameFrame,
+  ): void {
+    const message = frame.type === "SessionAttached" && episode.pregameReturn !== "gameCreated"
+      ? "Server answered the join's reconnect with an unexpected pregame session reply"
+      : sessionIdentityMismatch(identityOfCredentials(episode.credentials), {
+        gameCode: frame.game_code,
+        playerId: frame.player_id,
+        playerToken: frame.player_token,
+        fullKey: frame.full_key,
+      }, frame.type === "GameCreated" ? FALLBACK_GAME_CREATED_RULES : FALLBACK_SESSION_ATTACHED_RULES);
+    if (message !== null) {
+      this.rejectSessionIdentity(new AdapterError("WS_ERROR", message, false));
+      return;
+    }
+    if (frame.type === "GameCreated") {
+      this.initialFallback = { ...episode, pregameReturn: "gameCreated" };
+      return;
+    }
+    // Bookkeeping runs while the episode is still active, so it announces nothing.
+    this.completeReconnect(false);
+    clearTimeout(episode.deadlineTimer);
+    this.initialFallback = { kind: "awaitingGameStarted", credentials: episode.credentials };
+  }
+
+  /** A delivered state ends both withheld conditions. */
+  private settleWithheld(): void {
+    if (this.withheldState) {
+      this.withheldState = null;
+      this.emit({ type: "stateDelivery", withheld: null });
+    }
+    // An incumbent's frame inside a reconnect interval does not announce the
+    // candidate's episode as resumed (see `frameDecidesEpisode`).
+    if (this.withheldBootstrapFailed && this.frameDecidesEpisode()) {
+      this.withheldBootstrapFailed = false;
+      this.emit({ type: "reconnected", inGame: true });
+    }
+  }
+
+  private recordSocketLoss(id: string): SocketReconnectOutcome {
+    if (this.sessionIdentityRejected) return "failed";
+    if (this.disposed || this.gameEnded || this.maxReconnectAttempts === 0) return "not-attempted";
+    if (!this.snapshot && !this.playerToken && !this.reconnectInFlight) return "not-attempted";
+    if (this.pendingDiagnosticLosses.size >= DIAGNOSTIC_HISTORY_LIMIT) {
+      const oldest = this.pendingDiagnosticLosses.values().next().value;
+      if (oldest !== undefined) this.pendingDiagnosticLosses.delete(oldest);
+    }
+    this.pendingDiagnosticLosses.add(id);
+    return "pending";
+  }
+
+  private finishSocketDiagnostics(outcome: Exclude<SocketReconnectOutcome, "pending">): void {
+    completeSocketDiagnostics(this.pendingDiagnosticLosses, outcome);
+    this.pendingDiagnosticLosses.clear();
+  }
+
+  private setSessionLifecycleListeners(active: boolean): void {
+    if (active === this.sessionLifecycleListening) return;
+    this.sessionLifecycleListening = active;
+    if (active) {
+      window.addEventListener("online", this.retryAfterResume);
+      document.addEventListener("visibilitychange", this.retryAfterResume);
+    } else {
+      window.removeEventListener("online", this.retryAfterResume);
+      document.removeEventListener("visibilitychange", this.retryAfterResume);
+    }
   }
 
   private startPing(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-    }
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.lastInboundAt = Date.now();
+    this.lastPingTickAt = this.lastInboundAt;
     this.pingInterval = setInterval(() => {
-      this.send({ type: "Ping", data: { timestamp: Date.now() } });
-    }, 5000);
+      const now = Date.now();
+      // Background throttling or local suspension is not evidence of a dead peer.
+      if (document.visibilityState === "hidden" || now - this.lastPingTickAt > 2 * PING_INTERVAL_MS) {
+        this.lastInboundAt = now;
+      }
+      this.lastPingTickAt = now;
+      const silenceBudgetMs = this._serverInfo?.heartbeat?.silenceBudgetMs;
+      // Silence is recorded, never acted on: a healthy socket can be mid-way
+      // through a long state frame (no complete message for a while), and on
+      // legacy servers AI runs inline for minutes. Closing would add drops; the
+      // transport's own close remains the only disconnect signal.
+      if (silenceBudgetMs !== undefined && now - this.lastInboundAt >= silenceBudgetMs) {
+        this.socketDiagnostics?.markSilenceExceeded();
+      }
+      this.send({ type: "Ping", data: { timestamp: now } });
+    }, PING_INTERVAL_MS);
   }
 
   private nativeAiSetupFrame(options: NativeAiAdapterOptions) {
@@ -820,6 +3980,9 @@ export class WebSocketAdapter implements EngineAdapter {
             deck: { type: "DeckList", data: seat.deck },
           })),
           format_config: options.formatConfig ?? null,
+          ...(options.boosterPackPool !== undefined
+            ? { booster_pack_pool: options.boosterPackPool }
+            : {}),
           start_when_full: false,
           ranked: false,
         },
@@ -842,8 +4005,21 @@ export class WebSocketAdapter implements EngineAdapter {
       data: {
         game_code: options.gameCode,
         player_token: options.playerToken,
+        full_key: options.fullKey,
       },
     };
+  }
+
+  /** Seeds persisted native credentials before either initialization path
+   * attaches the socket, so its first reconnect response can be authenticated. */
+  private seedNativeReconnectSession(): void {
+    const options = this.options.nativePregame;
+    if (options?.kind !== "reconnect") return;
+
+    this._gameCode = options.gameCode;
+    this._playerId = options.playerId;
+    this.playerToken = options.playerToken;
+    this.fullSessionKey = options.fullKey;
   }
 
   private nativeSocketOptions(): NativeSocketAdapterOptions | null {
@@ -895,25 +4071,33 @@ export class WebSocketAdapter implements EngineAdapter {
    * throws, so callers — especially `submitAction` — can recover rather than
    * leaving the adapter wedged. Mirrors the guarded send in `PeerSession`.
    */
-  private send(msg: unknown): boolean {
-    const ws = this.ws;
+  private send(msg: unknown, ws = this.ws): boolean {
+    // An active initial fallback reports through its initialization only.
+    const quiet = this.initialFallbackActive();
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      this.emit({
-        type: "error",
-        message: "Cannot send message: WebSocket is not open.",
-      });
+      if (!quiet) {
+        this.emit({
+          type: "error",
+          message: "Cannot send message: WebSocket is not open.",
+        });
+      }
       return false;
     }
     try {
       ws.send(JSON.stringify(msg));
+      if (!(ws instanceof GzipEnvelopeSocket) && !(ws instanceof StateCodecSocket)) {
+        this.socketDiagnostics?.didSend();
+      }
       return true;
     } catch (err) {
-      this.emit({
-        type: "error",
-        message: `Failed to send message: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      });
+      if (!quiet) {
+        this.emit({
+          type: "error",
+          message: `Failed to send message: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
       return false;
     }
   }
@@ -925,12 +4109,44 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingManaPaymentPreviews.clear();
   }
 
+  private rejectAuthoritativeStateExport(error: Error): void {
+    this.pendingAuthoritativeStateExport?.reject(error);
+    this.pendingAuthoritativeStateExport = null;
+  }
+
+  private rejectPendingInteractionPreviews(error: Error): void {
+    for (const { reject } of this.pendingInteractionPreviews.values()) {
+      reject(error);
+    }
+    this.pendingInteractionPreviews.clear();
+  }
+
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
   getServerInfo(): ServerInfo | null {
     return this._serverInfo;
   }
 
-  private handleMessage(msg: { type: string; data?: unknown }): void {
+  /**
+   * The one place an inbound message can end an active initial fallback episode
+   * (see `episodeRouting` for each message type's class). True when the message
+   * ended the episode and the original initialization, so no handler runs.
+   */
+  private routeFallbackEpisode(msg: { type: string; data?: unknown }): boolean {
+    if (!this.initialFallbackActive()) return false;
+    const routing = episodeRouting(msg);
+    switch (routing.kind) {
+      case "terminal":
+        this.failInitialFallback(routing.error);
+        return true;
+      case "neutral":
+        return false;
+    }
+  }
+
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): true | void {
+    if (this.sessionIdentityRejected) return;
+    if (this.routeFallbackEpisode(msg)) return;
+
     switch (msg.type) {
       // ServerHello is no longer observed here — the shared
       // `openPhaseSocket` helper consumes it during `attachSocket`, and
@@ -938,10 +4154,29 @@ export class WebSocketAdapter implements EngineAdapter {
       // post-handshake message loop begins.
 
       case "GameCreated": {
-        const data = msg.data as { game_code: string; player_token: string };
+        const data = msg.data as {
+          game_code: string;
+          player_token: string;
+          full_key?: FullSessionKey;
+        };
+        // Intercepted before the ordinary host branch: during an initial
+        // fallback a pregame reply is never a new host.
+        const fallback = this.initialFallback;
+        if (fallback.kind === "reconnecting") {
+          this.answerFallbackWithPregameFrame(fallback, { type: "GameCreated", ...data });
+          break;
+        }
+        if (!this.acceptNativeReconnectIdentity({
+          gameCode: data.game_code,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
         this._gameCode = data.game_code;
         this.playerToken = data.player_token;
+        if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         this.hostWaitingForOpponent = true;
+        // A hosting reconnect is answered with GameCreated, not GameStarted.
+        if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(false);
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "gameCreated", gameCode: data.game_code });
         this.emit({ type: "waitingForOpponent" });
@@ -949,15 +4184,39 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "SessionAttached": {
-        const data = msg.data as { game_code: string; player_id: PlayerId; player_token: string };
+        const data = msg.data as {
+          game_code: string;
+          player_id: PlayerId;
+          player_token: string;
+          full_key?: FullSessionKey;
+        };
+        const fallback = this.initialFallback;
+        if (fallback.kind === "reconnecting") {
+          this.answerFallbackWithPregameFrame(fallback, { type: "SessionAttached", ...data });
+          break;
+        }
+        if (!this.acceptNativeReconnectIdentity({
+          gameCode: data.game_code,
+          playerId: data.player_id,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
+        this._gameCode = data.game_code;
+        const fullKey = data.full_key;
+        if (!fullKey) {
+          this.acceptFullSessionKey(undefined);
+          break;
+        }
+        if (!this.acceptFullSessionKey(fullKey)) break;
         const attachment: NativeSessionAttachment = {
           gameCode: data.game_code,
           playerId: data.player_id,
           playerToken: data.player_token,
+          fullKey,
         };
-        this._gameCode = attachment.gameCode;
         this._playerId = attachment.playerId;
         this.playerToken = attachment.playerToken;
+        this.recordHeldAttachment(attachment);
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "sessionAttached", attachment });
         if (this.pregameResolve) {
@@ -1014,11 +4273,10 @@ export class WebSocketAdapter implements EngineAdapter {
         // `GameStarted` that will never come.
         const data = msg.data as { game_code: string };
         this.emit({ type: "passwordRequired", gameCode: data.game_code });
-        if (this.reconnectInFlight) {
-          this.reconnectInFlight = false;
-          this.reconnectAttempt = 0;
-          this.emit({ type: "reconnectFailed" });
-        }
+        // An incumbent's answer inside a reconnect interval does not decide
+        // the candidate's episode (see `frameDecidesEpisode`).
+        if (!this.frameDecidesEpisode()) break;
+        if (this.reconnectInFlight) this.failReconnect("failed");
         if (this.initReject) {
           this.initReject(
             new AdapterError(
@@ -1034,106 +4292,196 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
-        if (this.reconnectInFlight) {
-          this.reconnectInFlight = false;
-          this.reconnectAttempt = 0;
-          this.emit({ type: "reconnected" });
-        } else if (this.hostWaitingForOpponent) {
-          this.hostWaitingForOpponent = false;
-          this.emit({
-            type: "opponentJoined",
-            opponentName: data.opponent_name,
-          });
+        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
+        if (this.stateCodec.recovering
+          && this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) {
+          // A recovery Full older than the applied revision is not accepted
+          // evidence: declining it keeps the recovery gate closed instead of
+          // publishing a backwards snapshot as the receipt that reopens it.
+          // An ordinary bootstrap is still allowed to reseed the baseline.
+          break;
         }
+        const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
+          ? this.options.nativePregame
+          : null;
+        // The initial fallback's reply is validated against the retained
+        // credentials before it bootstraps anything, then consumes the episode
+        // before any subscriber can run: nothing it publishes can race its
+        // deadline or re-enter it.
+        const fallback = this.initialFallback.kind === "reconnecting"
+          || this.initialFallback.kind === "awaitingGameStarted"
+          ? this.initialFallback
+          : null;
+        // Only a salvaged source still owes the session its first publication.
+        const publishesRetainedSession = fallback?.kind === "reconnecting" && fallback.source === "salvaged";
+        if (fallback !== null) {
+          if (!this.acceptFallbackGameStarted(fallback.credentials, data)) break;
+          this.completeInitialFallback();
+        }
+        if (!this.acceptNativeReconnectIdentity({
+          playerId: data.your_player,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
+        if (nativeReconnect) {
+          if (!this.acceptFullSessionKey(data.full_key)) break;
+        }
+        // Commit the bootstrap before any listener runs: `emit` does not isolate
+        // listener exceptions, so a listener that threw in an emit ahead of
+        // these would leave a delivered bootstrap unapplied and its codec
+        // binding pending on a live socket.
         const startedSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
+            viewerInteraction: data.viewer_interaction,
           },
         );
+        this.cachedStateRevision = data.state_revision ?? null;
         this._playerId = data.your_player;
-        if (this.options.nativePregame?.kind === "reconnect") {
-          const expected = this.options.nativePregame;
-          if (data.your_player !== expected.playerId) {
-            const error = new AdapterError(
-              "WS_ERROR",
-              `Native reconnect attached player ${data.your_player}, expected ${expected.playerId}`,
-              false,
-            );
-            this.rejectInitialization(error);
-            this.emit({ type: "error", message: error.message });
-            break;
-          }
-          const attachment: NativeSessionAttachment = {
-            gameCode: expected.gameCode,
-            playerId: expected.playerId,
-            playerToken: expected.playerToken,
-          };
-          this.emit({ type: "sessionChanged", session: this.currentSession() });
-          this.emit({ type: "sessionAttached", attachment });
-          this.pregameResolve?.(attachment);
-          this.pregameResolve = null;
-          this.pregameReject = null;
-        }
-        this.receivedGameStarted = true;
+        // The waiters, and the latch that lets a late `waitForGameStarted` skip
+        // its wait, belong to the episode: an incumbent's GameStarted inside a
+        // reconnect interval applies its state but leaves them to the candidate.
+        const decidesWaiters = this.frameDecidesEpisode();
+        if (decidesWaiters) this.receivedGameStarted = true;
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
         if (!this._gameCode && this.joinGameCode) {
           this._gameCode = this.joinGameCode;
         }
-        if (data.player_token) {
-          this.playerToken = data.player_token;
-          this.emit({ type: "sessionChanged", session: this.currentSession() });
+        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
+        if (!nativeReconnect && data.player_token) this.playerToken = data.player_token;
+        // The attachment is bootstrapped now: every identity guard above
+        // passed and the snapshot is cached.
+        this.stateCodec.accept(this.ws);
+        // The bootstrap's own waiters are captured before any listener runs: the
+        // snapshot and binding are committed, so a listener that throws on the
+        // announcements below must not leave them pending, and a waiter a
+        // reentrant listener installs belongs to its successor, not to this frame.
+        const initResolve = decidesWaiters ? this.initResolve : null;
+        const gameStartedResolve = decidesWaiters ? this.gameStartedResolve : null;
+        const initializedNow = initResolve !== null;
+        try {
+          // The episode is settled in `finally`: a listener that throws on
+          // `bootstrapDelivered` must not leave a committed bootstrap with its
+          // reconnect episode open (the drain of a confirmed attachment isolates
+          // the throw and keeps the socket).
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+          } finally {
+            if (this.reconnectInFlight) {
+              if (this.frameDecidesEpisode()) this.completeReconnect(true);
+            } else if (this.hostWaitingForOpponent) {
+              this.hostWaitingForOpponent = false;
+              this.emit({
+                type: "opponentJoined",
+                opponentName: data.opponent_name,
+              });
+            }
+          }
+          this.settleWithheld();
+          if (nativeReconnect) {
+            const attachment: NativeSessionAttachment = {
+              gameCode: nativeReconnect.gameCode,
+              playerId: nativeReconnect.playerId,
+              playerToken: nativeReconnect.playerToken,
+              fullKey: nativeReconnect.fullKey,
+            };
+            this.emit({ type: "sessionChanged", session: this.currentSession() });
+            this.emit({ type: "sessionAttached", attachment });
+            this.pregameResolve?.(attachment);
+            this.pregameResolve = null;
+            this.pregameReject = null;
+          }
+          // A salvaged fallback's reply omits the token; the retained credentials
+          // are published here, once, as the session this join now owns. A held
+          // fallback's session was published by its SessionAttached and is not
+          // repeated.
+          if (!nativeReconnect && (data.player_token || fallback !== null)) {
+            if (fallback === null || publishesRetainedSession) {
+              this.emit({ type: "sessionChanged", session: this.currentSession() });
+            }
+          }
+          const playerNames = data.player_names === undefined
+            ? undefined
+            : playerNamesFromWire(data.player_names);
+          this.emit({
+            type: "playerIdentity",
+            playerId: data.your_player,
+            opponentName: data.opponent_name ?? null,
+            ...(playerNames === undefined ? {} : { playerNames }),
+          });
+        } finally {
+          if (initResolve) {
+            // CR 103.1: the server sends the StartingPlayerContest event only on
+            // the initial GameStarted (drained server-side, so reconnects carry
+            // none). Stash it for initializeGame() to return, routing it through
+            // the same gameStore.initGame contest path as local games.
+            this.initStartEvents = data.events ?? [];
+            initResolve();
+            if (this.initResolve === initResolve) {
+              this.initResolve = null;
+              this.initReject = null;
+            }
+          }
+          if (gameStartedResolve) {
+            gameStartedResolve();
+            if (this.gameStartedResolve === gameStartedResolve) {
+              this.gameStartedResolve = null;
+              this.gameStartedReject = null;
+            }
+          }
         }
-        const playerNames = data.player_names === undefined
-          ? undefined
-          : playerNamesFromWire(data.player_names);
-        this.emit({
-          type: "playerIdentity",
-          playerId: data.your_player,
-          opponentName: data.opponent_name ?? null,
-          ...(playerNames === undefined ? {} : { playerNames }),
-        });
-        const initializedNow = this.initResolve !== null;
-        if (this.initResolve) {
-          // CR 103.1: the server sends the StartingPlayerContest event only on
-          // the initial GameStarted (drained server-side, so reconnects carry
-          // none). Stash it for initializeGame() to return, routing it through
-          // the same gameStore.initGame contest path as local games.
-          this.initStartEvents = data.events ?? [];
-          this.initResolve();
-          this.initResolve = null;
-          this.initReject = null;
-        }
-        if (this.gameStartedResolve) {
-          this.gameStartedResolve();
-          this.gameStartedResolve = null;
-          this.gameStartedReject = null;
-        }
+        // Always an array, never `undefined`: on this transport `undefined`
+        // would mean "this transport does not publish", which is false here —
+        // an omitted field means the server published none.
+        const startedRewindTargets = data.rewind_targets ?? [];
         if (this.options.nativePregame) {
           this.emit({
             type: "stateChanged",
             snapshot: startedSnapshot,
             events: data.events ?? [],
             serverRevision: data.state_revision,
+            rewindTargets: startedRewindTargets,
           });
         } else if (!initializedNow) {
           // Reconnect path — no initResolve pending, so emit state change
           // so GameProvider's event listener populates the store. Emits the
           // cached snapshot, which carries the derived-attached state (this
           // emit previously sent the raw `data.state`, dropping `derived`).
-          this.emit({ type: "stateChanged", snapshot: startedSnapshot, events: [] });
+          this.emit({
+            type: "stateChanged",
+            snapshot: startedSnapshot,
+            events: [],
+            rewindTargets: startedRewindTargets,
+          });
         }
-        break;
+        return true;
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
+        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) {
+          // A stale snapshot is never applied, but if it is this connection's
+          // own correlated completion it still answers the pending command;
+          // dropping it would leave the submission slot occupied. Legacy
+          // (uncorrelated) frames keep the old drop-only behaviour.
+          if (msg.command_id !== undefined) {
+            const stalePending = this.submission.take(msg.command_id);
+            if (stalePending) {
+              stalePending.resolve({ events: data.events, log_entries: data.log_entries });
+              this.emit({ type: "actionPendingChanged", pending: false });
+            }
+          }
+          break;
+        }
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -1143,17 +4491,21 @@ export class WebSocketAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
+            viewerInteraction: data.viewer_interaction,
           },
         );
-        const resolvedAction = this.pendingResolve !== null;
-        if (this.pendingResolve) {
+        this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
+        this.settleWithheld();
+        const pending = this.submission.take(msg.command_id);
+        const resolvedAction = pending !== null;
+        if (pending) {
+          pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingResolve({ events: data.events, log_entries: data.log_entries });
-          this.pendingResolve = null;
-          this.pendingReject = null;
         }
         if (!resolvedAction || this.options.nativePregame) {
           this.emit({
@@ -1162,20 +4514,110 @@ export class WebSocketAdapter implements EngineAdapter {
             events: data.events,
             logEntries: data.log_entries,
             serverRevision: data.state_revision,
+            rewindTargets: data.rewind_targets ?? [],
           });
+        }
+        return true;
+      }
+
+      case "ActionRejected": {
+        const data = msg.data as { rejection?: unknown };
+        const error = isActionRejection(data.rejection)
+          ? actionRejectionError(data.rejection)
+          : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.reject(error);
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else {
+          const unmatched = this.submission.unmatched(msg.command_id);
+          // Legacy servers always released the pending indicator here.
+          if (unmatched.releasesIndicator) {
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+          // An ActionRejected without a command_id is not an answer to this
+          // connection's command; surface it without releasing the slot.
+          if (unmatched.surfaces) {
+            this.emit({ type: "requestRejected", reason: error.message });
+          }
         }
         break;
       }
 
-      case "ActionRejected": {
-        const data = msg.data as { reason: string };
-        this.emit({ type: "actionPendingChanged", pending: false });
-        if (this.pendingReject) {
-          this.pendingReject(
-            actionRejectionError(data.reason),
-          );
-          this.pendingResolve = null;
-          this.pendingReject = null;
+      case "ActionFailed": {
+        const data = msg.data as { message: string };
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).surfaces) {
+          this.emit({ type: "operationFailed", message: data.message });
+        }
+        break;
+      }
+
+      case "StateWithheld": {
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          state_revision: number;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        // Without a delivered board the seat cannot reach the menu: fail the join recoverably.
+        if (data.withheld.type === "GameStarted" && this.snapshot === null) {
+          // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
+          const seat = data.withheld.data.your_player;
+          this._playerId = seat;
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+            this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
+          } finally {
+            // The failure is settled even when a listener throws above, and
+            // an incumbent's notice inside a reconnect interval does not
+            // decide the candidate's episode (see `frameDecidesEpisode`).
+            try {
+              if (this.frameDecidesEpisode()) {
+                this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+                if (this.reconnectInFlight) {
+                  this.failReconnect("failed");
+                  this.withheldBootstrapFailed = true;
+                }
+              }
+            } finally {
+              this.emit({ type: "operationFailed", message: data.reason });
+            }
+          }
+          break;
+        }
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        if (data.withheld.type === "GameStarted") {
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+          } finally {
+            if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(true);
+          }
+        } else {
+          const pending = this.submission.take(msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        // A stale notice still answers its command but must not report a newer board as withheld.
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
+        this.withheldState = { revision: data.state_revision, reason: data.reason };
+        this.emit({ type: "stateDelivery", withheld: this.withheldState });
+        break;
+      }
+
+      case "ActionNoOp": {
+        const pending = this.submission.take(msg.command_id);
+        if (pending) {
+          pending.resolve({ events: [], log_entries: [] });
+          this.emit({ type: "actionPendingChanged", pending: false });
+        } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+          // Legacy servers always released the pending indicator here.
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }
@@ -1191,17 +4633,109 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ManaPaymentPreviewRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(actionRejectionError(data.reason));
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
         }
         break;
       }
 
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+        }
+        break;
+      }
+
+      case "AuthoritativeStateExport": {
+        const data = msg.data;
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        if (pending) {
+          if (
+            typeof data === "object"
+            && data !== null
+            && "state" in data
+            && typeof data.state === "string"
+          ) {
+            pending.resolve(data.state);
+          } else {
+            pending.reject(new AdapterError(
+              "WS_ERROR",
+              "Server sent an invalid authoritative-state export.",
+              false,
+            ));
+          }
+        }
+        break;
+      }
+
+      // `ServerMessage` carries no `rename_all`, so its own fields are
+      // snake_case on the wire while the engine DTO inside carries camelCase.
+      case "InteractionPreview": {
+        const data = msg.data as { preview: InteractionPreview };
+        const pending = this.pendingInteractionPreviews.get(data.preview.requestId);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.preview.requestId);
+          pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "AuthoritativeStateExportFailed": {
+        const data = msg.data;
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        pending?.reject(new AdapterError(
+          AdapterErrorCode.REQUEST_FAILED,
+          typeof data === "object"
+            && data !== null
+            && "message" in data
+            && typeof data.message === "string"
+            ? data.message
+            : "Authoritative-state export failed.",
+          true,
+        ));
+        break;
+      }
+
+      case "InteractionPreviewFailed": {
+        const data = msg.data as { request_id: string; message: string };
+        const pending = this.pendingInteractionPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.request_id);
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+        }
+        break;
+      }
+
+      default:
+        this.rejectAuthoritativeStateExport(
+          new AdapterError("WS_ERROR", "Server sent an unrecognized WebSocket frame.", false),
+        );
+        break;
+
+      case "RequestRejected": {
+        const data = msg.data as { reason?: unknown };
+        this.emit({
+          type: "requestRejected",
+          reason: typeof data.reason === "string" ? data.reason : "Server rejected the request.",
+        });
+        break;
+      }
+
       case "OpponentDisconnected": {
-        const data = msg.data as { grace_seconds: number };
+        const data = msg.data as { grace_seconds: number; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({
           type: "opponentDisconnected",
           graceSeconds: data.grace_seconds,
@@ -1210,7 +4744,69 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({ type: "opponentReconnected" });
+        break;
+      }
+
+      case "TerminalResult": {
+        const data = msg.data;
+        if (!data || typeof data !== "object") break;
+        const delivery = (data as { delivery?: unknown }).delivery;
+        // Only a well-formed delivery for this attachment's exact Full identity
+        // ends the game. Anything else is ignored before it can claim terminal
+        // ownership, so the live session keeps its error and reconnect paths.
+        if (!this.acceptsTerminalDelivery(delivery)) break;
+        // Claim terminal ownership at frame acceptance, before any await. A
+        // transport error or close that lands while the delivery is being
+        // persisted must not surface as a session failure (whose consumers
+        // dispose this adapter and its listeners before the result is
+        // published) or start a reconnect.
+        this.gameEnded = true;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        if (this.options.nativePregame?.callerManagedTerminalDelivery) {
+          this.emit({ type: "sessionChanged", session: null });
+          this.emit({ type: "terminalDelivery", delivery });
+          break;
+        }
+        // The resumable session is kept until the delivery is durably committed
+        // and acknowledged: `dispose()` leaves it alone while cleanup is pending.
+        // On retention failure nothing is acknowledged and the session is never
+        // cleared, so the server-side result is not discarded; the failure is
+        // surfaced as `terminalUnavailable`.
+        this.terminalCleanupPending = true;
+        const terminalSession = this.currentSession();
+        void (async () => {
+          if (!(await commitFullTerminalDelivery(delivery))) {
+            this.emit({
+              type: "terminalUnavailable",
+              message: "Failed to retain terminal delivery",
+            });
+            return;
+          }
+          if (terminalSession) {
+            this.emit({ type: "sessionChanged", session: { ...terminalSession, terminalOnly: true } });
+          }
+          this.emit({ type: "terminalDelivery", delivery });
+          if (await acknowledgeFullTerminalDelivery(
+            this.serverUrl,
+            delivery.deliveryId,
+            delivery.credential,
+            this.nativeSocketOptions()?.socketFactory,
+          )) {
+            this.terminalCleanupPending = false;
+            this.emit({ type: "sessionChanged", session: null });
+            if (this.disposed) {
+              this.listeners = [];
+            }
+          }
+        })().catch((error: unknown) => {
+          this.emit({
+            type: "terminalUnavailable",
+            message: error instanceof Error ? error.message : "Terminal acknowledgement failed",
+          });
+        });
         break;
       }
 
@@ -1243,6 +4839,13 @@ export class WebSocketAdapter implements EngineAdapter {
         break;
       }
 
+      case "ContestProgress": {
+        const data = msg.data as { contest: number; clicks: [PlayerId, number][]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        this.emit({ type: "contestProgress", contest: data.contest, clicks: data.clicks });
+        break;
+      }
+
       case "TimerUpdate": {
         const data = msg.data as { player: PlayerId; remaining_seconds: number };
         this.emit({
@@ -1254,20 +4857,21 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TakebackRequested": {
-        const data = msg.data as { requester: PlayerId; requester_name: string };
+        const data = msg.data as { requester: PlayerId; requester_name: string; voters: PlayerId[] };
         this.emit({
           type: "takebackRequested",
           requester: data.requester,
           requesterName: data.requester_name,
+          voters: data.voters,
         });
         break;
       }
 
       case "TakebackResolved": {
-        const data = msg.data as { approved: boolean; resolved_by?: PlayerId | null };
+        const data = msg.data as { resolution: TakebackResolution; resolved_by?: PlayerId | null };
         this.emit({
           type: "takebackResolved",
-          approved: data.approved,
+          resolution: data.resolution,
           resolvedBy: data.resolved_by ?? null,
         });
         break;
@@ -1329,27 +4933,142 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string; code?: string };
-        const initializationError = data.code === "deck_rejected"
-          ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
-          : actionRejectionError(data.message);
-        this.rejectInitialization(initializationError);
+        // While a reconnect interval is open this frame came from the incumbent:
+        // it answers the incumbent's own request, for example the server's
+        // seat-authority refusal once the candidate owns the seat.
+        const episode = this.frameDecidesEpisode();
+        const terminal = episode && (this.reconnectInFlight || this.initReject !== null
+          || this.pregameReject !== null || this.gameStartedReject !== null);
+        if (episode) this.rejectInitialization(serverErrorInitializationError(data));
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
-        this.emit({ type: "error", message: data.message });
+        if (episode && this.reconnectInFlight) this.failReconnect();
+        this.emit({ type: terminal ? "error" : "operationFailed", message: data.message });
+        break;
+      }
+
+      case "AiDriverFault": {
+        const data = msg.data as {
+          fault: { id: number; after_state_revision: number; cause: unknown };
+        };
+        const message = "Native AI driver stopped; this game can no longer advance.";
+        this.aiDriverFault = { gameCode: this._gameCode, message };
+        const faulted = this.submission.drop();
+        if (faulted) {
+          faulted.reject(new AdapterError("WS_ERROR", message, false));
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+        this.emit({
+          type: "aiDriverFault",
+          id: data.fault.id,
+          revision: data.fault.after_state_revision,
+          message,
+        });
+        // Terminal for this game, as before: the native driver is gone, so
+        // consumers dispose the session and show the "game cannot continue"
+        // surface. `aiDriverFault` above stays for P2P relay and diagnostics.
+        this.emit({ type: "error", message });
         break;
       }
     }
   }
 
   private currentSession(): WsSessionData | null {
-    if (!this._gameCode || !this.playerToken) {
+    if (!this._gameCode || !this.playerToken || !this.fullSessionKey) {
       return null;
     }
     return {
       gameCode: this._gameCode,
+      ...(this._playerId !== null ? { playerId: this._playerId } : {}),
       playerToken: this.playerToken,
+      fullKey: this.fullSessionKey,
       serverUrl: this.serverUrl,
       timestamp: Date.now(),
     };
+  }
+
+  /** Rejects missing or changed Full identities before they can be persisted. */
+  private acceptFullSessionKey(key: FullSessionKey | undefined): boolean {
+    const error = this.fullSessionKeyRejection(key, this._gameCode);
+    if (error !== null) return this.rejectSessionIdentity(error);
+    // No rejection implies a present key; `?? null` only narrows the type.
+    this.fullSessionKey = key ?? null;
+    return true;
+  }
+
+  /**
+   * Why a Full key cannot be adopted for `gameCode`, or null when it can: it is
+   * missing or names another game, or it changes the identity already held.
+   * Reads state only, so a caller can validate a key before it writes any of the
+   * credentials the key belongs to.
+   */
+  private fullSessionKeyRejection(
+    key: FullSessionKey | undefined,
+    gameCode: string | null,
+  ): AdapterError | null {
+    if (!key || key.game_code !== gameCode || key.generation < 1) {
+      return new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
+    }
+    if (this.fullSessionKey && !sameFullSessionKey(this.fullSessionKey, key)) {
+      return new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
+    }
+    return null;
+  }
+
+  /**
+   * A terminal delivery is accepted only once this attachment holds an exact
+   * Full identity and the delivery names that same game and generation.
+   * Unlike `acceptFullSessionKey`, a mismatch does not latch a session
+   * rejection: the foreign frame is dropped and the live session is untouched.
+   */
+  private acceptsTerminalDelivery(delivery: unknown): delivery is FullTerminalDelivery {
+    return isValidFullTerminalDelivery(delivery)
+      && this.fullSessionKey !== null
+      && sameFullSessionKey(this.fullSessionKey, delivery.key);
+  }
+
+  /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */
+  private acceptFollowUpFullSessionKey(key: FullSessionKey | undefined): boolean {
+    return !this.fullSessionKey && !key
+      ? true
+      : this.acceptFullSessionKey(key);
+  }
+
+  /** Reject identity-bearing reconnect frames before they can update session state. */
+  private acceptNativeReconnectIdentity(frame: SessionIdentityFrame): boolean {
+    const expected = this.options.nativePregame?.kind === "reconnect"
+      ? this.options.nativePregame
+      : null;
+    if (!expected) return true;
+
+    const errorMessage = sessionIdentityMismatch(expected, frame, NATIVE_RECONNECT_RULES);
+    if (!errorMessage) return true;
+
+    return this.rejectSessionIdentity(new AdapterError("WS_ERROR", errorMessage, false));
+  }
+
+  /** Latches an invalid Full identity before later frames can mutate session state. */
+  private rejectSessionIdentity(error: AdapterError): false {
+    if (this.sessionIdentityRejected) return false;
+
+    // Decided before the latch and the cleanup: an active initial fallback
+    // reports the identity failure through its initialization only.
+    const fallback = this.initialFallbackActive();
+    this.sessionIdentityRejected = true;
+    // A reconnect interval that is open belongs to the rejected identity too:
+    // its candidate is retired through the attachment's abort, never adopted.
+    this.confirmingPreparation?.abort(error);
+    this.finishSocketDiagnostics("failed");
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    this.endInitialFallbackAsFailure();
+    this.rejectInitialization(error);
+    this.rejectAuthoritativeStateExport(error);
+    this.rejectPregameMutation(error);
+    if (!fallback) this.emit({ type: "error", message: error.message });
+    this.closeSocket?.();
+    return false;
   }
 }

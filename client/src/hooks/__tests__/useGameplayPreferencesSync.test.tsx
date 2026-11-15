@@ -9,6 +9,7 @@ import {
   useGameStore,
 } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useUiStore } from "../../stores/uiStore";
 
 vi.mock("../../game/dispatch", () => ({ dispatchActionForGameSession: vi.fn() }));
 
@@ -21,6 +22,7 @@ describe("useGameplayPreferencesSync", () => {
     usePreferencesStore.setState({
       phaseStops: [],
       priorityPassingMode: "Standard",
+      unCardActionsEnabled: false,
     });
     useGameStore.setState({
       adapter: null,
@@ -28,6 +30,7 @@ describe("useGameplayPreferencesSync", () => {
       engineCommitEpoch: 0,
       gameSessionGeneration: nextGameSessionGeneration(),
     });
+    useUiStore.setState({ fullControl: false });
   });
 
   afterEach(() => cleanup());
@@ -43,7 +46,7 @@ describe("useGameplayPreferencesSync", () => {
     act(() => {
       useGameStore.setState({ gameState, engineCommitEpoch: 1 });
     });
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
     expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
       1,
       { type: "SetPhaseStops", data: { stops: [] } },
@@ -56,17 +59,23 @@ describe("useGameplayPreferencesSync", () => {
       adapter,
       expect.any(Number),
     );
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      3,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
+    );
 
     act(() => {
       useGameStore.setState({ engineCommitEpoch: 2 });
     });
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
 
     act(() => {
       usePreferencesStore.getState().setPhaseStops([]);
       usePreferencesStore.getState().setPriorityPassingMode("Standard");
     });
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
 
     act(() => usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows"));
     await waitFor(() => {
@@ -75,7 +84,7 @@ describe("useGameplayPreferencesSync", () => {
         adapter,
         expect.any(Number),
       );
-      expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
+      expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
     });
 
     const firstGeneration = useGameStore.getState().gameSessionGeneration;
@@ -83,14 +92,14 @@ describe("useGameplayPreferencesSync", () => {
       useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() });
     });
     expect(useGameStore.getState().gameSessionGeneration).toBeGreaterThan(firstGeneration);
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(7));
 
     const secondGeneration = useGameStore.getState().gameSessionGeneration;
     act(() => {
       useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() });
     });
     expect(useGameStore.getState().gameSessionGeneration).toBeGreaterThan(secondGeneration);
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(7));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(10));
   });
 
   it("retries rejected sends without duplicating successful preferences", async () => {
@@ -103,7 +112,7 @@ describe("useGameplayPreferencesSync", () => {
     await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4));
     expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
       2,
       { type: "SetPhaseStops", data: { stops: [] } },
@@ -116,8 +125,85 @@ describe("useGameplayPreferencesSync", () => {
       adapter,
       expect.any(Number),
     );
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      4,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
+    );
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4));
+  });
+
+  it("overrides the synced mode while Full Control is on, and restores it when off", async () => {
+    useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
     await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      2,
+      { type: "SetPriorityPassingMode", data: { mode: "Standard" } },
+      adapter,
+      expect.any(Number),
+    );
+
+    // Full Control lives in `uiStore`, not `preferencesStore`, so it reaches the
+    // engine only through its own subscription.
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => {
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "SetPriorityPassingMode", data: { mode: "FullControl" } },
+        adapter,
+        expect.any(Number),
+      );
+    });
+
+    // An unrelated `uiStore` write must not re-dispatch: the subscription is a
+    // plain (non-selector) one guarded on the previous `fullControl` value.
+    const callsAfterOverride = vi.mocked(dispatchActionForGameSession).mock.calls.length;
+    act(() => useUiStore.setState({ selectedCardIds: [] }));
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(callsAfterOverride);
+
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => {
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "SetPriorityPassingMode", data: { mode: "Standard" } },
+        adapter,
+        expect.any(Number),
+      );
+    });
+  });
+
+  it("explicitly syncs Un-card actions preference on session start, and updates when toggled", async () => {
+    useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      3,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
+    );
+
+    act(() => usePreferencesStore.getState().setUnCardActionsEnabled(true));
+    await waitFor(() =>
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: true } } } },
+        adapter,
+        expect.any(Number),
+      ),
+    );
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
+
+    act(() => usePreferencesStore.getState().setUnCardActionsEnabled(false));
+    await waitFor(() =>
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+        adapter,
+        expect.any(Number),
+      ),
+    );
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(5);
   });
 });

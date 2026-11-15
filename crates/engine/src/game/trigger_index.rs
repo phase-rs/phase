@@ -1,4 +1,4 @@
-//! CR 603.2 + CR 603.6a + CR 611.2e: `TriggerIndex` — battlefield-scoped
+//! CR 603.2 + CR 603.6a: `TriggerIndex` — battlefield-scoped
 //! candidate pre-filter for `collect_pending_triggers`. Replaces a full
 //! battlefield scan with an event-keyed lookup so trigger-firing cost scales
 //! with the number of *relevant* triggers, not with `|battlefield|`.
@@ -25,19 +25,43 @@
 //! # Authority
 //!
 //! The authoritative correctness path is the rebuild at the end of
-//! `evaluate_layers` (CR 611.2e): every continuous-effect-driven mutation of
-//! `obj.trigger_definitions` (sliver lords, Changeling, Bramble Sovereign,
-//! suppress-triggers statics) flows through the layer pipeline, and
+//! `evaluate_layers`: every continuous-effect-driven mutation of
+//! `obj.trigger_definitions` (sliver lords, Changeling) flows through the
+//! layer pipeline, and
 //! `collect_pending_triggers` flushes pending layers before reading the index.
 //! The `move_to_zone` incremental hooks are best-effort optimization between
 //! layer flushes — they are NOT the safety net.
+//!
+//! CR 113.6: because those hooks are best-effort and `rebuild_from_battlefield`
+//! trusts `state.battlefield` alone (it never reads `obj.zone`), the index can
+//! hold an entry for a permanent that has already left the battlefield.
+//! `candidates_for_event` therefore filters candidates by the LIVE `obj.zone`
+//! before returning them, so the consult honours its own battlefield-candidate
+//! contract regardless of how the stale entry arose. This is the same predicate
+//! `reindex_object_triggers` enforces on the maintenance side. In
+//! `debug_assertions` builds a stale entry panics with the object id, its live
+//! zone, and the event; in release builds — including the `server-release`
+//! profile the multiplayer server ships, which inherits
+//! `debug-assertions = false` — it is corrected silently and recorded only by a
+//! `tracing::warn!` on the drop path. That log line is the sole recurrence
+//! evidence on the SERVER; `engine-wasm` initialises no `tracing` subscriber, so
+//! the browser build records nothing at all.
+//!
+//! SCOPE: this contains the TRIGGER consequence of the desync, not the desync.
+//! The underlying maintenance defect is not found. If the disagreement is
+//! "still in `state.battlefield`, live zone elsewhere", then every other
+//! consumer of `state.battlefield` — the CR 704 SBA pass, combat declaration,
+//! `game/filter.rs` battlefield queries, and the rendered board — still treats
+//! the object as a permanent. Only the trigger path is guarded here.
+//! Reconciling at `battlefield_phased_in_ids` would contain all consumers at one
+//! seam; that is deliberately out of scope for this change.
 
 use smallvec::SmallVec;
 
 use crate::types::ability::{EffectKind, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, TriggerIndex};
+use crate::types::game_state::{DerivedIndexReadiness, GameState, TriggerIndex};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::triggers::{TriggerEventKey, TriggerMode};
@@ -94,7 +118,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 /// dynamic emit a single `None` so the caller routes them to `unclassified`.
 /// `StateCondition` and `Unknown(_)` return an EMPTY result *and* the caller
 /// must NOT push such objects to `unclassified` — state triggers run through
-/// the dedicated `check_state_triggers` path, never event-driven dispatch.
+/// the dedicated `collect_state_triggers` path, never event-driven dispatch.
 ///
 /// Returns `(keys, route_to_unclassified)`:
 /// - non-empty keys → object goes into each bucket
@@ -154,7 +178,11 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // permanents are rare and the dedicated event keeps the consult cost
         // bounded.
         TriggerMode::Evolved => return (keys, true),
-        TriggerMode::ChangesController => push(TriggerEventKey::ChangesController),
+        // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
+        TriggerMode::GotchaSaid => return (keys, true),
+        // Un-card touch: consumes the dedicated `GameEvent::ObjectTouched`; rare, so unclassified.
+        TriggerMode::Touched => return (keys, true),
+        TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
         // --- Damage family ---
@@ -214,6 +242,13 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CounterAddedOnce
         | TriggerMode::CounterAddedAll
         | TriggerMode::CounterTypeAddedAll => push(TriggerEventKey::CounterAdded),
+        // CR 714.2d + CR 714.2e: a final-chapter meta-trigger's match shape is
+        // dynamic — the final chapter number is derived from the OBSERVED Saga's
+        // own chapter abilities, not from anything statically on this trigger.
+        // Route to `unclassified` (the documented safety net for dynamic
+        // shapes); the three printed cards in the class make the consult cost
+        // irrelevant.
+        TriggerMode::FinalSagaChapterAbility { .. } => return (keys, true),
         // CR 107.14: "Whenever you get one or more {E}" — energy uses the
         // player-counter event key, not the object-counter key.
         TriggerMode::CounterPlayerAddedAll => push(TriggerEventKey::PlayerCounterChanged),
@@ -309,7 +344,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::LosesGame => push(TriggerEventKey::PlayerLost),
 
         // --- Mana ---
-        TriggerMode::ManaAdded => push(TriggerEventKey::ManaProduced),
+        TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced => {
+            push(TriggerEventKey::ManaProduced)
+        }
         TriggerMode::ManaExpend => push(TriggerEventKey::ManaSpent),
 
         // --- Land ---
@@ -434,10 +471,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::ElementalBend => push(TriggerEventKey::Bending),
 
         // CR 603.8: state triggers are processed by the dedicated
-        // `check_state_triggers` path, NOT by event-driven dispatch. The
+        // `collect_state_triggers` path, NOT by event-driven dispatch. The
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
+        // CR 904.9: resolved by the scan hook
+        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // through event-driven dispatch. Neither a key nor unclassified.
+        TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
         TriggerMode::Unknown(_) => return (SmallVec::new(), false),
     }
@@ -461,7 +502,12 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
-        | GameEvent::ResolutionHalted { .. } => {}
+        | GameEvent::ExtraTurnCreated { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
+        // Contests are adapted physical minigames with no triggered-ability keys.
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -544,20 +590,23 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             if *to == Zone::Exile {
                 push(TriggerEventKey::Exiled);
             }
-            // CR 701.17: `match_milled` consumes `ZoneChanged { from: Library,
-            // to: Graveyard }`. Emit Milled key for that exact shape.
-            if *from == Some(Zone::Library) && *to == Zone::Graveyard {
-                push(TriggerEventKey::Milled);
-            }
         }
+        // CR 701.17a: the mill's own action event is what `match_milled`
+        // consumes; the library→graveyard zone shape above no longer routes here.
+        GameEvent::Milled { .. } => push(TriggerEventKey::Milled),
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
         GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
+        GameEvent::ManaAbilityProduced { .. } => push(TriggerEventKey::ManaProduced),
         GameEvent::TappedForMana { .. } => {
             push(TriggerEventKey::ManaProduced);
             push(TriggerEventKey::TapsForMana);
         }
-        GameEvent::ManaPoolEmptied { .. } | GameEvent::ManaRecolored { .. } => {}
+        // No trigger key: no card triggers on mana burn. The life loss it
+        // causes is itself a `LifeChanged` event, which carries its own keys.
+        GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. } => {}
         GameEvent::PermanentTapped { .. } => push(TriggerEventKey::Taps),
         GameEvent::PlayerLost { .. } => push(TriggerEventKey::PlayerLost),
         // CR 800.4: Administrative control transfers on elimination do NOT
@@ -584,16 +633,34 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::DamagePrevented { .. } => push(TriggerEventKey::DamagePrevented),
         GameEvent::SpellCountered { .. } => {}
         GameEvent::CounterAdded { .. } => push(TriggerEventKey::CounterAdded),
+        // CR 714.2e: consumed only by
+        // `FinalSagaChapterAbility { lifecycle: Resolved }` triggers, which live
+        // in the `unclassified` bucket. No key of its own.
+        GameEvent::SagaChapterAbilityResolved { .. } => {}
         GameEvent::Evolved { .. } => {}
+        GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
             push(TriggerEventKey::TokenCreated);
         }
+        // CR 111.1 + CR 707.13: a copy of a card created from a name is not a
+        // token, so it must not fire "whenever a token is created".
+        GameEvent::CardCopyCreated { .. } => {}
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        // CR 116.2c + CR 116.1: no printed trigger condition matches "a
+        // continuous effect ended". The special action doesn't use the stack, and
+        // any consequential board change (a Licid reverting to a creature and
+        // being unattached under CR 704.5p) emits its OWN indexed event.
+        // Explicitly inert rather than absent, so a future trigger family must
+        // classify it.
+        GameEvent::ContinuousEffectEnded { .. } => {}
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
@@ -611,8 +678,22 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
+        // CR 701.27b (by analogy): transforming and turning a permanent face
+        // up/down are distinct game actions that don't share triggers even
+        // though they use the same physical action; flipping is likewise its
+        // own game action. No printed flip card has a trigger that fires on
+        // flipping (a design fact about the card pool, not a CR statement).
+        // Deliberately dispatches NO trigger key — folding it into
+        // `FaceOrTransform` would consult transform/face-change triggers for an
+        // event none of them can match.
+        GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
+        // CR 101.4: publishing a chosen number is not CR 701.20 "reveal a card",
+        // and no printed trigger watches for it, so it keys nothing. Listed
+        // explicitly (not folded into `Revealed`) so a future "whenever a player
+        // reveals a card" trigger cannot start firing on a number.
+        GameEvent::ChosenNumbersRevealed { .. } => {}
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::Cycled { .. } => {}
         GameEvent::PlayerPerformedAction { .. } => push(TriggerEventKey::PlayerActionPerformed),
@@ -626,12 +707,17 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
         GameEvent::MonarchChanged { .. } => push(TriggerEventKey::MonarchOrInitiative),
-        GameEvent::CityBlessingGained { .. } => {}
+        // CR 702.195b-c: Enduring story is a designation, not an inherent trigger
+        // event; continuous effects reapply before trigger conditions are checked.
+        GameEvent::CityBlessingGained { .. } | GameEvent::EnduringStoryGained { .. } => {}
         // CR 103.1: setup determination, not a CR 706 die-roll trigger source.
         GameEvent::StartingPlayerContest { .. } => {}
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
+        // CR 706.6: an ignored (dropped) die is display-only, never a rules
+        // roll — "whenever you roll a die" must not see it, so no key.
+        GameEvent::DieRollIgnored { .. } => {}
         GameEvent::RingTemptsYou { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
@@ -661,6 +747,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // Unstable Host/Augment combine is a distinct mechanic and has no
         // dedicated trigger mode today.
         GameEvent::Augmented { .. } => {}
+        // CR 701.42a: no printed card triggers on melding; the melded
+        // permanent's entry is indexed through its `ZoneChanged` event.
+        GameEvent::Melded { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -680,6 +769,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::PowerToughnessChanged { .. } => {}
         GameEvent::CascadeMissed { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
@@ -770,9 +860,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::PhysicalContest
         | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
+        | EffectKind::ExileTopCardContest
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
         | EffectKind::EpicCopy
@@ -789,6 +881,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PutCounter
         | EffectKind::PutCounterAll
         | EffectKind::MultiplyCounter
+        | EffectKind::ReproduceEventCounters
         | EffectKind::DoublePT
         | EffectKind::DoublePTAll
         | EffectKind::MoveCounters
@@ -802,9 +895,12 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Shuffle
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
+        | EffectKind::OpenBoosterPack
         | EffectKind::ExileTop
+        | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::ChoosePermanent
         | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
@@ -818,6 +914,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeUnprepared
         | EffectKind::SetClassLevel
         | EffectKind::CreateDelayedTrigger
+        // Digital-only Alchemy (no CR entry): no production
+        // `EffectResolved`-dispatching matcher watches for boon
+        // installation, so `CreateBoon` resolving emits no trigger key.
+        | EffectKind::CreateBoon
         | EffectKind::AddTargetReplacement
         | EffectKind::AddRestriction
         | EffectKind::ReduceNextSpellCost
@@ -838,15 +938,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie
-        | EffectKind::FlipCoin
         | EffectKind::FlipCoins
-        | EffectKind::FlipCoinUntilLose
         | EffectKind::RingTemptsYou
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
         | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
+        | EffectKind::AbandonScheme
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
         // EffectResolved-dispatching matcher. No-op here.
@@ -858,6 +957,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
+        | EffectKind::NoteManaSpent
+        // Digital-only Alchemy (no CR entry): noting a number emits no
+        // `EffectResolved` at all, so no matcher dispatches on it.
+        | EffectKind::NoteNumber
         | EffectKind::ChooseObjectsIntoTrackedSet
         // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
         // counter placement fires `GameEvent::CounterAdded`, so no matcher
@@ -890,6 +993,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChangeTargets
         | EffectKind::Incubate
         | EffectKind::Amass
+        | EffectKind::EmpowerJace
         | EffectKind::Bolster
         | EffectKind::Manifest
         | EffectKind::Cloak
@@ -899,9 +1003,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SkipNextStep
         | EffectKind::AdditionalPhase
         | EffectKind::Double
+        | EffectKind::ModifyAnnouncedX
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
+        | EffectKind::CompletePlayerAction
         | EffectKind::Harness
         | EffectKind::CollectEvidence
         | EffectKind::Endure
@@ -916,12 +1022,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure
+        | EffectKind::CreateCardCopyByName
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::ChooseCounterAdjustment
         | EffectKind::Specialize
+        | EffectKind::HordePlayCard
         | EffectKind::Unimplemented
         | EffectKind::Crew
         | EffectKind::Station
@@ -931,6 +1039,12 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // action; its own `EffectResolved` dispatches no trigger key.
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
+        // No printed flip card has a trigger that fires on flipping (a design
+        // fact about the card pool, not a CR statement), so — mirroring
+        // `Transform` above — this effect's `EffectResolved` dispatches no key;
+        // `GameEvent::Flipped` is a log/display notification and dispatches no
+        // key either.
+        | EffectKind::FlipPermanent
         | EffectKind::TurnFaceUp
         // CR 701.27b: a turned-face-down permanent fires any face-down trigger
         // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's
@@ -1058,10 +1172,9 @@ impl TriggerIndex {
         }
     }
 
-    /// CR 603.6a + CR 611.2e: Rebuild from scratch by scanning every phased-in
+    /// Rebuild from scratch by scanning every phased-in
     /// battlefield permanent and re-deriving its keys via
-    /// `keys_from_trigger_def`. Called at the end of `evaluate_layers` and
-    /// lazily on first consult after deserialize.
+    /// `keys_from_trigger_def`.
     pub fn rebuild_from_battlefield(state: &mut GameState) {
         let mut fresh = TriggerIndex::default();
         // CR 702.26: phased-out permanents don't trigger.
@@ -1081,20 +1194,25 @@ impl TriggerIndex {
                 fresh.add(obj_id, &defs, synthetic);
             }
         }
+        fresh.readiness = DerivedIndexReadiness::Built;
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_trigger_index_rebuild();
         state.trigger_index = fresh;
     }
 }
 
-/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
-/// before a consult. The layer pipeline remains the authoritative rebuild path
-/// for live granted and removed definitions; this only restores the empty
-/// derived index after deserialize when battlefield state is already present.
+/// CR 603.2: Ensure the serde-skipped candidate index has been
+/// populated by a full battlefield scan before a consult. Rebuilds only an
+/// `Unbuilt` index (fresh from `Default`, as after deserialize), and only
+/// while the battlefield is non-empty. A `Built` index is not rebuilt here
+/// even when its buckets are empty because no permanent carries a trigger.
+/// The layer pipeline remains the authoritative rebuild path for live
+/// granted and removed definitions.
 pub fn ensure_ready(state: &mut GameState) {
-    if state.trigger_index.by_key.is_empty()
-        && state.trigger_index.unclassified.is_empty()
-        && !state.battlefield.is_empty()
-    {
-        TriggerIndex::rebuild_from_battlefield(state);
+    match state.trigger_index.readiness {
+        DerivedIndexReadiness::Built => {}
+        DerivedIndexReadiness::Unbuilt if state.battlefield.is_empty() => {}
+        DerivedIndexReadiness::Unbuilt => TriggerIndex::rebuild_from_battlefield(state),
     }
 }
 
@@ -1102,6 +1220,12 @@ pub fn ensure_ready(state: &mut GameState) {
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
 pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[ObjectId; 16]> {
+    // CR 500.7: creating an extra turn adds it directly after the specified
+    // turn. `ExtraTurnCreated` is internal accounting for that insertion, not
+    // a triggerable game event, so it must not reach catch-all definitions.
+    if matches!(event, GameEvent::ExtraTurnCreated { .. }) {
+        return SmallVec::new();
+    }
     let mut out: SmallVec<[ObjectId; 16]> = SmallVec::new();
     out.extend(state.trigger_index.unclassified.iter().copied());
     let keys = keys_from_event(event, state);
@@ -1121,11 +1245,111 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
     if let Some(object_id) = phase_out_source {
         out.push(object_id);
     }
+    // CR 113.6: a candidate whose live zone is not the battlefield is a stale
+    // index entry. The `retain` below corrects it and logs; in debug builds we
+    // additionally panic with the diagnosis so the underlying maintenance defect
+    // is not masked indefinitely. `not(test)` mirrors the `ReplacementIndex`
+    // differential gate in `indexed_object_replacement_candidates` — without it,
+    // every hostile-state unit test in this module's own `#[cfg(test)] mod tests`
+    // would panic before reaching the code under test. Note that `cfg(test)` is
+    // NOT set for the engine lib when it is linked by the integration-test
+    // binaries under `crates/engine/tests/`, so this assertion IS live there —
+    // deliberately: it makes the whole integration suite a recurrence detector.
+    // O(candidates); the Vec is confined to this cfg so release and unit-test
+    // builds allocate nothing. `out` is not yet deduped, so the same
+    // (object_id, live_zone) pair can appear more than once in `stale`; that is
+    // duplication, not multiple defects.
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        let stale: Vec<(ObjectId, Zone)> = out
+            .iter()
+            .filter_map(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .and_then(|obj| (obj.zone != Zone::Battlefield).then_some((*id, obj.zone)))
+            })
+            .collect();
+        // `stale` and `event` are reported as SEPARATE fields: the consulted
+        // event says nothing about why an object went stale, and conflating
+        // them would misdirect the first person to hit this.
+        debug_assert!(
+            stale.is_empty(),
+            "TriggerIndex holds off-battlefield candidates (CR 113.6): \
+             stale=(object_id, live_zone){stale:?} consulted_for_event={event:?}",
+        );
+    }
     out.retain(|id| {
-        state
-            .objects
-            .get(id)
-            .is_none_or(|obj| !obj.is_phased_out() || phase_out_source == Some(*id))
+        let Some(obj) = state.objects.get(id) else {
+            // Absent objects are RETAINED, preserving the previous `is_none_or`
+            // semantics exactly: the production candidate loop already
+            // `continue`s on a missing object, and `DebugAction::RemoveObject`
+            // deletes an object without an index removal — so dropping here
+            // would change no behavior while breaking existing fixtures.
+            return true;
+        };
+        if obj.is_phased_out() && phase_out_source != Some(*id) {
+            return false;
+        }
+        if obj.zone != Zone::Battlefield {
+            // CR 113.6: "Abilities of all other objects usually function only
+            // while that object is on the battlefield." This consult returns
+            // BATTLEFIELD candidates — every caller scans them with
+            // `zone_filter = Some(Zone::Battlefield)`. CR 113.6b / CR 113.6k
+            // opt-ins (`trigger_zones`) are honoured by the dedicated off-zone
+            // scan in `triggers.rs`, which populates itself from the
+            // graveyard/exile/stack/command zone lists and never consults this
+            // index. So a candidate whose LIVE zone is no longer the battlefield
+            // is a stale entry and must not be handed back. This is the same
+            // predicate `reindex_object_triggers` already enforces on the
+            // maintenance side of this module.
+            //
+            // ONE DIRECTION, not an equivalence. `derived_views::is_live_battlefield_object`
+            // is the CONJUNCTION of `state.battlefield.contains(id)` and
+            // `obj.zone == Battlefield`; this checks only the second conjunct.
+            // Dropping the first is not merely an O(|battlefield|) saving — it
+            // is a weaker predicate, and the gap has a real producer:
+            // `zones::absorb_component` removes a merged/melded component from
+            // `state.battlefield` and then sets its zone BACK to `Battlefield`,
+            // so a component can be zone-battlefield while not a battlefield
+            // member. `reindex_object_triggers` admits on `obj.zone` alone, so
+            // that shape can enter the index and this retain passes it through.
+            // Uncontained here by choice: the reported bug is the opposite
+            // direction, and a `contains` on every candidate is a real hot-path
+            // cost for a shape with no current reindexing caller.
+            //
+            // CR 603.10a look-back sources are unaffected: a permanent observing
+            // its own departure, a self-exploiting creature, and co-departed
+            // observers are each produced by dedicated `collect_matching_triggers`
+            // blocks in `triggers.rs` fed from the event / `ZoneChangeRecord`,
+            // not from this index.
+            //
+            // `debug_assertions` builds have already panicked above with the full
+            // diagnosis; release builds (including `server-release`, which the
+            // multiplayer server ships and which inherits
+            // `debug-assertions = false`) silently correct it here. It is on the
+            // drop branch, so it costs nothing unless the defect actually occurs.
+            //
+            // This is the only recurrence evidence ON THE SERVER. It is NOT
+            // evidence in the browser: `engine-wasm` has no `tracing-subscriber`
+            // dependency and initialises no subscriber, so `tracing` events there
+            // go to the no-op dispatcher and this line emits nothing. A recurrence
+            // in a WASM release build is corrected silently and invisibly — and
+            // that is the surface most players are on, so absence of warnings in
+            // production is NOT evidence the desync stopped happening.
+            // NOTE: this runs BEFORE the `sort_unstable_by_key`/`dedup` below, so
+            // one stale id in several buckets logs more than once per consult, and
+            // every subsequent consult re-logs while the desync persists — count
+            // distinct object ids, not lines.
+            tracing::warn!(
+                object_id = ?id,
+                live_zone = ?obj.zone,
+                event = ?event,
+                "TriggerIndex held an off-battlefield candidate; dropped (CR 113.6)"
+            );
+            return false;
+        }
+        true
     });
     out.sort_unstable_by_key(|id| id.0);
     out.dedup();
@@ -1135,7 +1359,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::game_object::GameObject;
+    use crate::game::game_object::{GameObject, PhaseOutCause, PhaseStatus};
     use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::CardId;
@@ -1186,6 +1410,37 @@ mod tests {
     }
 
     #[test]
+    fn extra_turn_creation_does_not_route_unclassified_candidates() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = ObjectId(99);
+        state.objects.insert(
+            watcher,
+            GameObject::new(
+                watcher,
+                CardId(99),
+                PlayerId(0),
+                "Always Watcher".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.trigger_index.add(
+            watcher,
+            &[TriggerDefinition::new(TriggerMode::Always)],
+            false,
+        );
+        assert!(state.trigger_index.unclassified.contains(&watcher));
+
+        let candidates = candidates_for_event(
+            &state,
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
     fn cumulative_upkeep_emits_upkeep_phase_key() {
         let def = TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep);
         let (keys, _) = keys_from_trigger_def(&def);
@@ -1209,6 +1464,28 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
+    }
+
+    #[test]
+    fn extra_turn_creation_is_trigger_inert() {
+        let state = GameState::new_two_player(42);
+        let creation_keys = keys_from_event(
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+            &state,
+        );
+        assert!(creation_keys.is_empty());
+
+        let turn_started_keys = keys_from_event(
+            &GameEvent::TurnStarted {
+                player_id: PlayerId(0),
+                turn_number: 2,
+            },
+            &state,
+        );
+        assert!(turn_started_keys.contains(&TriggerEventKey::TurnStarted));
     }
 
     #[test]
@@ -1247,8 +1524,9 @@ mod tests {
     #[test]
     fn from_anywhere_to_graveyard_candidate_survives_library_origin_event() {
         // CR 603.6c: "from anywhere" includes library→graveyard moves. The
-        // event side emits only Milled for this shape, so this class must stay
-        // in the unclassified safety bucket until a generic graveyard key exists.
+        // event side emits NO key at all for this shape, so the unclassified
+        // safety bucket — which `candidates_for_event` unions unconditionally —
+        // is what carries this class until a generic graveyard key exists.
         let mut state = GameState::new_two_player(42);
         let watcher = ObjectId(99);
         let def = TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1269,6 +1547,42 @@ mod tests {
 
         let candidates = candidates_for_event(&state, &event);
         assert!(candidates.contains(&watcher));
+    }
+
+    /// CR 701.17a: the mill key's event-side source moved off the zone shape and
+    /// onto the action event. Both legs run in one invocation, so a
+    /// `keys_from_event` that answered nothing at all cannot pass.
+    #[test]
+    fn milled_key_comes_from_the_action_event_not_the_zone_shape() {
+        let state = GameState::new_two_player(42);
+
+        let zone_change = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        };
+        assert!(
+            !keys_from_event(&zone_change, &state).contains(&TriggerEventKey::Milled),
+            "the library→graveyard zone shape must no longer carry the Milled key"
+        );
+
+        for to in [Zone::Graveyard, Zone::Exile] {
+            let milled = GameEvent::Milled {
+                player_id: PlayerId(0),
+                object_id: ObjectId(7),
+                to,
+            };
+            assert!(
+                keys_from_event(&milled, &state).contains(&TriggerEventKey::Milled),
+                "the CR 701.17a action event carries the Milled key whatever zone \
+                 the card reached (CR 701.17c); {to:?} did not"
+            );
+        }
     }
 
     #[test]
@@ -1335,6 +1649,42 @@ mod tests {
         );
     }
 
+    /// CR 603.2: a consult while the battlefield is empty has nothing to scan,
+    /// so it must not mark the index as populated; the first consult after a
+    /// permanent arrives still has to restore it.
+    #[test]
+    fn ensure_ready_defers_build_while_battlefield_is_empty() {
+        let mut state = GameState::new_two_player(42);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            state.trigger_index.readiness,
+            DerivedIndexReadiness::Unbuilt,
+            "a consult over an empty battlefield must leave the index unbuilt"
+        );
+
+        let object_id = ObjectId(80);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(80),
+            PlayerId(0),
+            "Late Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            candidates_for_event(&state, &tapped_for_mana_event()).as_slice(),
+            &[object_id],
+            "the first consult after a permanent arrives must index it"
+        );
+    }
+
     #[test]
     fn tapped_for_mana_candidates_exclude_irrelevant_battlefield_objects() {
         let mut state = GameState::new_two_player(42);
@@ -1383,6 +1733,182 @@ mod tests {
             candidates.len(),
             2,
             "only TapsForMana candidates are visited"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 113.6 live-zone guard on the consult path.
+    //
+    // Every negative below induces the `state.battlefield` / `obj.zone` desync
+    // by writing `obj.zone` DIRECTLY, leaving `state.battlefield` and the index
+    // untouched. `zones::move_to_zone` cannot be used to induce it: its
+    // CR 603.6c hook drops the object from the index whenever it leaves the
+    // battlefield, so the stale entry these rows require would never exist.
+    // -----------------------------------------------------------------------
+
+    /// A phased-in battlefield permanent carrying one `TapsForMana` trigger,
+    /// registered through the production rebuild path.
+    fn indexed_mana_trigger_source(state: &mut GameState, object_id: ObjectId) {
+        let mut object = GameObject::new(
+            object_id,
+            CardId(object_id.0),
+            PlayerId(0),
+            format!("Indexed Source {}", object_id.0),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+        TriggerIndex::rebuild_from_battlefield(state);
+    }
+
+    fn tapped_for_mana_event() -> GameEvent {
+        GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(999),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        }
+    }
+
+    /// Row 1 — the paired positive reach-guard for the zone rows below. Without
+    /// it, a guard that dropped every candidate would satisfy them vacuously.
+    #[test]
+    fn on_battlefield_source_is_still_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+
+        assert!(
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "an indexed source whose live zone IS the battlefield must remain a candidate"
+        );
+    }
+
+    /// Rows 2-6 — The Locust God (Hand), Lightning Rift (Graveyard), and the
+    /// sibling zones. CR 113.6: abilities of a permanent function only while it
+    /// is on the battlefield, so a stale index entry pointing off-battlefield
+    /// must not be handed back to the candidate loop. Command is included
+    /// because command-zone triggers are owned by the dedicated off-zone scan
+    /// in `triggers.rs`, never by this index.
+    #[test]
+    fn off_battlefield_sources_are_not_candidates() {
+        let leaked: Vec<Zone> = [
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Library,
+            Zone::Command,
+        ]
+        .into_iter()
+        .filter(|zone| {
+            let mut state = GameState::new_two_player(42);
+            let object_id = ObjectId(200);
+            indexed_mana_trigger_source(&mut state, object_id);
+            // Induce the desync: live zone moves, `state.battlefield` and the
+            // index are deliberately left stale.
+            state.objects.get_mut(&object_id).unwrap().zone = *zone;
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id)
+        })
+        .collect();
+
+        assert!(
+            leaked.is_empty(),
+            "CR 113.6: a stale index entry whose live zone is off the battlefield \
+             must not be returned as a candidate; leaked from {leaked:?}"
+        );
+    }
+
+    /// Row 7 — CR 702.26b: a phased-out permanent is treated as though it does
+    /// not exist, so it is not a candidate. Unchanged by the zone guard.
+    #[test]
+    fn phased_out_source_is_not_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        assert!(
+            !candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "CR 702.26b: a phased-out permanent must not be a candidate"
+        );
+    }
+
+    /// Row 8 — CR 702.26b carve-out: the permanent that just phased out is the
+    /// source of its own `PermanentPhasedOut` event and MUST survive. This row
+    /// is multi-authority on purpose (phased out AND the event source), and it
+    /// is the row that proves the zone guard is not collateral damage: phasing
+    /// changes status, not zone, so the carve-out object is still
+    /// `Zone::Battlefield` and passes the new check.
+    #[test]
+    fn phase_out_event_source_survives_the_carve_out() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let event = GameEvent::PermanentPhasedOut {
+            object_id,
+            indirect: false,
+        };
+        assert!(
+            candidates_for_event(&state, &event).contains(&object_id),
+            "CR 702.26b: the phase-out event's own source must still be a candidate"
+        );
+    }
+
+    /// Row 9 — fail-open is preserved. An id in the index with no `GameObject`
+    /// at all is RETAINED, pinning the `let ... else { return true }` rewrite
+    /// against the previous `is_none_or` semantics. Two production routes reach
+    /// this: the candidate loop's own missing-object `continue`, and
+    /// `DebugAction::RemoveObject`, which deletes an object without an index
+    /// removal.
+    #[test]
+    fn indexed_id_without_an_object_is_retained() {
+        let mut state = GameState::new_two_player(42);
+        let ghost = ObjectId(201);
+        state.trigger_index.add(
+            ghost,
+            &[TriggerDefinition::new(TriggerMode::TapsForMana)],
+            false,
+        );
+
+        assert!(
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&ghost),
+            "an indexed id with no GameObject must be retained (fail-open)"
+        );
+    }
+
+    /// Row 11 — the exact desync shape the env-gated differential is
+    /// structurally blind to: the id is off-battlefield by `obj.zone` while
+    /// still present in `state.battlefield`. The differential's shadow is drawn
+    /// from the live `obj.zone`, so this object is absent from the shadow and
+    /// present in production candidates — it lands only in `production - shadow`,
+    /// the direction that was removed for having a false-positive floor. So the
+    /// differential cannot see THIS shape at all, and this guard is the only
+    /// detector for it.
+    #[test]
+    fn off_battlefield_source_still_in_the_battlefield_vector_is_not_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().zone = Zone::Hand;
+
+        assert!(
+            state.battlefield.contains(&object_id),
+            "reach-guard: this row is only meaningful while the id is STILL in \
+             `state.battlefield` — that is the desync under test"
+        );
+        assert!(
+            !candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "CR 113.6: `state.battlefield` membership is not the authority; the \
+             live `obj.zone` is"
         );
     }
 }

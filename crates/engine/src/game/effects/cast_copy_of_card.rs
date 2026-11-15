@@ -10,6 +10,12 @@ use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntry
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::zones::Zone;
 
+pub(crate) fn cast_copy_spell_cast_ledger_error(
+    error: crate::types::resolved_commands::ResolvedLedgerEditReplayInvariantError,
+) -> String {
+    format!("failed to record cast copy: {error}")
+}
+
 /// CR 707.12: Cast a copy of a card/object. The copy is created from the
 /// source object's copiable values and put onto the stack as part of casting.
 pub fn resolve(
@@ -34,8 +40,18 @@ pub fn resolve(
             TargetRef::Player(_) => None,
         })
         .collect();
+    // The ability's own object occurrences, aligned with `source_ids` while
+    // the sources are its targets (empty for a tracked-set population).
+    let mut source_positions: Vec<usize> = ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| matches!(target, TargetRef::Object(_)))
+        .map(|(position, _)| position)
+        .collect();
 
     if source_ids.is_empty() && references_tracked_set(target_filter) {
+        source_positions.clear();
         let ctx = FilterContext::from_ability(ability);
         // CR 608.2c: Resolve the tracked-set sentinel from the resolving effect's
         // last known context before collecting the affected objects.
@@ -48,6 +64,7 @@ pub fn resolve(
             .unwrap_or_default()
             .into_iter()
             .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
+            .filter(|id| copy_castable_from_original_zone(state, *id, ability.controller))
             .collect();
 
         if !source_ids.is_empty() {
@@ -73,6 +90,10 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // CR 707.12a: under a "copy that card N times" loop the
+            // `repeat_for` driver owns the iterations; this resume is the rest
+            // of the CURRENT iteration and must not re-enter the loop.
+            resume.repeat_for = None;
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
@@ -81,6 +102,7 @@ pub fn resolve(
                 up_to: true,
                 constraint: None,
                 source_id: ability.source_id,
+                reciprocal_role: None,
             };
             return Ok(());
         }
@@ -96,12 +118,23 @@ pub fn resolve(
     }
 
     for (index, source_id) in source_ids.iter().copied().enumerate() {
+        if !copy_castable_from_original_zone(state, source_id, ability.controller) {
+            continue;
+        }
         let copy_id =
             cast_one_copy(state, source_id, ability, events).map_err(EffectError::InvalidParam)?;
 
-        if open_copy_target_selection(state, copy_id, ability.controller, None)
+        if !open_copy_target_selection(state, copy_id, ability.controller, None)
             .map_err(EffectError::InvalidParam)?
         {
+            crate::game::casting_costs::commit_copy_cast(
+                state,
+                copy_id,
+                ability.controller,
+                events,
+            )
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        } else {
             let mut resume = ability.clone();
             resume.effect = Effect::CastCopyOfCard {
                 target: TargetFilter::None,
@@ -109,14 +142,25 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // The rest of this iteration only (see the choice resume above).
+            resume.repeat_for = None;
             if index + 1 < source_ids.len() {
-                resume.targets = source_ids[index + 1..]
-                    .iter()
-                    .copied()
-                    .map(TargetRef::Object)
-                    .collect();
+                if source_positions.len() == source_ids.len() {
+                    // The remaining sources are this ability's own target
+                    // occurrences: project them, pins included.
+                    resume.project_target_occurrences(&source_positions[index + 1..]);
+                } else {
+                    // A tracked-set population: fresh, unpinned.
+                    resume.set_unpinned_targets(
+                        source_ids[index + 1..]
+                            .iter()
+                            .copied()
+                            .map(TargetRef::Object)
+                            .collect(),
+                    );
+                }
             } else {
-                resume.targets.clear();
+                resume.clear_targets();
             }
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             return Ok(());
@@ -129,6 +173,26 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 707.12 + CR 601.3 + CR 113.6f: the copy is created in the original's
+/// zone and cast from there, and it copies the original's own restriction on
+/// where it may be cast from (Haakon, Stromgald Scourge). A copy that can't be
+/// cast from that zone by `caster` (CR 109.5: "your graveyard" is the caster's)
+/// is neither offered nor created. A missing source is left to `cast_one_copy`,
+/// which reports it.
+fn copy_castable_from_original_zone(
+    state: &GameState,
+    source_id: ObjectId,
+    caster: crate::types::player::PlayerId,
+) -> bool {
+    state.objects.get(&source_id).is_none_or(|source| {
+        crate::game::restrictions::restrictions_permit_cast_origin(
+            &source.casting_restrictions,
+            caster,
+            Some(crate::game::game_object::CastOrigin::of(source)),
+        )
+    })
 }
 
 fn references_tracked_set(filter: &TargetFilter) -> bool {
@@ -159,12 +223,23 @@ fn cast_one_copy(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<ObjectId, String> {
-    let (source, card_id, origin_zone) = {
+    let (mut source, card_id, origin) = {
         let Some(source) = state.objects.get(&source_id) else {
             return Err(format!("copy source {source_id:?} not found"));
         };
-        (source.clone(), source.card_id, source.zone)
+        (
+            source.clone(),
+            source.card_id,
+            crate::game::game_object::CastOrigin::of(source),
+        )
     };
+    let origin_zone = origin.zone;
+    // CR 123.1 + CR 707.2 + CR 707.12: the copy has the card's copiable values;
+    // stickers and their changes aren't among them. Stripped before anything
+    // (the spell ability, the keyword snapshot) is derived from the clone.
+    crate::game::stickers::remove_stickers_from_copy(&mut source);
+    crate::game::ledger::validate_spell_cast_recording(state, ability.controller)
+        .map_err(cast_copy_spell_cast_ledger_error)?;
 
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -178,6 +253,9 @@ fn cast_one_copy(
     // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.12).
     copy.zone = Zone::Stack;
     copy.is_token = false;
+    // The clone above may carry a token source's descriptor; a nontoken
+    // spell copy has no intrinsic token body.
+    copy.token_art = None;
     // CR 707.12a: the copy is NOT represented by a card, so abilities gated on
     // "if this spell is represented by a card" (e.g. Cipher's encode, CR 702.99a)
     // must not fire for it. `is_token` stays false (this copy goes to the
@@ -186,11 +264,19 @@ fn cast_one_copy(
     copy.is_copy = true;
     copy.tapped = false;
     copy.prepared = None;
+    copy.prepared_copy_source = None;
     // CR 707.12: The copy is created in the same zone as the source object before casting.
     copy.cast_from_zone = Some(origin_zone);
+    copy.copied_from_zone = Some(origin);
     copy.cost_x_paid = None;
     copy.kickers_paid.clear();
     copy.additional_cost_payment_count = 0;
+    // CR 707.12: the copy is cast, but it pays its OWN costs — the source's
+    // payment record must not carry over. This path bypasses `finalize_cast`
+    // (see the keyword-snapshot block below), so the helper establishes the
+    // fresh-cast no-payment baseline; a future variant that actually pays
+    // mana for the copy must stamp AFTER this reset.
+    copy.clear_cast_payment_stamps();
     state.objects.insert(copy_id, copy);
 
     // CR 611.2f + CR 707.12: This cast path bypasses `finalize_cast`, so snapshot
@@ -201,51 +287,42 @@ fn cast_one_copy(
     // a printed-Cascade card would carry an empty snapshot and silently drop its
     // Cascade trigger. `effective_spell_keyword_instances` preserves multi-instance
     // keywords (Cascade x2, Ripple) exactly as the seams' instance counting expects.
-    let cast_spell_keywords =
-        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
-    if let Some(copy_mut) = state.objects.get_mut(&copy_id) {
-        copy_mut.cast_spell_keywords = cast_spell_keywords;
-    }
+    crate::game::casting::snapshot_cast_spell_keywords(state, ability.controller, copy_id);
 
     let mut resolved =
         ability_def.map(|def| build_resolved_from_def(&def, copy_id, ability.controller));
     if let Some(resolved) = resolved.as_mut() {
         resolved.context.cast_from_zone = Some(origin_zone);
+        // CR 707.12: a cast copy declares only the targets chosen for it.
+        resolved.start_target_record_recursive();
     }
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller: ability.controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: resolved,
-            casting_variant: CastingVariant::Normal,
-            // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
-            // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
-            // ignored here. Every card in this class today is a free recast, so
-            // the parser only ever emits `ManaCost::zero()`; the copy is cast for
-            // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
-            // card must thread that alt-cost into this stack entry at this site.
-            actual_mana_spent: 0,
+    // CR 707.12 + CR 707.10: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: ability.controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: resolved.map(Box::new),
+                casting_variant: CastingVariant::Normal,
+                // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
+                // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
+                // ignored here. Every card in this class today is a free recast, so
+                // the parser only ever emits `ManaCost::zero()`; the copy is cast for
+                // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
+                // card must thread that alt-cost into this stack entry at this site.
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
-    events.push(GameEvent::SpellCast {
-        card_id,
-        controller: ability.controller,
-        object_id: copy_id,
-    });
-    if let Some(obj) = state.objects.get(&copy_id).cloned() {
-        crate::game::restrictions::record_spell_cast_from_zone(
-            state,
-            ability.controller,
-            &obj,
-            origin_zone,
-            CastingVariant::Normal,
-        );
-    }
-
+        None,
+        events,
+    );
+    // CR 707.12 + CR 601.2i: the copy becomes cast once its announcement is
+    // complete (`casting_costs::commit_copy_cast`): immediately when it has
+    // no target to announce, else at the end of its announcement walk.
     Ok(copy_id)
 }
 
@@ -291,6 +368,116 @@ mod tests {
     }
 
     #[test]
+    fn cast_copy_of_card_stamps_a_fresh_cast_occurrence() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = add_exiled_spell_card(&mut state, "Fresh Copy");
+        let inherited = crate::types::game_state::CastOccurrence {
+            caster: PlayerId(1),
+            turn_journal_index: 19,
+        };
+        state.objects.get_mut(&source_id).unwrap().cast_occurrence = Some(inherited);
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+                count: None,
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let copy_id = cast_one_copy(&mut state, source_id, &ability, &mut events)
+            .expect("the card copy is put on the stack");
+        // CR 601.2i: the copy becomes cast when its announcement completes.
+        crate::game::casting_costs::commit_copy_cast(&mut state, copy_id, PlayerId(0), &mut events)
+            .expect("the card copy is cast");
+        let expected = crate::types::game_state::CastOccurrence {
+            caster: PlayerId(0),
+            turn_journal_index: 0,
+        };
+
+        assert_eq!(state.objects[&source_id].cast_occurrence, Some(inherited));
+        assert_eq!(state.objects[&copy_id].cast_occurrence, Some(expected));
+        assert_eq!(
+            state
+                .stack
+                .back()
+                .and_then(StackEntry::ability)
+                .and_then(|ability| ability.cast_occurrence),
+            Some(expected)
+        );
+        assert_eq!(state.spells_cast_this_turn_by_player[&PlayerId(0)].len(), 1);
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&PlayerId(0)][0].spell_object_id,
+            Some(copy_id)
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::SpellCast { object_id, .. } if *object_id == copy_id
+        )));
+    }
+
+    #[test]
+    fn spell_cast_writer_error_mappings_are_explicit_and_non_panicking_for_card_copy() {
+        use crate::types::resolved_commands::{ResolvedLedgerEdit, ResolvedRulesCommand};
+
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::ResolveAllReady { epoch: 41 };
+        let source_id = add_exiled_spell_card(&mut state, "Overflow Copy");
+        let copy_id = ObjectId(state.next_object_id);
+        state.spells_cast_this_game.insert(PlayerId(0), u32::MAX);
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+                count: None,
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let source_before = serde_json::to_value(&state.objects[&source_id]).unwrap();
+        let stack_before = state.stack.clone();
+        let next_object_id_before = state.next_object_id;
+        let journal_len_before = state.resolved_rules_journal.entries().len();
+        let mut events = Vec::new();
+
+        let error = resolve(&mut state, &ability, &mut events)
+            .expect_err("the real cast-copy writer must propagate ledger overflow");
+        assert!(matches!(
+            error,
+            EffectError::InvalidParam(ref message)
+                if message == "failed to record cast copy: resolved ledger command overflows a counter"
+        ));
+        assert_eq!(
+            serde_json::to_value(&state.objects[&source_id]).unwrap(),
+            source_before
+        );
+        assert!(!state.objects.contains_key(&copy_id));
+        assert_eq!(state.stack, stack_before);
+        assert_eq!(state.next_object_id, next_object_id_before);
+        assert!(events.is_empty());
+        assert!(state.spells_cast_this_turn_by_player.is_empty());
+        assert_eq!(
+            state.resolved_rules_journal.entries().len(),
+            journal_len_before
+        );
+        assert!(!state.resolved_rules_journal.entries().iter().any(|entry| {
+            matches!(
+                entry.command.as_ref(),
+                Some(ResolvedRulesCommand::LedgerEdit(command))
+                    if matches!(command.edit, ResolvedLedgerEdit::SpellCast { .. })
+            )
+        }));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { epoch: 41 }
+        ));
+    }
+
+    #[test]
     fn explicit_target_casts_a_stack_copy_without_moving_source_card() {
         let mut state = GameState::new_two_player(7);
         let source_id = add_exiled_spell_card(&mut state, "Lightning Bolt");
@@ -331,6 +518,73 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == copy_id)
         }));
+    }
+
+    /// CR 707.12 (issue #5943): the copy is cast, but pays its OWN (zero)
+    /// costs — the source object's cast-payment record must not carry over.
+    /// This path bypasses `finalize_cast`, so `clear_cast_payment_stamps` in
+    /// `cast_one_copy` is the fresh-cast no-payment baseline. The source keeps
+    /// its own record (reach-guard).
+    #[test]
+    fn cast_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = add_exiled_spell_card(&mut state, "Lightning Bolt");
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&source_id].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
+        }
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+                count: None,
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).expect("cast copy resolves");
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, source_id, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the SOURCE keeps its payment record.
+        assert_eq!(
+            state.objects[&source_id].mana_spent_to_cast_amount, 2,
+            "source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "source keeps its own Phyrexian life-payment record"
+        );
     }
 
     #[test]

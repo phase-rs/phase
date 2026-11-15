@@ -10,7 +10,10 @@
 //! The cap is deliberately generous — far above any realistic game state,
 //! including degenerate token-army boards — so it never rejects legitimate play;
 //! it only blocks payloads engineered to force large allocations/clones.
-use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
+use engine::types::actions::{
+    DebugAction, DebugTokenRequest, GameAction, MAX_DEBUG_COUNTER_AMOUNT, MAX_DEBUG_CREATE_COUNT,
+    MAX_DEBUG_LIFE_AMOUNT,
+};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ProductionOverride};
 use engine::types::mana::{ManaRestriction, ManaSourceSelection, SpellCostCriterion};
@@ -28,10 +31,9 @@ pub const MAX_ACTION_LIST_LEN: usize = 10_000;
 /// name.
 pub const MAX_CHOICE_LEN: usize = 256;
 
-/// Max serialized size for nested debug-only AST payloads that can contain
-/// strings, vectors, or filters. Debug actions are still client-supplied game
-/// actions, so they must not forward arbitrarily large nested payloads into the
-/// engine reducers.
+/// Max serialized size for nested AST payloads in debug bodies.
+/// Client-supplied strings, vectors, or filters must not
+/// forward arbitrarily large payloads into the engine reducers.
 pub const MAX_DEBUG_AST_JSON_LEN: usize = 16 * 1024;
 
 /// Max cumulative bytes accepted across all free-form strings in one semantic
@@ -176,6 +178,7 @@ fn guard_mana_restrictions_payload(
                 pending.extend(children);
             }
             ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForSpellColor(_)
             | ManaRestriction::OnlyForActivation
             | ManaRestriction::OnlyForTaggedActivation(_)
             | ManaRestriction::OnlyForXCosts
@@ -190,8 +193,10 @@ fn guard_mana_restrictions_payload(
                 count: _,
             }
             | ManaRestriction::OnlyForSpellFromZone(_)
+            | ManaRestriction::CannotCastSpellFromZone(_)
             | ManaRestriction::OnlyForFaceDownSpell
             | ManaRestriction::OnlyForSpecialAction(_)
+            | ManaRestriction::Impossible
             | ManaRestriction::ConvokePayment => {}
         }
     }
@@ -360,14 +365,36 @@ fn guard_debug_token_request_payload(request: &DebugTokenRequest) -> Result<(), 
 
 fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
     match action {
-        DebugAction::CreateCard { card_name, .. } => {
+        DebugAction::CreateCard {
+            card_name, count, ..
+        } => {
             bound_string("Debug.CreateCard.card_name", card_name)?;
+            bound_batch_count("Debug.CreateCard.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateCard.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
         }
         DebugAction::AddMana { mana, .. } => {
             bound_list("Debug.AddMana.mana", mana.len())?;
         }
-        DebugAction::CreateToken { request, .. } => {
+        DebugAction::CreateToken { request, count, .. } => {
+            bound_batch_count("Debug.CreateToken.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateToken.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
             guard_debug_token_request_payload(request)?;
+        }
+        DebugAction::CreateTokenCopy { count, .. } => {
+            bound_batch_count("Debug.CreateTokenCopy.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateTokenCopy.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
         }
         DebugAction::ModifyCounters { counter_type, .. } => {
             guard_counter_type_payload("Debug.ModifyCounters.counter_type", counter_type)?;
@@ -377,6 +404,22 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         }
         DebugAction::RemoveKeyword { keyword, .. } => {
             bound_serialized_json("Debug.RemoveKeyword.keyword", keyword)?;
+        }
+        DebugAction::GainLife { amount, .. } | DebugAction::LoseLife { amount, .. } => {
+            if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                return Err(format!(
+                    "Debug.LifeChange.amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                ));
+            }
+        }
+        // `counter_kind` is a unit-variant enum (a bounded scalar), so only the
+        // count needs a bound.
+        DebugAction::GivePlayerCounters { count, .. } | DebugAction::GiveEnergy { count, .. } => {
+            if *count > MAX_DEBUG_COUNTER_AMOUNT {
+                return Err(format!(
+                    "Debug.CounterGain.count {count} exceeds the maximum {MAX_DEBUG_COUNTER_AMOUNT}"
+                ));
+            }
         }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
@@ -399,8 +442,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::ModifyEnergy { .. }
         | DebugAction::SetInfiniteMana { .. }
         | DebugAction::SetPhase { .. }
-        | DebugAction::RunStateBasedActions
-        | DebugAction::CreateTokenCopy { .. } => {}
+        | DebugAction::RunStateBasedActions => {}
     }
     Ok(())
 }
@@ -410,6 +452,28 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
 /// listed explicitly so newly added variants must be classified at compile time.
 pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
     match action {
+        GameAction::SetReplacementAutoChoice { selector } => {
+            if let Some(id) = selector {
+                bound_string("SetReplacementAutoChoice.selector", &id.0)?;
+            }
+        }
+        GameAction::ChooseReplacementAndRemember { choice } => {
+            if let engine::types::actions::ReplacementAutoChoice::Order { order } = choice {
+                bound_list("ChooseReplacementAndRemember.order", order.len())?;
+            }
+        }
+
+        // Un-card actions: the only client-supplied free-form text is the spoken
+        // word or number of a gesture.
+        GameAction::UnAction { action } => {
+            if let engine::types::un_actions::UnAction::PerformTell {
+                tell: engine::types::un_actions::UnTell::Said { text },
+            } = action
+            {
+                bound_string("UnAction.PerformTell.text", text)?;
+            }
+        }
+
         GameAction::CastSpell { targets, .. } => {
             bound_list("CastSpell.targets", targets.len())?;
         }
@@ -441,11 +505,35 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::OrderTriggers { order } => {
             bound_list("OrderTriggers.order", order.len())?;
         }
+        // CR 601.2b + CR 601.2f: the caster's elected reduction order and hybrid
+        // announcement. The engine rejects a non-permutation and an illegal
+        // announcement, but bound the transport payload here too — both list
+        // lengths and each index, so a client cannot force an allocation with a
+        // huge index before the engine ever sees it.
+        GameAction::OrderCostReductions {
+            order,
+            hybrid_announcement,
+        } => {
+            bound_list("OrderCostReductions.order", order.len())?;
+            for index in order {
+                bound_list("OrderCostReductions.order index", *index)?;
+            }
+            bound_list(
+                "OrderCostReductions.hybrid_announcement",
+                hybrid_announcement.len(),
+            )?;
+        }
         GameAction::SelectCards { cards } => {
             bound_list("SelectCards.cards", cards.len())?;
         }
         GameAction::SelectCoinFlips { keep_indices } => {
             bound_list("SelectCoinFlips.keep_indices", keep_indices.len())?;
+        }
+        // CR 706.6: a client-supplied set of die-roll indices to ignore. The
+        // engine re-validates every index against `ignorable_indices`; this is
+        // the coarse WS-level length bound, mirroring the coin-flip sibling.
+        GameAction::SelectDieRolls { ignore_indices } => {
+            bound_list("SelectDieRolls.ignore_indices", ignore_indices.len())?;
         }
         GameAction::SelectModes { indices } => {
             bound_list("SelectModes.indices", indices.len())?;
@@ -454,8 +542,10 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         // ("`count` is a small enum — nothing unbounded") was FALSE: `IterationCount::Fixed`
         // wraps an unbounded `u32` and IS the real DoS vector — bounded here as a coarse
         // WS-level belt (mirrors `ChooseManaColor.count`; the engine's MAX_SHORTCUT_CYCLES is
-        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`
-        // and each `Scheduled` pin's schedule `Vec`) are bounded as DEFENSE-IN-DEPTH: the
+        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`,
+        // each `Scheduled` pin's schedule `Vec`, and each schedule step's `Ranking` — three
+        // levels, not two, since a step's subject became a list) are bounded as
+        // DEFENSE-IN-DEPTH: the
         // 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) already keeps a remote
         // nested payload to a few hundred structs, and this guard runs POST-deserialize
         // (client_message_wire_guard.rs:50), so it bounds downstream compute/clone work — not
@@ -463,13 +553,13 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         // Exhaustive matches (no wildcard) force a future variant to be classified here.
         GameAction::DeclareShortcut { count, template } => {
             use engine::analysis::decision_template::{
-                IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+                IterationCount, PinnedDecision, Ranking, TargetPin, TargetSchedule,
             };
             // Exhaustive (no wildcard): a future `IterationCount` count variant build-breaks
             // here so its wire bound is a conscious decision, not a silent gap.
             match count {
                 IterationCount::Fixed(n) => bound_batch_count("DeclareShortcut.count", *n)?,
-                IterationCount::UntilLethal => {}
+                IterationCount::UntilLethal | IterationCount::WithoutEnd => {}
             }
             if let Some(template) = template {
                 bound_list("DeclareShortcut.template.decisions", template.decisions.len())?;
@@ -478,16 +568,36 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
                         PinnedDecision::Targets { targets, .. } => {
                             bound_list("DeclareShortcut.template.targets", targets.len())?;
                             for target in targets {
+                                // CR 732.2a: each schedule STEP now carries a `Ranking` — its
+                                // own `Vec<AnnouncementSubject>` — so the outer schedule bound
+                                // no longer covers the whole payload. Every arm bounds its
+                                // rankings, INCLUDING `Constant`: it was a no-op only while it
+                                // carried no vector, and leaving it out would make the one arm
+                                // a hostile client can send unbounded. `Ranking::iter` is the
+                                // newtype's length surface (the field is private).
+                                let bound_ranking = |ranking: &Ranking| {
+                                    bound_list(
+                                        "DeclareShortcut.template.ranking",
+                                        ranking.iter().count(),
+                                    )
+                                };
                                 match target {
+                                    TargetPin::Scheduled(TargetSchedule::Constant(r)) => {
+                                        bound_ranking(r)?;
+                                    }
                                     TargetPin::Scheduled(TargetSchedule::RoundRobin(v)) => {
                                         bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                        for ranking in v {
+                                            bound_ranking(ranking)?;
+                                        }
                                     }
                                     TargetPin::Scheduled(TargetSchedule::Piecewise(v)) => {
                                         bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                        for (_, ranking) in v {
+                                            bound_ranking(ranking)?;
+                                        }
                                     }
-                                    TargetPin::Scheduled(TargetSchedule::Constant(_))
-                                    | TargetPin::ByIdentity(_)
-                                    | TargetPin::Player(_) => {}
+                                    TargetPin::ByIdentity(_) | TargetPin::Player(_) => {}
                                 }
                             }
                         }
@@ -563,7 +673,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             bound_list("SetPhaseStops.stops", stops.len())?;
         }
         GameAction::SetPriorityPassingMode { .. } => {}
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             guard_mana_source_selection_payload(selection)?;
         }
         GameAction::DistributeAmong { distribution, .. } => {
@@ -584,8 +694,29 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::RetargetSpell { new_targets, .. } => {
             bound_list("RetargetSpell.new_targets", new_targets.len())?;
         }
+        // CR 702.106a / CR 702.106f: an agenda names at most two cards; the
+        // reducer validates the exact count, this only bounds the wire payload.
+        GameAction::ChooseSecretAgendaNames { names } => {
+            if names.len() > 2 {
+                return Err(format!(
+                    "ChooseSecretAgendaNames.names has {} entries; at most 2 allowed",
+                    names.len()
+                ));
+            }
+            for (index, name) in names.iter().enumerate() {
+                bound_string(&format!("ChooseSecretAgendaNames.names[{index}]"), name)?;
+            }
+        }
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
+        }
+        GameAction::EndContinuousEffect {
+            source_name, cost, ..
+        } => {
+            bound_string("EndContinuousEffect.source_name", source_name)?;
+            if let engine::types::mana::ManaCost::Cost { shards, .. } = cost {
+                bound_list("EndContinuousEffect.cost.shards", shards.len())?;
+            }
         }
         GameAction::SubmitSpellbookDraft { card } => {
             bound_string("SubmitSpellbookDraft.card", card)?;
@@ -594,6 +725,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             guard_debug_action_payload(debug_action)?;
         }
         GameAction::PassPriority
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. }
         | GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
         | GameAction::ActivateAbility { .. }
@@ -604,14 +738,17 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
         | GameAction::ChooseAssistPlayer { .. }
         | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::ActivateStation { .. }
@@ -619,6 +756,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PlayFaceDown { .. }
         | GameAction::TurnFaceUp { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
@@ -639,6 +777,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::CastSpellAsMiracle { .. }
         | GameAction::CastSpellAsMadness { .. }
         | GameAction::DecideOptionalEffect { .. }
+        | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
         | GameAction::DecideOptionalEffectAndRemember { .. }
         | GameAction::PayUnlessCost { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
@@ -701,7 +840,29 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
 mod tests {
     use super::*;
     use engine::game::combat::AttackTarget;
+    use engine::types::game_state::ReplacementAutoChoiceId;
     use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaCost, ManaCostShard};
+
+    #[test]
+    fn replacement_removal_bounds_opaque_selector_strings() {
+        assert_eq!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
+                selector: Some(ReplacementAutoChoiceId("r".to_owned() + &"a".repeat(64)))
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice { selector: None }),
+            Ok(())
+        );
+        assert!(
+            guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
+                selector: Some(ReplacementAutoChoiceId("x".repeat(MAX_CHOICE_LEN + 1)))
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn bounded_meld_actions_are_accepted() {
@@ -716,5 +877,35 @@ mod tests {
         ] {
             assert_eq!(guard_game_action_payload(&action), Ok(()));
         }
+    }
+
+    #[test]
+    fn end_continuous_effect_presentation_payload_is_bounded() {
+        let action = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        assert_eq!(guard_game_action_payload(&action), Ok(()));
+
+        let oversized_name = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "x".repeat(MAX_CHOICE_LEN + 1),
+            cost: ManaCost::zero(),
+        };
+        assert!(guard_game_action_payload(&oversized_name).is_err());
+
+        let oversized_cost = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White; MAX_ACTION_LIST_LEN + 1],
+                generic: 0,
+            },
+        };
+        assert!(guard_game_action_payload(&oversized_cost).is_err());
     }
 }

@@ -24,6 +24,7 @@ export function manaValueOfCost(cost: ManaCost): number {
     case "NoCost":
     case "SelfManaCost":
     case "SelfManaValue":
+    case "SelfManaCostReduced":
       return 0;
     case "Cost":
       return (

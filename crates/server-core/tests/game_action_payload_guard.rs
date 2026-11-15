@@ -2,35 +2,52 @@
 //! `server_core::game_action_payload_guard`).
 
 use engine::analysis::decision_template::{
-    DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-    MayChoiceOption, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
+    AnnouncementSubject, ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot,
+    DecisionTemplate, IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode,
+    TargetPin, TargetSchedule,
 };
+use engine::game::engine::apply;
+use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
-    Comparator, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    Comparator, Effect, QuantityExpr, QuantityModification, ReplacementDefinition, TargetFilter,
+    TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypedFilter,
 };
-use engine::types::actions::{DebugAction, DebugTokenRequest};
-use engine::types::counter::CounterType;
-use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, YieldTarget};
+use engine::types::actions::{
+    DebugAction, DebugTokenRequest, ReplacementAutoChoice, MAX_DEBUG_COUNTER_AMOUNT,
+    MAX_DEBUG_CREATE_COUNT, MAX_DEBUG_LIFE_AMOUNT,
+};
+use engine::types::counter::{CounterMatch, CounterType};
+use engine::types::game_state::{
+    ManaChoice, ProductionOverride, ReplacementAutoChoiceIdentity, ShardChoice, WaitingFor,
+    YieldTarget,
+};
 use engine::types::identifiers::{CardId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{
-    ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, SpellCostCriterion,
-    TapsForManaSelection,
+    ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection,
+    ManaType, SpellCostCriterion, TapsForManaSelection,
 };
 use engine::types::match_config::DeckCardCount;
-use engine::types::player::PlayerId;
+use engine::types::phase::Phase;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::proposed_event::TokenCharacteristics;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
     guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
     MAX_MANA_SELECTION_STRING_BYTES,
 };
 
+use server_core::guard_client_message_before_dispatch;
+use server_core::protocol::{ClientMessage, ServerMode};
+
 fn mana_source_selection() -> ManaSourceSelection {
     ManaSourceSelection {
         source: ObjectIncarnationRef::of(ObjectId(1), 1),
         ability_index: Some(0),
         mana_type: ManaType::Green,
+        output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
         atomic_combination: None,
         restrictions: Vec::new(),
         penalty: ManaSourcePenalty::None,
@@ -83,6 +100,7 @@ fn accepts_realistic_tap_land_semantic_selection() {
     selection.atomic_combination = Some(vec![ManaType::Green, ManaType::Blue]);
     selection.restrictions = vec![
         ManaRestriction::OnlyForSpellType("Creature".to_string()),
+        ManaRestriction::CannotCastSpellFromZone(Zone::Hand),
         ManaRestriction::OnlyForAny(vec![
             ManaRestriction::OnlyForCreatureType("Elf".to_string()),
             ManaRestriction::OnlyForSpellMatchingCostCriteria {
@@ -104,6 +122,17 @@ fn accepts_realistic_tap_land_semantic_selection() {
 
     guard_game_action_payload(&GameAction::TapLandForMana { selection })
         .expect("a realistic semantic mana-source selection stays within every budget");
+}
+
+#[test]
+fn accepts_scalar_deferred_mana_quantity_without_new_collection_budget() {
+    for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+        let mut selection = mana_source_selection();
+        selection.mana_type = ManaType::Colorless;
+        selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+        guard_game_action_payload(&GameAction::ActivateManaSource { selection })
+            .expect("the scalar descriptor adds no list or string payload");
+    }
 }
 
 #[test]
@@ -270,6 +299,7 @@ fn rejects_oversized_debug_token_counter_name() {
             toughness_override: None,
             enter_with_counters: vec![(CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)), 1)],
         },
+        count: 1,
         run_etb: true,
     });
 
@@ -287,10 +317,83 @@ fn accepts_debug_token_preset_pt_override_fields() {
             toughness_override: Some(5),
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 
     guard_game_action_payload(&action).expect("numeric P/T overrides are semantic engine input");
+}
+
+#[test]
+fn rejects_debug_create_count_above_engine_ceiling() {
+    let action = GameAction::Debug(DebugAction::CreateTokenCopy {
+        source_id: ObjectId(1),
+        owner: PlayerId(0),
+        count: MAX_DEBUG_CREATE_COUNT + 1,
+        nonlegendary: false,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.CreateTokenCopy.count"));
+}
+
+#[test]
+fn rejects_debug_life_change_amount_above_engine_ceiling() {
+    let gain = |amount| {
+        GameAction::Debug(DebugAction::GainLife {
+            player_id: PlayerId(0),
+            amount,
+        })
+    };
+    let lose = |amount| {
+        GameAction::Debug(DebugAction::LoseLife {
+            player_id: PlayerId(1),
+            amount,
+        })
+    };
+
+    guard_game_action_payload(&gain(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-gain amount");
+    guard_game_action_payload(&lose(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-loss amount");
+
+    for action in [
+        gain(MAX_DEBUG_LIFE_AMOUNT + 1),
+        lose(MAX_DEBUG_LIFE_AMOUNT + 1),
+    ] {
+        let err = guard_game_action_payload(&action).unwrap_err();
+        assert!(err.contains("Debug.LifeChange.amount"), "{err}");
+    }
+}
+
+#[test]
+fn rejects_debug_counter_gain_count_above_engine_ceiling() {
+    let give_counters = |count| {
+        GameAction::Debug(DebugAction::GivePlayerCounters {
+            player_id: PlayerId(0),
+            counter_kind: PlayerCounterKind::Poison,
+            count,
+        })
+    };
+    let give_energy = |count| {
+        GameAction::Debug(DebugAction::GiveEnergy {
+            player_id: PlayerId(1),
+            count,
+        })
+    };
+
+    guard_game_action_payload(&give_counters(MAX_DEBUG_COUNTER_AMOUNT))
+        .expect("the engine ceiling itself is an accepted player-counter count");
+    guard_game_action_payload(&give_energy(MAX_DEBUG_COUNTER_AMOUNT))
+        .expect("the engine ceiling itself is an accepted energy count");
+
+    for action in [
+        give_counters(MAX_DEBUG_COUNTER_AMOUNT + 1),
+        give_energy(MAX_DEBUG_COUNTER_AMOUNT + 1),
+    ] {
+        let err = guard_game_action_payload(&action).unwrap_err();
+        assert!(err.contains("Debug.CounterGain.count"), "{err}");
+    }
 }
 
 #[test]
@@ -302,6 +405,7 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: Vec::new(),
                 subtypes: Vec::new(),
                 supertypes: Vec::new(),
@@ -310,6 +414,7 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
             },
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 
@@ -325,6 +430,7 @@ fn shortcut_template(decision_count: usize) -> DecisionTemplate {
             card_id: CardId(1),
             trigger_description: None,
         },
+        point: ChoicePoint::MayGate,
         index: 0,
     };
     DecisionTemplate {
@@ -375,6 +481,20 @@ fn accepts_within_bound_declare_shortcut_template() {
 }
 
 #[test]
+fn accepts_declare_shortcut_without_end() {
+    assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
+        count: IterationCount::WithoutEnd,
+        template: None,
+    })
+    .is_ok());
+    assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
+        count: IterationCount::WithoutEnd,
+        template: Some(shortcut_template(MAX_ACTION_LIST_LEN + 1)),
+    })
+    .is_err());
+}
+
+#[test]
 fn rejects_over_cap_fixed_shortcut_count() {
     // T3a (CR 732.2a): `Fixed(u32::MAX)` is the real Vector-1 count; the WS belt must reject
     // it. Revert-probe: restore the `..` that discarded `count` ⇒ guard returns Ok ⇒ FAIL.
@@ -414,6 +534,7 @@ fn rejects_over_cap_shortcut_schedule() {
     };
     let slot = DecisionSlot {
         source: src.clone(),
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     };
     let action = GameAction::DeclareShortcut {
@@ -423,9 +544,9 @@ fn rejects_over_cap_shortcut_schedule() {
             decisions: vec![PinnedDecision::Targets {
                 slot,
                 targets: vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(vec![
-                    src;
-                    MAX_ACTION_LIST_LEN + 1
-                ]))],
+                        Ranking::one(AnnouncementSubject::Object(src));
+                        MAX_ACTION_LIST_LEN + 1
+                    ]))],
             }],
             replay: ReplayMode::Static,
             key: DecisionGroupKey {
@@ -438,4 +559,242 @@ fn rejects_over_cap_shortcut_schedule() {
         guard_game_action_payload(&action).is_err(),
         "an over-cap loop-shortcut schedule vec must be rejected (nested memory bound)"
     );
+}
+
+/// **Row R1-e — the arm the guard used to skip.** Each schedule step now carries a `Ranking`,
+/// its own `Vec<AnnouncementSubject>`, so the outer schedule bound no longer covers the whole
+/// payload — and `Constant` newly carries a vector where it previously carried none, which
+/// made it the ONE `Scheduled` arm a hostile client could send unbounded.
+///
+/// # Non-vacuity / discrimination
+///
+/// Every other list in each fixture is deliberately in-bounds (one decision, one target, and
+/// for the nested arm a schedule of exactly `MAX_ACTION_LIST_LEN` steps), so ONLY the ranking
+/// bound can reject. The paired positive is an in-bounds `Constant` ranking that must be
+/// ACCEPTED, without which a guard that refused every `DeclareShortcut` would pass.
+///
+/// REVERT-PROBES: (a) drop the `Constant` arm's `bound_ranking` ⇒ the first assertion FAILS;
+/// (b) drop the per-step `bound_ranking` loop in the `RoundRobin` arm ⇒ the nested assertion
+/// FAILS while `rejects_over_cap_shortcut_schedule` above stays green, because that row's
+/// rankings are all one element.
+#[test]
+fn rejects_over_cap_shortcut_ranking_on_every_scheduled_arm() {
+    let src = YieldTarget::AllCopies {
+        card_id: CardId(1),
+        trigger_description: None,
+    };
+    let slot = DecisionSlot {
+        source: src.clone(),
+        point: ChoicePoint::AnnouncedTarget,
+        index: 0,
+    };
+    // `Ranking::new` refuses duplicates, so the entries must be distinct. `PlayerId` is a
+    // `u8` and the cap is 10_000, so seats cannot supply enough of them — card identities can.
+    let ranking_of = |len: usize| -> Ranking {
+        let subjects: Vec<AnnouncementSubject> = (0..len as u64)
+            .map(|i| {
+                AnnouncementSubject::Object(YieldTarget::AllCopies {
+                    card_id: CardId(i),
+                    trigger_description: None,
+                })
+            })
+            .collect();
+        Ranking::new(subjects).expect("distinct subjects are a legal ranking")
+    };
+    let declare = |targets: Vec<TargetPin>| GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: Some(DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets,
+            }],
+            replay: ReplayMode::Static,
+            key: DecisionGroupKey {
+                sources: vec![],
+                kind: DecisionKind::LoopChoice,
+            },
+        }),
+    };
+
+    // ── the `Constant` arm: the payload the pre-parameterization guard could not see ──
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::Constant(ranking_of(MAX_ACTION_LIST_LEN + 1))
+        )]))
+        .is_err(),
+        "an over-cap `Constant` ranking must be rejected — this arm carries a Vec now"
+    );
+
+    // ── the NESTED arm on the OTHER two variants: the outer schedule is in bounds, so only
+    //    the per-step ranking bound can refuse. The over-cap step is LAST, so a guard that
+    //    inspected only the first step would accept.
+    //
+    //    The row's shape is "an in-bounds schedule of over-cap rankings"; it is not
+    //    materialized at MAX × (MAX+1) because that literal reading is 10^8 subjects (~5 GB)
+    //    and would measure the allocator, not the guard. Three steps discriminate identically.
+    for (label, sched) in [
+        (
+            "RoundRobin",
+            TargetSchedule::RoundRobin(vec![
+                ranking_of(1),
+                ranking_of(2),
+                ranking_of(MAX_ACTION_LIST_LEN + 1),
+            ]),
+        ),
+        (
+            "Piecewise",
+            TargetSchedule::Piecewise(vec![
+                (0, ranking_of(1)),
+                (5, ranking_of(MAX_ACTION_LIST_LEN + 1)),
+            ]),
+        ),
+    ] {
+        assert!(
+            guard_game_action_payload(&declare(vec![TargetPin::Scheduled(sched)])).is_err(),
+            "{label}: an over-cap ranking nested inside an in-bounds schedule must be \
+             rejected — the outer `bound_list` passes, so only the per-step bound can refuse"
+        );
+    }
+
+    // ── the paired positives: in-bounds payloads on every arm ARE accepted ──
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::Constant(ranking_of(MAX_ACTION_LIST_LEN))
+        )]))
+        .is_ok(),
+        "a ranking at exactly the cap is honest traffic and must pass — without this the row \
+         would be satisfied by a guard that rejected every declaration"
+    );
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::RoundRobin(vec![ranking_of(3), ranking_of(4)])
+        )]))
+        .is_ok(),
+        "and an in-bounds nested schedule passes, so the nested refusals above are the LENGTH \
+         and not the nesting"
+    );
+}
+
+#[test]
+fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
+    let mut sources = Vec::new();
+    for index in 0..50 {
+        let modification = if index == 0 {
+            QuantityModification::Minus { value: 1 }
+        } else {
+            QuantityModification::Plus { value: 1 }
+        };
+        sources.push(
+            scenario
+                .add_creature(P0, "Counter modifier", 1, 1)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                        .quantity_modification(modification),
+                )
+                .id(),
+        );
+    }
+    let spell = scenario
+        .add_spell_to_hand(P0, "Counter spell", true)
+        .with_ability(Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(target).resolve();
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidates,
+        remember_identity: Some(key),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("all 50 counter modifiers must offer an eligible replacement ordering");
+    };
+    assert_eq!(*candidate_count, 50);
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(key.candidates.len(), 50);
+    for identity in &key.candidates {
+        let ReplacementAutoChoiceIdentity::Definition {
+            source: saved_source,
+            definition,
+            ..
+        } = identity
+        else {
+            panic!("counter modifiers must snapshot their real definitions");
+        };
+        // The scan can differ from the requested order; every identity must
+        // still reference one of the real applicable source definitions.
+        assert!(sources.contains(&saved_source.object_id));
+        assert_eq!(
+            definition.as_ref(),
+            &runner.state().objects[&saved_source.object_id].replacement_definitions[0]
+        );
+        assert_eq!(
+            definition.as_ref(),
+            &runner.state().objects[&saved_source.object_id].base_replacement_definitions[0]
+        );
+    }
+    let order = sources
+        .iter()
+        .map(|source| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_id == *source)
+                .unwrap()
+        })
+        .collect();
+    runner
+        .act(GameAction::ChooseReplacementAndRemember {
+            choice: ReplacementAutoChoice::Order { order },
+        })
+        .unwrap();
+    assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+    let record = &runner.state().replacement_auto_choices[0];
+    let key_bytes = serde_json::to_vec(&record.key).unwrap().len();
+    assert!(
+        key_bytes > MAX_DEBUG_AST_JSON_LEN,
+        "real stored key is {key_bytes} bytes"
+    );
+    println!(
+        "real stored replacement key: {key_bytes} bytes; compact selector: {} bytes",
+        record.id.0.len()
+    );
+    assert_eq!(record.id.0.len(), 65);
+    // CR 616.1f: subtracting the initial counter reduces the count to zero,
+    // leaving no other applicable replacements when the event is rescanned.
+    assert!(runner.state().objects[&target].counters.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
+
+    let frame = serde_json::to_string(&ClientMessage::Action {
+        action: GameAction::SetReplacementAutoChoice {
+            selector: Some(record.id.clone()),
+        },
+    })
+    .unwrap();
+    let decoded: ClientMessage = serde_json::from_str(&frame).unwrap();
+    guard_client_message_before_dispatch(&decoded, ServerMode::Full)
+        .expect("a legitimate saved preference removal must pass the real transport guard");
+    let ClientMessage::Action { action } = decoded else {
+        unreachable!()
+    };
+    let waiting_for = runner.state().waiting_for.clone();
+    let result = apply(runner.state_mut(), P0, action).unwrap();
+    assert!(runner.state().replacement_auto_choices.is_empty());
+    assert_eq!(runner.state().waiting_for, waiting_for);
+    assert!(result.events.is_empty());
+    assert!(runner.state().objects[&target].counters.is_empty());
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
 }

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-lan"
+description = "Allows first-party desktop content to explicitly host, discover, and connect to private LAN servers."
+commands.allow = ["lan_capabilities", "start_lan_server", "lan_server_status", "stop_lan_server", "discover_lan_servers", "authorize_lan_server", "connect_lan_server", "lan_bridge_send", "lan_bridge_close"]

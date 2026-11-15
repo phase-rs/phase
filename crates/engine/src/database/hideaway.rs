@@ -85,9 +85,14 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             filter: TargetFilter::Any,
             // CR 702.75a: "put the rest on the bottom of your library."
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            // CR 702.75a names one position for the whole remainder, not a split.
+            rest_split_top_count: None,
+            rest_order: crate::types::ability::DigRestOrder::Random,
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
     )
@@ -96,6 +101,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::HideawayConceal {
             target: TargetFilter::ParentTarget,
+            grantee: None,
         },
     ));
 

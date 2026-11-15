@@ -133,7 +133,7 @@ fn self_move_relatch_chains_across_two_hops() {
         controller: P0,
         kind: StackEntryKind::ActivatedAbility {
             source_id: src,
-            ability: drawing_ability(src, captured),
+            ability: Box::new(drawing_ability(src, captured)),
         },
     });
 

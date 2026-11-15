@@ -80,6 +80,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
     // emissary via the production handler.
     let source = crate::support::exact_named_choice_source(runner.state(), emissary);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: P0,
         choice_type: ChoiceType::card_type(),
         options: vec![

@@ -140,3 +140,70 @@ fn duskmantle_seer_each_player_loses_life_for_their_own_revealed_card() {
         "P1's revealed card must be put into P1's hand"
     );
 }
+
+/// Runs Duskmantle Seer's upkeep trigger with the given library contents and returns the runner
+/// and the Seer's id. Stops at upkeep so the draw step cannot eliminate an empty-library player.
+fn seer_upkeep(
+    p0_library: bool,
+    p1_library: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+) {
+    let db = load_db().expect("card db");
+    let mut scenario = GameScenario::new();
+    let seer = scenario.add_real_card(P0, "Duskmantle Seer", Zone::Battlefield, db);
+    if p0_library {
+        scenario.add_real_card(P0, "Bonesplitter", Zone::Library, db);
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+    }
+    if p1_library {
+        scenario.add_real_card(P1, "Balance", Zone::Library, db);
+        scenario.add_real_card(P1, "Island", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().phase = Phase::Untap;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    (runner, seer)
+}
+
+/// CR 608.2c + CR 609.3: a player with no top card reveals nothing, loses 0 and puts nothing into
+/// hand; the other player's clauses are unaffected and the Seer does not act on itself.
+fn assert_seer_stays(p0_library: bool, p1_library: bool, hands: (usize, usize), life: (i32, i32)) {
+    let (runner, seer) = seer_upkeep(p0_library, p1_library);
+    let s = runner.state();
+    assert_eq!(s.objects[&seer].zone, Zone::Battlefield, "Seer stays");
+    assert_eq!(
+        (s.players[0].hand.len(), s.players[1].hand.len()),
+        hands,
+        "hands"
+    );
+    assert_eq!((runner.life(P0), runner.life(P1)), life, "life");
+}
+
+#[test]
+fn duskmantle_seer_p1_empty_library_reveals_nothing() {
+    if load_db().is_some() {
+        assert_seer_stays(true, false, (1, 0), (19, 20));
+    }
+}
+
+#[test]
+fn duskmantle_seer_p0_empty_library_reveals_nothing() {
+    if load_db().is_some() {
+        assert_seer_stays(false, true, (0, 1), (20, 18));
+    }
+}
+
+#[test]
+fn duskmantle_seer_both_libraries_empty_reveals_nothing() {
+    if load_db().is_some() {
+        assert_seer_stays(false, false, (0, 0), (20, 20));
+    }
+}

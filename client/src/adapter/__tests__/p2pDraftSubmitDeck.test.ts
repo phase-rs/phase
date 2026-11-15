@@ -1,0 +1,592 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { P2PDraftHost } from "../p2p-draft-host";
+import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchLaunch } from "../../network/draftProtocol";
+
+/**
+ * U17 — the commander designation's submission channel at the P2P host seam.
+ *
+ * CR 903.3: "Each deck has a legendary card designated as its commander." This
+ * suite asserts the host carries that designation from the wire to the adapter;
+ * CR 903.1 scopes the designation to the Commander variant, which is why the
+ * empty-designation row is a legal payload and not a hostile one.
+ *
+ * Every test drives the REAL host seam (`handleGuestMessage` / `submitHostDeck`
+ * / the private `handleDeckSubmission` funnel) against a stubbed adapter,
+ * rather than asserting a message shape.
+ *
+ * WHAT THIS HARNESS DOES NOT RUN: `handleGuestMessage` is invoked directly with
+ * a plain object literal. `validateDraftMessage` runs UPSTREAM of it, in
+ * `decodeDraftWireMessage` -> `draftPeerSession.ts`'s `conn.on("data")`, and
+ * this harness constructs no peer session. So no row here may name
+ * `validateSubmitDeck`, its bound or its floor as the branch it reaches —
+ * every validator claim belongs to `draftProtocol.test.ts`, which is the only
+ * suite in `client/src` that runs the validator at all.
+ *
+ * Modelled on `p2pDraftPick.test.ts`, including its `REVERT-PROBE:`
+ * convention: every test names the exact line whose reversion it catches.
+ */
+
+function newHost(kind: "CommanderDraft" | "Premier" = "CommanderDraft") {
+  return new P2PDraftHost(
+    { id: "host" } as never,
+    () => () => {},
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
+    kind,
+    4,
+    "Host",
+    "Swiss",
+    "Competitive",
+  );
+}
+
+type PrivateHost = {
+  draftStarted: boolean;
+  paused: boolean;
+  guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
+  adapter: Record<string, ReturnType<typeof vi.fn>>;
+  handleGuestMessage: (seat: number, message: unknown) => Promise<void>;
+  dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+  persistSessionStrict: () => Promise<void>;
+  broadcastViews: () => Promise<void>;
+  matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
+};
+
+function asPrivate(host: P2PDraftHost): PrivateHost {
+  return host as unknown as PrivateHost;
+}
+
+/**
+ * The two adapter methods `handleDeckSubmission` reaches.
+ *
+ * `getViewForSeat` is NOT optional here: the funnel awaits it AFTER the send,
+ * inside the same `try`, so a stub missing it throws, the `catch` sends
+ * `draft_error` and rethrows — which is exactly what the rejection row asserts,
+ * reached for the wrong reason.
+ *
+ * Its `seats` array must hold at least one seat that is neither
+ * `has_submitted_deck` nor `is_bot`: `seats.every(...)` on an EMPTY array is
+ * `true`, which enters `allDecksSubmitted` -> `generatePairings()`, absent from
+ * this stub.
+ */
+function stubAdapter(overrides: Record<string, unknown> = {}) {
+  return {
+    submitDeckForSeat: vi.fn(async () => ({ status: "Deckbuilding", seat_view: "submitting" })),
+    getViewForSeat: vi.fn(async () => ({
+      status: "Deckbuilding",
+      seats: [{ has_submitted_deck: false, is_bot: false }],
+    })),
+    ...overrides,
+  } as unknown as Record<string, ReturnType<typeof vi.fn>>;
+}
+
+/** Seed a guest session for `seat` — without it, every send is a silent no-op. */
+function seatGuestSession(privateHost: PrivateHost, seat: number) {
+  const send = vi.fn();
+  privateHost.guestSessions.set(seat, { send });
+  return send;
+}
+
+describe("P2P deck-submission channel", () => {
+  /**
+   * Adjacent host-side reach for Set bot launch. The adapter is stubbed here:
+   * draft-wasm's no-database proposal is tested in its Rust entry-point test.
+   */
+  it("launches a submitted Set Premier deck against a full bot proposal", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    const humanDeck = Array<string>(40).fill("Forest");
+    const getBotDeck = vi.fn(async () => ({
+      main_deck: ["Alpha", "Beta", "Gamma", "Delta"],
+      lands: { Plains: 36 },
+      commander: [],
+    }));
+    privateHost.adapter = stubAdapter({
+      exportSession: vi.fn(async () => JSON.stringify({
+        pools: [[], []],
+        submitted_decks: { 0: { seat: 0, main_deck: humanDeck, commanders: [] } },
+      })),
+      getBotDeck,
+      boosterPackPoolForGame: vi.fn(async () => null),
+    });
+    const launches: DraftMatchLaunch[] = [];
+    host.onEvent((event) => {
+      if (event.type === "matchStart") launches.push(event.launch);
+    });
+
+    await host.submitHostDeck(humanDeck, []);
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(0, humanDeck, []);
+    await privateHost.dispatchMatchLaunch({
+      match_id: "set-bot-match", round: 1, seat_a: 0, seat_b: 1,
+      name_a: "Host", name_b: "Bot 1",
+    } as PairingView, {
+      seats: [
+        { seat_index: 0, is_bot: false },
+        { seat_index: 1, is_bot: true },
+      ],
+      match_config: { match_type: "Bo1" },
+    } as DraftPlayerView);
+
+    expect(getBotDeck).toHaveBeenCalledWith(1);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toMatchObject({
+      type: "Bot", matchId: "set-bot-match", localSeat: 0, botSeat: 1,
+      deckPayload: {
+        player: { main_deck: humanDeck },
+        opponent: { main_deck: ["Alpha", "Beta", "Gamma", "Delta", ...Array<string>(36).fill("Plains")] },
+        booster_pack_pool: null,
+      },
+    });
+    expect(privateHost.matchLaunches.get("set-bot-match")?.get(0)).toEqual(launches[0]);
+  });
+
+  /**
+   * The original Cube multiset is private to the host's device. In a pod of
+   * three or more, a pairing that excludes seat 0 elects a guest as its engine
+   * authority (`HumanHost`, or the human side of a `Bot` launch); that
+   * launch must name no source (its engine then opens ordinary set boosters),
+   * never the undealt sentinel or its duplicate count. The same pod's seat-0
+   * pairing is the reach-guard: the host's own launch still carries the exact
+   * source Booster Tutor opens from.
+   *
+   * REVERT-PROBE: return `this.adapter.boosterPackPoolForGame()` unconditionally
+   * from `boosterPackPoolForMatchAuthority` (the pre-fix behaviour) and the
+   * seat-2 launch assertions fail on `booster_pack_pool: null` and on the
+   * sentinel scan.
+   */
+  it.each([false, true])(
+    "withholds the Cube source from a participant match authority (bot opponents: %s)",
+    async (bot) => {
+      const host = newHost("Premier");
+      const privateHost = asPrivate(host);
+      const source = ["Cube A", "Cube A", "Undealt sentinel"];
+      const draftView = {
+        seats: [0, 1, 2, 3].map((seat_index) => ({
+          seat_index,
+          is_bot: bot && (seat_index === 1 || seat_index === 3),
+        })),
+        match_config: { match_type: "Bo1" },
+      } as DraftPlayerView;
+      privateHost.adapter = stubAdapter({
+        exportSession: vi.fn(async () => JSON.stringify({
+          pools: [[], [], [], []], submitted_decks: {
+            0: { seat: 0, main_deck: ["Host deck"], commanders: [] },
+            1: { seat: 1, main_deck: ["Seat 1 deck"], commanders: [] },
+            2: { seat: 2, main_deck: ["Human deck"], commanders: [] },
+            3: { seat: 3, main_deck: ["Guest deck"], commanders: [] },
+          },
+        })),
+        getBotDeck: vi.fn(async () => ({ main_deck: ["Bot deck"], lands: {}, commander: [] })),
+        boosterPackPoolForGame: vi.fn(async () => source),
+      });
+      privateHost.persistSessionStrict = vi.fn(async () => {});
+      const hostLaunches: DraftMatchLaunch[] = [];
+      host.onEvent((event) => {
+        if (event.type === "matchStart") hostLaunches.push(event.launch);
+      });
+      const seatSends = [1, 2, 3].map((seat) => seatGuestSession(privateHost, seat));
+
+      await privateHost.dispatchMatchLaunch({
+        match_id: "host-match", round: 1, seat_a: 0, seat_b: 1, name_a: "Host", name_b: "Seat 1",
+      } as PairingView, draftView);
+      await privateHost.dispatchMatchLaunch({
+        match_id: "guest-match", round: 1, seat_a: 2, seat_b: 3, name_a: "Human", name_b: "Other",
+      } as PairingView, draftView);
+
+      // Reach-guard: the host's own launch opens from the exact original source.
+      expect(hostLaunches).toHaveLength(1);
+      expect(hostLaunches[0]).toMatchObject({
+        type: bot ? "Bot" : "HumanHost", localSeat: 0,
+        deckPayload: { booster_pack_pool: source, player: { main_deck: ["Host deck"] } },
+      });
+
+      // The guest authority receives no source, exactly like a set draft.
+      expect(seatSends[1]).toHaveBeenCalledWith(expect.objectContaining({
+        type: "draft_match_start", launch: expect.objectContaining({
+          type: bot ? "Bot" : "HumanHost", localSeat: 2,
+          deckPayload: expect.objectContaining({ booster_pack_pool: null,
+            player: expect.objectContaining({ main_deck: ["Human deck"] }) }),
+        }),
+      }));
+      // Every guest frame, and the guest match's durable launch record (which
+      // is persisted and later echoed as Bo3 intergame launch authority),
+      // must be free of every source entry.
+      const participantFrames = JSON.stringify(seatSends.map((send) => send.mock.calls));
+      const guestRecord = JSON.stringify([...privateHost.matchLaunches.get("guest-match")!.values()]);
+      for (const entry of source) {
+        expect(participantFrames).not.toContain(entry);
+        expect(guestRecord).not.toContain(entry);
+      }
+
+      // The host-local N-seat Commander payload never leaves this device.
+      const commander = await host.podCommanderDeckPayload({ ...draftView, seats: draftView.seats.slice(2) }, 3);
+      expect(commander.booster_pack_pool).toEqual(source);
+      expect(commander.player.main_deck).toEqual([bot ? "Bot deck" : "Guest deck"]);
+      expect(commander.opponent.main_deck).toEqual(["Human deck"]);
+    },
+  );
+
+  /**
+   * V-TS-1. The wire message's designation reaches the adapter, in order.
+   *
+   * REVERT-PROBE: change `p2p-draft-host.ts`'s `case "draft_submit_deck"` to
+   * `handleDeckSubmission(seat, msg.mainDeck)` — dropping the third argument —
+   * and this reds.
+   */
+  it("routes a guest's designation to the adapter, in order", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.adapter = stubAdapter();
+    const send = seatGuestSession(privateHost, 2);
+
+    await privateHost.handleGuestMessage(2, {
+      type: "draft_submit_deck",
+      submissionId: "submission-1",
+      mainDeck: ["Plains", "Island"],
+      commanders: ["Kenrith, the Returned King"],
+    });
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(
+      2,
+      ["Plains", "Island"],
+      ["Kenrith, the Returned King"],
+    );
+    // Paired positive reach-guard: the call RESOLVED and the seat received its
+    // durable receipt (`draft_deck_submit_ack`, draft protocol 14).
+    // A thrown guard cannot satisfy a not-called negative elsewhere in this
+    // suite if this row cannot reach the adapter at all.
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "draft_deck_submit_ack", submissionId: "submission-1" }),
+    );
+  });
+
+  /**
+   * V-TS-2. Multi-authority: the funnel has TWO callers, and each must carry
+   * its OWN designation. A guest's `draft_submit_deck` arrives on the wire at
+   * seat n; the host's `submitHostDeck` never touches the wire and is seat 0.
+   *
+   * REVERT-PROBE: change `submitHostDeck` to
+   * `handleDeckSubmission(0, mainDeck)` and this reds.
+   */
+  it("carries the host's own designation through submitHostDeck", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.adapter = stubAdapter();
+
+    const view = await host.submitHostDeck(
+      ["Swamp", "Mountain"],
+      ["Gyruda, Doom of Depths"],
+    );
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(
+      0,
+      ["Swamp", "Mountain"],
+      ["Gyruda, Doom of Depths"],
+    );
+    // Reach-guard: seat 0 returns the SUBMITTING seat's own view, not the host
+    // view the other branch returns — so the funnel ran to completion.
+    expect(view).toMatchObject({ seat_view: "submitting" });
+  });
+
+  /**
+   * V-TS-3. An empty designation is FORWARDED — neither dropped nor defaulted
+   * into a synthesised name.
+   *
+   * This proves the HOST forwards `[]`. It proves NOTHING about the validator's
+   * floor: `validateDraftMessage` does not run in this harness. The floor of 0
+   * is `draftProtocol.test.ts`'s zero-entry accept row, and only that row.
+   *
+   * REVERT-PROBE: the same dropped-argument reversion as V-TS-1 — with two
+   * arguments, `toHaveBeenCalledWith(seat, mainDeck, [])` reds.
+   */
+  it("forwards an empty designation rather than dropping it", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.adapter = stubAdapter();
+    const send = seatGuestSession(privateHost, 1);
+
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_submit_deck",
+      submissionId: "submission-1",
+      mainDeck: ["Forest"],
+      commanders: [],
+    });
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(1, ["Forest"], []);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "draft_deck_submit_ack", submissionId: "submission-1" }),
+    );
+  });
+
+  /**
+   * V-TS-4. Hostile: a submission BEFORE the draft starts is refused and never
+   * reaches the adapter. The `!this.draftStarted` guard is unchanged by this
+   * phase; the row exists so a new argument threaded through the case body
+   * cannot have moved the refusal.
+   *
+   * The negative is not vacuous: V-TS-1 proves this same harness CAN reach the
+   * adapter.
+   */
+  it("refuses a submission before the draft has started", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = false;
+    privateHost.adapter = stubAdapter();
+    const send = seatGuestSession(privateHost, 3);
+
+    await privateHost.handleGuestMessage(3, {
+      type: "draft_submit_deck",
+      submissionId: "submission-1",
+      mainDeck: ["Plains"],
+      commanders: ["Kenrith, the Returned King"],
+    });
+
+    expect(send).toHaveBeenCalledWith({
+      type: "draft_error",
+      reason: "Draft not started",
+      submissionId: "submission-1",
+      submissionDisposition: "Rejected",
+    });
+    expect(privateHost.adapter.submitDeckForSeat).not.toHaveBeenCalled();
+  });
+
+  /**
+   * V-TS-5. The loud-refusal surface: an adapter rejection reaches the
+   * SUBMITTING guest as `draft_error`, and rethrows.
+   *
+   * The `reason`-TEXT assertion is the second belt. `handleDeckSubmission`'s
+   * `catch` is reachable from `getViewForSeat` as well as from
+   * `submitDeckForSeat`, so asserting merely that a `draft_error` was sent
+   * would pass for a mis-stubbed fixture. Asserting the rejection's OWN
+   * distinctive message is what attributes the error to its cause.
+   *
+   * REVERT-PROBE: weaken `handleDeckSubmission`'s `try`/`catch` — swallow the
+   * error, or stop sending `draft_error` — and this reds. §9 Step 6 forbids it.
+   */
+  it("returns an adapter rejection to the submitting guest as draft_error", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => {
+        throw new Error("card 'Kenrith, the Returned King' is designated as commander 1 time(s) but the deck contains 0 copy(ies)");
+      }),
+    });
+    const send = seatGuestSession(privateHost, 2);
+
+    await expect(
+      privateHost.handleGuestMessage(2, {
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains"],
+        commanders: ["Kenrith, the Returned King"],
+      }),
+    ).rejects.toThrow("is designated as commander");
+
+    expect(send).toHaveBeenCalledWith({
+      type: "draft_error",
+      reason:
+        "card 'Kenrith, the Returned King' is designated as commander 1 time(s) but the deck contains 0 copy(ies)",
+      submissionId: "submission-1",
+      submissionDisposition: "Rejected",
+    });
+  });
+
+  /**
+   * CR 702.139a/b: the draft engine refuses a companion the starting deck makes
+   * ineligible (a backed Gyruda over an odd-mana-value card). The host must
+   * then treat the submission as NOT accepted: no durable receipt, no
+   * acknowledgement, no progression, and a retry under the same submission id
+   * reaches the reducer again rather than replaying a phantom acceptance.
+   *
+   * REVERT-PROBE: record the receipt or persist before awaiting the adapter and
+   * `persistSessionStrict` is called / the retry skips the adapter.
+   */
+  it("neither acknowledges, persists nor advances a companion the engine refuses", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const refusal = "companion 'Gyruda, Doom of Depths' is not a legal companion for this starting deck";
+    const submitDeckForSeat = vi.fn(async () => { throw new Error(refusal); });
+    privateHost.adapter = stubAdapter({ submitDeckForSeat });
+    const send = seatGuestSession(privateHost, 2);
+    const events: string[] = [];
+    host.onEvent((event) => events.push(event.type));
+    const message = {
+      type: "draft_submit_deck",
+      submissionId: "gyruda-1",
+      mainDeck: ["Seat 2 Card 0"],
+      commanders: [],
+      companion: "Gyruda, Doom of Depths",
+    };
+
+    await expect(privateHost.handleGuestMessage(2, message)).rejects.toThrow("not a legal companion");
+    expect(send).toHaveBeenCalledWith({
+      type: "draft_error", reason: refusal, submissionId: "gyruda-1", submissionDisposition: "Rejected",
+    });
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "draft_deck_submit_ack" }));
+    expect(privateHost.persistSessionStrict).not.toHaveBeenCalled();
+    expect(privateHost.broadcastViews).not.toHaveBeenCalled();
+    expect(events).not.toContain("deckSubmitted");
+    expect(events).not.toContain("allDecksSubmitted");
+
+    // Same id again: the reducer is consulted anew (no receipt was recorded).
+    await expect(privateHost.handleGuestMessage(2, message)).rejects.toThrow("not a legal companion");
+    expect(submitDeckForSeat).toHaveBeenCalledTimes(2);
+    expect(submitDeckForSeat).toHaveBeenCalledWith(2, ["Seat 2 Card 0"], [], "Gyruda, Doom of Depths");
+  });
+
+  it("acknowledges and persists a companion the engine accepts", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    privateHost.adapter = stubAdapter();
+    const send = seatGuestSession(privateHost, 2);
+
+    await privateHost.handleGuestMessage(2, {
+      type: "draft_submit_deck",
+      submissionId: "gyruda-ok",
+      mainDeck: ["Seat 2 Card 0"],
+      commanders: [],
+      companion: "Gyruda, Doom of Depths",
+    });
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(
+      2, ["Seat 2 Card 0"], [], "Gyruda, Doom of Depths",
+    );
+    expect(privateHost.persistSessionStrict).toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "draft_deck_submit_ack", submissionId: "gyruda-ok" }),
+    );
+  });
+
+  /**
+   * V7. MTR 7.3: a Casual pod may revise a deck between rounds. Every seat has
+   * already submitted, so the all-submitted branch of
+   * `publishAcceptedDeckSubmission` fires at `RoundComplete`; that revision
+   * must republish the pod and never generate the next round's pairings —
+   * round advancement stays the host's `AdvanceRound`.
+   *
+   * REVERT-PROBE: fold `case "RoundComplete":` back into the
+   * `generatePairingsInner()` group and `adapter.generatePairings` is called
+   * and `pairingsGenerated` is emitted.
+   */
+  it("republishes a between-rounds revision without generating pairings", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      current_round: 1,
+      pairings: [],
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+      generatePairings: vi.fn(async () => ({ ...roundCompleteView, status: "MatchInProgress", current_round: 2 })),
+    });
+    const events: string[] = [];
+    host.onEvent((event) => events.push(event.type));
+    seatGuestSession(privateHost, 2);
+
+    await privateHost.handleGuestMessage(2, {
+      type: "draft_submit_deck",
+      submissionId: "revision-1",
+      mainDeck: ["Island"],
+      commanders: [],
+    });
+
+    // Reach guard: the revision reached `publishAcceptedDeckSubmission`.
+    expect(events).toContain("deckSubmitted");
+    expect(events).toContain("allDecksSubmitted");
+    expect(privateHost.broadcastViews).toHaveBeenCalled();
+    expect(privateHost.adapter.generatePairings).not.toHaveBeenCalled();
+    expect(events).not.toContain("pairingsGenerated");
+  });
+
+  /**
+   * V7b. A host revert to an earlier composition (A -> B -> A) is a new
+   * submission and must reach the reducer. The stubbed adapter decides
+   * admission, so the host-side behavior is policy-independent and the
+   * helper's `"Competitive"` policy is left as is.
+   *
+   * REVERT-PROBE: restore `submitHostDeck`'s "any prior seat-0 receipt with a
+   * matching fingerprint" lookup and the third submission replays A's receipt:
+   * `submitDeckForSeat` is called twice, and `submitted_decks[0]` stays B.
+   */
+  it("submits a host revert to an earlier deck rather than replaying its receipt", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+    });
+    const deckA = Array<string>(40).fill("Plains");
+    const deckB = Array<string>(40).fill("Island");
+
+    await host.submitHostDeck(deckA, []);
+    await host.submitHostDeck(deckB, []);
+    await host.submitHostDeck(deckA, []);
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledTimes(3);
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenLastCalledWith(0, deckA, []);
+  });
+
+  /**
+   * V7b sibling (preservation). An immediate retry of the LATEST accepted
+   * submission still replays its receipt and never reaches the reducer twice.
+   */
+  it("replays the receipt for a retry of the host's latest submission", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const roundCompleteView = {
+      status: "RoundComplete",
+      seats: [0, 1, 2, 3].map(() => ({ has_submitted_deck: true, is_bot: false })),
+    };
+    privateHost.adapter = stubAdapter({
+      submitDeckForSeat: vi.fn(async () => roundCompleteView),
+      getViewForSeat: vi.fn(async () => roundCompleteView),
+    });
+    const deckA = Array<string>(40).fill("Plains");
+
+    await host.submitHostDeck(deckA, []);
+    // Reach guard: the first submission carried A to the reducer.
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(0, deckA, []);
+    await host.submitHostDeck(deckA, []);
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
+  });
+});

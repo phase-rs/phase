@@ -97,4 +97,5 @@ describe("ModeChoiceModal", () => {
     fireEvent.click(cancel);
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
   });
+
 });

@@ -39,7 +39,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
-use engine::types::ability::{CastingPermission, ManaSpendPermission, TargetRef};
+use engine::types::ability::{CardPlayMode, CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, CastingPermissionIndex, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -283,21 +283,9 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         "reach guard: a pending cast must exist before the failing distribution"
     );
 
-    // CR 601.2d: the handler stashes the announced division into
-    // `pending.ability.distribution` BEFORE it clones `pending_for_restore`, so a
-    // correct clean restore carries exactly that stash (and nothing else changes).
-    // Build the expected post-failure pending from the pre-failure snapshot plus
-    // that one stash — a full structural check that both (i) proves the restore is
-    // not a subtly-wrong `Some(_)`, and (ii) proves the distribution stash is
-    // present (a restore that dropped it would fail here just as a bare
-    // pre-snapshot compare would).
+    // The action boundary is transactional: the failed choice must restore the
+    // exact pre-action pending cast, including the absence of a distribution.
     let distribution = even_distribution(total, &targets);
-    let mut expected_pending = pre_pending.clone();
-    expected_pending
-        .as_mut()
-        .expect("reach guard set above")
-        .ability
-        .distribution = Some(distribution.clone());
 
     let result = runner.act(GameAction::DistributeAmong { distribution });
 
@@ -306,13 +294,12 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         result.is_err(),
         "recomputed 6-mana cost must be unpayable from a 4-mana pool (CR 601.2h)"
     );
-    // (b) full structural restore of pending_cast — not just is_some(): catches a
-    // restore that pushes back a subtly-wrong PendingCast (e.g. a dropped
-    // `.ability.distribution` stash, or a cost/target field mutated in place).
+    // (b) Full structural restore of the pre-action pending cast — not just
+    // `is_some()`: catches a retry state leaked from the rejected action.
     assert_eq!(
         runner.state().pending_cast,
-        expected_pending,
-        "pending_cast must be restored exactly (pre-failure state + the CR 601.2d distribution stash)"
+        pre_pending,
+        "pending_cast must be restored exactly to its pre-action state"
     );
     // (c) waiting_for is unchanged — a clean, retryable/cancellable DistributeAmong
     // state, not a corrupted stale one.
@@ -340,7 +327,8 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
     const X: u32 = 2;
     let (mut runner, spell, card_id, creatures) = fireball_scenario(3);
     zones::move_to_zone(runner.state_mut(), spell, Zone::Exile, &mut Vec::new());
-    runner.state_mut().players[0].mana_pool.mana = blue_pool(3);
+    runner.state_mut().players[0].mana_pool =
+        engine::types::mana::ManaPool::from_units(blue_pool(3));
     runner
         .state_mut()
         .objects
@@ -348,8 +336,10 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
         .unwrap()
         .casting_permissions = vec![
         CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P1,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -358,12 +348,16 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
         CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P0,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -372,7 +366,9 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
     ];

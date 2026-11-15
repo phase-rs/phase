@@ -1,24 +1,36 @@
 import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { PlayerLatency } from "./PlayerLatency.tsx";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { formatLifeReadout, lifeReadoutTitle, useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useHordeDeckMeta } from "../../hooks/useHordeDeckMeta.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
+import type { PlayerAvatarIdentity } from "../../services/playerAvatars.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
-import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import {
+  getAllOpponentIds,
+  getOpponentIds,
+  getWaitingForClickTargetRefs,
+  getWaitingForPlayerChoiceIds,
+  isOneOnOne,
+  resolveFocusedOpponent,
+} from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, HordeRulesBadge, InitiativeBadge, MonarchBadge, PoisonCounterBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -64,12 +76,13 @@ export function OpponentHud({
   const forceCompactHud = isMobileViewport || isCompactHeight;
 
   const teamBased = gameState?.format_config?.team_based ?? false;
+  // The Horde deck's engine-authored rules summary (undefined outside Horde).
+  const hordeMeta = useHordeDeckMeta();
 
-  const allOpponents = useMemo(() => {
-    if (!gameState) return [];
-    const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
-    return seatOrder.filter((id) => id !== playerId);
-  }, [gameState, playerId]);
+  const allOpponents = useMemo(
+    () => getAllOpponentIds(gameState, playerId),
+    [gameState, playerId],
+  );
 
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = useMemo(() => getOpponentIds(gameState, playerId), [gameState, playerId]);
@@ -159,42 +172,21 @@ export function OpponentHud({
 
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
-  // CR 115.7: A single-target retarget (Bolt Bend) is chosen on the board, so
-  // opponents are legal click targets when they appear in `legal_new_targets`.
-  const isRetargetChoiceForMe = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single";
-  // CR 303.4g + CR 115.1: a returned / non-spell Aura that enchants a player
-  // (a Curse) is hosted by a board pick — opponents are legal click hosts when
-  // they appear in `legal_targets`.
-  const isReturnAsAuraForMe = waitingFor?.type === "ReturnAsAuraTarget"
-    && waitingFor.data.player === playerId;
-  const isTargeting = isHumanTargetSelection || isCopyRetargetForMe || isRetargetChoiceForMe || isReturnAsAuraForMe;
-  const currentLegalTargets = useMemo(() => {
-    if (isHumanTargetSelection) {
-      return waitingFor.data.selection?.current_legal_targets ?? [];
-    }
-    if (isCopyRetargetForMe) {
-      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
-      return slot?.legal_alternatives ?? [];
-    }
-    if (isRetargetChoiceForMe) {
-      return waitingFor.data.legal_new_targets;
-    }
-    if (isReturnAsAuraForMe) {
-      return waitingFor.data.legal_targets;
-    }
-    return [];
-  }, [isHumanTargetSelection, isCopyRetargetForMe, isRetargetChoiceForMe, isReturnAsAuraForMe, waitingFor]);
+  const canActForWaitingState = useCanActForWaitingState();
+  // `null` = the engine is not asking THIS client to click a target; `[]` = it is
+  // asking but nothing is legal yet. `isTargeting` needs that distinction, which
+  // is why the refs authority is read here rather than a length check. Two tab
+  // behaviours ride on it: the peek popover's targeting presentation (legal
+  // targets sorted to the front, cyan ring) and `showIncomingOnHover`, which
+  // decides whether hovering an attacking tab shows threats or the board peek.
+  const clickTargetRefs = useMemo(
+    () => (canActForWaitingState ? getWaitingForClickTargetRefs(waitingFor) : null),
+    [canActForWaitingState, waitingFor],
+  );
+  const isTargeting = clickTargetRefs !== null;
   const validPlayerTargetIds = useMemo(
-    () => currentLegalTargets
-      .filter((tgt): tgt is { Player: number } => "Player" in tgt)
-      .map((tgt) => tgt.Player),
-    [currentLegalTargets],
+    () => (canActForWaitingState ? getWaitingForPlayerChoiceIds(waitingFor) : []),
+    [canActForWaitingState, waitingFor],
   );
   // Object targets grouped by their controller, so each `OpponentTab` can
   // show only that opponent's legal targets in the peek popover. The set
@@ -203,7 +195,7 @@ export function OpponentHud({
   const legalObjectTargetsByController = useMemo(() => {
     const map = new Map<PlayerId, ObjectId[]>();
     if (!objectsMapForTargets) return map;
-    for (const tgt of currentLegalTargets) {
+    for (const tgt of clickTargetRefs ?? []) {
       if (!("Object" in tgt)) continue;
       const obj = objectsMapForTargets[tgt.Object];
       if (!obj) continue;
@@ -212,7 +204,7 @@ export function OpponentHud({
       map.set(obj.controller, list);
     }
     return map;
-  }, [currentLegalTargets, objectsMapForTargets]);
+  }, [clickTargetRefs, objectsMapForTargets]);
 
   const handlePlayerTarget = useCallback(
     (targetPlayerId: number) => {
@@ -247,7 +239,7 @@ export function OpponentHud({
   const isOnline = connectionStatus !== "disconnected";
   const primaryOpponentId =
     liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
-  const primaryOpponentAvatarUrl = useMultiplayerStore(
+  const primaryOpponentAvatarIdentity = useMultiplayerStore(
     (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
   );
   // Always-called hook (rules-of-hooks) — used only on the 1v1 branch below.
@@ -267,10 +259,13 @@ export function OpponentHud({
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
+    // The Horde seat has no life total (it decks out instead) — the engine flag
+    // that marks it, also used by LifeTotal to show the library-as-clock.
+    const isOpponentHorde = gameState?.players[opponentId]?.has_no_life_total ?? false;
     const showMatchScore = gameState?.match_config?.match_type === "Bo3";
     const matchScore = showMatchScore ? gameState?.match_score ?? null : null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
-    const opponentAvatarUrl = primaryOpponentAvatarUrl;
+    const opponentAvatarIdentity = primaryOpponentAvatarIdentity;
     const compact = forceCompactHud;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
@@ -293,20 +288,24 @@ export function OpponentHud({
           active={isOpponentTurn}
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
-          avatarUrl={opponentAvatarUrl}
+          avatarIdentity={opponentAvatarIdentity}
           playerId={opponentId}
           density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           cornerBadge={<NextUpBadge playerId={opponentId} compact={compact} />}
           trailing={
             <>
+              {isOpponentHorde && hordeMeta ? (
+                <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+              ) : null}
               <EnchantmentsBadge playerId={opponentId} />
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
               {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
               {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
-              {opponentDesignations.activeDungeon ? (
-                <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
+              {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+              {opponentDesignations.dungeonRoom ? (
+                <DungeonBadge room={opponentDesignations.dungeonRoom} />
               ) : null}
               {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
               {opponentDesignations.ringLevel > 0 ? (
@@ -317,17 +316,16 @@ export function OpponentHud({
                 />
               ) : null}
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
-              {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
+              {opponentPoisonCounters > 0 ? <PoisonCounterBadge playerId={opponentId} value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
-              {[...new Set(opponentDesignations.unboundedResources.map((u) => familyOf(u.axis)))].map(
-                (family) => (
-                  <UnboundedBadge key={family} family={family} />
-                ),
-              )}
+              {opponentDesignations.unboundedFamilies.map((u) => (
+                <UnboundedBadge key={u.family} family={u.family} state={u.state} />
+              ))}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
+              <PlayerLatency playerId={opponentId} />
             </>
           }
         >
@@ -571,6 +569,7 @@ function OpponentTab({
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
+  const hordeMeta = useHordeDeckMeta();
   const isTheirTurn = gameState?.active_player === playerId;
   const { waitingSeatId, reason } = useTurnStatus();
   const isWaitingOnThem = waitingSeatId === playerId;
@@ -624,9 +623,13 @@ function OpponentTab({
     if (!hoverEnabled && hoverPopover !== "none") setHoverPopover("none");
   }, [hoverEnabled, hoverPopover]);
   const player = gameState?.players[playerId];
+  // Ticks with the damage animation rather than at snapshot commit, in step with
+  // the seat's `LifeTotal` above it.
+  const displayedLife = useDisplayedLife(playerId);
+  const lifeTitle = lifeReadoutTitle(t, displayedLife);
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
   const counts = useMemo(() => {
     if (!gameState || compact) return { creatures: 0, lands: 0, other: 0 };
     const objects = gameState.battlefield
@@ -644,7 +647,7 @@ function OpponentTab({
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
 
-  // Player-attached Auras (Curses, Faith's Fetters, Dictate of Kruphix…).
+  // Player-attached Auras (Curses, Paradox Haze — anything with `Enchant player`).
   // Surfaced as a corner badge so it stays visible in both density modes and
   // never competes with the inline `statusCluster` for width on 3-4 player
   // rails. Hover → portaled `AurasHoverPreview`
@@ -715,7 +718,7 @@ function OpponentTab({
             ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
             : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
   const waitingReasonText = isWaitingOnThem
-    ? t(reason?.key ?? "status.reason.thinking", reason?.params)
+    ? t(`status.reason.${reason?.id ?? "thinking"}`, reason?.params)
     : null;
 
   const ariaLabel = commitReady
@@ -758,13 +761,17 @@ function OpponentTab({
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
           <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
         </svg>
-        {player.life}
+        <span title={lifeTitle} aria-label={lifeTitle}>{formatLifeReadout(displayedLife)}</span>
       </span>
+      {player.has_no_life_total && hordeMeta ? (
+        <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+      ) : null}
       {designations.isMonarch ? <MonarchBadge /> : null}
       {designations.hasInitiative ? <InitiativeBadge /> : null}
       {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
-      {designations.activeDungeon ? (
-        <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+      {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+      {designations.dungeonRoom ? (
+        <DungeonBadge room={designations.dungeonRoom} />
       ) : null}
       {designations.ringLevel > 0 ? (
         <CounterBadge
@@ -774,14 +781,15 @@ function OpponentTab({
         />
       ) : null}
       {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-      {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+      {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
       {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
-      {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map((family) => (
-        <UnboundedBadge key={family} family={family} />
+      {designations.unboundedFamilies.map((u) => (
+        <UnboundedBadge key={u.family} family={u.family} state={u.state} />
       ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
+      <PlayerLatency playerId={playerId} />
       {onKick && !isEliminated && (
         // Stop propagation so clicking the kick affordance doesn't also fire
         // the parent button's `onClick` (focus / target select).
@@ -846,7 +854,7 @@ function OpponentTab({
       )}
       <OpponentAvatar
         label={label}
-        avatarUrl={avatarUrl}
+        avatarIdentity={avatarIdentity}
         seatColor={seatColor}
         compact={compact}
       />
@@ -972,23 +980,30 @@ function OpponentTab({
 
 function OpponentAvatar({
   label,
-  avatarUrl,
+  avatarIdentity,
   seatColor,
   compact = false,
 }: {
   label: string;
-  avatarUrl: string | null;
+  avatarIdentity: PlayerAvatarIdentity | null;
   seatColor: string;
   compact?: boolean;
 }) {
+  const avatar = usePlayerAvatarImage(avatarIdentity);
+  const activeSrc = avatar.src;
   // Inner avatar visuals: real portrait when known, synthesized
   // seat-color tile with the player's initial otherwise.
-  const inner = avatarUrl ? (
+  const inner = activeSrc ? (
     <>
-      <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+      <img
+        src={activeSrc}
+        alt={label}
+        className="h-full w-full object-cover"
+        onError={() => avatar.advanceFailedSource(activeSrc)}
+      />
       <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
     </>
-  ) : (
+  ) : avatarIdentity && avatar.isLoading ? null : (
     <>
       <div
         className="flex h-full w-full items-center justify-center text-[11px] font-bold text-white/90 @min-[11rem]:text-sm"
@@ -1013,18 +1028,19 @@ function OpponentAvatar({
     boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
   };
 
-  if (!avatarUrl) {
+  if (!activeSrc) {
     return <div className={tileClassName} style={tileStyle} title={label}>{inner}</div>;
   }
 
   return (
     <AvatarHoverPreview
-      avatarUrl={avatarUrl}
+      avatarUrl={activeSrc}
       label={label}
       seatColor={seatColor}
       title={label}
       className={tileClassName}
       style={tileStyle}
+      onAvatarError={avatar.advanceFailedSource}
     >
       {inner}
     </AvatarHoverPreview>

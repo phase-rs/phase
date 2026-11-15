@@ -2,7 +2,9 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter, TypeFilter};
+use engine::types::ability::{
+    CardTypeSetSource, Effect, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -52,7 +54,10 @@ fn elemental_spectacle_counts_distinct_controlled_permanent_colors_for_tokens() 
     match definition.effect.as_ref() {
         Effect::Token { count, .. } => match count {
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctColorsAmongPermanents { filter },
+                qty:
+                    QuantityRef::DistinctColorsAmong {
+                        source: CardTypeSetSource::Objects { filter },
+                    },
             } => match filter {
                 TargetFilter::Typed(typed) => {
                     assert_eq!(typed.type_filters, vec![TypeFilter::Permanent]);

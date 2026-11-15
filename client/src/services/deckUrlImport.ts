@@ -4,6 +4,10 @@
 // own decklist text format, which deckParser already consumes. Going through
 // the worker also sidesteps CORS, which both upstreams enforce on browsers.
 
+import type { ParseKeys } from "i18next";
+
+import { getEffectiveOffline } from "../stores/connectivityStore";
+
 // Default points at the official lobby worker in production builds; the dev
 // build uses a relative path so Vite's proxy can forward to a local
 // `wrangler dev` instance without CORS. Override with VITE_IMPORT_DECK_URL
@@ -16,16 +20,17 @@ const MOXFIELD_HOST_RE = /^(?:www\.)?moxfield\.com$/;
 const ARCHIDEKT_HOST_RE = /^(?:www\.)?archidekt\.com$/;
 
 /**
- * Translation keys for the two frontend-authored errors this module can throw.
+ * Translation keys for frontend-authored errors this module can throw.
  * Distinct from upstream worker error messages, which arrive as JSON bodies
  * and flow through verbatim as `Error.message` (server-authored pass-through,
- * per `client/src/i18n/README.md`). The modal layer uses the `importDeck.`
- * prefix to detect that a thrown message is a translation key vs server text.
+ * per `client/src/i18n/README.md`). The modal layer matches a thrown message
+ * against these values to tell a translation key from server text.
  */
 export const IMPORT_ERROR_KEYS = {
   invalidUrl: "importDeck.errorInvalidUrl",
+  offline: "importDeck.errorOffline",
   networkFailure: "importDeck.errorNetworkFailure",
-} as const;
+} as const satisfies Record<string, ParseKeys<"menu">>;
 
 // Users commonly paste URLs without the protocol ("moxfield.com/decks/abc").
 // The WHATWG URL parser requires a scheme, so normalize once at the boundary
@@ -75,6 +80,9 @@ export async function fetchDeckFromUrl(input: string): Promise<string> {
   const normalized = normalizeDeckUrl(input);
   if (!isSupportedDeckUrl(normalized)) {
     throw new Error(IMPORT_ERROR_KEYS.invalidUrl);
+  }
+  if (getEffectiveOffline()) {
+    throw new Error(IMPORT_ERROR_KEYS.offline);
   }
 
   const endpoint = `${IMPORT_DECK_BASE}/import-deck?url=${encodeURIComponent(normalized)}`;

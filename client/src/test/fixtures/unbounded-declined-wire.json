@@ -1,0 +1,22 @@
+{
+  "unbounded_families": [
+    {
+      "family": "counters",
+      "player": 0,
+      "state": {
+        "type": "Unscheduled"
+      }
+    }
+  ],
+  "unbounded_resources": [
+    {
+      "axis": {
+        "Counter": [
+          "Plus1Plus1",
+          "Creature"
+        ]
+      },
+      "player": 0
+    }
+  ]
+}

@@ -4,7 +4,6 @@
 //! deployed app uses (serialization → deserialization round-trip).
 
 use super::support::shared_card_db;
-use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -51,12 +50,9 @@ fn springheart_realdb_attached_accept_makes_copy() {
 
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&sh_id)
-        .unwrap()
-        .attached_to = Some(AttachTarget::Object(host_id));
+    // CR 702.103b: attach in the real bestowed-Aura form. A printed creature
+    // hand-attached to a creature is exactly what CR 704.5p sentence 1 sweeps.
+    runner.attach_as_bestowed_aura(sh_id, host_id);
     // Floating mana so the pay clearly succeeds.
     for ty in [ManaType::Green, ManaType::Green] {
         runner.state_mut().players[0]
@@ -110,12 +106,9 @@ fn springheart_realdb_attached_decline_makes_insect() {
 
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&sh_id)
-        .unwrap()
-        .attached_to = Some(AttachTarget::Object(host_id));
+    // CR 702.103b: attach in the real bestowed-Aura form. A printed creature
+    // hand-attached to a creature is exactly what CR 704.5p sentence 1 sweeps.
+    runner.attach_as_bestowed_aura(sh_id, host_id);
 
     let card_id = runner.state().objects[&forest].card_id;
     runner

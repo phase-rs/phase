@@ -5,24 +5,62 @@
  * then resolve the corresponding promise when the worker responds.
  */
 import type {
-  BatchResolveResult,
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  AiLlmProposalResult,
+  AiProposalSubmission,
+  ContestDriveResult,
   FormatConfig,
   GameAction,
+  GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
+  LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
+  RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
+  ViewerTransitionSnapshot,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import {
+  actionRejectionError,
+  AdapterError,
+  AdapterErrorCode,
+  isActionRejection,
+} from "./types";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
+import {
+  STATE_CODEC_DECODE_TIMEOUT_MS,
+  type StateCodecDecodeResult,
+} from "./state-codec-runtime";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
 type EngineResponse =
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string; bracketViolation?: true };
+  | {
+      type: "error";
+      id: number;
+      message: string;
+      bracketViolation?: true;
+      engineOccupied?: true;
+      actionRejection?: unknown;
+    };
+
+type RestoredWorkerResult = {
+  presentation: RestoredStackAutomationPresentation;
+  snapshot: { state: GameState; legalResult: LegalActionsResult };
+};
 
 /**
  * Watchdog timeout for gameplay round-trip calls. Generous on purpose: a
@@ -41,12 +79,12 @@ const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
  * WasmAdapter dispose the stalled worker and activate its main-thread fallback.
  */
 const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
+const MALFORMED_ACTION_REJECTION_MESSAGE = "The engine rejected that action.";
 
 type RequestTimeoutBehavior = "notify" | "reject";
 
 /**
- * Watchdog timeout for AI search round-trips (getAiAction /
- * getAiScoredCandidates / selectActionFromScores). Deliberately much larger
+ * Watchdog timeout for AI proposal generation. Deliberately much larger
  * than ENGINE_REQUEST_TIMEOUT_MS: AI search legitimately exceeds 60s on
  * pathological boards (turn-40 squirrel / mana-token storms take hundreds of
  * seconds in debug; release is ~10-50x faster but can still cross a minute),
@@ -92,11 +130,31 @@ export class EngineWorkerClient {
           if (entry) {
             this.pending.delete(msg.id);
             if (entry.timer) clearTimeout(entry.timer);
-            // Bracket violation is a typed rejection so the caller can match
-            // by code rather than by string substring on the error message.
-            const err = msg.bracketViolation
-              ? new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false)
-              : new Error(msg.message);
+            // Bracket violation and occupied-engine refusals are typed
+            // rejections so the caller can match by code rather than by string
+            // substring on the error message.
+            let err: Error;
+            if ("actionRejection" in msg && isActionRejection(msg.actionRejection)) {
+              err = actionRejectionError(msg.actionRejection);
+            } else if (
+              msg.actionRejection !== undefined
+              || (
+                "actionRejection" in msg
+                && msg.message === MALFORMED_ACTION_REJECTION_MESSAGE
+              )
+            ) {
+              err = new AdapterError(
+                AdapterErrorCode.ACTION_REJECTED,
+                MALFORMED_ACTION_REJECTION_MESSAGE,
+                true,
+              );
+            } else if (msg.bracketViolation) {
+              err = new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false);
+            } else if (msg.engineOccupied) {
+              err = new AdapterError(AdapterErrorCode.ENGINE_OCCUPIED, msg.message, false);
+            } else {
+              err = new Error(msg.message);
+            }
             entry.reject(err);
           }
           break;
@@ -129,6 +187,7 @@ export class EngineWorkerClient {
     message: Record<string, unknown>,
     timeoutMs?: number,
     timeoutBehavior: RequestTimeoutBehavior = "notify",
+    transfer?: Transferable[],
   ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -155,7 +214,18 @@ export class EngineWorkerClient {
         reject,
         timer,
       });
-      this.worker.postMessage({ ...message, id });
+      try {
+        if (transfer) this.worker.postMessage({ ...message, id }, transfer);
+        else this.worker.postMessage({ ...message, id });
+      } catch (error) {
+        // A synchronous postMessage throw must not leave a pending entry with
+        // a live timer: the caller's promise is the only failure signal.
+        const entry = this.pending.get(id);
+        if (!entry) return;
+        this.pending.delete(id);
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -175,8 +245,32 @@ export class EngineWorkerClient {
     return this.request<number>({ type: "loadCardDbFromUrl" });
   }
 
+  async buildAiCardSubset(): Promise<string> {
+    return this.request<string>({ type: "buildAiCardSubset" });
+  }
+
   async evaluateDeckCompatibility(request: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
+  }
+
+  /** Always-definite deck/format verdict for ENFORCING callers. See
+   *  `WasmAdapter.evaluateDeckFormatGate`. */
+  async evaluateDeckFormatGate(request: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
+  }
+
+  /** Engine resource-bound check of one guest deck's printings sidecar; rejects
+   *  with the engine's reason on abuse. See `P2PHostAdapter.handleNewGuest`. */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.request<null>({ type: "checkDeckPrintingsBounds", printings });
+  }
+
+  async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
+  }
+
+  async formatConfigForCustomRules(customRules: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "formatConfigForCustomRules", customRules });
   }
 
   async getCardFaceData(cardName: string): Promise<unknown> {
@@ -191,13 +285,15 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "getCardRulings", cardName });
   }
 
-  /**
-   * Build the game-scoped AI card-DB subset for THIS game. Returns the
-   * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
-   * Called ONLY on the MAIN engine client (full CARD_DB + live GAME_STATE).
-   */
-  async buildAiCardSubset(): Promise<string> {
-    return this.request<string>({ type: "buildAiCardSubset" });
+  async canonicalCardNames(names: string[]): Promise<unknown> {
+    return this.request<unknown>({ type: "canonicalCardNames", names });
+  }
+
+  async query<K extends EngineQueryName>(
+    name: K,
+    args: EngineQueryArgs<K>,
+  ): Promise<EngineQueryResult<K>> {
+    return this.request<EngineQueryResult<K>>({ type: "query", name, args });
   }
 
   async initializeGame(
@@ -207,6 +303,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeGame",
@@ -216,6 +313,35 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      draftSessionMinDeckSize,
+    });
+  }
+
+  /**
+   * Host-start entry point. Unlike `initializeGame`, the engine refuses when it
+   * already holds a game and claims the multiplayer flag in the same call that
+   * installs the state — so a host sharing this worker with local play can
+   * never overwrite (or be overwritten by) the other session. Rejects with
+   * `AdapterErrorCode.ENGINE_OCCUPIED` on refusal.
+   */
+  async initializeMultiplayerHostGame(
+    deckData: unknown | null,
+    seed: number,
+    formatConfig: FormatConfig | null,
+    matchConfig: MatchConfig | null,
+    playerCount?: number,
+    firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
+  ): Promise<SubmitResult> {
+    return this.request<SubmitResult>({
+      type: "initializeMultiplayerHostGame",
+      deckData,
+      seed,
+      formatConfig,
+      matchConfig,
+      playerCount,
+      firstPlayer,
+      draftSessionMinDeckSize,
     });
   }
 
@@ -224,8 +350,7 @@ export class EngineWorkerClient {
   // continue (and that holds the dispatch mutex). They carry a watchdog that
   // surfaces a "still waiting" prompt after ENGINE_REQUEST_TIMEOUT_MS without
   // cancelling the underlying worker request. Human round-trips use 60s;
-  // the AI-search getters (getAiAction / getAiScoredCandidates /
-  // selectActionFromScores) use the far longer ENGINE_AI_TIMEOUT_MS because a
+  // AI proposal generation uses the far longer ENGINE_AI_TIMEOUT_MS because a
   // healthy search can legitimately exceed a minute on pathological boards.
   // Bulk/long setup calls (card-DB load, game init, deck compatibility, batch
   // resolve, restore/resume, export, bracket estimate) deliberately omit the
@@ -238,9 +363,70 @@ export class EngineWorkerClient {
     );
   }
 
+  async driveContest(
+    nowMs: number,
+    aiPlayers: number[],
+    awayPlayers: number[],
+    clicks: unknown[],
+  ): Promise<ContestDriveResult> {
+    return this.request<ContestDriveResult>(
+      { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async requestTakeback(actor: number, aiPlayers: number[]): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "requestTakeback", actor, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async respondTakeback(
+    actor: number,
+    approve: boolean,
+    aiPlayers: number[],
+  ): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "respondTakeback", actor, approve, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async cancelTakeback(actor: number): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "cancelTakeback", actor },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    return this.request<TakebackVote | null>(
+      { type: "pendingTakeback" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
+    return this.request<SubmitResult>(
+      { type: "submitInteraction", actor, submission },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
     return this.request<number[]>(
       { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async previewInteraction(
+    actor: number,
+    request: InteractionPreviewRequest,
+  ): Promise<InteractionPreview> {
+    return this.request<InteractionPreview>(
+      { type: "previewInteraction", actor, request },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -256,9 +442,13 @@ export class EngineWorkerClient {
     );
   }
 
-  async getLegalActions(): Promise<LegalActionsResult> {
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    await this.request<null>({ type: "setDebugHandReveal", enabled }, ENGINE_REQUEST_TIMEOUT_MS);
+  }
+
+  async getLegalActions(viewerId: number): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
-      { type: "getLegalActions" },
+      { type: "getLegalActions", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -269,9 +459,9 @@ export class EngineWorkerClient {
    * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
    * stamps the `seq` on arrival.
    */
-  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
+  async getSnapshot(viewerId: number): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
     return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
-      { type: "getSnapshot" },
+      { type: "getSnapshot", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -290,49 +480,152 @@ export class EngineWorkerClient {
     );
   }
 
-  async getAiAction(
+  async getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot> {
+    return this.request<ViewerTransitionSnapshot>(
+      { type: "getViewerTransitionSnapshot", viewerId, events },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async getAiActionProposal(
     difficulty: string,
     playerId: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "getAiAction",
-        difficulty,
-        playerId,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposal", difficulty, playerId },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
+  async getAiActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  /** Engine-owned tactical floor for a decision whose optional scorer timed out. */
+  async getAiTacticalActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiTacticalActionProposal", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async getAiTacticalActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiTacticalActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /** Engine-authored LLM request for this seat's current decision. */
+  async buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
+  ): Promise<LlmDecisionRequestResult | null> {
+    return this.request<LlmDecisionRequestResult | null>(
+      {
+        type: "buildLlmDecisionRequest",
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+        settingsRevision,
+        clock,
+      },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /** Main authority re-issues a contract before an LLM reply can mint anything. */
+  async getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    threadTurn: number | null,
+    provider: string,
+    status: number,
+    responseBody: string,
+    clock: LlmClockReading,
+  ): Promise<AiLlmProposalResult | null> {
+    return this.request<AiLlmProposalResult | null>(
+      {
+        type: "getAiActionProposalFromLlmResponse",
+        playerId,
+        fingerprint,
+        threadTurn,
+        provider,
+        status,
+        responseBody,
+        clock,
+      },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async llmProviderCatalog(): Promise<unknown> {
+    return this.request<unknown>({ type: "llmProviderCatalog" }, ENGINE_REQUEST_TIMEOUT_MS);
+  }
+
+  /** This worker-side endpoint scores only; it cannot mint a proposal. */
   async getAiScoredCandidates(
     difficulty: string,
     playerId: number,
     seed: number,
   ): Promise<[GameAction, number][]> {
     return this.request<[GameAction, number][]>(
-      {
-        type: "getAiScoredCandidates",
-        difficulty,
-        playerId,
-        seed,
-      },
+      { type: "getAiScoredCandidates", difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
-  async selectActionFromScores(
+  /** Main authority filters scores through a fresh contract before minting. */
+  async getAiActionProposalFromScores(
     scoresJson: string,
     difficulty: string,
+    playerId: number,
     seed: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "selectActionFromScores",
-        scoresJson,
-        difficulty,
-        seed,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposalFromScores", scoresJson, difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async getAiActionProposalFromScoresWithDiagnostics(
+    scoresJson: string,
+    difficulty: string,
+    playerId: number,
+    seed: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalFromScoresWithDiagnostics", scoresJson, difficulty, playerId, seed },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    return this.request<AiProposalSubmission>(
+      { type: "submitAiActionProposal", proposal },
+      ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 
@@ -344,6 +637,10 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "restoreState", stateJson });
   }
 
+  async resumeRestoredGameState(viewerId: number): Promise<RestoredWorkerResult> {
+    return this.request<RestoredWorkerResult>({ type: "resumeRestoredGameState", viewerId });
+  }
+
   /**
    * Host-resume entry point. Unlike `restoreState` (undo semantics, stale
    * RNG seed, refused when multiplayer is already on), this loads a
@@ -351,8 +648,8 @@ export class EngineWorkerClient {
    * flips the engine's multiplayer flag. Mirrors server-core's
    * `GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(stateJson: string): Promise<void> {
-    await this.request<null>({ type: "resumeMultiplayerHostState", stateJson });
+  async resumeMultiplayerHostState(stateJson: string, viewerId: number): Promise<RestoredWorkerResult> {
+    return this.request<RestoredWorkerResult>({ type: "resumeMultiplayerHostState", stateJson, viewerId });
   }
 
   async resetGame(): Promise<void> {
@@ -383,28 +680,40 @@ export class EngineWorkerClient {
     });
   }
 
-  async resolveAll(
-    requester: number,
-    aiSeats: { playerId: number; difficulty: string }[],
-    maxResolutions: number = 0,
-  ): Promise<BatchResolveResult> {
-    // Intentionally no watchdog timeout: a batch resolve can be legitimately
-    // very long (a multi-thousand-item storm draining one chunk at a time),
-    // and a false timeout mid-drain is worse than a long wait. Residual risk:
-    // if the worker wedges *inside* resolveAll itself the promise never settles
-    // and the "Resolving…" overlay sticks. Accepted as a lower-severity UX
-    // bug than false-positiving a healthy long drain — revisit only if a
-    // bounded per-chunk timeout proves safe.
-    return this.request<BatchResolveResult>({
-      type: "resolveAll",
-      requester,
-      aiSeatsJson: JSON.stringify(aiSeats),
-      maxResolutions,
-    });
-  }
-
   async ping(): Promise<string> {
     return this.request<string>({ type: "ping" });
+  }
+
+  // ── Negotiated state-codec sessions ───────────────────────────────────
+  // The worker owns the Rust decoder handles; this client only carries ids and
+  // frames. Opening deliberately has NO client watchdog: a late success still
+  // resolves so its owner can close the session rather than orphan it — the
+  // preparation deadline that abandons an open is the caller's policy.
+
+  async openStateCodec(): Promise<number> {
+    return this.request<number>({ type: "openStateCodec" });
+  }
+
+  /**
+   * Decode one full/Delta frame. The frame's own ArrayBuffer is transferred
+   * (TextEncoder allocates a fresh, wholly owned buffer), so the caller's view
+   * is detached after the call. A timeout is fatal to the calling transport.
+   */
+  async decodeStateCodec(
+    sessionId: number,
+    frame: Uint8Array,
+  ): Promise<StateCodecDecodeResult> {
+    return this.request<StateCodecDecodeResult>(
+      { type: "decodeStateCodec", sessionId, frame },
+      STATE_CODEC_DECODE_TIMEOUT_MS,
+      "reject",
+      [frame.buffer as ArrayBuffer],
+    );
+  }
+
+  /** Release the worker's session and its retained baseline. */
+  async closeStateCodec(sessionId: number): Promise<void> {
+    await this.request<null>({ type: "closeStateCodec", sessionId });
   }
 
   /**

@@ -17,8 +17,8 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AdditionalCost, AdditionalCostOrigin,
-    Comparator, Effect, SpellCastingOptionKind, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetRef,
+    Comparator, Effect, QuantityExpr, SpellCastingOptionKind, TapCreaturesAggregateStat,
+    TapCreaturesRequirement, TapCreaturesSelectionMode, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -26,7 +26,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -267,11 +267,13 @@ fn team_tactics_with_teamwork_grants_double_strike_and_trample() {
     // Tap the 3/3 (total power 3 >= Teamwork 1) to pay the aggregate cost.
     match runner.state().waiting_for.clone() {
         WaitingFor::PayCost {
-            kind: PayCostKind::TapCreatures { aggregate },
+            kind:
+                PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Aggregate(aggregate),
+                },
             choices,
             ..
         } => {
-            let aggregate = aggregate.expect("Teamwork surfaces an aggregate constraint");
             assert_eq!(
                 aggregate.value, 1,
                 "Teamwork 1 must surface an aggregate power threshold of 1"
@@ -646,6 +648,14 @@ fn is_teamwork_gate(cond: &AbilityCondition) -> bool {
     )
 }
 
+/// `true` if an `instead` branch is gated specifically on paying Teamwork.
+fn is_teamwork_instead_gate(cond: &AbilityCondition) -> bool {
+    matches!(
+        cond,
+        AbilityCondition::ConditionInstead { inner } if is_teamwork_gate(inner)
+    )
+}
+
 /// Beast Mode's second clause ("Also put a +1/+1 counter on that creature if
 /// this spell was cast using teamwork") must parse to a real `PutCounter`
 /// effect gated on the Teamwork payment — NOT `Effect::Unimplemented{"also"}`
@@ -679,22 +689,45 @@ fn beast_mode_teamwork_counter_rider() {
     );
 }
 
-// KNOWN GAP — We Say Thee Nay! ("Counter that spell unless its controller pays
-// {4} instead if this spell was cast using teamwork") is NOT fixed by this change.
-// Tracing proves its inverted "... instead if teamwork" clause is consumed by the
-// instead-clause / counter-unless chain path (try_parse_generic_instead_clause →
-// split_inverted_instead_clause → build_instead_def, conditions.rs:2416/2473)
-// BEFORE it can reach `strip_suffix_conditional` — so the trailing-rider
-// recognizer never sees it (verified: strip_suffix_conditional is never called
-// with the teamwork text for this card). The {4} tax sub-ability keeps
-// `condition: null` and fires on every cast. The correct fix is inverted-form
-// specific (the shared build_instead_def chain also serves the FORWARD teamwork
-// "instead" cards — Cruel Alliance/Too Evil — which rely on it returning None so
-// the leading peel folds them to `AdditionalCostPaidInstead`; adding teamwork to
-// that shared chain would regress them). This is outside the reviewed plan's
-// stated root cause (the plan asserted strip_suffix_conditional would peel it) and
-// is returned to the orchestrator as a stop-and-return item. `shipped_teamwork_
-// cards_parse_without_unimplemented` still covers WSTN parsing cleanly.
+/// We Say Thee Nay!'s inverted replacement must bind the {4} unless-payment as
+/// the Teamwork-paid alternative to the base {2} payment (CR 601.2f, 608.2c,
+/// 614.6). It must not survive as an independent sequential {4} instruction.
+#[test]
+fn we_say_thee_nay_inverted_teamwork_instead_is_typed() {
+    let parsed = parse_spell("We Say Thee Nay!", WE_SAY_THEE_NAY, &["Instant"]);
+    assert_no_unimplemented(&parsed, "We Say Thee Nay!");
+
+    let four_tax = all_defs(&parsed)
+        .into_iter()
+        .find(|d| {
+            matches!(
+                d.unless_pay.as_ref().map(|modifier| &modifier.cost),
+                Some(AbilityCost::Mana {
+                    cost: ManaCost::Cost { generic: 4, .. }
+                })
+            )
+        })
+        .expect("We Say Thee Nay! must carry the {4} unless-payment alternative");
+    assert!(
+        four_tax
+            .condition
+            .as_ref()
+            .is_some_and(is_teamwork_instead_gate),
+        "the {{4}} alternative must be ConditionInstead{{AdditionalCostPaid{{Teamwork}}}}, got {:?}",
+        four_tax.condition
+    );
+    assert!(
+        !parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            engine::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                detector,
+                ..
+            } if detector == "Replacement_Instead"
+        )),
+        "the typed replacement must satisfy the Replacement_Instead audit: {:?}",
+        parsed.parse_warnings
+    );
+}
 
 /// EMH lowers to a teamwork-gated `DigInsteadAlt`: the top-level Dig keeps any
 /// number (`keep_count == u32::MAX`, `up_to`), gated on Teamwork, with the base
@@ -802,39 +835,271 @@ fn quantum_reduction_flash_not_unconditional() {
 // where one should not appear, and the presence of the pre-existing gate).
 // ---------------------------------------------------------------------------
 
-/// Cruel Alliance's leading "instead" form stays an `AdditionalCostPaidInstead`
-/// sub-ability — the trailing/Dig fix must not re-route it.
+/// Forward Teamwork replacement forms stay on the established
+/// `AdditionalCostPaidInstead` fold. That exact shape is consumed during
+/// CR 601.2c target announcement to expose the broad paid-mode target filter.
 #[test]
-fn cruel_alliance_unchanged() {
-    let parsed = parse_spell("Cruel Alliance", CRUEL_ALLIANCE, &["Sorcery"]);
-    assert_no_unimplemented(&parsed, "Cruel Alliance");
-    let has_instead = all_defs(&parsed).into_iter().any(|d| {
-        matches!(
-            d.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        )
-    });
+fn forward_teamwork_instead_forms_keep_additional_cost_fold() {
+    for (name, oracle) in [
+        ("Cruel Alliance", CRUEL_ALLIANCE),
+        ("Too Evil to Stay Dead", TOO_EVIL_TO_STAY_DEAD),
+    ] {
+        let parsed = parse_spell(name, oracle, &["Sorcery"]);
+        assert_no_unimplemented(&parsed, name);
+        let has_instead = all_defs(&parsed).into_iter().any(|d| {
+            matches!(
+                d.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            )
+        });
+        assert!(
+            has_instead,
+            "{name} must keep its AdditionalCostPaidInstead sub-ability"
+        );
+    }
+}
+
+/// Helicarrier Strike's forward-condition/trailing-`instead` replacement must
+/// be one Teamwork-gated `ConditionInstead` branch. A sequential gated
+/// 4-damage instruction would deal six damage when Teamwork was paid instead
+/// of replacing two with four.
+#[test]
+fn helicarrier_strike_forward_trailing_teamwork_instead_is_typed() {
+    let parsed = parse_spell("Helicarrier Strike", HELICARRIER_STRIKE, &["Instant"]);
+    assert_no_unimplemented(&parsed, "Helicarrier Strike");
+    let four_damage = all_defs(&parsed)
+        .into_iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    ..
+                }
+            )
+        })
+        .expect("Helicarrier Strike must carry the four-damage alternative");
     assert!(
-        has_instead,
-        "Cruel Alliance must keep its AdditionalCostPaidInstead sub-ability"
+        four_damage
+            .condition
+            .as_ref()
+            .is_some_and(is_teamwork_instead_gate),
+        "four damage must be ConditionInstead{{AdditionalCostPaid{{Teamwork}}}}, got {:?}",
+        four_damage.condition
+    );
+    assert!(
+        !parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            engine::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                detector,
+                ..
+            } if detector == "Replacement_Instead"
+        )),
+        "the typed replacement must satisfy the Replacement_Instead audit: {:?}",
+        parsed.parse_warnings
     );
 }
 
-/// Helicarrier Strike's leading "If teamwork, ... instead" peels at the leading
-/// site (which already recognized teamwork) — its `AdditionalCostPaid{Teamwork}`
-/// sub-ability is intact and the trailing rider must not double-handle it.
+/// Cast Helicarrier Strike at a real attacking creature and return the damage
+/// marked after resolution. This crosses casting, optional aggregate-cost
+/// payment, target selection, `ConditionInstead` evaluation, and resolution.
+fn helicarrier_damage_after_cast(pay_teamwork: bool) -> u32 {
+    use engine::game::combat::AttackTarget;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 9).id();
+    let tapper = scenario.add_creature(P0, "Teamwork Tapper", 2, 2).id();
+    let mut strike =
+        scenario.add_spell_to_hand_from_oracle(P0, "Helicarrier Strike", true, HELICARRIER_STRIKE);
+    strike.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let strike = strike.id();
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(PlayerId(1)))])
+        .expect("declaring the Helicarrier target as an attacker must succeed");
+
+    let card_id = runner.state().objects[&strike].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: strike,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Helicarrier Strike must succeed");
+
+    for _ in 0..48 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => runner
+                .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                .expect("choosing whether to pay Teamwork must succeed"),
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => runner
+                .act(GameAction::SelectCards {
+                    cards: vec![tapper],
+                })
+                .expect("tapping the 2-power creature must pay Teamwork 2"),
+            WaitingFor::TargetSelection { .. } => runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(attacker)),
+                })
+                .expect("the attacking creature must be a legal target"),
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("advancing the zero-cost cast or priority must succeed"),
+            other => panic!("unexpected Helicarrier waiting state: {other:?}"),
+        };
+    }
+
+    assert!(runner.state().stack.is_empty(), "Helicarrier must resolve");
+    runner.state().objects[&attacker].damage_marked
+}
+
 #[test]
-fn helicarrier_strike_unchanged() {
-    let parsed = parse_spell("Helicarrier Strike", HELICARRIER_STRIKE, &["Instant"]);
-    assert_no_unimplemented(&parsed, "Helicarrier Strike");
-    let gated = all_defs(&parsed)
-        .into_iter()
-        .filter(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
-        .filter(|d| d.condition.as_ref().is_some_and(is_teamwork_gate))
-        .count();
+fn helicarrier_strike_runtime_replaces_two_damage_with_four() {
     assert_eq!(
-        gated, 1,
-        "Helicarrier keeps exactly one Teamwork-gated DealDamage sub-ability"
+        helicarrier_damage_after_cast(false),
+        2,
+        "declining Teamwork must retain the base two damage"
+    );
+    assert_eq!(
+        helicarrier_damage_after_cast(true),
+        4,
+        "paying Teamwork must replace two damage with four, not add four"
+    );
+}
+
+/// Cast We Say Thee Nay! in response to a creature spell, pay every surfaced
+/// unless cost, and return the complete prompt sequence. Paying (rather than
+/// declining) keeps the target spell live, so either possible duplicate order
+/// (`{2}` then `{4}` or `{4}` then `{2}`) remains observable.
+fn we_say_thee_nay_unless_costs(pay_teamwork: bool) -> Vec<u32> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..8)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut creature = scenario.add_creature_to_hand(P0, "Target Spell", 2, 2);
+    creature.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let creature = creature.id();
+    let tapper = scenario
+        .add_creature(PlayerId(1), "Teamwork Tapper", 2, 2)
+        .id();
+    let mut nay = scenario.add_spell_to_hand_from_oracle(
+        PlayerId(1),
+        "We Say Thee Nay!",
+        true,
+        WE_SAY_THEE_NAY,
+    );
+    nay.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let nay = nay.id();
+    let mut runner = scenario.build();
+    let mut prompts = Vec::new();
+
+    let creature_card = runner.state().objects[&creature].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: creature,
+            card_id: creature_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the target creature spell must succeed");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("passing priority to the responder must succeed");
+
+    let nay_card = runner.state().objects[&nay].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: nay,
+            card_id: nay_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting We Say Thee Nay! must succeed");
+
+    for _ in 0..64 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => runner
+                .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                .expect("choosing whether to pay Teamwork must succeed"),
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => runner
+                .act(GameAction::SelectCards {
+                    cards: vec![tapper],
+                })
+                .expect("tapping the 2-power creature must pay Teamwork 2"),
+            WaitingFor::TargetSelection { .. } => runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(creature)),
+                })
+                .expect("the creature spell must be a legal target"),
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("advancing the zero-cost cast or priority must succeed"),
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(
+                    player, P0,
+                    "the targeted spell's controller must be prompted"
+                );
+                prompts.push(match cost {
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic, .. },
+                    } => generic,
+                    other => panic!("expected a fixed generic unless cost, got {other:?}"),
+                });
+                runner
+                    .act(GameAction::PayUnlessCost { pay: true })
+                    .expect("paying the surfaced unless cost must succeed")
+            }
+            other => panic!("unexpected We Say Thee Nay waiting state: {other:?}"),
+        };
+    }
+    assert!(runner.state().stack.is_empty(), "both spells must resolve");
+    assert!(
+        runner.state().battlefield.contains(&creature),
+        "paying every surfaced tax must let the target creature spell resolve"
+    );
+    prompts
+}
+
+#[test]
+fn we_say_thee_nay_runtime_selects_exactly_one_unless_cost() {
+    assert_eq!(
+        we_say_thee_nay_unless_costs(false),
+        vec![2],
+        "declining Teamwork must surface exactly the base {{2}} tax"
+    );
+    assert_eq!(
+        we_say_thee_nay_unless_costs(true),
+        vec![4],
+        "paying Teamwork must replace the {{2}} tax with exactly one {{4}} tax"
     );
 }
 

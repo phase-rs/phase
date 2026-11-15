@@ -1,0 +1,43 @@
+# Schema-adequacy artifact: the archived P7 probe, verbatim in shape.
+# Two Replace ops on ONE file (op 2's `find` exists only in op 1's output), two assert_counts
+# on the FINAL mutant text, and a two-entry line-free anchor. Validated, never run here.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "phase-engine"
+test         = "integration"
+filter       = "loop_shortcut_seat_pin_census"
+filter_match = "substring"
+
+[output]
+file   = "crates/engine/tests/integration/loop_shortcut_seat_pin_census.rs"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+claim = "no mounts, unmodified tree — the instrument itself"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P7_relocate_arm0_below_arm1"
+claim = "site 2 is pinned to `shortcut_drive_period`'s match arm, not merely present"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/game/engine.rs"
+  find    = "                    | TargetPin::Player(_) => 1,\n"
+  replace = ""
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/game/engine.rs"
+  find    = "                    | TargetPin::Creature(_) => 1,\n"
+  replace = "                    | TargetPin::Creature(_) => 1,\n                    | TargetPin::Player(_) => 1,\n"
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/engine.rs"
+  text  = "| TargetPin::Player(_) => 1,"
+  count = 1
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["site 2 must remain `shortcut_drive_period`'s MATCH arm",
+             "got \"Some(crate::analysis::decision_template::TargetPin::Player(*pl))\""]

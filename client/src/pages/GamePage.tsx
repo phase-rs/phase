@@ -1,29 +1,53 @@
 import {
   type CSSProperties,
+  type RefObject,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import type {
+  ChallengeDeck,
   CompanionRevealChoice,
   DeckCardCount,
+  FormatConfig,
   GameFormat,
   MatchConfig,
   ObjectId,
+  PlayDrawPosition,
   SerializedAbilityCost,
+  AiDecisionDiagnosticReceipt,
+  TakebackEvent,
+  TakebackResolution,
 } from "../adapter/types";
+import {
+  supportsAiDecisionDiagnostics,
+  supportsDebugHandReveal,
+  supportsMatchConcede,
+  supportsTakeback,
+} from "../adapter/types";
+import type {
+  InteractionManaRestriction,
+  InteractionPresentationSurface,
+  ViewerInteraction,
+} from "../adapter/generated/interaction";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
+import { isValidFinalView } from "../services/fullTerminalResult";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
+import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
@@ -34,6 +58,8 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { UnActionsHost } from "../components/unactions/UnActionsHost.tsx";
+import { ScryOutcomeOverlay } from "../components/animation/ScryOutcomeOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { loopDetectionModeFromQuery } from "../game/loopDetectionMode.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -49,6 +75,7 @@ import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
+import { isFocusTargetAvailable } from "../components/ui/focusTarget.ts";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
@@ -66,13 +93,14 @@ import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
-import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { RippleRevealChoiceModal } from "../components/modal/RippleRevealChoiceModal.tsx";
 import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
@@ -82,6 +110,7 @@ import { SpliceOfferModal } from "../components/modal/SpliceOfferModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
+import { ResolutionOptionalPaymentModalContent } from "../components/modal/ResolutionOptionalPaymentModal.tsx";
 import { OptionalCostModalContent } from "../components/modal/OptionalCostModal.tsx";
 import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
 import { LifeRedistributionModal } from "../components/modal/LifeRedistributionModal.tsx";
@@ -92,7 +121,9 @@ import {
   RespondToPrecastCopyShortcutModal,
 } from "../components/modal/PrecastCopyShortcutModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
+import { ResolveAllConsentModal } from "../components/modal/ResolveAllConsentModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
+import { CostReductionOrderModal } from "../components/modal/CostReductionOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
 import { useModalPeek } from "../components/modal/useModalPeek.ts";
@@ -102,11 +133,15 @@ import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
+import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
+import { EntryControllerModal } from "../components/modal/EntryControllerModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
 import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
+import { ContestOverlay } from "../components/contest/ContestOverlay.tsx";
+import { useContestStore } from "../stores/contestStore.ts";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -114,6 +149,7 @@ import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
+import { DayNightBadge } from "../components/hud/HudBadges.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
@@ -124,6 +160,7 @@ import {
   type SettingsTabId,
 } from "../components/settings/PreferencesModal.tsx";
 import { DebugPanel } from "../components/chrome/DebugPanel.tsx";
+import { AiDecisionOverlay } from "../components/chrome/AiDecisionOverlay.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { TakebackRequestDialog } from "../components/multiplayer/TakebackRequestDialog.tsx";
@@ -135,15 +172,25 @@ import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
 import { AttachmentFan } from "../components/board/AttachmentFan.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
-import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
+import { P2PHostAdapter, type P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts";
+import { usePriorityChime } from "../hooks/usePriorityChime.ts";
+import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
-import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import {
+  clearGame,
+  hasRemoteHumans,
+  loadActiveGame,
+  seatSource,
+  useGameStore,
+} from "../stores/gameStore.ts";
+import { PLAYER_ID } from "../constants/game";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -155,28 +202,36 @@ import {
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { formatMetadata, isSetupFormat } from "../data/formatRegistry.ts";
+import { withChallengeDeck } from "../data/challengeDeckRegistry.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
+import { ABILITY_BLOCK_REASON_KEY } from "../viewmodel/abilityBlockReason.ts";
 import {
   abilityChoiceLabel,
+  abilityLabel,
   formatAbilityCost,
   loyaltyBadge,
+  stripCostPrefix,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../viewmodel/costLabel.ts";
+import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
-  getCastableZoneViewerTarget,
   getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
+  getSharedPileHolder,
   getWaitingForObjectChoiceIds,
+  getZoneViewerPile,
   isSplitBoardActive,
+  resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
-  type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { GAME_Z_LAYER } from "../constants/ui.ts";
@@ -185,10 +240,6 @@ type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
-
-function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
-  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
-}
 
 function isDirectSoloRouteMode(rawMode: string | null): boolean {
   return ![
@@ -219,15 +270,30 @@ function directSetupFormatConfig(format: GameFormat | null) {
  * a compile error — the idiomatic TS replacement for a `switch`-with-`never`-default
  * when the union has a single arm today but will grow.
  */
-const HOSTING_FAILURE_MESSAGE_KEYS: Record<
-  Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"],
-  string
-> = {
+const HOSTING_FAILURE_MESSAGE_KEYS = {
   room_still_claimed: "gamePage.toasts.roomStillClaimed",
-};
+} as const satisfies Record<Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"], ParseKeys<"game">>;
+
+/** The toast each takeback resolution shows; an approval's feedback is the restored board. */
+const TAKEBACK_RESOLUTION_TOAST_KEYS = {
+  approved: null,
+  declined: "takebackDialog.declinedToast",
+  cancelled: "takebackDialog.cancelledToast",
+  withdrawn: "takebackDialog.withdrawnToast",
+} as const satisfies Record<TakebackResolution, ParseKeys<"multiplayer"> | null>;
+
+/** The route's normalized game mode — the census key `seatSource` classifies. */
+type GamePageMode =
+  | "ai"
+  | "online"
+  | "local"
+  | "p2p-host"
+  | "p2p-join"
+  | "draft-match"
+  | "spectate";
 
 export function GamePage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "multiplayer"]);
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -241,13 +307,17 @@ export function GamePage() {
   // Without this gate, refreshing `/game/<id>?mode=p2p-host` against a
   // Full-mode server would attempt `openBrokerClient` and surface an
   // "Expected LobbyOnly server, got Full" error to the user.
-  const locationState = location.state as { useBroker?: boolean } | null;
+  const locationState = location.state as
+    | { useBroker?: boolean; formatConfig?: FormatConfig }
+    | null;
   const cachedServerMode = useMultiplayerStore((s) => s.serverInfo?.mode);
   const useBroker = locationState?.useBroker ?? (cachedServerMode === "LobbyOnly");
   const rawMode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
   const formatParam = searchParams.get("format") as GameFormat | null;
+  // Which self-piloting Horde deck the survivors face (Horde format only).
+  const hordeDeckParam = searchParams.get("hordeDeck") as ChallengeDeck | null;
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
   const loopParam = searchParams.get("loop");
@@ -255,6 +325,12 @@ export function GamePage() {
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
+  const pileParam = searchParams.get("pile") ?? undefined;
+  // The lobby authority this join/spectate was launched from. Produced by
+  // our own navigation from a canonical `LobbySource.url`; a hand-edited
+  // value surfaces through the adapter's existing handshake error path, the
+  // same way a hand-edited `code` does.
+  const serverParam = searchParams.get("server") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
   const activeGameMeta = useMemo(
     () => (gameId ? loadActiveGame() : null),
@@ -264,6 +340,12 @@ export function GamePage() {
     activeGameMeta && activeGameMeta.id === gameId
       ? activeGameMeta.formatConfig
       : undefined;
+  // The setup screen's edited config (starting life), handed over on the
+  // navigation that started this game. `GameSetupPage`'s native-engine route
+  // writes no resume pointer, so router state is the only channel that
+  // reaches both engine routes; `savedFormatConfig` still wins because it
+  // survives a hard refresh, and the two agree whenever both are present.
+  const setupFormatConfig = locationState?.formatConfig;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
   // `useMemo`, each render constructs a fresh object reference from
@@ -272,14 +354,21 @@ export function GamePage() {
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
   const formatConfig = useMemo(() => {
-    if (isDirectSoloRouteMode(rawMode)) {
-      if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
-        return savedFormatConfig;
+    const base = (() => {
+      if (isDirectSoloRouteMode(rawMode)) {
+        if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
+          return savedFormatConfig;
+        }
+        return setupFormatConfig ?? directSetupFormatConfig(formatParam);
       }
-      return directSetupFormatConfig(formatParam);
-    }
-    return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
-  }, [formatParam, rawMode, savedFormatConfig]);
+      return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
+    })();
+    // Horde: apply the challenge deck picked on the setup screen. The engine owns
+    // each deck's rules, so this swaps in that deck's whole `HordeRuleset` (wave
+    // policy, setup turns, life deltas) rather than only the deck id — see
+    // `withChallengeDeck`. No-ops for non-Horde formats and unknown decks.
+    return base && hordeDeckParam ? withChallengeDeck(base, hordeDeckParam) : base;
+  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig, hordeDeckParam]);
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
@@ -293,7 +382,7 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" =
+  const mode: GamePageMode =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
@@ -341,11 +430,53 @@ export function GamePage() {
     {},
   );
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+  const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
+  // The id of the game whose terminal result has been displayed. Keyed by game
+  // rather than a bare flag: Rematch navigates to a new game id on this same
+  // mounted page, and a transport failure of that new game must still surface
+  // the Connection Lost banner.
+  const endedGameIdRef = useRef<string | null>(null);
+  const markGameOver = useCallback(() => {
+    endedGameIdRef.current = gameId ?? null;
+  }, [gameId]);
+  const isGameOver = useCallback(
+    () => gameId !== undefined && endedGameIdRef.current === gameId,
+    [gameId],
+  );
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
-    { requester: number; requesterName: string } | null
+    { requester: number; requesterName: string; voters: number[] } | null
   >(null);
+
+  const handleTakebackEvent = useCallback((event: TakebackEvent) => {
+    switch (event.type) {
+      case "takebackRequested":
+        setPendingTakeback({
+          requester: event.requester,
+          requesterName: event.requesterName,
+          voters: event.voters,
+        });
+        break;
+      case "takebackResolved": {
+        setPendingTakeback(null);
+        const toastKey = TAKEBACK_RESOLUTION_TOAST_KEYS[event.resolution];
+        if (toastKey !== null) {
+          useMultiplayerStore.getState().showToast(t(toastKey, { ns: "multiplayer" }));
+        }
+        break;
+      }
+      case "requestRejected":
+        // The authority refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is authority-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
+        break;
+    }
+  }, [t]);
 
   const handleWsEvent = useCallback((event: WsAdapterEvent) => {
     switch (event.type) {
@@ -390,7 +521,9 @@ export function GamePage() {
         setReconnectState({ status: "idle" });
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "stateChanged":
         // Record game start time on first state update
@@ -409,12 +542,29 @@ export function GamePage() {
         // Skip if we already navigated away from a self-concede — the server sends
         // both Conceded and GameOver to all players, so this would race with navigate.
         if (hasConcededRef.current) break;
+        markGameOver();
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
+        break;
+      case "terminalDelivery":
+        markGameOver();
+        clearPromptOverlayState();
+        if (gameId) clearGame(gameId);
+        setTerminalReason(event.delivery.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+          ...(event.delivery.finalView && isValidFinalView(event.delivery.finalView)
+            ? { gameState: event.delivery.finalView }
+            : {}),
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "emoteReceived":
         setReceivedEmote(event.emote);
@@ -425,6 +575,9 @@ export function GamePage() {
           3000,
         );
         break;
+      case "contestProgress":
+        useContestStore.getState().setProgress(event.contest, event.clicks);
+        break;
       case "timerUpdate":
         setTimerRemaining((prev) => ({
           ...prev,
@@ -432,16 +585,12 @@ export function GamePage() {
         }));
         break;
       case "takebackRequested":
-        setPendingTakeback({
-          requester: event.requester,
-          requesterName: event.requesterName,
-        });
-        break;
       case "takebackResolved":
+      case "requestRejected":
+        handleTakebackEvent(event);
+        break;
+      case "bootstrapDelivered":
         setPendingTakeback(null);
-        if (!event.approved) {
-          useMultiplayerStore.getState().showToast(t("multiplayer:takebackDialog.declinedToast"));
-        }
         break;
       case "playerDisconnected":
         // Multiplayer (3+ players): a specific player disconnected
@@ -491,11 +640,16 @@ export function GamePage() {
             : [...s.spectators, event.name],
         }));
         break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "error":
+        // Also the terminal surface for a native AI driver fault (the adapter
+        // emits `aiDriverFault`, then this `error`): the game cannot continue.
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
-        if (!isOnlineMode) {
+        if (!isOnlineMode && !isGameOver()) {
           setReconnectState({ status: "failed" });
         }
         break;
@@ -505,14 +659,25 @@ export function GamePage() {
             deckRejected: true,
             reason: event.reason,
             joinCode,
+            // Carry the origin back: the retry must re-join the same server,
+            // not whichever one this client hosts on.
+            server: serverParam,
           },
         });
         break;
     }
-  }, [gameId, navigate, joinCode, isOnlineMode, t]);
+  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
+      case "takebackRequested":
+      case "takebackResolved":
+      case "requestRejected":
+        handleTakebackEvent(event);
+        break;
+      case "bootstrapDelivered":
+        setPendingTakeback(null);
+        break;
       case "roomCreated": {
         setHostGameCode(event.roomCode);
         const effectivePlayerCount = playerCount ?? formatConfig?.max_players ?? 2;
@@ -612,16 +777,33 @@ export function GamePage() {
         );
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "playerSlotsUpdated":
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        markGameOver();
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
+        break;
+      case "terminalResult":
+        markGameOver();
+        clearPromptOverlayState();
+        // Display is independent of native guest convergence. The provider /
+        // adapter owns deletion after durable cleanup ownership is established.
+        setTerminalReason(event.result.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.result.display.winner } },
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -633,9 +815,14 @@ export function GamePage() {
           },
         });
         break;
+      case "operationFailed":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "hostingFailed": {
         // Pre-game setup failure — distinct from `error` (catch-all for
@@ -656,13 +843,19 @@ export function GamePage() {
         break;
       }
     }
-  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t]);
+  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
   }, []);
 
   const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
+    if (sourceParam === "draft" && draftIdParam) {
+      navigate("/draft/quick?resume=1", {
+        state: { draftStartError: reason ?? null, draftId: draftIdParam },
+      });
+      return;
+    }
     if (reason) {
       // cEDH bracket lock: surface as a blocking modal rather than navigating
       // away, so the user can read the explanation before going back to setup.
@@ -676,7 +869,7 @@ export function GamePage() {
       return;
     }
     navigate("/");
-  }, [navigate]);
+  }, [navigate, sourceParam, draftIdParam]);
 
   const handleCardDataMissing = useCallback(() => {
     setShowCardDataMissing(true);
@@ -686,6 +879,9 @@ export function GamePage() {
   const handleResumeReset = useCallback((reason: string) => {
     setResumeResetReason(reason);
   }, []);
+
+  const routesWsEvents = mode === "ai" || mode === "online" || mode === "spectate";
+  const routesP2PEvents = mode === "p2p-host" || mode === "p2p-join";
 
   if (!gameId) return null;
 
@@ -703,10 +899,10 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
-      onP2PEvent={
-        mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
-      }
+      serverUrl={serverParam}
+      pile={pileParam}
+      onWsEvent={routesWsEvents ? handleWsEvent : undefined}
+      onP2PEvent={routesP2PEvents ? handleP2PEvent : undefined}
       onReady={
         mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
           ? handleReady
@@ -719,7 +915,9 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
+        seatMode={mode}
         isOnlineMode={isOnlineMode}
+        receivesAdapterEvents={routesWsEvents || routesP2PEvents}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -734,6 +932,7 @@ export function GamePage() {
         receivedEmote={receivedEmote}
         timerRemaining={timerRemaining}
         gameStartedAt={gameStartedAt}
+        terminalReason={terminalReason}
         pendingTakeback={pendingTakeback}
         onCloseTakebackDialog={() => setPendingTakeback(null)}
         disconnectChoice={disconnectChoice}
@@ -753,7 +952,11 @@ export function GamePage() {
 interface GamePageContentProps {
   gameId: string;
   mode: string | null;
+  /** The normalized mode, for seat derivation a raw route mode cannot answer. */
+  seatMode: GamePageMode;
   isOnlineMode: boolean;
+  /** Whether this page routes its adapter's events to a handler. */
+  receivesAdapterEvents: boolean;
   hostGameCode: string | null;
   waitingForOpponent: boolean;
   opponentDisconnected: boolean;
@@ -771,7 +974,8 @@ interface GamePageContentProps {
   receivedEmote: string | null;
   timerRemaining: Record<number, number>;
   gameStartedAt: number | null;
-  pendingTakeback: { requester: number; requesterName: string } | null;
+  terminalReason: string | null;
+  pendingTakeback: { requester: number; requesterName: string; voters: number[] } | null;
   onCloseTakebackDialog: () => void;
   // 3-4p P2P additions
   disconnectChoice: { playerId: number; gracePeriodMs: number } | null;
@@ -787,7 +991,9 @@ interface GamePageContentProps {
 function GamePageContent({
   gameId,
   mode,
+  seatMode,
   isOnlineMode,
+  receivesAdapterEvents,
   hostGameCode,
   waitingForOpponent: _waitingForOpponent,
   opponentDisconnected,
@@ -802,6 +1008,7 @@ function GamePageContent({
   receivedEmote,
   timerRemaining,
   gameStartedAt,
+  terminalReason,
   pendingTakeback,
   onCloseTakebackDialog,
   disconnectChoice,
@@ -823,15 +1030,16 @@ function GamePageContent({
   const focusedGridTemplateRows = useResolvedGridRows();
   const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
+  const isBestOfThree = gameState?.match_config?.match_type === "Bo3";
+  const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const submitIntergameCommand = useMultiplayerDraftStore((s) => s.submitIntergameCommand);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
-  // Store `waitingFor`, not `gameState.waiting_for`: this is paired below with
-  // the store-slice `legalActionsByObject`, and only the store's own field is
-  // committed atomically with the legal actions.
+  // Store `waitingFor`, not `gameState.waiting_for`: only the store's own field is
+  // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
-  const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const stackLength = useGameStore((s) => s.gameState?.stack?.length ?? 0);
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
@@ -846,12 +1054,11 @@ function GamePageContent({
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    flashStartingPlayerContest(startingContest.events);
     useGameStore.getState().clearStartingContest();
   }, [startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
-  // mulligan UI appears (the roll determines who's on the play, which precedes
-  // drawing opening hands). True from `initGame` setting the carrier through the
+  // mulligan UI appears (the roll-off precedes drawing opening hands). True from `initGame` setting the carrier through the
   // dice overlay's full life — the store hands `startingContest` off to
   // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
   // immediately for instant speed and explicit play/draw (no contest).
@@ -864,12 +1071,42 @@ function GamePageContent({
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile" | "library";
     playerId: number;
-    autoOpenKey?: string;
   } | null>(null);
-  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
+  const gameMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const preferencesReturnFocusRef = useRef<HTMLElement | SVGElement | null>(null);
+  const zoneViewerReturnFocusRef = useRef<HTMLElement | SVGElement | null>(null);
+  const resolvedZoneViewerReturnFocusRef = useMemo<
+    RefObject<HTMLElement | SVGElement | null>
+  >(
+    () => ({
+      get current() {
+        const exactLauncher = zoneViewerReturnFocusRef.current;
+        // A manually opened pile is the most precise return target, but the
+        // final card can leave that pile while the viewer is open. Resolve at
+        // restoration time so the persistent game-menu trigger remains a
+        // connected fallback instead of allowing focus to fall to <body>.
+        return isFocusTargetAvailable(exactLauncher)
+          ? exactLauncher
+          : gameMenuTriggerRef.current;
+      },
+    }),
+    [],
+  );
+  const openPreferences = useCallback(
+    (request: { tab?: SettingsTabId; highlight?: SettingsHighlight } = {}) => {
+      // Toast and context-menu launchers unmount as settings opens. Hand focus
+      // to the persistent game-menu button first, and make that same durable
+      // element the modal's explicit restoration target.
+      const returnTarget = gameMenuTriggerRef.current;
+      preferencesReturnFocusRef.current = returnTarget;
+      returnTarget?.focus();
+      setPreferencesOpen(request);
+    },
+    [],
+  );
   const [boardContextMenu, setBoardContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const playerId = usePlayerId();
@@ -879,9 +1116,9 @@ function GamePageContent({
   const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
   const boardChoiceLayerActive = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor, objects);
-    return canActForWaitingState && choice?.player === playerId;
-  }, [canActForWaitingState, objects, playerId, waitingFor]);
+    const choice = getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast);
+    return canActForWaitingState && choice != null;
+  }, [canActForWaitingState, gameState?.allows_cancel_cast, objects, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -890,13 +1127,48 @@ function GamePageContent({
   const cardReportDialogOpen = useUiStore((s) => s.cardReportDialogOpen);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
+  const multiplayerSplitLayoutNudgeDismissed = usePreferencesStore(
+    (s) => s.multiplayerSplitLayoutNudgeDismissed,
+  );
+  const setMultiplayerSplitLayoutNudgeDismissed = usePreferencesStore(
+    (s) => s.setMultiplayerSplitLayoutNudgeDismissed,
+  );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
+  const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
+  const stateWithheld = useMultiplayerStore((s) => s.stateWithheld);
   const adapter = useGameStore((s) => s.adapter);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
+  // GamePage owns the only local diagnostic subscription. Adapter events remain
+  // gameplay-only so no receipt can enter P2P/server state or wire traffic.
+  useEffect(() => {
+    setAiDecisionReceipt(null);
+    if (!supportsAiDecisionDiagnostics(adapter)) {
+      return;
+    }
+    adapter.setAiDecisionDiagnosticsEnabled(aiDecisionCaptureEnabled);
+    if (!aiDecisionCaptureEnabled) {
+      return;
+    }
+    const unsubscribe = adapter.subscribeAiDecisionDiagnostics(setAiDecisionReceipt);
+    return () => {
+      unsubscribe();
+      adapter.setAiDecisionDiagnosticsEnabled(false);
+    };
+  }, [adapter, aiDecisionCaptureEnabled]);
+  useDebugHandReveal(showAiHand);
+  // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
+  // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
+  // it cannot answer "is anyone else at this table?".
+  const storeGameMode = useGameStore((s) => s.gameMode);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
     return getOpponentIds(gameState, perspectivePlayerId);
@@ -904,14 +1176,40 @@ function GamePageContent({
   const activeOpponentId =
     resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
   const seatCount = getSeatCount(gameState);
-  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, seatCount);
-  const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
+  const resolvedMultiplayerBoardLayout = resolveMultiplayerBoardLayout(
     multiplayerBoardLayout,
+    seatCount,
+    isMobile,
+  );
+  const untapForcedSplit =
+    seatCount > 2 &&
+    canActForWaitingState &&
+    getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast)?.intent === "untap";
+  const effectiveMultiplayerBoardLayout = untapForcedSplit
+    ? "split"
+    : resolvedMultiplayerBoardLayout;
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, seatCount);
+  const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
+    effectiveMultiplayerBoardLayout,
     seatCount,
   );
   const handleToggleMultiplayerBoardLayout = useCallback(() => {
-    setMultiplayerBoardLayout(multiplayerBoardLayout === "split" ? "focused" : "split");
-  }, [multiplayerBoardLayout, setMultiplayerBoardLayout]);
+    setMultiplayerBoardLayout(
+      resolvedMultiplayerBoardLayout === "split" ? "focused" : "split",
+    );
+  }, [resolvedMultiplayerBoardLayout, setMultiplayerBoardLayout]);
+  const handleTryMultiplayerSplitLayout = useCallback(() => {
+    setMultiplayerBoardLayout("split");
+  }, [setMultiplayerBoardLayout]);
+  const handleDismissMultiplayerSplitLayoutNudge = useCallback(() => {
+    setMultiplayerSplitLayoutNudgeDismissed(true);
+  }, [setMultiplayerSplitLayoutNudgeDismissed]);
+  const showMultiplayerSplitLayoutNudge =
+    seatCount > 2 &&
+    !isMobile &&
+    multiplayerBoardLayout === "focused" &&
+    !untapForcedSplit &&
+    !multiplayerSplitLayoutNudgeDismissed;
   const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
   const handleKickPlayer = useCallback((pid: number) => {
     const adapter = useGameStore.getState().adapter as
@@ -919,6 +1217,9 @@ function GamePageContent({
       | null;
     void adapter?.kickPlayer?.(pid);
   }, []);
+  const handleResumeP2P = useCallback(() => {
+    if (adapter instanceof P2PHostAdapter) adapter.requestResume();
+  }, [adapter]);
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element
@@ -959,6 +1260,13 @@ function GamePageContent({
     onHideConcedeDialog();
   }, [adapter, onHideConcedeDialog]);
 
+  const handleMatchConcede = useCallback(() => {
+    if (supportsMatchConcede(adapter)) {
+      adapter.sendMatchConcede();
+    }
+    onHideConcedeDialog();
+  }, [adapter, onHideConcedeDialog]);
+
   const handleSendEmote = useCallback(
     (emote: string) => {
       if (adapter && adapter instanceof WebSocketAdapter) {
@@ -971,14 +1279,14 @@ function GamePageContent({
   // GH #1507: "request takeback" — ask every other human player to approve
   // rolling the game back to before this player's last action.
   const handleRequestTakeback = useCallback(() => {
-    if (adapter && adapter instanceof WebSocketAdapter) {
+    if (supportsTakeback(adapter)) {
       adapter.sendRequestTakeback();
     }
   }, [adapter]);
 
   const handleRespondTakeback = useCallback(
     (approve: boolean) => {
-      if (adapter && adapter instanceof WebSocketAdapter) {
+      if (supportsTakeback(adapter)) {
         adapter.sendRespondTakeback(approve);
       }
       onCloseTakebackDialog();
@@ -987,7 +1295,7 @@ function GamePageContent({
   );
 
   const handleCancelTakeback = useCallback(() => {
-    if (adapter && adapter instanceof WebSocketAdapter) {
+    if (supportsTakeback(adapter)) {
       adapter.sendCancelTakeback();
     }
     onCloseTakebackDialog();
@@ -1009,7 +1317,13 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  useKeyboardShortcuts();
+  const sandboxToolsAvailable = mode === "ai" || mode === "local" || isSandboxGame;
+  useKeyboardShortcuts({ sandboxToolsAvailable });
+
+  // Priority-attention cues: one controller writes the store; each cue reads it.
+  usePriorityAttentionController();
+  usePriorityChime();
+  usePriorityTabTitle();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {
@@ -1042,11 +1356,9 @@ function GamePageContent({
   }, []);
 
   // Auto-open graveyard/exile viewer when the engine is waiting for an object
-  // choice in that zone, or when Priority surfaces cast/play actions on cards
-  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
+  // choice in that zone (e.g. SelectObjects for Reanimate / Regrowth).
   useEffect(() => {
     if (!objects) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       return;
     }
     const wf = engineWaitingFor;
@@ -1061,45 +1373,29 @@ function GamePageContent({
     for (const objectId of getWaitingForObjectChoiceIds(wf)) {
       const obj = objects[objectId];
       if (!obj) continue;
-      if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
-      const zone: "graveyard" | "exile" = obj.zone === "Graveyard" ? "graveyard" : "exile";
-      groups.add(`${zone}:${obj.owner}`);
-      if (!firstHit) firstHit = { zone, playerId: obj.owner };
+      const pile = getZoneViewerPile(gameState, obj);
+      if (!pile) continue;
+      groups.add(`${pile.zone}:${pile.playerId}`);
+      if (!firstHit) firstHit = pile;
     }
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
-      dismissedCastableZoneViewerKeyRef.current = null;
+      zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
       setViewingZone(firstHit);
-      return;
     }
-
-    const castableTarget = getCastableZoneViewerTarget(
-      wf,
-      objects,
-      legalActionsByObject,
-    );
-    if (castableTarget) {
-      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
-      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
-        setViewingZone({
-          zone: castableTarget.zone,
-          playerId: castableTarget.playerId,
-          autoOpenKey,
-        });
-      }
-      return;
-    }
-
-    dismissedCastableZoneViewerKeyRef.current = null;
-  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+  }, [canActForWaitingState, engineWaitingFor, objects, gameState]);
 
   const handleZoneViewerClose = useCallback(() => {
-    if (viewingZone?.autoOpenKey) {
-      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
-    }
     setViewingZone(null);
-  }, [viewingZone]);
+  }, []);
+
+  const prepareZoneViewerActionClose = useCallback(() => {
+    // A cast/play action can remove the final card only after its asynchronous
+    // engine dispatch resolves. Choose the durable launcher before the viewer
+    // closes so focus never lands on a pile that disappears moments later.
+    zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
+  }, []);
 
   const handleDeclareCompanion = useCallback(
     (choice: CompanionRevealChoice | null) => {
@@ -1115,12 +1411,20 @@ function GamePageContent({
     [dispatch],
   );
 
-  // CR 103.5 + 103.5b: `id` encodes the three branches of MulliganChoice.
+  // CR 103.5 + 103.5b: `id` encodes the four branches of MulliganChoice.
   // "keep"           → MulliganChoice::Keep
   // "mulligan"       → MulliganChoice::Mulligan
+  // "freeReveal"     → MulliganChoice::FreeReveal
   // "powder:<oid>"   → MulliganChoice::UseSerumPowder { object_id: <oid> }
   const handleMulliganChoice = useCallback(
     (id: string) => {
+      if (id === "freeReveal") {
+        dispatch({
+          type: "MulliganDecision",
+          data: { choice: { type: "FreeReveal" } },
+        });
+        return;
+      }
       if (id.startsWith("powder:")) {
         const objectId = Number(id.slice("powder:".length));
         dispatch({
@@ -1147,22 +1451,30 @@ function GamePageContent({
 
   const handleSubmitSideboard = useCallback(
     (main: DeckCardCount[], sideboard: DeckCardCount[]) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "SubmitSideboard", main, sideboard });
+        return;
+      }
       dispatch({
         type: "SubmitSideboard",
         data: { main, sideboard },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
   const handleChoosePlayDraw = useCallback(
     (playFirst: boolean) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "ChoosePlayDraw", playFirst });
+        return;
+      }
       dispatch({
         type: "ChoosePlayDraw",
         data: { play_first: playFirst },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
 
@@ -1172,6 +1484,11 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    "--game-left-rail-offset": "0px",
+    // Where the targeting prompt starts, which is the only part of its
+    // placement this page can state: the split layout puts seat panes at the
+    // very top of the board, so the prompt clears them. How TALL the block is
+    // stays the block's own business — see TargetingOverlay.
     "--game-targeting-prompt-top": splitBoardActive
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
@@ -1183,7 +1500,13 @@ function GamePageContent({
     ? { width: "38px", height: "53px" }
     : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
   const handleViewZone = useCallback(
-    (zone: "graveyard" | "exile" | "library", zonePlayerId: number) => {
+    (
+      zone: "graveyard" | "exile" | "library",
+      zonePlayerId: number,
+      launcher?: HTMLButtonElement,
+    ) => {
+      zoneViewerReturnFocusRef.current =
+        launcher ?? gameMenuTriggerRef.current;
       setViewingZone({ zone, playerId: zonePlayerId });
     },
     [],
@@ -1256,9 +1579,12 @@ function GamePageContent({
 
   return (
     <div
-      ref={containerRef}
-      className={`game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
-      style={gamePageStyle}
+      className={`game-no-select flex h-[100dvh] w-full flex-col bg-gray-950 lg:flex-row${showDebugBounds ? " debug-bounds" : ""}`}
+    >
+      <div
+        ref={containerRef}
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden contain-paint"
+        style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
         const target = e.target as HTMLElement | null;
@@ -1276,7 +1602,7 @@ function GamePageContent({
     >
       <SpectatorChrome />
       <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
-      <StackDisplay />
+      <StackDisplay effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
 
       {/* Persistent Sandbox banner — visible to all players whenever the
           game's format_config has debug actions enabled. Not dismissible. */}
@@ -1287,6 +1613,17 @@ function GamePageContent({
           aria-label={t("gamePage.sandbox.bannerAria")}
         >
           {t("gamePage.sandbox.banner")}
+        </div>
+      )}
+
+      {/* Adapter-supplied reason, shown raw; non-interactive so the menu stays reachable. */}
+      {stateWithheld && (
+        <div
+          className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold text-white shadow-md"
+          role="status"
+          data-testid="state-withheld-banner"
+        >
+          {stateWithheld.reason}
         </div>
       )}
 
@@ -1329,20 +1666,23 @@ function GamePageContent({
           gridTemplateColumns: "1fr",
         }}
       >
-        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        {/* Row 1: Opponent hand + zone piles. Equal flexible side tracks keep
+            the focused hand centered on the viewport while the piles remain
+            right-aligned; split layouts render their hands inside seat panes. */}
         <div
-          className={`relative z-20 min-w-0 flex w-full ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
+          className={`relative z-20 min-w-0 w-full ${renderFocusedOpponentTopRow ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]" : "flex"} ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
           data-flex-zone="opp-row"
         >
           {renderFocusedOpponentTopRow && (
             <>
-              <div className="min-w-0 flex-1">
-                <OpponentHand showCards={showAiHand} />
+              <div aria-hidden />
+              <div className="min-w-0">
+                <OpponentHand />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
                 flexZone="opponentPiles"
-                className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+                className="flex items-start justify-self-end gap-1.5 px-1 py-1"
                 style={playerZoneRailStyle}
               >
                 {activeOpponentId != null ? (
@@ -1350,18 +1690,28 @@ function GamePageContent({
                     <ExilePile
                       playerId={activeOpponentId}
                       size={pileSize}
-                      onClick={() => handleViewZone("exile", activeOpponentId)}
+                      onClick={(launcher) =>
+                        handleViewZone("exile", activeOpponentId, launcher)
+                      }
                     />
-                    <LibraryPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onView={() => handleViewZone("library", activeOpponentId)}
-                    />
-                    <GraveyardPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onClick={() => handleViewZone("graveyard", activeOpponentId)}
-                    />
+                    {getSharedPileHolder(gameState, "library") == null && (
+                      <LibraryPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onView={(launcher) =>
+                          handleViewZone("library", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
+                    {getSharedPileHolder(gameState, "graveyard") == null && (
+                      <GraveyardPile
+                        playerId={activeOpponentId}
+                        size={pileSize}
+                        onClick={(launcher) =>
+                          handleViewZone("graveyard", activeOpponentId, launcher)
+                        }
+                      />
+                    )}
                   </>
                 ) : null}
               </DraggableWidget>
@@ -1372,9 +1722,9 @@ function GamePageContent({
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
+            effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
-            showOpponentCards={showAiHand}
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
@@ -1385,16 +1735,16 @@ function GamePageContent({
             band would drag the hand vertically. Instead we give the row a
             CONSTANT height equal to the DEFAULT band and pin it to the track's
             bottom (`self-end`, the viewport edge, which never moves). The height
-            mirrors the resolver's default track exactly — `min(18%, 150px)` of
-            the grid's CONTENT box (`100dvh` minus the top-overlay padding) — but
+            uses the shared `--game-player-row-height` contract (also consumed by
+            board-choice controls) to mirror the resolver's default track. It is
             computed in viewport units so it ignores the LIVE (resized) track,
-            which a plain `18%` on a grid item would track instead. The hand thus
-            keeps its default resting position and stays put on resize; a grown
-            band opens empty space ABOVE the row (trading with the battlefield)
-            rather than shoving the hand up. */}
+            which a plain percentage on a grid item would track instead. The hand
+            thus keeps its default resting position and stays put on resize; a
+            grown band opens empty space ABOVE the row (trading with the
+            battlefield) rather than shoving the hand up. */}
         <div
           className="relative min-w-0 self-end overflow-visible"
-          style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
+          style={{ height: "var(--game-player-row-height)" }}
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center" data-flex-zone="playerHandRow">
@@ -1402,31 +1752,42 @@ function GamePageContent({
                 PlayerHand's own fan (see ZoneFanCard), so the row is just the hand.
                 The `playerHandRow` flex-zone hook drives the mobile hand-lift
                 transform in index.css. */}
-            <PlayerHand />
+            <PlayerHand interactionDisabled={boardChoiceLayerActive} />
           </div>
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}
             flexZone="playerPiles"
             scaleKey="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-            // Anchor box-scale to the bottom-left dock corner.
-            style={{ ...playerZoneRailStyle, transformOrigin: "bottom left" }}
+            // Anchor box-scale to the bottom-left dock corner. No left-rail
+            // offset here: this pile is absolutely positioned inside the board
+            // grid, whose padding already accounts for a left-docked log panel.
+            style={{
+              ...playerZoneRailStyle,
+              transformOrigin: "bottom left",
+            }}
           >
             <div className="flex items-end gap-2">
               <ExilePile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onClick={() => handleViewZone("exile", perspectivePlayerId)}
+                onClick={(launcher) =>
+                  handleViewZone("exile", perspectivePlayerId, launcher)
+                }
               />
               <GraveyardPile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onClick={() => handleViewZone("graveyard", perspectivePlayerId)}
+                onClick={(launcher) =>
+                  handleViewZone("graveyard", perspectivePlayerId, launcher)
+                }
               />
               <LibraryPile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onView={() => handleViewZone("library", perspectivePlayerId)}
+                onView={(launcher) =>
+                  handleViewZone("library", perspectivePlayerId, launcher)
+                }
               />
             </div>
           </DraggableWidget>
@@ -1455,6 +1816,7 @@ function GamePageContent({
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
+              <DayNightBadge />
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
@@ -1474,7 +1836,10 @@ function GamePageContent({
             <CombatPhaseIndicator />
           </div>
           {isSpectatorMode ? (
-            <TurnStatusLine />
+            <div className="flex flex-row items-center gap-1.5">
+              <TurnStatusLine />
+              <DayNightBadge />
+            </div>
           ) : (
             <>
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
@@ -1486,6 +1851,7 @@ function GamePageContent({
                 <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
+                <DayNightBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
@@ -1500,538 +1866,653 @@ function GamePageContent({
         </div>
       </DraggableWidget>
 
-      <GameLogPanel />
-      <MobileHandDrawer />
+      <MobileHandDrawer interactionDisabled={boardChoiceLayerActive} />
       <FlexEditOverlay />
 
       {/* Game menu — top-left hamburger */}
       <GameMenu
         gameId={gameId}
-        isAiMode={mode === "ai"}
+        isAiMode={mode === "ai" && supportsDebugHandReveal(adapter)}
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
-        multiplayerBoardLayout={seatCount > 2 ? multiplayerBoardLayout : undefined}
-        onToggleMultiplayerBoardLayout={seatCount > 2 ? handleToggleMultiplayerBoardLayout : undefined}
-        onSettingsClick={() => setPreferencesOpen({})}
+        logPanelOpen={logPanelOpen}
+        onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
+        multiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
+        }
+        onToggleMultiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? handleToggleMultiplayerBoardLayout : undefined
+        }
+        showMultiplayerSplitLayoutNudge={showMultiplayerSplitLayoutNudge}
+        onTryMultiplayerSplitLayout={
+          showMultiplayerSplitLayoutNudge ? handleTryMultiplayerSplitLayout : undefined
+        }
+        onDismissMultiplayerSplitLayoutNudge={
+          showMultiplayerSplitLayoutNudge ? handleDismissMultiplayerSplitLayoutNudge : undefined
+        }
+        onSettingsClick={() => openPreferences()}
+        menuTriggerRef={gameMenuTriggerRef}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
-        onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
-        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        // Offered when the adapter carries takeback and this page renders its takeback events.
+        onRequestTakeback={
+          supportsTakeback(adapter) && receivesAdapterEvents && mode !== "spectate"
+            ? handleRequestTakeback
+            : undefined
+        }
+        takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
+        showSandboxTools={sandboxToolsAvailable}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugInteractionMode={debugInteractionMode}
+        onToggleDebugInteractionMode={sandboxToolsAvailable ? toggleDebugInteractionMode : undefined}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
         onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}
         onReportCardClick={() => useUiStore.getState().openCardReportDialog()}
       />
-      <HelpSheet />
-      <CardReportDialog />
+      {/* Share the viewport stacking order with arrow portals while keeping
+          the board's paint containment and the overlay subtree mounted. */}
+      {createPortal(
+        <div className="game-no-select text-white" style={gamePageStyle}>
+          <HelpSheet />
+          <CardReportDialog returnFocusRef={gameMenuTriggerRef} />
 
-      {/* Connection failure toast */}
-      {isOnlineMode && (
-        <ConnectionToast
-          onRetry={() => window.location.reload()}
-          onSettings={() => setPreferencesOpen({})}
-        />
-      )}
-
-
-      {/*
-        Opponent-disconnected overlay for server (WS) games. The live
-        "N seconds to forfeit" countdown lives on `ConnectionToast`, keyed
-        by player — this modal just communicates the blocking/paused state
-        of the game screen. P2P games use `DisconnectChoiceDialog` +
-        `PausedBanner` instead (see adapter §4).
-      */}
-      {opponentDisconnected && !pauseReason && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60" />
-          <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
-            <h2 className="mb-2 text-lg font-bold text-yellow-400">
-              {t("gamePage.opponentDisconnected.title")}
-            </h2>
-            <p className="text-sm text-gray-300">
-              {t("gamePage.opponentDisconnected.body")}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* P2P pause banner — visible to everyone while paused. */}
-      <PausedBanner isVisible={pauseReason !== null} reason={pauseReason ?? ""} />
-
-      {/* P2P host-only disconnect decision modal. */}
-      {isP2PHost && disconnectChoice !== null && (
-        <DisconnectChoiceDialog
-          isOpen
-          playerLabel={getOpponentDisplayName(disconnectChoice.playerId)}
-          gracePeriodMs={disconnectChoice.gracePeriodMs}
-          onPauseAndWait={() => {
-            const adapter = useGameStore.getState().adapter as
-              | { holdForReconnect?: (pid: number) => void }
-              | null;
-            adapter?.holdForReconnect?.(disconnectChoice.playerId);
-          }}
-          onContinueWithout={() => {
-            const adapter = useGameStore.getState().adapter as
-              | { concedeDisconnected?: (pid: number) => Promise<void> }
-              | null;
-            void adapter?.concedeDisconnected?.(disconnectChoice.playerId);
-          }}
-          onDismiss={onDismissDisconnectChoice}
-        />
-      )}
-
-      {/* Pre-game lobby progress (3-4p P2P only). */}
-      {lobbyProgress !== null && (
-        <LobbyProgress
-          joined={lobbyProgress.joined}
-          total={lobbyProgress.total}
-          roomCode={hostGameCode ?? undefined}
-        />
-      )}
-
-      {/* Card data missing modal */}
-      {showCardDataMissing && (
-        <CardDataMissingModal onContinue={onDismissCardDataMissing} />
-      )}
-
-      {/* cEDH bracket-violation blocking modal.
-          Shown when the engine refuses game init because one or more decks
-          are not declared cEDH (bracket 5) at a cEDH table.
-          Covers the entire page — no game state is accessible behind it
-          because the engine never initialised. */}
-      {bracketViolationError && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("gameSetup.bracketViolation.title")}
-          data-testid="bracket-violation-modal"
-        >
-          <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
-            <h2 className="mb-2 text-lg font-bold text-rose-400">
-              {t("gameSetup.bracketViolation.title")}
-            </h2>
-            <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
-            <p className="mb-6 text-xs text-gray-500">
-              {t("gameSetup.bracketViolation.body")}
-            </p>
-            <button
-              onClick={onDismissBracketViolation}
-              className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
-            >
-              {t("gameSetup.bracketViolation.returnToSetup")}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Resume-failed banner */}
-      <AnimatePresence>
-        {resumeResetReason && (
-          <motion.div
-            className="fixed top-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg bg-amber-950 px-4 py-3 shadow-2xl ring-1 ring-amber-700/50"
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            transition={{ duration: 0.25 }}
-          >
-            <span className="text-sm text-amber-200">
-              {t("gamePage.resumeReset.message", { reason: resumeResetReason })}
-            </span>
-            <button
-              onClick={onDismissResumeReset}
-              className="rounded bg-amber-800 px-2.5 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-700"
-            >
-              {t("gamePage.actions.ok")}
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Overlay layers */}
-      <DebugPanel />
-      <ResolutionProgressOverlay />
-
-      {preferencesOpen && (
-        <PreferencesModal
-          onClose={() => setPreferencesOpen(null)}
-          initialTab={preferencesOpen.tab}
-          highlight={preferencesOpen.highlight}
-        />
-      )}
-
-      {boardContextMenu && (
-        <BoardContextMenu
-          x={boardContextMenu.x}
-          y={boardContextMenu.y}
-          onClose={() => setBoardContextMenu(null)}
-          onChangeBackground={() =>
-            setPreferencesOpen({ tab: "gameplay", highlight: "board-background" })
-          }
-          onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
-          onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
-          onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
-          onReportCard={
-            canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
-          }
-        />
-      )}
-
-      <DebugCardContextMenu />
-      <DebugLibraryViewer />
-
-      {/* Animation overlay (above board, below modals) */}
-      <AnimationOverlay containerRef={containerRef} />
-      {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
-      <RevealOverlay />
-      <TurnBanner />
-      <DiceRollOverlay />
-
-      {/* Combat SVG overlays: blocker assignments + attack target arrows */}
-      <BlockAssignmentLines />
-      <AttackTargetLines />
-      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
-          Self-gates: renders nothing unless the local player is assigning blockers
-          to attackers that carry a minimum-blocker requirement. */}
-      <BlockRequirementBadges />
-
-      {/* Per-creature must-attack / can't-attack and must-block / can't-block
-          badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
-          unless the local player is at the matching declare step and the engine
-          supplied constraints. Display-only. */}
-      <AttackRequirementBadges />
-      <BlockerConstraintBadges />
-
-      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
-          hover doesn't re-render GamePageContent (and the whole battlefield). */}
-      <GameCardPreview />
-
-      {/* WaitingFor-driven prompt overlays (only for human player).
-          Wrapped in DialogHost so any active dialog can be peeked away to
-          reveal the battlefield underneath; peek state resets on every
-          new WaitingFor so a fresh prompt is always visible. */}
-      <DialogHost>
-        {waitingFor != null &&
-          isClickThroughWaitingFor(waitingFor, objects) &&
-          canActForWaitingState && <TargetingOverlay />}
-        {waitingFor != null &&
-          MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
-          canActForWaitingState && <ManaPaymentUI />}
-        {waitingFor?.type === "ChooseXValue" &&
-          canActForWaitingState && <ChooseXValueUI />}
-        {waitingFor?.type === "PayAmountChoice" &&
-          canActForWaitingState && <PayAmountChoiceUI />}
-        {waitingFor?.type === "AssistPayment" &&
-          canActForWaitingState && <AssistPaymentUI />}
-        {waitingFor?.type === "ReplacementChoice" &&
-          canActForWaitingState && <ReplacementModal />}
-        {waitingFor?.type === "OrderTriggers" &&
-          canActForWaitingState && <TriggerOrderModal />}
-        <BattleProtectorModal />
-        <MeldChoiceModal />
-        <AssistChoosePlayerModal />
-        <ClashOpponentModal />
-        <ZoneOpponentChooserModal />
-        <PileOpponentModal />
-        <AnnouncingOpponentModal />
-        <TributeModal />
-        <CombatTaxModal />
-        <AlternativeCostModal />
-        <CastingVariantModal />
-        <PermanentTypeSlotModal />
-        <ModeChoiceModal />
-        <DeclareShortcutModal />
-        <RespondToShortcutModal />
-        <PrecastCopyShortcutOfferModal />
-        <RespondToPrecastCopyShortcutModal />
-        <ChooseOneOfBranchModal />
-        <LifeRedistributionModal />
-        <AdventureCastModal />
-        <CascadeChoiceModal />
-        <SpellbookDraftModal />
-        <FreeCastWindowModal />
-        <ModalFaceModal />
-        <MiracleRevealModal />
-        {waitingFor?.type === "SpliceOffer" &&
-          canActForWaitingState && (
-            <SpliceOfferModal />
-          )}
-
-        {/* Scry/Dig/Surveil card choice modal */}
-        <CardChoiceModal />
-
-        {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
-        <AbilityChoiceModal />
-
-        {/* Player-attached Aura viewer (Curse cycle, Faith's Fetters, etc.).
-            Mounted here — not from inside HudPlate where the badge lives —
-            so the dialog's `fixed inset-0` shell anchors to the viewport
-            instead of HudPlate's transform-CB bounding box. */}
-        <PlayerEnchantmentsDialog />
-
-        {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
-            battlefield object): a centered spread of the host + attachments,
-            each with its live selection affordance. Opened by clicking a
-            permanent-with-attachments during a target/board-choice prompt or by
-            the host's ⧉ badge. Self-portals to document.body, so its mount point
-            here is incidental. */}
-        <AttachmentFan />
-
-        {/* Optional additional cost choice (kicker, blight, "or pay") */}
-        {waitingFor?.type === "OptionalCostChoice" &&
-          canActForWaitingState && (
-            <OptionalCostModal />
-          )}
-
-        {/* Defiler cycle — optional life payment for mana reduction */}
-        {waitingFor?.type === "DefilerPayment" &&
-          canActForWaitingState && (
-            <DefilerPaymentModal />
-          )}
-
-        {/* Optional effect choice ("You may X") / Opponent may choice */}
-        {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
-          canActForWaitingState && (
-            <OptionalEffectModal />
-          )}
-
-        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
-        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
-          canActForWaitingState && (
-            <TopOrBottomModal />
-          )}
-
-        {/* CR 702.140c + CR 730.2a: mutate spell controller chooses top/bottom */}
-        {waitingFor?.type === "MutateMergeChoice" &&
-          canActForWaitingState && (
-            <MutateMergeModal />
-          )}
-
-        {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
-        {waitingFor?.type === "CipherEncodeChoice" &&
-          canActForWaitingState && (
-            <CipherEncodeModal />
-          )}
-
-        {waitingFor?.type === "UntapChoice" &&
-          canActForWaitingState && (
-            <UntapChoiceModal />
-          )}
-
-        {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
-        {waitingFor?.type === "ExertChoice" &&
-          canActForWaitingState && (
-            <ExertChoiceModal />
-          )}
-
-        {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
-        {waitingFor?.type === "EnlistChoice" &&
-          canActForWaitingState && (
-            <EnlistChoiceModal />
-          )}
-
-        {/* Unless payment choice ("Counter unless you pay {X}") */}
-        {waitingFor?.type === "UnlessPayment" &&
-          canActForWaitingState && (
-            <UnlessPaymentPanel />
-          )}
-
-        {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
-        {waitingFor?.type === "UnlessPaymentChooseCost" &&
-          canActForWaitingState && (
-            <UnlessPaymentChooseCostModal />
-          )}
-        {waitingFor?.type === "ActivationCostOneOfChoice" &&
-          canActForWaitingState && (
-            <ActivationCostOneOfChoiceModal />
-          )}
-      </DialogHost>
-
-      {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
-          paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
-      {viewingZone && (
-        <ZoneViewer
-          zone={viewingZone.zone}
-          playerId={viewingZone.playerId}
-          onClose={handleZoneViewerClose}
-        />
-      )}
-
-      {waitingFor?.type === "CompanionReveal" &&
-        waitingFor.data.player === playerId && (
-          <CompanionRevealPrompt
-            eligibleCompanions={waitingFor.data.eligible_companions}
-            onChoose={handleDeclareCompanion}
+          {/* The page's toast surface, not an online-only one: solo games raise
+              toasts too (the native-engine fallback notice). Only online games get
+              a Retry — reloading re-dials the server, but a solo game has nothing
+              to re-dial and would just restart itself. */}
+          <ConnectionToast
+            onRetry={isOnlineMode ? () => window.location.reload() : undefined}
+            onSettings={() => openPreferences()}
           />
-        )}
 
-      {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
-          they are in the pending set. Each player decides independently.
-          Held back until the CR 103.1 starting-player contest finishes so the
-          dice aren't hidden behind this modal. */}
-      {waitingFor?.type === "MulliganDecision" &&
-        !startingContestActive &&
-        (() => {
-          const entry = waitingFor.data.pending.find(
-            (e) => e.player === playerId,
-          );
-          if (!entry) return null;
-          // CR 103.5b: bottoming is folded into the MulliganDecision variant as
-          // a per-entry BottomCards sub-phase resolved at this player's own
-          // declare point.
-          if (entry.phase.type === "BottomCards") {
-            return (
-              <MulliganBottomCardsPrompt
-                playerId={entry.player}
-                count={entry.phase.count}
-                openingHandBottom={false}
-                excludedCardId={
-                  entry.phase.then.type === "UseSerumPowder"
-                    ? entry.phase.then.object_id
-                    : undefined
-                }
-                onChoose={handleBottomCards}
-              />
-            );
-          }
-          return (
-            <MulliganDecisionPrompt
-              playerId={entry.player}
-              mulliganCount={entry.mulligan_count}
-              freeFirstMulligan={waitingFor.data.free_first_mulligan}
-              onChoose={handleMulliganChoice}
-            />
-          );
-        })()}
 
-      {waitingFor?.type === "MulliganDecision" &&
-        !startingContestActive &&
-        !waitingFor.data.pending.some((e) => e.player === playerId) && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
-            <div className="relative text-center">
-              <p className="text-base font-semibold text-white">
-                {t("gamePage.mulligan.opponentDeciding")}
-              </p>
+
+          {/*
+            Opponent-disconnected overlay for server (WS) games. The live
+            "N seconds to forfeit" countdown lives on `ConnectionToast`, keyed
+            by player — this modal just communicates the blocking/paused state
+            of the game screen. P2P games use `DisconnectChoiceDialog` +
+            `PausedBanner` instead (see adapter §4).
+          */}
+          {opponentDisconnected && !pauseReason && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center">
+              <div className="absolute inset-0 bg-black/60" />
+              <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
+                <h2 className="mb-2 text-lg font-bold text-yellow-400">
+                  {t("gamePage.opponentDisconnected.title")}
+                </h2>
+                <p className="text-sm text-gray-300">
+                  {t("gamePage.opponentDisconnected.body")}
+                </p>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-      {waitingFor?.type === "OpeningHandBottomCards" &&
-        (() => {
-          const entry = waitingFor.data.pending.find(
-            (e) => e.player === playerId,
-          );
-          if (!entry) return null;
-          return (
-            <MulliganBottomCardsPrompt
-              playerId={entry.player}
-              count={entry.count}
-              openingHandBottom
-              onChoose={handleBottomCards}
-            />
-          );
-        })()}
-
-      {waitingFor?.type === "BetweenGamesSideboard" &&
-        waitingFor.data.player === playerId &&
-        (() => {
-          const pool = deckPools?.find((p) => p.player === playerId);
-          if (!pool) return null;
-          return (
-            <BetweenGamesSideboardModal
-              pool={pool}
-              gameNumber={waitingFor.data.game_number}
-              score={waitingFor.data.score}
-              onSubmit={handleSubmitSideboard}
-            />
-          );
-        })()}
-
-      {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
-        waitingFor.data.player === playerId && (
-          <ChoiceModal
-            title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
-            subtitle={t("gamePage.playDraw.matchScore", {
-              p0Wins: waitingFor.data.score.p0_wins,
-              p1Wins: waitingFor.data.score.p1_wins,
-            })}
-            options={[
-              {
-                id: "play",
-                label: t("gamePage.playDraw.playFirst"),
-                description: t("gamePage.playDraw.playFirstDescription"),
-              },
-              {
-                id: "draw",
-                label: t("gamePage.playDraw.drawFirst"),
-                description: t("gamePage.playDraw.drawFirstDescription"),
-              },
-            ]}
-            onChoose={(id) => handleChoosePlayDraw(id === "play")}
+          {/* P2P pause banner — visible to everyone while paused. */}
+          <PausedBanner
+            isVisible={pauseReason !== null}
+            reason={pauseReason ?? ""}
+            onResume={isP2PHost && adapter instanceof P2PHostAdapter ? handleResumeP2P : undefined}
           />
-        )}
 
-      {/* Multiplayer UX overlays */}
-      {isOnlineMode && (
-        <>
-          <ConcedeDialog
-            isOpen={showConcedeDialog}
-            onConfirm={handleConcede}
-            onCancel={onHideConcedeDialog}
+          {/* P2P host-only disconnect decision modal. */}
+          {isP2PHost && disconnectChoice !== null && (
+            <DisconnectChoiceDialog
+              isOpen
+              playerLabel={getOpponentDisplayName(disconnectChoice.playerId)}
+              gracePeriodMs={disconnectChoice.gracePeriodMs}
+              onPauseAndWait={() => {
+                const adapter = useGameStore.getState().adapter as
+                  | { holdForReconnect?: (pid: number) => void }
+                  | null;
+                adapter?.holdForReconnect?.(disconnectChoice.playerId);
+              }}
+              onContinueWithout={() => {
+                const adapter = useGameStore.getState().adapter as
+                  | { concedeDisconnected?: (pid: number) => Promise<void> }
+                  | null;
+                void adapter?.concedeDisconnected?.(disconnectChoice.playerId);
+              }}
+              onDismiss={onDismissDisconnectChoice}
+            />
+          )}
+
+          {/* Pre-game lobby progress (3-4p P2P only). */}
+          {lobbyProgress !== null && (
+            <LobbyProgress
+              joined={lobbyProgress.joined}
+              total={lobbyProgress.total}
+              roomCode={hostGameCode ?? undefined}
+            />
+          )}
+
+          {/* Card data missing modal */}
+          {showCardDataMissing && (
+            <CardDataMissingModal onContinue={onDismissCardDataMissing} />
+          )}
+
+          {/* cEDH bracket-violation blocking modal.
+              Shown when the engine refuses game init because one or more decks
+              are not declared cEDH (bracket 5) at a cEDH table.
+              Covers the entire page — no game state is accessible behind it
+              because the engine never initialised. */}
+          {bracketViolationError && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("gameSetup.bracketViolation.title")}
+              data-testid="bracket-violation-modal"
+            >
+              <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
+                <h2 className="mb-2 text-lg font-bold text-rose-400">
+                  {t("gameSetup.bracketViolation.title")}
+                </h2>
+                <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
+                <p className="mb-6 text-xs text-gray-500">
+                  {t("gameSetup.bracketViolation.body")}
+                </p>
+                <button
+                  onClick={onDismissBracketViolation}
+                  className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
+                >
+                  {t("gameSetup.bracketViolation.returnToSetup")}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Resume-failed banner */}
+          <AnimatePresence>
+            {resumeResetReason && (
+              <motion.div
+                className="fixed top-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg bg-amber-950 px-4 py-3 shadow-2xl ring-1 ring-amber-700/50"
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                transition={{ duration: 0.25 }}
+              >
+                <span className="text-sm text-amber-200">
+                  {t("gamePage.resumeReset.message", { reason: resumeResetReason })}
+                </span>
+                <button
+                  onClick={onDismissResumeReset}
+                  className="rounded bg-amber-800 px-2.5 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-700"
+                >
+                  {t("gamePage.actions.ok")}
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Overlay layers */}
+          <DebugPanel
+            aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
           />
+          <AiDecisionOverlay
+            receipt={aiDecisionReceipt}
+            visible={aiDecisionCaptureEnabled}
+            onClose={() => setAiDecisionCaptureEnabled(false)}
+          />
+          <ResolutionProgressOverlay />
+
+          {preferencesOpen && (
+            <PreferencesModal
+              onClose={() => setPreferencesOpen(null)}
+              initialTab={preferencesOpen.tab}
+              highlight={preferencesOpen.highlight}
+              returnFocusRef={preferencesReturnFocusRef}
+            />
+          )}
+
+          {boardContextMenu && (
+            <BoardContextMenu
+              x={boardContextMenu.x}
+              y={boardContextMenu.y}
+              onClose={() => setBoardContextMenu(null)}
+              onChangeBackground={() =>
+                openPreferences({ tab: "gameplay", highlight: "board-background" })
+              }
+              onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
+              onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
+              onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
+              onReportCard={
+                canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
+              }
+            />
+          )}
+
+          <DebugCardContextMenu surface="game" />
+          <DebugLibraryViewer returnFocusRef={gameMenuTriggerRef} />
+
+          {/* Animation overlay (above board, below modals) */}
+          <AnimationOverlay containerRef={containerRef} />
+          {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
+          <RevealOverlay />
+          <TurnBanner />
+          <DiceRollOverlay />
+          <ScryOutcomeOverlay />
+          <UnActionsHost />
+
+          {/* Combat SVG overlays: blocker assignments + attack target arrows */}
+          <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+          <AttackTargetLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+          {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+              Self-gates: renders nothing unless the local player is assigning blockers
+              to attackers that carry a minimum-blocker requirement. */}
+          <BlockRequirementBadges />
+
+          {/* Per-creature must-attack / can't-attack and must-block / can't-block
+              badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
+              unless the local player is at the matching declare step and the engine
+              supplied constraints. Display-only. */}
+          <AttackRequirementBadges />
+          <BlockerConstraintBadges />
+
+          {/* WaitingFor-driven prompt overlays (only for human player).
+              Wrapped in DialogHost so any active dialog can be peeked away to
+              reveal the battlefield underneath; peek state resets on every
+              new WaitingFor so a fresh prompt is always visible. */}
+          {/* Eye to Eye / Mouth to Mouth: real-time clicking contest + result banner. */}
+          <ContestOverlay />
+
+          <DialogHost>
+            {waitingFor != null &&
+              isClickThroughWaitingFor(waitingFor, objects) &&
+              canActForWaitingState && <TargetingOverlay />}
+            {waitingFor != null &&
+              MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
+              canActForWaitingState && <ManaPaymentUI />}
+            {waitingFor?.type === "ManaSourceSelection" &&
+              canActForWaitingState && <ManaSourceSelectionUI />}
+            {waitingFor?.type === "ChooseXValue" &&
+              canActForWaitingState && <ChooseXValueUI />}
+            {waitingFor?.type === "PayAmountChoice" &&
+              canActForWaitingState && <PayAmountChoiceUI />}
+            {waitingFor?.type === "AssistPayment" &&
+              canActForWaitingState && <AssistPaymentUI />}
+            {waitingFor?.type === "ReplacementChoice" &&
+              canActForWaitingState && <ReplacementModal />}
+            {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
+            {waitingFor?.type === "OrderTriggers" &&
+              canActForWaitingState && <TriggerOrderModal />}
+            {waitingFor?.type === "OrderCostReductions" &&
+              canActForWaitingState && <CostReductionOrderModal />}
+            <BattleProtectorModal />
+            <MeldChoiceModal />
+            <AssistChoosePlayerModal />
+            <ClashOpponentModal />
+            <ZoneOpponentChooserModal />
+            <PileOpponentModal />
+            <AnnouncingOpponentModal />
+            <GiftRecipientModal />
+            <EntryControllerModal />
+            <TributeModal />
+            <CombatTaxModal />
+            <AlternativeCostModal />
+            <CastingVariantModal />
+            <PermanentTypeSlotModal />
+            <ModeChoiceModal />
+            <DeclareShortcutModal />
+            <RespondToShortcutModal />
+            <PrecastCopyShortcutOfferModal />
+            <RespondToPrecastCopyShortcutModal />
+            <ChooseOneOfBranchModal />
+            <LifeRedistributionModal />
+            <AdventureCastModal />
+            <CascadeChoiceModal />
+            <RippleRevealChoiceModal />
+            <SpellbookDraftModal />
+            <FreeCastWindowModal />
+            <ModalFaceModal />
+            <MiracleRevealModal />
+            {waitingFor?.type === "SpliceOffer" &&
+              canActForWaitingState && (
+                <SpliceOfferModal />
+              )}
+
+            {/* Scry/Dig/Surveil card choice modal */}
+            <CardChoiceModal />
+
+            {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
+            <AbilityChoiceModal />
+
+            {/* Player-attached Aura viewer (Curse cycle, Paradox Haze, etc.).
+                Mounted here — not from inside HudPlate where the badge lives —
+                so the dialog's `fixed inset-0` shell anchors to the viewport
+                instead of HudPlate's transform-CB bounding box. */}
+            <PlayerEnchantmentsDialog />
+
+            {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
+                battlefield object): a centered spread of the host + attachments,
+                each with its live selection affordance. Opened by clicking a
+                permanent-with-attachments during a target/board-choice prompt or by
+                the host's ⧉ badge. Self-portals to document.body, so its mount point
+                here is incidental. */}
+            <AttachmentFan />
+
+            {/* Optional additional cost choice (kicker, blight, "or pay") */}
+            {waitingFor?.type === "OptionalCostChoice" &&
+              canActForWaitingState && (
+                <OptionalCostModal />
+              )}
+
+            {/* Defiler cycle — optional life payment for mana reduction */}
+            {waitingFor?.type === "DefilerPayment" &&
+              canActForWaitingState && (
+                <DefilerPaymentModal />
+              )}
+
+            {/* Optional effect choice ("You may X") / Opponent may choice */}
+            {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
+              canActForWaitingState && (
+                <OptionalEffectModal />
+              )}
+
+            {/* Optional immediate payment branch ("discard a card or pay {2}") */}
+            {waitingFor?.type === "ResolutionOptionalPaymentChoice" && (
+              <ResolutionOptionalPaymentModal />
+            )}
+
+            {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+            {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+              canActForWaitingState && (
+                <TopOrBottomModal />
+              )}
+
+            {/* CR 702.140c + CR 730.2a: mutate spell controller chooses top/bottom */}
+            {waitingFor?.type === "MutateMergeChoice" &&
+              canActForWaitingState && (
+                <MutateMergeModal />
+              )}
+
+            {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
+            {waitingFor?.type === "CipherEncodeChoice" &&
+              canActForWaitingState && (
+                <CipherEncodeModal />
+              )}
+
+            {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
+            {waitingFor?.type === "ExertChoice" &&
+              canActForWaitingState && (
+                <ExertChoiceModal />
+              )}
+
+            {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
+            {waitingFor?.type === "EnlistChoice" &&
+              canActForWaitingState && (
+                <EnlistChoiceModal />
+              )}
+
+            {/* Unless payment choice ("Counter unless you pay {X}") */}
+            {waitingFor?.type === "UnlessPayment" &&
+              canActForWaitingState && (
+                <UnlessPaymentPanel />
+              )}
+
+            {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
+            {waitingFor?.type === "UnlessPaymentChooseCost" &&
+              canActForWaitingState && (
+                <UnlessPaymentChooseCostModal />
+              )}
+            {waitingFor?.type === "ActivationCostOneOfChoice" &&
+              canActForWaitingState && (
+                <ActivationCostOneOfChoiceModal />
+              )}
+          </DialogHost>
+
+          {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
+              paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
+          {viewingZone && (
+            <ZoneViewer
+              zone={viewingZone.zone}
+              playerId={viewingZone.playerId}
+              onClose={handleZoneViewerClose}
+              onPrepareActionClose={prepareZoneViewerActionClose}
+              returnFocusRef={resolvedZoneViewerReturnFocusRef}
+            />
+          )}
+
+          {waitingFor?.type === "CompanionReveal" &&
+            waitingFor.data.player === playerId && (
+              <CompanionRevealPrompt
+                eligibleCompanions={waitingFor.data.eligible_companions}
+                onChoose={handleDeclareCompanion}
+              />
+            )}
+
+          {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
+              they are in the pending set. Each player decides independently.
+              Held back until the CR 103.1 starting-player contest finishes so the
+              dice aren't hidden behind this modal. */}
+          {waitingFor?.type === "MulliganDecision" &&
+            !startingContestActive &&
+            (() => {
+              const entry = waitingFor.data.pending.find(
+                (e) => e.player === playerId,
+              );
+              if (!entry) return null;
+              // CR 103.5b: bottoming is folded into the MulliganDecision variant as
+              // a per-entry BottomCards sub-phase resolved at this player's own
+              // declare point.
+              if (entry.phase.type === "BottomCards") {
+                return (
+                  <MulliganBottomCardsPrompt
+                    playerId={entry.player}
+                    count={entry.phase.count}
+                    openingHandBottom={false}
+                    excludedCardId={
+                      entry.phase.then.type === "UseSerumPowder"
+                        ? entry.phase.then.object_id
+                        : undefined
+                    }
+                    onChoose={handleBottomCards}
+                  />
+                );
+              }
+              return (
+                <MulliganDecisionPrompt
+                  playerId={entry.player}
+                  mulliganCount={entry.mulligan_count}
+                  freeFirstMulligan={waitingFor.data.free_first_mulligan}
+                  onChoose={handleMulliganChoice}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "MulliganDecision" &&
+            !startingContestActive &&
+            !waitingFor.data.pending.some((e) => e.player === playerId) && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+                <div className="relative text-center">
+                  <p className="text-base font-semibold text-white">
+                    {t("gamePage.mulligan.opponentDeciding")}
+                  </p>
+                </div>
+              </div>
+            )}
+
+          {waitingFor?.type === "OpeningHandBottomCards" &&
+            (() => {
+              const entry = waitingFor.data.pending.find(
+                (e) => e.player === playerId,
+              );
+              if (!entry) return null;
+              return (
+                <MulliganBottomCardsPrompt
+                  playerId={entry.player}
+                  count={entry.count}
+                  openingHandBottom
+                  onChoose={handleBottomCards}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "BetweenGamesSideboard" &&
+            waitingFor.data.player === playerId &&
+            (() => {
+              const pool = deckPools?.find((p) => p.player === playerId);
+              if (!pool) return null;
+              return (
+                <BetweenGamesSideboardModal
+                  pool={pool}
+                  gameNumber={waitingFor.data.game_number}
+                  score={waitingFor.data.score}
+                  minMainDeckSize={waitingFor.data.min_main_deck_size}
+                  maxSideboardSize={waitingFor.data.max_sideboard_size}
+                  onSubmit={handleSubmitSideboard}
+                />
+              );
+            })()}
+
+          {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
+            canActForWaitingState && (
+              <ChoiceModal
+                title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
+                subtitle={t("gamePage.playDraw.matchScore", {
+                  p0Wins: waitingFor.data.score.p0_wins,
+                  p1Wins: waitingFor.data.score.p1_wins,
+                })}
+                options={[
+                  {
+                    id: "play",
+                    label: t("gamePage.playDraw.playFirst"),
+                    description: t("gamePage.playDraw.playFirstDescription"),
+                  },
+                  {
+                    id: "draw",
+                    label: t("gamePage.playDraw.drawFirst"),
+                    description: t("gamePage.playDraw.drawFirstDescription"),
+                  },
+                ]}
+                onChoose={(id) => handleChoosePlayDraw(id === "play")}
+              />
+            )}
+
+          {/* CR 103.1: the chooser names the seat that takes the first turn, once
+              the starting-player contest has finished. */}
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            canActForWaitingState && (
+              <ChoiceModal
+                title={t("gamePage.startingPlayer.title")}
+                options={waitingFor.data.candidates.map((seat) =>
+                  seat === playerId
+                    ? {
+                        id: String(seat),
+                        label: t("gamePage.playDraw.playFirst"),
+                        description: t("gamePage.playDraw.playFirstDescription"),
+                      }
+                    : {
+                        id: String(seat),
+                        label: t("gamePage.startingPlayer.playerPlaysFirst", {
+                          name: getOpponentDisplayName(seat),
+                        }),
+                      },
+                )}
+                onChoose={(id) =>
+                  dispatch({ type: "ChooseStartingPlayer", data: { player: Number(id) } })
+                }
+              />
+            )}
+
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            !canActForWaitingState && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+                <div className="relative text-center">
+                  <p className="text-base font-semibold text-white">
+                    {t("gamePage.startingPlayer.opponentChoosing", {
+                      name: getOpponentDisplayName(waitingFor.data.player),
+                    })}
+                  </p>
+                </div>
+              </div>
+            )}
+
+          {/* Multiplayer UX overlays */}
           <TakebackRequestDialog
-            isOpen={pendingTakeback !== null}
+            isOpen={pendingTakeback !== null
+              && (pendingTakeback.requester === playerId || pendingTakeback.voters.includes(playerId))}
             requesterName={pendingTakeback?.requesterName ?? ""}
             isOwnRequest={pendingTakeback?.requester === playerId}
             onApprove={() => handleRespondTakeback(true)}
             onDecline={() => handleRespondTakeback(false)}
             onCancel={handleCancelTakeback}
           />
-          {!isSpectatorMode && (
-            <EmoteOverlay
-              onSendEmote={handleSendEmote}
-              receivedEmote={receivedEmote}
+          {isOnlineMode && (
+            <>
+              <ConcedeDialog
+                isOpen={showConcedeDialog}
+                gameAction={{
+                  kind: "game",
+                  consequence: isBestOfThree ? "best-of-three-game" : "ordinary-game",
+                  onConfirm: handleConcede,
+                }}
+                matchAction={
+                  supportsMatchConcede(adapter) && isBestOfThree
+                    ? { kind: "match", onConfirm: handleMatchConcede }
+                    : undefined
+                }
+                onCancel={onHideConcedeDialog}
+                returnFocusRef={gameMenuTriggerRef}
+              />
+              {!isSpectatorMode && (
+                <EmoteOverlay
+                  onSendEmote={handleSendEmote}
+                  receivedEmote={receivedEmote}
+                />
+              )}
+              {/* Per-player timer display */}
+              {Object.entries(timerRemaining).map(([pid, secs]) =>
+                secs > 0 ? (
+                  <div
+                    key={pid}
+                    className={`fixed z-30 text-xs font-mono font-bold ${
+                      Number(pid) === playerId
+                        ? "bottom-40 left-1/2 -translate-x-1/2 text-amber-400"
+                        : "top-16 left-1/2 -translate-x-1/2 text-red-400"
+                    }`}
+                  >
+                    {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
+                  </div>
+                ) : null,
+              )}
+            </>
+          )}
+
+          {waitingFor?.type === "GameOver" && (
+            <GameOverScreen
+              winner={waitingFor.data.winner}
+              mode={mode}
+              seatMode={seatMode}
+              isOnlineMode={isOnlineMode}
+              gameStartedAt={gameStartedAt}
+              terminalReason={terminalReason}
             />
           )}
-          {/* Per-player timer display */}
-          {Object.entries(timerRemaining).map(([pid, secs]) =>
-            secs > 0 ? (
-              <div
-                key={pid}
-                className={`fixed z-30 text-xs font-mono font-bold ${
-                  Number(pid) === playerId
-                    ? "bottom-40 left-1/2 -translate-x-1/2 text-amber-400"
-                    : "top-16 left-1/2 -translate-x-1/2 text-red-400"
-                }`}
-              >
-                {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
-              </div>
-            ) : null,
-          )}
-        </>
-      )}
 
-      {waitingFor?.type === "GameOver" && (
-        <GameOverScreen
-          winner={waitingFor.data.winner}
-          mode={mode}
-          isOnlineMode={isOnlineMode}
-          gameStartedAt={gameStartedAt}
-        />
+          {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
+              Renders only when (a) the engine is waiting on the local player
+              and (b) the WaitingFor type has no UI handler in the frontend.
+              Without this, an unknown WaitingFor would silently hang the game
+              with no way to escape — see UnhandledWaitingForModal for details. */}
+          <UnhandledWaitingForModal
+            onExit={handleUnhandledExit}
+            exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
+          />
+        </div>,
+        document.body,
       )}
-
-      {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
-          Renders only when (a) the engine is waiting on the local player
-          and (b) the WaitingFor type has no UI handler in the frontend.
-          Without this, an unknown WaitingFor would silently hang the game
-          with no way to escape — see UnhandledWaitingForModal for details. */}
-      <UnhandledWaitingForModal
-        onExit={handleUnhandledExit}
-        exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
-      />
+      </div>
+      <GameLogPanel />
+      {/* This is a peer of the board and log columns: a preview opened from a
+          log card must not be clipped by the paint-contained board column. */}
+      <GameCardPreview />
     </div>
   );
 }
@@ -2054,6 +2535,31 @@ interface MulliganDecisionPromptProps {
   mulliganCount: number;
   freeFirstMulligan: boolean;
   onChoose: (id: string) => void;
+}
+
+// CR 103.1: engine-provided play/draw label keys; `satisfies` makes a new
+// engine variant a type error here.
+const PLAY_DRAW_LABEL_KEYS = {
+  OnThePlay: "gamePage.mulligan.onThePlay",
+  OnTheDraw: "gamePage.mulligan.onTheDraw",
+} as const satisfies Record<PlayDrawPosition, ParseKeys<"game">>;
+
+/** The viewer's engine-provided opening turn position (CR 103.1). Formats only. */
+function OpeningTurnPosition() {
+  const { t } = useTranslation("game");
+  const playDraw = useGameStore((s) => s.gameState?.derived?.viewer_play_draw);
+  const turnNumber = useGameStore((s) => s.gameState?.derived?.viewer_turn_number);
+  const label = playDraw
+    ? t(PLAY_DRAW_LABEL_KEYS[playDraw])
+    : turnNumber != null
+      ? t("gamePage.mulligan.takeTurn", { turn: turnNumber })
+      : null;
+  if (!label) return null;
+  return (
+    <div className="mt-1 inline-flex w-fit items-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-0.5 text-xs font-semibold text-cyan-200">
+      {label}
+    </div>
+  );
 }
 
 interface MulliganPanelProps {
@@ -2088,8 +2594,11 @@ function MulliganPanel({
         transition={{ duration: 0.24, ease: "easeOut" }}
       />
       <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Grow with the card row so a whole hand shows without scrolling when
+            the viewport fits it; never narrower than 72rem (or the viewport),
+            never wider than the viewport (the row scrolls again below that). */}
         <motion.div
-          className="card-scale-reset pointer-events-auto relative z-10 w-full max-w-6xl"
+          className="card-scale-reset pointer-events-auto relative z-10 w-fit min-w-[min(100%,72rem)] max-w-full"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
@@ -2105,6 +2614,7 @@ function MulliganPanel({
               <p className="modal-subtitle max-w-2xl text-slate-400">
                 {subtitle}
               </p>
+              <OpeningTurnPosition />
             </div>
 
             <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>
@@ -2174,6 +2684,13 @@ function MulliganDecisionPrompt({
     )
     .filter((oid): oid is number => oid !== null);
 
+  // CR 103.5 as modified by the Dandan free-reveal rule: the engine
+  // (`mulligan::free_reveal_offered`) decides whether the hand qualifies and
+  // enumerates the action; the FE only shows the button for an issued action.
+  const freeRevealOffered = legalActions.some(
+    (a) => a.type === "MulliganDecision" && a.data.choice.type === "FreeReveal",
+  );
+
   if (!player || !objects) {
     const fallbackOptions = [
       {
@@ -2193,6 +2710,15 @@ function MulliganDecisionPrompt({
           ? t("gamePage.mulligan.shuffleDrawSevenFree")
           : t("gamePage.mulligan.shuffleDrawSevenAgain"),
       },
+      ...(freeRevealOffered
+        ? [
+            {
+              id: "freeReveal",
+              label: t("gamePage.mulligan.freeReveal"),
+              description: t("gamePage.mulligan.freeRevealDescription"),
+            },
+          ]
+        : []),
       // CR 103.5b: A Powder option per legal `UseSerumPowder` candidate the
       // engine emitted. The button label uses the object's engine-provided
       // name so the FE never re-evaluates which hand objects qualify.
@@ -2248,6 +2774,15 @@ function MulliganDecisionPrompt({
                   ? t("gamePage.mulligan.freeMulligan")
                   : t("gamePage.mulligan.mulliganTo", { count: nextHandSize })}
               </button>
+              {freeRevealOffered && (
+                <button
+                  onClick={() => onChoose("freeReveal")}
+                  className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                  title={t("gamePage.mulligan.freeRevealDescription")}
+                >
+                  {t("gamePage.mulligan.freeReveal")}
+                </button>
+              )}
               {/* CR 103.5b: One button per legal `UseSerumPowder` candidate
                   the engine surfaced. Name comes from engine-provided state. */}
               {serumPowderIds.map((oid) => (
@@ -2306,6 +2841,8 @@ function MulliganDecisionPrompt({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
@@ -2529,6 +3066,8 @@ function MulliganBottomCardsPrompt({
                 >
                   <CardImage
                     cardName={obj.name}
+                    ownerPrinting={obj.printing}
+                    ownerPrintedRef={obj.printed_ref}
                     size="normal"
                     className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                   />
@@ -2587,13 +3126,17 @@ function VictoryParticles() {
 function GameOverScreen({
   winner,
   mode,
+  seatMode,
   isOnlineMode = false,
   gameStartedAt,
+  terminalReason,
 }: {
   winner: number | null;
   mode: string | null;
+  seatMode: GamePageMode;
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
+  terminalReason?: string | null;
 }) {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -2603,15 +3146,29 @@ function GameOverScreen({
   const players = gameState?.players;
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
-  const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
+  // Which seat this client holds is the mode census's answer, never a default:
+  // a wire-assigned seat is authoritative only once the wire has delivered it.
+  // A legacy online save carries no player id, so a recovered result must not be
+  // labelled from seat 0's perspective while the seat is unknown.
+  const assignedSeat = useMultiplayerStore((s) => s.activePlayerId);
+  const seatOrigin = seatSource(seatMode);
+  const localSeat = seatOrigin === "seat-zero" ? PLAYER_ID : assignedSeat;
+  const seatKnown = localSeat !== null;
+  const activePlayerId = localSeat ?? PLAYER_ID;
 
-  const playerLife = players?.[activePlayerId]?.life ?? 0;
-  const opponentLife = players
-    ? (players.find((p) => p.id !== activePlayerId)?.life ?? 0)
-    : 0;
+  const playerLife = gameState && seatKnown
+    ? formatLifeReadout(lifeReadout(gameState, activePlayerId))
+    : null;
+  const opponentId = seatKnown ? players?.find((p) => p.id !== activePlayerId)?.id : undefined;
+  const opponentLife =
+    gameState && seatKnown && opponentId !== undefined
+      ? formatLifeReadout(lifeReadout(gameState, opponentId))
+      : null;
 
-  const isVictory = winner === activePlayerId;
+  const isVictory = seatKnown && winner === activePlayerId;
   const isDraw = winner == null;
+  // A winner with no known seat is neither this client's victory nor its defeat.
+  const outcomeUnknown = winner != null && !seatKnown;
 
   const turnCount = gameState?.turn_number ?? 0;
   const gameDuration = gameStartedAt
@@ -2620,12 +3177,14 @@ function GameOverScreen({
 
   const titleText = isDraw
     ? t("gamePage.gameOver.draw")
-    : isVictory
-      ? t("gamePage.gameOver.victory")
-      : t("gamePage.gameOver.defeat");
-  const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
+    : outcomeUnknown
+      ? t("gamePage.gameOver.complete")
+      : isVictory
+        ? t("gamePage.gameOver.victory")
+        : t("gamePage.gameOver.defeat");
+  const titleColor = isDraw || outcomeUnknown ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
 
-  const glowColor = isDraw
+  const glowColor = isDraw || outcomeUnknown
     ? "rgba(176,176,176,0.5)"
     : isVictory
       ? "rgba(201,176,55,0.8)"
@@ -2633,7 +3192,7 @@ function GameOverScreen({
 
   const textShadow = `0 0 20px ${glowColor}, 0 0 40px ${glowColor.replace(/[\d.]+\)$/, "0.5)")}, 0 0 80px ${glowColor.replace(/[\d.]+\)$/, "0.3)")}`;
 
-  const bgGradient = isDraw
+  const bgGradient = isDraw || outcomeUnknown
     ? "radial-gradient(ellipse at center, rgba(50,50,50,0.6) 0%, rgba(0,0,0,0.95) 70%)"
     : isVictory
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
@@ -2649,17 +3208,17 @@ function GameOverScreen({
   const [runOver, setRunOver] = useState(false);
 
   useEffect(() => {
-    if (!isDraft || !gameId || resultRecorded) return;
+    if (!isDraft || !gameId || resultRecorded || !seatKnown) return;
     const result: DraftMatchResult = isDraw ? "draw" : isVictory ? "win" : "loss";
     useDraftStore.getState().recordMatchResult(gameId, result).then(() => {
       setResultRecorded(true);
       const meta = loadActiveQuickDraft();
       if (meta?.phase === "complete") setRunOver(true);
     });
-  }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+  }, [isDraft, gameId, isDraw, isVictory, resultRecorded, seatKnown]);
 
   useEffect(() => {
-    if (!isDraftPodMatch || resultRecorded) return;
+    if (!isDraftPodMatch || resultRecorded || !seatKnown) return;
     void useMultiplayerDraftStore
       .getState()
       .reportActiveMatchGameResult(winner)
@@ -2667,7 +3226,7 @@ function GameOverScreen({
       .catch((err) => {
         console.error("[GameOverScreen] failed to report draft pod match result:", err);
       });
-  }, [isDraftPodMatch, resultRecorded, winner]);
+  }, [isDraftPodMatch, resultRecorded, winner, seatKnown]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -2680,11 +3239,36 @@ function GameOverScreen({
     params.delete("roomName");
     if (mode) params.set("mode", mode);
     params.set("difficulty", difficulty);
-    navigate(`/game/${newId}?${params.toString()}`);
+    // `format` names the format but carries none of its edited knobs, and the
+    // saved active-game record is keyed to the game id we are leaving — so a
+    // custom starting life would revert to the format default here. Hand over
+    // the config the engine actually played with, on the same router-state
+    // channel `GameSetupPage` uses to start a game.
+    navigate(`/game/${newId}?${params.toString()}`, {
+      state: { formatConfig: gameState?.format_config },
+    });
   };
 
   const handleBackToDraft = () => {
     navigate("/draft/quick?resume=1");
+  };
+
+  /**
+   * There are TWO "back to pod" affordances in a `draft-match` game — this
+   * game-over button and the in-game menu's "Back to draft"
+   * (`GameMenu.tsx`) — and a third exit through Concede
+   * (`useConcedeHandler`). All three ask the same question, so all three ask
+   * `endCommanderSession`, which owns the answer and the reasoning: a pairwise
+   * pod match must survive being left, a Commander launch must not.
+   *
+   * `finally`, not `then` — a teardown that rejects must not strand the player
+   * on the game-over screen.
+   */
+  const handleBackToPod = () => {
+    void useMultiplayerDraftStore
+      .getState()
+      .endCommanderSession()
+      .finally(() => navigate("/draft-pod"));
   };
 
   return (
@@ -2718,18 +3302,21 @@ function GameOverScreen({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
           >
-            <p className="text-base text-gray-200 sm:text-lg">
-              <Trans
-                i18nKey="gamePage.gameOver.lifeSummary"
-                t={t}
-                values={{ playerLife, opponentLife }}
-                components={{
-                  player: <span className="font-bold text-white" />,
-                  sep: <span className="mx-3 text-gray-500" />,
-                  opponent: <span className="font-bold text-white" />,
-                }}
-              />
-            </p>
+            {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
+            {gameState && seatKnown && playerLife !== null && opponentLife !== null && (
+              <p className="text-base text-gray-200 sm:text-lg">
+                <Trans
+                  i18nKey="gamePage.gameOver.lifeSummary"
+                  t={t}
+                  values={{ playerLife, opponentLife }}
+                  components={{
+                    player: <span className="font-bold text-white" />,
+                    sep: <span className="mx-3 text-gray-500" />,
+                    opponent: <span className="font-bold text-white" />,
+                  }}
+                />
+              </p>
+            )}
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
                 {turnCount > 0 && <span>{t("gamePage.gameOver.turns", { count: turnCount })}</span>}
@@ -2775,7 +3362,7 @@ function GameOverScreen({
             ) : isDraftPodMatch ? (
               <button
                 disabled={!resultRecorded}
-                onClick={() => navigate("/draft-pod")}
+                onClick={handleBackToPod}
                 className={gameButtonClass({
                   tone: isVictory ? "amber" : "slate",
                   size: "lg",
@@ -2829,6 +3416,135 @@ function GameOverScreen({
 
 // ── Ability Choice Modal ──────────────────────────────────────────────────
 
+export function manaRestrictionLabel(
+  t: TFunction<"game">,
+  restriction: InteractionManaRestriction,
+): string {
+  switch (restriction.type) {
+    case "onlyForTypeSpellsOrAbilities":
+      return t(
+        restriction.data.ability === "ofSpellType"
+          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
+          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        { spellType: restriction.data.spellType },
+      );
+    case "onlyForSpell":
+      return t("gamePage.manaRestrictions.onlyForSpell");
+    case "onlyForActivation":
+      return t("gamePage.manaRestrictions.onlyForActivation");
+    case "onlyForSpellType":
+      return t("gamePage.manaRestrictions.onlyForSpellType", restriction.data);
+    case "onlyForCreatureType":
+      return t("gamePage.manaRestrictions.onlyForCreatureType", restriction.data);
+    case "onlyForTaggedActivation":
+      return t("gamePage.manaRestrictions.onlyForTaggedActivation", restriction.data);
+    case "onlyForXCosts":
+      return t("gamePage.manaRestrictions.onlyForXCosts");
+    case "onlyForSpellWithKeywordKind":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKind", restriction.data);
+    case "onlyForSpellWithKeywordKindFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKindFromZone", restriction.data);
+    case "onlyForSpellWithManaValue":
+      return t("gamePage.manaRestrictions.onlyForSpellWithManaValue", restriction.data);
+    case "onlyForSpellMatchingCostCriteria":
+      return t("gamePage.manaRestrictions.onlyForSpellMatchingCostCriteria", {
+        spellType: restriction.data.spellType ?? t("gamePage.manaRestrictions.anySpell"),
+        criteria: restriction.data.criteria.map((criterion) => {
+          switch (criterion.type) {
+            case "manaValue":
+              return t("gamePage.manaRestrictions.manaValueCriterion", criterion.data);
+            case "hasXInCost":
+              return t("gamePage.manaRestrictions.hasXInCostCriterion");
+          }
+        }).join(", "),
+      });
+    case "onlyForSpellWithColorCount":
+      return t("gamePage.manaRestrictions.onlyForSpellWithColorCount", restriction.data);
+    case "onlyForSpellColor":
+      return t("gamePage.manaRestrictions.onlyForSpellColor", restriction.data);
+    case "onlyForSpellFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "cannotCastSpellFromZone":
+      return t("gamePage.manaRestrictions.cannotCastSpellFromZone", restriction.data);
+    case "onlyForFaceDownSpell":
+      return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
+    case "onlyForAny":
+      return t("gamePage.manaRestrictions.onlyForAny", {
+        restrictions: restriction.data.restrictions
+          .map((nested) => manaRestrictionLabel(t, nested))
+          .join(" "),
+      });
+    case "onlyForSpecialAction":
+      return t("gamePage.manaRestrictions.onlyForSpecialAction", restriction.data);
+    case "impossible":
+      return t("gamePage.manaRestrictions.impossible");
+    case "convokePayment":
+      return t("gamePage.manaRestrictions.convokePayment");
+  }
+}
+
+function projectedManaChoiceLabel(t: TFunction<"game">, surfaces: InteractionPresentationSurface[]): {
+  label: string;
+  description?: string;
+} {
+  const units = surfaces.filter(
+    (surface): surface is Extract<InteractionPresentationSurface, { type: "mana" }> =>
+      surface.type === "mana" && surface.data.role === "producedMana",
+  );
+  if (units.length === 0) return { label: t("gamePage.manaRestrictions.tapForMana") };
+
+  const grouped = new Map<string, { symbols: string[]; restrictions: InteractionManaRestriction[]; count: number }>();
+  for (const unit of units) {
+    const key = JSON.stringify([unit.data.symbols, unit.data.restrictions]);
+    const group = grouped.get(key);
+    if (group) {
+      group.count += 1;
+    } else {
+      grouped.set(key, {
+        symbols: unit.data.symbols,
+        restrictions: unit.data.restrictions,
+        count: 1,
+      });
+    }
+  }
+  const label = [...grouped.values()]
+    .map(({ symbols, count }) => {
+      const mana = symbols.map((symbol) => `{${symbol}}`).join("");
+      return count === 1 ? mana : `${mana} × ${count}`;
+    })
+    .join(" + ");
+  const restrictions = [...grouped.values()]
+    .flatMap((group) => group.restrictions.map((restriction) => manaRestrictionLabel(t, restriction)));
+  return {
+    label: t("gamePage.manaRestrictions.tapFor", { mana: label }),
+    description: restrictions.length > 0 ? [...new Set(restrictions)].join(" ") : undefined,
+  };
+}
+
+export function projectedManaChoices(
+  interaction: ViewerInteraction | null,
+  objectId: ObjectId,
+): Map<string, InteractionPresentationSurface[]> {
+  const choices = new Map<string, InteractionPresentationSurface[]>();
+  if (!interaction) return choices;
+  for (const opportunity of interaction.opportunities) {
+    if (opportunity.response.type !== "exactChoices") continue;
+    for (const choice of opportunity.response.data.choices) {
+      const action = choice.surfaces.find(
+        (surface): surface is Extract<InteractionPresentationSurface, { type: "action" }> =>
+          surface.type === "action" && surface.data.code === "tapLandForMana",
+      );
+      const isSource = choice.surfaces.some(
+        (surface) => surface.type === "object"
+          && surface.data.role === "source"
+          && surface.data.reference === String(objectId),
+      );
+      if (action?.data.actionId && isSource) choices.set(action.data.actionId, choice.surfaces);
+    }
+  }
+  return choices;
+}
+
 function AbilityChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -2837,10 +3553,27 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const localized = useLocalizedCardContent(obj?.name ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  // CR 709.5b: engine-published Room halves, already resolved through the
+  // COPIED halves for a permanent that copies a Room.
+  const roomHalfIdentities = useGameStore(
+    (s) => s.gameState?.derived?.room_half_identities,
+  );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  // CR 118.3: the engine-authored "can't pay this cost right now" read-out.
+  // Read from the store slice (not from `uiStore.pendingAbilityChoice`) so the
+  // rows stay live against the current state rather than latched to whatever
+  // was true when the choice was queued.
+  // `?? {}` is load-bearing, not defensive noise: a store SNAPSHOT that predates
+  // this slice (a restored session, or any consumer holding an older store
+  // shape) yields `undefined`, and subscripting it would crash the whole game
+  // page for a display-only feature. Mirrors `legalResultState`'s own
+  // `result.activationBlockReasons ?? {}` default.
+  const activationBlockReasons = useGameStore((s) => s.activationBlockReasons) ?? {};
 
   if (!pending || !obj) return null;
 
@@ -2872,20 +3605,32 @@ function AbilityChoiceModal() {
         : allPlayOrCast
           ? t("gamePage.abilityChoice.subtitlePlay")
           : t("gamePage.abilityChoice.subtitleChoose");
+  const manaChoices = projectedManaChoices(viewerInteraction, pending.objectId);
 
   return (
     <ChoiceModal
-      title={obj.name}
+      title={localized?.name || obj.name}
+      scrollable
+      footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
+      previewObjectId={obj.id}
       previewCardTypes={obj.card_types}
-      options={pending.actions.map((action, i) => {
-        const { label, description } = abilityChoiceLabel(
+      options={[
+        ...pending.actions.map((action, i) => {
+        let { label, description } = abilityChoiceLabel(
           action,
           obj,
           objects,
           webSlingingCosts,
+          roomHalfIdentities,
         );
+        if (action.type === "TapLandForMana") {
+          const surfaces = action.interactionActionId
+            ? manaChoices.get(action.interactionActionId)
+            : undefined;
+          if (surfaces) ({ label, description } = projectedManaChoiceLabel(t, surfaces));
+        }
         // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
         // reading the structured Loyalty cost (never parsing the label string).
         const ability =
@@ -2900,16 +3645,62 @@ function AbilityChoiceModal() {
             // badge already expresses its cost, so keeping the effect in the
             // secondary description would visually detach it from that badge.
             label: description ?? stripLoyaltyCostPrefix(label),
-            labelTone: "secondary",
+            // `as const`: a spread element no longer receives `ChoiceOption[]`
+            // as its contextual type, so this would otherwise widen to `string`.
+            labelTone: "secondary" as const,
             icon: (
               <LoyaltyBadge amount={badge.amount} kind="cost" />
             ),
           };
         }
         return { id: String(i), label, description };
-      })}
+        }),
+        // CR 118.3: display-only rows for abilities the engine is withholding
+        // solely because the cost is unpayable right now. Appended AFTER the
+        // action rows so the positional `id = String(i)` <-> `pending.actions[Number(id)]`
+        // contract above is preserved byte-for-byte.
+        //
+        // No de-duplication against the offered rows is needed: the engine's
+        // read-out and its offered set are produced by the SAME
+        // `activation_verdict` core, so an ability is in exactly one of them.
+        ...(activationBlockReasons[String(pending.objectId)] ?? []).map((entry) => {
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the
+          // host object, the idiom both shipped consumers use. A runtime-granted
+          // index has no printed description, so the row falls back to the
+          // reason alone (matching `PermanentCard`'s badge).
+          const ability = entry.ability_index < obj.abilities.length
+            ? obj.abilities[entry.ability_index]
+            : undefined;
+          const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
+          // Same label/description split the OFFERED rows above get from
+          // `abilityChoiceLabel` (`costLabel.ts`: `abilityLabel` for the label,
+          // `stripCostPrefix` for the description). A blocked `{3}` and an
+          // offered `{3}` therefore render identically in the same list and
+          // differ only by the disabled styling — which is the comparison the
+          // reported defect is about, since the card face shows both. Reusing
+          // the shipped helpers rather than re-deriving the split here keeps the
+          // two row kinds from drifting apart. `RichLabel` inside `ChoiceModal`
+          // renders `{3}` as a real mana pip, so no cost plumbing is needed.
+          const effect = ability?.description
+            ? renderDescription(stripCostPrefix(ability.description), obj.name)
+            : undefined;
+          return {
+            id: `blocked:${entry.ability_index}`,
+            label: ability ? renderDescription(abilityLabel(ability), obj.name) : reason,
+            description: effect ? `${effect} — ${reason}` : ability ? reason : undefined,
+            disabled: true,
+          };
+        }),
+      ]}
       onChoose={(id) => {
-        dispatch(pending.actions[Number(id)]);
+        // CR 118.3: blocked rows are display-only and carry a non-numeric id.
+        // Without this guard `Number("blocked:0")` is `NaN`, so
+        // `pending.actions[NaN]` is `undefined` and a malformed dispatch
+        // reaches the engine.
+        if (id.startsWith("blocked:")) return;
+        const action = pending.actions[Number(id)];
+        if (!action) return;
+        dispatch(action);
         setPending(null);
       }}
       onClose={() => setPending(null)}
@@ -3007,6 +3798,22 @@ function OptionalEffectModal() {
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
+function ResolutionOptionalPaymentModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const canActForWaitingState = useCanActForWaitingState();
+
+  if (waitingFor?.type !== "ResolutionOptionalPaymentChoice") return null;
+
+  return (
+    <ResolutionOptionalPaymentModalContent
+      waitingFor={waitingFor}
+      canActForWaitingState={canActForWaitingState}
+      dispatch={dispatch}
+    />
+  );
+}
+
 // ── Top or Bottom Choice Modal (CR 401.4) ──────────────────────────────
 
 function TopOrBottomModal() {
@@ -3039,50 +3846,6 @@ function CipherEncodeModal() {
   if (waitingFor?.type !== "CipherEncodeChoice") return null;
 
   return <CipherEncodeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
-}
-
-// ── Untap Choice Modal ─────────────────────────────────────────────────
-
-function UntapChoiceModal() {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.waitingFor);
-  const objects = useGameStore((s) => s.gameState?.objects);
-
-  if (waitingFor?.type !== "UntapChoice") return null;
-
-  const objectId = waitingFor.data.candidates[0];
-  if (objectId == null) return null;
-
-  const object = objects?.[objectId];
-  const name = object?.name ?? t("gamePage.untap.permanentFallback");
-
-  return (
-    <ChoiceModal
-      title={t("gamePage.untap.title", { name })}
-      subtitle={t("gamePage.untap.subtitle")}
-      previewCardName={object?.name}
-      previewCardTypes={object?.card_types}
-      options={[
-        {
-          id: "untap",
-          label: t("gamePage.untap.untap"),
-          description: t("gamePage.untap.untapDescription", { name }),
-        },
-        {
-          id: "keep-tapped",
-          label: t("gamePage.untap.keepTapped"),
-          description: t("gamePage.untap.keepTappedDescription", { name }),
-        },
-      ]}
-      onChoose={(id) =>
-        dispatch({
-          type: "ChooseUntap",
-          data: { object_id: objectId, untap: id === "untap" },
-        })
-      }
-    />
-  );
 }
 
 // ── Exert Choice Modal (CR 701.43d: exert as it attacks) ────────────────
@@ -3190,12 +3953,58 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
 }
 
 function formatUnlessCost(
-  cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number },
+  cost:
+    // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost is a real
+    // discriminated variant with required fields (the engine's
+    // `AbilityCost::GetPlayerCounters` always sends both) — rendered
+    // unchanged, not reinterpreted (no lowercasing, no fallback defaults).
+    | {
+        type: "GetPlayerCounters";
+        count: number;
+        counter_kind: "Poison" | "Experience" | "Rad" | "Ticket";
+      }
+    | {
+        type: string;
+        cost?: { type: string; shards?: string[]; generic?: number };
+        amount?: number;
+        count?: number;
+        /** Un-card `SayPhrase` cost: the phrase the payer says. */
+        phrase?: string;
+      },
   t: TFunction<"game">,
 ): string {
+  // `"counter_kind" in cost` narrows via property presence rather than a
+  // `cost.type` literal comparison — the sibling union member's `type: string`
+  // is too wide for a `switch (cost.type)`/`cost.type === "GetPlayerCounters"`
+  // check to exclude it, so `cost.counter_kind` would otherwise fail to
+  // type-check inside that branch. The exhaustive switch below maps each
+  // engine value to its i18n key explicitly rather than interpolating
+  // `cost.counter_kind` directly into the key template — that would make the
+  // display layer depend on the engine's serde string matching the locale
+  // JSON's key names, an implicit coupling the compiler can't check. This way
+  // a future `PlayerCounterKind` variant fails to compile here instead of
+  // silently rendering a missing translation.
+  if ("counter_kind" in cost) {
+    const kindKey: "Poison" | "Experience" | "Rad" | "Ticket" = (() => {
+      switch (cost.counter_kind) {
+        case "Poison":
+          return "Poison";
+        case "Experience":
+          return "Experience";
+        case "Rad":
+          return "Rad";
+        case "Ticket":
+          return "Ticket";
+      }
+    })();
+    const kind = t(`gamePage.cost.playerCounterKind.${kindKey}`);
+    return t("gamePage.cost.playerCounters", { count: cost.count, kind });
+  }
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
+    case "SayPhrase":
+      return t("unActions.sayPhrase.say", { phrase: cost.phrase ?? "" });
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "DiscardCard":
@@ -3227,16 +4036,77 @@ function formatUnlessCost(
   }
 }
 
+/** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
+function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-2 pb-4"
+        initial={{ y: 80, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: 80, opacity: 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-fuchsia-300/30 bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            {t("unActions.sayPhrase.title")}
+          </h3>
+          {effect && (
+            <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
+          )}
+          <div className="flex flex-col items-center gap-3">
+            <motion.button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: true } })
+              }
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+              animate={{ rotate: [0, -2, 2, -2, 0], scale: [1, 1.03, 1] }}
+              transition={{ duration: 1.2, repeat: Infinity }}
+              whileTap={{ scale: 0.92, rotate: 6 }}
+            >
+              <span aria-hidden className="mr-2">{"\u{1F64F}"}</span>
+              {t("unActions.sayPhrase.say", { phrase })}
+            </motion.button>
+            <button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: false } })
+              }
+              className="min-h-11 rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              {t("unActions.sayPhrase.stayQuiet")}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
   const description = waitingFor.data.effect_description ?? t("gamePage.unlessPayment.defaultEffect");
   const effect = description.charAt(0).toUpperCase() + description.slice(1);
+
+  // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
+  // the "payment" is a spoken phrase, so it gets its own button and gag.
+  if (waitingFor.data.cost.type === "SayPhrase") {
+    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
+  }
+
+  const costDisplay = drawCost
+    ? unlessDrawCostLabel(drawCost)
+    : formatUnlessCost(waitingFor.data.cost, t);
 
   return (
     <AnimatePresence>
@@ -3266,14 +4136,16 @@ function UnlessPaymentPanel() {
                 size="sm"
               />
             </button>
-            <button
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: false } })
-              }
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
-            >
-              {t("gamePage.unlessPayment.dontPay")}
-            </button>
+            {unlessPaymentCanBeDeclined(drawCost) && (
+              <button
+                onClick={() =>
+                  dispatch({ type: "PayUnlessCost", data: { pay: false } })
+                }
+                className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              >
+                {t("gamePage.unlessPayment.dontPay")}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>
@@ -3385,7 +4257,10 @@ function MeldChoiceModal() {
     );
   }
 
-  if (waitingFor?.type === "MeldAttackTargetChoice") {
+  if (
+    waitingFor?.type === "MeldAttackTargetChoice" ||
+    waitingFor?.type === "EntryAttackTargetChoice"
+  ) {
     const targets = waitingFor.data.valid_targets;
     return (
       <ChoiceModal

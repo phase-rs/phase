@@ -1,0 +1,53 @@
+# probe-pin's own pin, and the manifest the Tilt `probe-pin-check` resource runs.
+#
+# The target is probe-pin's OWN `pure_logic` test binary — never `isolation_e2e`, which is
+# what runs probe-pin. `ppfixture_census` reads prod.txt at RUNTIME, so a bind-mounted mutant
+# is visible to it and a compiled-in copy would not be.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+timeout_secs = 60
+
+[output]
+file   = "crates/probe-pin/tests/fixtures/dogfood_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+claim = "no mounts, unmodified tree — the instrument itself"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P1_drop_second_site"
+claim = "the census counts BOTH marker lines, not just the first"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/probe-pin/tests/fixtures/prod.txt"
+  find    = "SITE-TWO marker beta\n"
+  replace = ""
+  [[probe.assert_count]]
+  file  = "crates/probe-pin/tests/fixtures/prod.txt"
+  text  = "marker"
+  count = 1
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 1",
+             "text: \"SITE-ONE marker alpha\\n\""]
+
+[[probe]]
+id = "P2_pad_reaches_target"
+claim = "a prepend mutant is visible at the mounted path too"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/probe-pin/tests/fixtures/prod.txt"]
+  text   = "// pad marker\n"
+  repeat = 200
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 202"]

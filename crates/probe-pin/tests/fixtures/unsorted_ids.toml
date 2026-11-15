@@ -1,0 +1,46 @@
+# Row 23's fixture. The probe ids MUST be declared out of alphabetical order: the corpus ids
+# P0..P9 are already sorted, so a sorted fixture would make the "sort the ids" TRIVIALIZE arm
+# a no-op. `pure_logic::idempotent` ASSERTS this precondition rather than stating it.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+# FOUR env keys, not the default's one: row 23's other DROP arm (a `HashMap` for `[target].env`)
+# is invisible on a one-entry map, which has exactly one iteration order. The digest serializes
+# the whole [target], so this is where that arm shows.
+env          = { RUST_MIN_STACK = "16777216", PP_ROW23_A = "1", PP_ROW23_B = "2", PP_ROW23_C = "3" }
+
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/unsorted_ids_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P9_zulu"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/probe-pin/tests/fixtures/prod.txt"
+  find    = "SITE-TWO marker beta\n"
+  replace = ""
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 1"]
+
+[[probe]]
+id = "P1_alpha"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/probe-pin/tests/fixtures/prod.txt"]
+  text   = "// pad marker\n"
+  repeat = 200
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 202"]

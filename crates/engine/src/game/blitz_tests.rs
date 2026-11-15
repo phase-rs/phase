@@ -36,7 +36,8 @@ fn blitz_creature_on_battlefield(state: &mut GameState) -> ObjectId {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
     }
-    install_blitz_riders(state, id, PlayerId(0));
+    let mut events = Vec::new();
+    install_blitz_riders(state, id, PlayerId(0), &mut events);
     id
 }
 

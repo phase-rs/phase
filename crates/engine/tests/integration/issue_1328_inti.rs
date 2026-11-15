@@ -62,6 +62,19 @@ fn inti_attack_trigger_ast_has_reflexive_counter_after_optional_discard() {
     );
 }
 
+fn hand_count(
+    runner: &engine::game::scenario::GameRunner,
+    player: engine::types::PlayerId,
+) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.hand.len())
+        .expect("player exists")
+}
+
 fn p1p1(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> u32 {
     runner
         .state()
@@ -200,5 +213,85 @@ fn inti_reflexive_counter_after_interactive_discard_choice() {
             .expect("attacker should remain on battlefield")
             .has_keyword(&Keyword::Trample),
         "Inti must also grant trample to the chosen attacker"
+    );
+}
+
+/// PR #7414 review (CodeRabbit): the deferred-continuation carrier loses the
+/// parent's `optional`, so the question was whether a DECLINED optional parent
+/// can run its reflexive after a suspension.
+///
+/// It cannot, and this row pins why: declining ends the chain before anything
+/// suspends. `DiscardChoice` — the suspension in this card — is only reached
+/// once the "you may" has been ACCEPTED, so there is no continuation to resume
+/// and the reflexive is never created. Two cards stay in hand, no counter, no
+/// trample.
+///
+/// The accept-side twin is `inti_reflexive_counter_after_interactive_discard_choice`
+/// above; together they cover both answers to the same prompt on the one card
+/// whose suspended path the resolver's own comment names.
+///
+/// Stated plainly: this row does NOT discriminate the PR #7414 gate — measured,
+/// it passes with that gate reverted too, because an explicitly declined
+/// optional never reaches the condition at all. It pins the reachability
+/// argument (decline ⇒ no suspension ⇒ no resumed carrier), which is what makes
+/// the carrier's missing `optional` harmless.
+#[test]
+fn inti_declined_discard_suspends_nothing_and_fires_no_reflexive() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Inti, Seneschal of the Sun", 2, 2, INTI_ATTACK_ABILITY);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    scenario.add_card_to_hand(P0, "Discard A");
+    scenario.add_card_to_hand(P0, "Discard B");
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare attackers");
+    runner.pass_both_players();
+
+    let hand_before = hand_count(&runner, P0);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional discard must be allowed");
+
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::DiscardChoice { .. }),
+        "declining must not suspend into a discard choice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "CR 603.12: nothing was discarded, so the reflexive must not target, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        hand_count(&runner, P0),
+        hand_before,
+        "declining must not discard a card"
+    );
+    assert_eq!(
+        p1p1(&runner, attacker),
+        0,
+        "a declined discard puts no +1/+1 counter on the attacker"
+    );
+    assert!(
+        !runner
+            .state()
+            .objects
+            .get(&attacker)
+            .expect("attacker remains on the battlefield")
+            .has_keyword(&Keyword::Trample),
+        "a declined discard grants no trample"
     );
 }

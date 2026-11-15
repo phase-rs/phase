@@ -1,13 +1,24 @@
+pub use phase_ast::types::player::*;
+
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::events::BendingType;
+use super::ability::is_false;
+use super::card_printing::SharedPrinting;
+use super::display_only::DisplayOnly;
+use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
 
 use crate::game::deck_loading::DeckEntry;
+
+/// `skip_serializing_if` for zero-default turn-window counters: omitting them
+/// at rest keeps the StateUpdate wire shape identical to upstream (fixture +
+/// bandwidth budgets) while still transmitting live nonzero windows.
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
 
 /// Status of a player in the game. Mirrors `PhaseStatus` for permanents — a
 /// phased-out player is treated as though they don't exist for targeting,
@@ -48,28 +59,6 @@ impl PlayerStatus {
     }
 }
 
-/// CR 122.1b: Named player counter types tracked by the engine.
-/// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
-/// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum PlayerCounterKind {
-    Poison,
-    Experience,
-    Rad,
-    Ticket,
-}
-
-impl fmt::Display for PlayerCounterKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Poison => write!(f, "poison"),
-            Self::Experience => write!(f, "experience"),
-            Self::Rad => write!(f, "rad"),
-            Self::Ticket => write!(f, "ticket"),
-        }
-    }
-}
-
 /// CR 702.139: Tracks a declared companion outside the game.
 /// The companion is not a `GameObject` until it moves to hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,18 +67,31 @@ pub struct CompanionInfo {
     pub card: DeckEntry,
     /// CR 702.139c: Whether the companion has been put into hand this game (once per game).
     pub used: bool,
+    /// CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed companion,
+    /// captured at the reveal from the source it was revealed from (display-only).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
-
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct PlayerId(pub u8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Player {
     pub id: PlayerId,
     pub life: i32,
+    /// This seat has NO life total, so `life` is meaningless for it and must not
+    /// be presented as a resource. Damage and life loss it would take are
+    /// redirected into milling its library, and it is exempt from the CR 704.5a
+    /// "0 or less life" state-based action.
+    ///
+    /// True only for the Horde seat in a `GameFormat::Horde` game (a casual
+    /// variant, hence no CR number — see `horde::player_has_no_life_total`). Set
+    /// once at deck load, since the Horde seat is fixed for the whole game.
+    ///
+    /// Engine-derived and serialized so clients can render the seat truthfully
+    /// (showing its library — the Horde's real clock, as it loses by decking out)
+    /// instead of a frozen life total, WITHOUT re-deriving "which seat is the
+    /// Horde" on the frontend.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_no_life_total: bool,
     pub mana_pool: ManaPool,
 
     // Per-player zones
@@ -122,6 +124,12 @@ pub struct Player {
     pub life_gained_this_turn: u32,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    /// CR 107.14 + CR 122.1: Energy counters this player has paid or otherwise
+    /// lost this turn. Bumped on every energy decrement in
+    /// `GameState::apply_resolved_player_edit` and reset at turn start. Read by
+    /// `QuantityRef::EnergyPaidOrLostThisTurn` (Blaster Hulk).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub energy_paid_or_lost_this_turn: u32,
     /// CR 603.4: Amount of life lost during the previous turn, snapshotted at turn start.
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
@@ -130,6 +138,19 @@ pub struct Player {
     pub descended_this_turn: bool,
     #[serde(default)]
     pub cards_drawn_this_turn: u32,
+    /// CR 121.1 + CR 603.4: Number of cards this player drew during the
+    /// previous turn, snapshotted at turn start. Used by "if you drew a card
+    /// last turn" intervening-if conditions (Mine Is the Only Truth).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cards_drawn_last_turn: u32,
+    /// CR 601.2i + CR 603.4: Number of spells this player's opponents have
+    /// cast since this player's last turn ended. Bumped in
+    /// `ledger::apply_resolved_ledger_edit` on every finalized cast, reset
+    /// for the completed player in `turns.rs::start_next_turn`. Used by "if
+    /// no opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub opponent_spells_cast_since_own_last_turn: u32,
     /// CR 121.1 + CR 504.1: Number of cards this player has drawn during the
     /// current step. Reset on every step transition (`turns.rs::advance_phase`)
     /// and at turn start (`start_next_turn`). Used by
@@ -145,7 +166,8 @@ pub struct Player {
     /// CR 702.179d: The inherent speed trigger can increase speed only once each turn.
     #[serde(default)]
     pub speed_trigger_used_this_turn: bool,
-    /// CR 710.2: Number of crimes committed this turn.
+    /// CR 700.13: Whether this player has committed a crime this turn (stored
+    /// as 0 or 1 for `QuantityRef` condition evaluation).
     #[serde(default)]
     pub crimes_committed_this_turn: u32,
     /// CR 704.5b: Set when this player attempted to draw from an empty library.
@@ -163,12 +185,19 @@ pub struct Player {
     pub is_eliminated: bool,
 
     /// Avatar crossover: which bending types this player has performed this turn.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub bending_types_this_turn: HashSet<BendingType>,
 
     /// CR 122.1: Player counters (experience, rad, ticket, etc.).
     /// Poison counters route to the dedicated `poison_counters` field via method accessors.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
     pub player_counters: HashMap<PlayerCounterKind, u32>,
 
     /// Phasing status. Default `Active`. While `PhasedOut`, the player is
@@ -181,6 +210,13 @@ pub struct Player {
     /// Stored as card data (not a GameObject) until moved to hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<CompanionInfo>,
+    /// Digital-only Alchemy (no CR entry): the number this player last noted
+    /// ("note its power", "note that excess damage"). Read by
+    /// `QuantityRef::NotedNumber` ("where X is the noted number",
+    /// Dragonborn Immolator / Mephit's Enthusiasm / Molten Impact). A new
+    /// note overwrites; `None` (nothing noted) reads as 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noted_number: Option<i32>,
 
     /// CR 607.2d / CR 607.2m (by analogy): durable per-player chosen attributes —
     /// the player-axis mirror of `GameObject.chosen_attributes`. Today this holds
@@ -210,6 +246,7 @@ impl Default for Player {
         Player {
             id: PlayerId(0),
             life: 20,
+            has_no_life_total: false,
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),
@@ -224,9 +261,12 @@ impl Default for Player {
             energy: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
+            energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
+            cards_drawn_last_turn: 0,
+            opponent_spells_cast_since_own_last_turn: 0,
             cards_drawn_this_step: 0,
             speed: None,
             speed_trigger_used_this_turn: false,
@@ -238,6 +278,7 @@ impl Default for Player {
             player_counters: HashMap::new(),
             companion: None,
             chosen_attributes: Vec::new(),
+            noted_number: None,
             can_look_at_top_of_library: false,
             commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,
@@ -250,6 +291,46 @@ fn default_contraption_crank_sprocket() -> u8 {
 }
 
 impl Player {
+    /// CR 101.4 + CR 608.2d: The number this player most recently chose for a
+    /// per-player `Effect::Choose { ChoiceType::NumberRange }` ("each player
+    /// secretly chooses a number 0 or greater"). `None` when this player has
+    /// not chosen a number — the aggregate readers of
+    /// [`crate::types::ability::QuantityRef::PlayerChosenNumber`] use that to
+    /// exclude non-choosers from a highest/lowest fold instead of counting them
+    /// as 0.
+    ///
+    /// Reads the secret and the revealed variants interchangeably: revealing a
+    /// number changes who may SEE it, never what it is, so every rules read
+    /// ("the highest number", "each player who chose the lowest number") must
+    /// return the same value on both sides of the reveal.
+    pub fn chosen_number(&self) -> Option<u32> {
+        use crate::types::ability::ChosenAttribute;
+        self.chosen_attributes.iter().find_map(|attr| match attr {
+            ChosenAttribute::Number(n) | ChosenAttribute::RevealedNumber(n) => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// CR 101.4 + CR 608.2c: Publish this player's secretly-chosen number, the
+    /// state transition behind "then all players reveal those numbers
+    /// simultaneously". Returns the revealed value, or `None` when this player
+    /// chose no number (CR 609.3 — revealing nothing is a legal no-op, which is
+    /// what lets a card name every player when only some of them chose).
+    /// Idempotent: an already-revealed number stays revealed.
+    pub fn reveal_chosen_number(&mut self) -> Option<u32> {
+        use crate::types::ability::ChosenAttribute;
+        let value = self.chosen_number()?;
+        self.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
+        self.chosen_attributes
+            .push(ChosenAttribute::RevealedNumber(value));
+        Some(value)
+    }
+
     /// CR 122.1: Get the current count of a player counter.
     /// Poison counters route to the dedicated field (SBA at CR 704.5c).
     pub fn player_counter(&self, kind: &PlayerCounterKind) -> u32 {
@@ -296,5 +377,34 @@ impl Player {
     /// attack/SBA per the player-phasing exclusion choke points).
     pub fn is_phased_out(&self) -> bool {
         self.status.is_phased_out()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The turn-window counters must not perturb the StateUpdate wire shape
+    /// at rest (production fixture + bandwidth budgets), while live nonzero
+    /// windows still transmit and omitted fields read back as zero.
+    #[test]
+    fn turn_window_counters_skip_zero_on_the_wire() {
+        let rest = Player::default();
+        let json = serde_json::to_value(&rest).expect("serialize");
+        let object = json.as_object().expect("object");
+        assert!(!object.contains_key("cards_drawn_last_turn"));
+        assert!(!object.contains_key("opponent_spells_cast_since_own_last_turn"));
+        let back: Player = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.cards_drawn_last_turn, 0);
+        assert_eq!(back.opponent_spells_cast_since_own_last_turn, 0);
+
+        let live = Player {
+            cards_drawn_last_turn: 3,
+            opponent_spells_cast_since_own_last_turn: 1,
+            ..Player::default()
+        };
+        let json = serde_json::to_value(&live).expect("serialize");
+        assert_eq!(json["cards_drawn_last_turn"], 3);
+        assert_eq!(json["opponent_spells_cast_since_own_last_turn"], 1);
     }
 }

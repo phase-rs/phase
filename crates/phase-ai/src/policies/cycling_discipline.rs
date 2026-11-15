@@ -5,6 +5,11 @@
 //! option existed, including cycling away the only land available for its next
 //! planned land drop. This policy removes that automatic edge while keeping all
 //! cycling scores finite so a real tactical payoff can still justify the line.
+//!
+//! The sole-land guard is plan-independent: no plan ⇒ lands still wanted. A
+//! missing `AiSession::plan` entry (imported decks and live paths with no deck
+//! pool) means the AI has no land schedule to consult, not that it has finished
+//! making land drops.
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
@@ -99,12 +104,14 @@ fn source_is_sole_needed_land(ctx: &PolicyContext<'_>) -> bool {
         })
         .count();
 
+    // CR 305.2: a player normally plays only one land per turn, so the sole land
+    // in hand is an irreplaceable land drop. When a plan exists it decides whether
+    // more lands are still wanted; with no plan entry to consult, they are.
     ctx.context
         .session
         .plan
         .get(&ctx.ai_player)
-        .and_then(|plan| next_planned_land_target(plan, controlled_lands))
-        .is_some()
+        .is_none_or(|plan| next_planned_land_target(plan, controlled_lands).is_some())
 }
 
 fn next_planned_land_target(plan: &PlanSnapshot, controlled_lands: usize) -> Option<usize> {
@@ -139,18 +146,38 @@ mod tests {
 
     const AI: PlayerId = PlayerId(0);
 
+    /// Derived, not hand-built: every `AiSession::plan` entry is produced by
+    /// `derive_snapshot`, so a hand-written schedule can pin behaviour at a
+    /// shape production never presents. These two are the only reachable ones.
     fn baseline_plan() -> PlanSnapshot {
-        PlanSnapshot {
-            expected_lands: [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
-            ..PlanSnapshot::default()
-        }
+        crate::plan::derive_snapshot(&crate::features::DeckFeatures::default())
     }
 
     fn ramp_plan() -> PlanSnapshot {
-        PlanSnapshot {
-            expected_lands: [1, 2, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7],
-            ..PlanSnapshot::default()
-        }
+        crate::plan::derive_snapshot(&crate::features::DeckFeatures {
+            mana_ramp: crate::features::ManaRampFeature {
+                dork_count: 8,
+                commitment: 0.96,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    /// The two helpers above replaced hand-written schedules
+    /// (`[1,2,3,4,5,6,6,…]` and `[1,2,4,5,6,7,7,…]`). They were correct — this
+    /// pins that, so the conversion is provably behaviour-preserving rather
+    /// than merely plausible.
+    #[test]
+    fn derived_plans_match_the_schedules_they_replaced() {
+        assert_eq!(
+            baseline_plan().expected_lands,
+            [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        );
+        assert_eq!(
+            ramp_plan().expected_lands,
+            [1, 2, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]
+        );
     }
 
     fn add_cycler(
@@ -184,6 +211,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         }
@@ -362,6 +390,62 @@ mod tests {
         );
     }
 
+    /// The reported line (turn one land drop, then Sol Ring, then cycling the
+    /// last land away) happens with an empty `AiSession::plan` map — imported
+    /// decks and the live paths that build no deck pool. The guard must not
+    /// depend on session construction: no plan entry means lands are still
+    /// wanted, so the strong penalty fires.
+    #[test]
+    fn sole_land_guard_fires_without_a_plan_entry() {
+        let mut state = GameState::new_two_player(42);
+        add_land(&mut state, Zone::Battlefield);
+        let cycler = add_cycler(
+            &mut state,
+            "Cycling Land",
+            CoreType::Land,
+            Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(2))),
+        );
+
+        assert_score(
+            cycling_verdict(&state, cycler, None),
+            "cycling_discipline_needed_land",
+            AiConfig::default()
+                .policy_penalties
+                .cycling_needed_land_penalty,
+        );
+    }
+
+    /// The fallback is reached only when there is no plan to consult: a plan
+    /// whose land target is already met still stands the guard down.
+    #[test]
+    fn sole_land_guard_still_stands_down_when_plan_target_met() {
+        let mut state = GameState::new_two_player(42);
+        for _ in 0..6 {
+            add_land(&mut state, Zone::Battlefield);
+        }
+        let cycler = add_cycler(
+            &mut state,
+            "Cycling Land",
+            CoreType::Land,
+            Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(2))),
+        );
+
+        assert_score(
+            cycling_verdict(&state, cycler, Some(baseline_plan())),
+            "cycling_discipline_patience",
+            AiConfig::default()
+                .policy_penalties
+                .cycling_patience_penalty,
+        );
+        assert_score(
+            cycling_verdict(&state, cycler, None),
+            "cycling_discipline_needed_land",
+            AiConfig::default()
+                .policy_penalties
+                .cycling_needed_land_penalty,
+        );
+    }
+
     #[test]
     fn planned_land_targets_follow_baseline_and_ramp_caps() {
         assert_eq!(next_planned_land_target(&baseline_plan(), 5), Some(6));
@@ -461,6 +545,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: hand_sliver,
                 ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -491,6 +576,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: hand_sliver,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: runtime_candidate.metadata.clone(),
         };

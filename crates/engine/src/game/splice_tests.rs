@@ -7,7 +7,7 @@ use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter,
 };
-use crate::types::game_state::{GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{CastPaymentMode, GameState, PendingCast, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -176,6 +176,67 @@ fn declining_proceeds_past_the_offer() {
         !matches!(result, Ok(WaitingFor::SpliceOffer { .. })),
         "declining must not re-present the splice offer"
     );
+}
+
+#[test]
+fn splice_auto_cast_remains_offered_and_reaches_splice_offer() {
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+
+    let mut state = GameState::new_two_player(42);
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let host = create_object(
+        &mut state,
+        CardId(40),
+        PlayerId(0),
+        "Arcane Offer Host".to_string(),
+        Zone::Hand,
+    );
+    {
+        let object = state.objects.get_mut(&host).unwrap();
+        object.card_types.core_types.push(CoreType::Instant);
+        object.card_types.subtypes.push("Arcane".to_string());
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::zero();
+        let definition = AbilityDefinition::new(AbilityKind::Spell, gain_two_life());
+        object.abilities = std::sync::Arc::new(vec![definition.clone()]);
+        object.base_abilities = std::sync::Arc::new(vec![definition]);
+    }
+    let splicer = splice_card_in_hand(&mut state, 41, "Arcane", "{1}");
+    state.objects.get_mut(&splicer).unwrap().base_keywords =
+        state.objects[&splicer].keywords.clone();
+    let action = GameAction::CastSpell {
+        object_id: host,
+        card_id: state.objects[&host].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    crate::game::engine::apply_as_current(&mut state, action).expect("Arcane host cast must start");
+    let WaitingFor::SpliceOffer {
+        pending_cast,
+        eligible,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("Arcane host must reach its splice offer")
+    };
+    assert_eq!(pending_cast.object_id, host);
+    assert_eq!(pending_cast.payment_mode, CastPaymentMode::Auto);
+    assert_eq!(eligible, &vec![splicer]);
 }
 
 #[test]

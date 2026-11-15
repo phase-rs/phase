@@ -1,0 +1,29 @@
+{{- if not .Values.scaleOut.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "phase-server.fullname" . }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  {{- /* `scaleOut.enabled` is the supported way to run more than one replica;
+       it gives every ordinal its own claim. */}}
+  # Not configurable: sessions, the lobby and the SQLite games.db are
+  # per-process state, and two pods on one node could share the RWO PVC.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "phase-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "phase-server.selectorLabels" . | nindent 8 }}
+      {{- with (include "phase-server.podAnnotations" .) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "phase-server.podSpec" . | nindent 6 }}
+{{- end }}

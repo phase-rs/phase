@@ -129,7 +129,7 @@ fn end_combat_phase_spell_exiles_resolving_object_during_combat() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(7242),
-            ability: Some(ability),
+            ability: Some(Box::new(ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -211,7 +211,7 @@ fn end_combat_phase_spell_goes_to_graveyard_outside_combat() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(7243),
-            ability: Some(ability),
+            ability: Some(Box::new(ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

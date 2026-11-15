@@ -12,13 +12,47 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
-    EmbalmCost, EternalizeCost, FlashbackCost, Keyword, KeywordKind, ProtectionTarget,
+    BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
+    GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
 };
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
+
+use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+
+/// An engine-authored Ninjutsu-family activation announcement for Priority
+/// preflight. The hand/command source and return creature stay private to the
+/// keyword authority until facade conversion.
+pub(in crate::game) struct PriorityNinjutsuAnnouncement {
+    ninjutsu_object_id: ObjectId,
+    creature_to_return: ObjectId,
+}
+
+impl PriorityNinjutsuAnnouncement {
+    fn new(ninjutsu_object_id: ObjectId, creature_to_return: ObjectId) -> Self {
+        Self {
+            ninjutsu_object_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn ninjutsu_object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.ninjutsu_object_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
 /// for simple keywords (ignoring associated data for parameterized variants).
@@ -35,6 +69,18 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
 }
 
+/// CR 702.16: borrowed traversal over an object's protection qualities.
+/// Shared by targeting and attachment legality so both read the same list
+/// without cloning or re-looking-up the host.
+pub(crate) fn protection_qualities(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::keywords::ProtectionTarget> {
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Protection(quality) => Some(quality),
+        _ => None,
+    })
+}
+
 /// Object-scoped keyword-kind query — same battlefield-only caveat as
 /// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
 /// that can be off-battlefield.
@@ -43,19 +89,58 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// Whether generic keyword removal strips this candidate.
+/// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
+/// abilities. Other removal operands keep their existing same-variant scope.
+pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
+    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
+}
+
+/// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
+/// about an object's keywords. The door declares it; the authority never
+/// infers liveness from an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldObject {
+    /// The live object of its id, or a view of it that the door rescoped only
+    /// in who controls it (`matches_target_filter_in_owner_zone`'s CR 109.5
+    /// owner substitution). Off the battlefield it answers through the live
+    /// object's off-zone effective keywords, which include off-zone grants.
+    Live,
+    /// A snapshot of an earlier moment (attack, counter, damage and event
+    /// records; entry observations) or a projection of a hypothetical one
+    /// (CR 614.12 entry projections, face-down and token entry objects). It
+    /// answers from its own keywords: the object `FilterProp::WithKeyword` reads.
+    Detached,
+}
+
+/// CR 603.10 + CR 608.2i + CR 400.7: whether the object a caller holds has a
+/// keyword of `kind`. A caller holding a rescoped view of the live object
+/// (same object, one attribute substituted) passes `HeldObject::Live`.
+pub(crate) fn effective_keyword_kind_of(
+    state: &GameState,
+    obj: &GameObject,
+    held: HeldObject,
+    kind: KeywordKind,
+) -> bool {
+    match held {
+        HeldObject::Detached => has_keyword_kind(obj, kind),
+        HeldObject::Live if obj.zone == Zone::Battlefield => has_keyword_kind(obj, kind),
+        HeldObject::Live => {
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, obj.id, kind)
+        }
+    }
+}
+
 pub fn object_has_effective_keyword_kind(
     state: &GameState,
     object_id: ObjectId,
     kind: KeywordKind,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if obj.zone == Zone::Battlefield {
-        return obj.keywords.iter().any(|keyword| keyword.kind() == kind);
-    }
-
-    crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| effective_keyword_kind_of(state, obj, HeldObject::Live, kind))
 }
 
 /// CR 702.61a: True when any spell on the stack has split second. While true,
@@ -82,17 +167,29 @@ pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Optio
     }
 }
 
+/// CR 702.174a: Effective Gift kind for casting prompts (hand / stack included).
+/// Routes through [`effective_keyword_for_object`] so off-zone grants are visible.
+pub fn effective_gift_kind(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
+    match effective_keyword_for_object(state, object_id, KeywordKind::Gift)? {
+        Keyword::Gift(kind) => Some(kind),
+        _ => None,
+    }
+}
+
 /// CR 702.146a: Effective Disturb alt-cost for an object in the graveyard.
 pub fn effective_disturb_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
     let keyword =
         effective_keyword_for_object(state, object_id, KeywordKind::Disturb).or_else(|| {
             let obj = state.objects.get(&object_id)?;
-            // `snapshot_object_face` clears layout_kind; a still-unswapped DFC
-            // back face retains its layout kind and must not grant Disturb.
+            // #7565: the explicit swap-snapshot marker says "the live face is
+            // the alternative and this slot holds the stashed normal face" —
+            // a still-unswapped DFC back face must not grant Disturb. (The old
+            // discriminator was layout_kind.is_none(), an implicit contract
+            // with snapshot_object_face's erasure.)
             let stored_front_face = obj
                 .back_face
                 .as_ref()
-                .filter(|face| face.layout_kind.is_none())?;
+                .filter(|face| face.is_swap_snapshot)?;
             stored_front_face
                 .keywords
                 .iter()
@@ -329,10 +426,33 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
-/// CR 602.1a + CR 702.141a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
-/// anywhere in an activated ability's cost tree before legality or payment.
-/// The mana payment path treats those placeholders as free, so every activation
-/// fetch must concretize them against the source object (Sliver Gravemother class).
+/// CR 118.6 + CR 202.1b: "An ability can also have an unpayable cost if its cost
+/// is based on the mana cost of an object with no mana cost." True when `cost` is
+/// a placeholder bound to the recipient's MANA COST (`SelfManaCost`,
+/// `SelfManaCostReduced`) and the recipient has none, so the concretized
+/// `ManaCost::NoCost` would otherwise read as "pay nothing" on the activated-
+/// ability payment path. `SelfManaValue` is excluded: a no-mana-cost object's
+/// mana value is 0 (CR 202.3a), which is a payable {0}.
+pub(crate) fn self_mana_cost_is_unpayable(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    match cost {
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. } => matches!(
+            resolve_keyword_mana_cost(state, object_id, cost),
+            ManaCost::NoCost
+        ),
+        // A concrete cost is payable as written; `SelfManaValue` concretizes to
+        // the recipient's mana value, which is 0 for a no-mana-cost object.
+        ManaCost::NoCost | ManaCost::Cost { .. } | ManaCost::SelfManaValue => false,
+    }
+}
+
+/// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
+/// anywhere in an `AbilityCost` tree before affordability or payment. The mana
+/// payment path treats those placeholders as free, so every payable cost must
+/// concretize them against its source object (Kentaro and Sliver Gravemother classes).
 pub(crate) fn resolve_self_mana_in_ability_cost(
     state: &GameState,
     source_id: ObjectId,
@@ -400,21 +520,24 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
     }
 }
 
-/// CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a: Resolve a
-/// `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload carried by a
-/// granted graveyard activated keyword to the recipient card's concrete mana
-/// sub-cost. Encore / Scavenge / Embalm / Eternalize are graveyard *activated*
-/// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
-/// payment path treats self-referential placeholders as free — so they must be
-/// concretized before the activated ability is synthesized. Non-self-referential
-/// keywords (printed Embalm `{3}{W}`, Encore `{5}`, or any other keyword) pass
-/// through unchanged.
+/// CR 702.84a / CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a:
+/// Resolve a `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload
+/// carried by a granted graveyard activated keyword to the recipient card's
+/// concrete mana sub-cost. Unearth / Encore / Scavenge / Embalm / Eternalize are
+/// graveyard *activated* abilities whose mana sub-cost is paid through
+/// `AbilityCost::Mana`, and that payment path treats self-referential
+/// placeholders as free — so they must be concretized before the activated
+/// ability is synthesized. Non-self-referential keywords (printed Embalm
+/// `{3}{W}`, Encore `{5}`, or any other keyword) pass through unchanged.
 pub fn resolve_self_cost_graveyard_activated_keyword(
     state: &GameState,
     object_id: ObjectId,
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
+        Keyword::Unearth(cost) => {
+            Keyword::Unearth(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         Keyword::Encore(cost) => Keyword::Encore(resolve_keyword_mana_cost(state, object_id, cost)),
         Keyword::Scavenge(cost) => {
             Keyword::Scavenge(resolve_keyword_mana_cost(state, object_id, cost))
@@ -425,6 +548,86 @@ pub fn resolve_self_cost_graveyard_activated_keyword(
         Keyword::Eternalize(EternalizeCost::Mana(cost)) => Keyword::Eternalize(
             EternalizeCost::Mana(resolve_keyword_mana_cost(state, object_id, cost)),
         ),
+        other => other.clone(),
+    }
+}
+
+/// CR 118.9 + CR 601.2f + CR 604.1: Resolve a `ManaCost::SelfManaCost` /
+/// `SelfManaValue` / `SelfManaCostReduced` payload carried by a *cast-time*
+/// alternative-cost keyword (CR 702.152a Blitz, CR 702.137a Spectacle, CR
+/// 702.119a Emerge, and the rest of the cast-from-hand alt-cost family) to the
+/// recipient spell's own concrete mana cost, before that keyword's cost is
+/// offered or paid. A `CastWithKeyword` static (CR 604.1) can grant one of
+/// these keywords with a bare `SelfManaCost` placeholder payload ("The blitz
+/// cost is equal to its mana cost" — Henzie, "Toolbox" Torre); left
+/// unresolved, `ManaCost::SelfManaCost` has mana value 0 but is not flagged
+/// "without paying mana", so it silently acts as a real {0} alternative cost.
+/// This mirrors [`resolve_self_cost_graveyard_activated_keyword`] but covers
+/// the disjoint keyword family whose cost is paid on the stack as a spell's
+/// total cost (CR 601.2f) rather than as an `AbilityCost::Mana` sub-cost.
+///
+/// Inclusion criterion: every keyword here is (a) a cast-time alternative or
+/// additional cost that substitutes for or accompanies a spell's mana cost,
+/// and (b) carries a bare `ManaCost` (or a `Mana(ManaCost)` variant of its
+/// cost enum, or a struct payload with a `mana_cost` field such as
+/// `EmergeCost`) that a `CastWithKeyword` grant could plausibly bind to a
+/// self-referential placeholder. Battlefield/activated-only keywords (Equip,
+/// Fortify, Reconfigure, Outlast, Unearth, Ninjutsu, Morph/Megamorph, Kicker)
+/// are not granted through this spell-cast seam and are intentionally
+/// excluded — they resolve their own placeholders (if any) at their own
+/// activation seam. Non-self-referential keywords pass through unchanged.
+pub(crate) fn resolve_self_cost_spell_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Keyword {
+    match keyword {
+        Keyword::Blitz(BlitzCost::Mana(cost)) => Keyword::Blitz(BlitzCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Spectacle(cost) => {
+            Keyword::Spectacle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Dash(cost) => Keyword::Dash(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Prowl(cost) => Keyword::Prowl(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Surge(cost) => Keyword::Surge(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Freerunning(cost) => {
+            Keyword::Freerunning(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Evoke(EvokeCost::Mana(cost)) => Keyword::Evoke(EvokeCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Bestow(BestowCost::Mana(cost)) => Keyword::Bestow(BestowCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Madness(cost) => {
+            Keyword::Madness(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Miracle(cost) => {
+            Keyword::Miracle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Overload(cost) => {
+            Keyword::Overload(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Mutate(cost) => Keyword::Mutate(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Mayhem(cost) => Keyword::Mayhem(resolve_keyword_mana_cost(state, object_id, cost)),
+        // CR 702.119a: Emerge's mana cost is a struct field (`EmergeCost.mana_cost`),
+        // not a bare `ManaCost`, so it needs its own arm; `sacrifice_filter` is
+        // untouched (it has no self-referential mana placeholder).
+        Keyword::Emerge(EmergeCost {
+            mana_cost,
+            sacrifice_filter,
+        }) => Keyword::Emerge(EmergeCost {
+            mana_cost: resolve_keyword_mana_cost(state, object_id, mana_cost),
+            sacrifice_filter: sacrifice_filter.clone(),
+        }),
+        Keyword::WebSlinging(cost) => {
+            Keyword::WebSlinging(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Plot(cost) => Keyword::Plot(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Offspring(cost) => {
+            Keyword::Offspring(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         other => other.clone(),
     }
 }
@@ -464,32 +667,89 @@ pub fn has_indestructible(obj: &GameObject) -> bool {
 
 /// CR 702.16b: Returns true if target's protection prevents interaction from source.
 pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> bool {
-    for kw in &target.keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            if source_matches_protection_target(pt, target, source) {
-                return true;
+    protection_prevents_from_with_source_name(target, Some(source), None)
+}
+
+/// CR 702.16b + CR 702.16e + CR 608.2h: Returns true if target's protection prevents
+/// interaction from source. When checking `ProtectionTarget::ChosenCardName`,
+/// `source_name` (e.g. from an LKI projection) takes precedence over `source.name`,
+/// allowing departed sources (such as dead Clones or ceased tokens) to be matched by
+/// their last-known name.
+pub fn protection_prevents_from_with_source_name(
+    target: &GameObject,
+    source: Option<&GameObject>,
+    source_name: Option<&str>,
+) -> bool {
+    for pt in protection_qualities(target) {
+        match pt {
+            ProtectionTarget::ChosenCardName => {
+                if target.chosen_card_name().is_some_and(|chosen| {
+                    crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                }) {
+                    return true;
+                }
+            }
+            _ => {
+                if let Some(source_obj) = source {
+                    if source_matches_protection_target(pt, target, source_obj) {
+                        return true;
+                    }
+                }
             }
         }
     }
     false
 }
 
-pub fn source_matches_protection_target(
+/// CR 702.16: The bearer a protection quality is evaluated for. Object
+/// protection reads the protected permanent's own chosen attributes; player
+/// protection has no `GameObject`, so the chosen-attribute arms are inert for
+/// it (a player-scoped chosen quality is resolved by the granting static's
+/// scan arm before it reaches this matcher).
+enum ProtectionBearer<'a> {
+    Object(&'a GameObject),
+    Player(PlayerId),
+}
+
+impl ProtectionBearer<'_> {
+    /// CR 702.16k: the protected side of a "protection from [a player]" quality.
+    fn controller(&self) -> PlayerId {
+        match self {
+            Self::Object(object) => object.controller,
+            Self::Player(player) => *player,
+        }
+    }
+
+    fn object(&self) -> Option<&GameObject> {
+        match self {
+            Self::Object(object) => Some(object),
+            Self::Player(_) => None,
+        }
+    }
+}
+
+/// CR 702.16: Single quality-vs-source matcher for both protection bearers
+/// (permanent and player). `source` is the spell/ability/permanent the
+/// protection is checked against.
+fn protection_quality_matches(
     protection: &ProtectionTarget,
-    protected: &GameObject,
+    bearer: ProtectionBearer<'_>,
     source: &GameObject,
 ) -> bool {
     // CR 709.4b: A split source off the stack has the combined colors of both
     // halves; on the stack (the usual protection-source case) it is the chosen
     // half. `effective_colors` no-ops for single-face and on-stack sources.
     let source_colors = source.effective_colors();
+    let protected = bearer.object();
     match protection {
         ProtectionTarget::Color(color) => source_colors.contains(color),
         ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
         ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
         ProtectionTarget::Multicolored => source_colors.len() > 1,
+        // CR 702.16 + CR 105.4: the chosen color is a property of the protected
+        // permanent; a player bearer has no chosen attributes.
         ProtectionTarget::ChosenColor => protected
-            .chosen_color()
+            .and_then(|object| object.chosen_color())
             .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
@@ -497,9 +757,23 @@ pub fn source_matches_protection_target(
         // (e.g. Serra's Emissary); creatures it grants protection to receive a
         // concrete `Protection(CardType(..))` baked in by the layer applier.
         ProtectionTarget::ChosenCardType => protected
-            .chosen_card_type()
+            .and_then(|object| object.chosen_card_type())
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16a + CR 201.2: "Protection from the chosen card
+        // name" — resolved from the protected permanent's own chosen card name.
+        ProtectionTarget::ChosenCardName => protected
+            .and_then(|object| object.chosen_card_name())
+            .is_some_and(|name| {
+                crate::game::filter::source_has_chosen_name(Some(source), None, name)
+            }),
+        // CR 702.16k: Resolve "the chosen player" from the protected
+        // permanent's persisted choice. Protection covers objects that player
+        // controls and objects they own that no other player controls; CR
+        // 109.4 + CR 108.4a make controller-or-owner the shared authority.
+        ProtectionTarget::ChosenPlayer => protected
+            .and_then(|object| object.chosen_player())
+            .is_some_and(|player| source.controller_or_owner() == player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
         ProtectionTarget::Everything => true,
@@ -509,19 +783,180 @@ pub fn source_matches_protection_target(
         // be evaluated from the source alone without game state.
         ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
         // CR 702.16k: "Protection from [a player]" — the source matches if it is
-        // controlled by the scoped player(s) relative to the protected object's
-        // controller, regardless of the source's characteristics. "Each of your
-        // opponents" (CR 702.16i) is captured by `Opponent`: any controller
-        // other than the protected object's controller is an opponent in 1v1 and
-        // free-for-all multiplayer. Player references with no static context
-        // (target/chosen/etc.) fail closed.
+        // controlled by the scoped player(s) relative to the protected side,
+        // regardless of the source's characteristics. "Each of your opponents"
+        // (CR 702.16i) is captured by `Opponent`: any controller other than the
+        // protected side is an opponent in 1v1 and free-for-all multiplayer.
+        // `SpecificPlayer` is the resolution-time binding of a declared-target
+        // anaphor ("protection from that player", CR 608.2c/608.2h). Player
+        // references with no static context fail closed.
         ProtectionTarget::FromPlayer(scope) => match scope {
             crate::types::ability::ControllerRef::Opponent => {
-                source.controller != protected.controller
+                source.controller_or_owner() != bearer.controller()
             }
-            crate::types::ability::ControllerRef::You => source.controller == protected.controller,
+            crate::types::ability::ControllerRef::You => {
+                source.controller_or_owner() == bearer.controller()
+            }
+            crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                source.controller_or_owner() == *id
+            }
             _ => false,
         },
+        // CR 702.16i: a set quality is expanded into concrete Color qualities by
+        // resolve_granted_protection before any match; an unexpanded set (a printed
+        // keyword, never produced by a card today) matches nothing.
+        ProtectionTarget::EachColor(_) => false,
+    }
+}
+
+pub fn source_matches_protection_target(
+    protection: &ProtectionTarget,
+    protected: &GameObject,
+    source: &GameObject,
+) -> bool {
+    protection_quality_matches(protection, ProtectionBearer::Object(protected), source)
+}
+
+/// CR 702.16: Player-scoped protection quality match. The player-level sibling
+/// of [`source_matches_protection_target`]: "you gain protection from [quality]"
+/// (Seht's Tiger, Faith's Shield) and "protection from that player" (Eon
+/// Frolicker) are read against a source without a protected `GameObject`.
+pub fn source_matches_protection_target_for_player(
+    protection: &ProtectionTarget,
+    player_id: PlayerId,
+    source: &GameObject,
+) -> bool {
+    protection_quality_matches(protection, ProtectionBearer::Player(player_id), source)
+}
+
+/// CR 702.11d: Check if a source matches a `HexproofFilter` ("hexproof from
+/// [quality]"). Bearer-independent — it reads only the source — so the object
+/// path (`targeting::hexproof_filter_matches`) and the player path
+/// (`static_abilities::player_has_hexproof_from`) share it.
+pub fn source_matches_hexproof_filter(
+    filter: &crate::types::keywords::HexproofFilter,
+    source: &GameObject,
+) -> bool {
+    // CR 709.4b: A split source has its chosen-half colors on the stack (the
+    // usual hexproof-source case) and its combined colors off the stack; no-op
+    // for single-face and on-stack sources.
+    let source_colors = source.effective_colors();
+    match filter {
+        crate::types::keywords::HexproofFilter::Color(color) => source_colors.contains(color),
+        crate::types::keywords::HexproofFilter::CardType(type_name) => {
+            source_matches_card_type(source, type_name)
+        }
+        crate::types::keywords::HexproofFilter::Quality(quality) => {
+            source_matches_quality(source, quality)
+        }
+        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
+        // resolved to a concrete `Color(_)` at layer application time (see
+        // `layers::apply_continuous_effect`). The intrinsic variant arm
+        // remains for cards whose printed text resolves "the chosen color" on
+        // the same object that chose it — mirrors
+        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
+        crate::types::keywords::HexproofFilter::ChosenColor => source
+            .chosen_color()
+            .is_some_and(|color| source_colors.contains(&color)),
+    }
+}
+
+/// CR 702.16i + CR 903.4 + CR 702.124c: The colors a `ProtectionColorSet` stands
+/// for, relative to `you` (the controller of the granting effect), in WUBRG order.
+pub fn protection_color_set_members(
+    state: &GameState,
+    set: &ProtectionColorSet,
+    you: PlayerId,
+) -> Vec<ManaColor> {
+    match set {
+        // CR 903.4f: with no commander the identity is undefined and the grant
+        // does nothing (no colors).
+        ProtectionColorSet::OutsideCommanderColorIdentity => {
+            crate::game::commander::defined_commander_color_identity(state, you)
+                .map(|identity| {
+                    ManaColor::ALL
+                        .iter()
+                        .copied()
+                        .filter(|color| !identity.contains(color))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        // CR 110.1 + CR 702.26b: only existing, phased-in permanents count.
+        // CR 109.5 + CR 611.3a: "you" and colors are live, not owner/base values.
+        // CR 613.1e + CR 613.1f: layer 5 colors feed the layer 6 grant.
+        ProtectionColorSet::AmongPermanentsYouControl => {
+            crate::game::effects::mana::distinct_colors(
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|obj| is_controlled_color_contributor(obj, you))
+                    .flat_map(|obj| obj.color.iter()),
+            )
+        }
+    }
+}
+
+/// CR 110.1 + CR 702.26b + CR 109.5: whether `obj` is one of the "permanents
+/// you control" whose colors `ProtectionColorSet::AmongPermanentsYouControl`
+/// collects. The member census and the layer pass's entrant-escalation probe
+/// share this predicate.
+pub(crate) fn is_controlled_color_contributor(obj: &GameObject, you: PlayerId) -> bool {
+    obj.is_phased_in_permanent() && obj.controller == you
+}
+
+/// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
+/// continuous effect from `source_id` whose "you" is `you` into the concrete
+/// qualities it grants. The layer applier bakes the result into `obj.keywords`
+/// and records each instance's provenance; attachment legality reads that
+/// recorded result rather than resolving grant definitions again.
+///
+/// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
+/// several separate protection abilities, so the result may hold 0..n entries.
+/// Chosen qualities yield 0 (no choice recorded, or a chosen card type with no
+/// protection noun) or 1 entries; every concrete
+/// quality yields exactly itself.
+pub fn resolve_granted_protection(
+    state: &GameState,
+    quality: &ProtectionTarget,
+    source_id: ObjectId,
+    you: PlayerId,
+) -> Vec<ProtectionTarget> {
+    match quality {
+        // CR 702.16 + CR 105.4: the color chosen on the granting source.
+        ProtectionTarget::ChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_color())
+            .map(ProtectionTarget::Color)
+            .into_iter()
+            .collect(),
+        // CR 702.16 + CR 205.2: the card type chosen on the granting source.
+        ProtectionTarget::ChosenCardType => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_card_type())
+            .and_then(|card_type| card_type.protection_quality_str())
+            .map(|quality| ProtectionTarget::CardType(quality.to_string()))
+            .into_iter()
+            .collect(),
+        ProtectionTarget::EachColor(set) => protection_color_set_members(state, set, you)
+            .into_iter()
+            .map(ProtectionTarget::Color)
+            .collect(),
+        // "The chosen player" and "the chosen card name" stay unresolved: they
+        // are read off the protected permanent's own persisted choice, not the
+        // granting source.
+        ProtectionTarget::Color(_)
+        | ProtectionTarget::CardType(_)
+        | ProtectionTarget::Quality(_)
+        | ProtectionTarget::Multicolored
+        | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
+        | ProtectionTarget::Everything
+        | ProtectionTarget::Filter(_)
+        | ProtectionTarget::FromPlayer(_) => vec![quality.clone()],
     }
 }
 
@@ -773,6 +1208,8 @@ pub fn activate_ninjutsu(
             cost: effective_cost,
         },
         None,
+        // CR 702.49a: this seam pays only the ninjutsu mana cost; no counter leg can join it.
+        &mut None,
         events,
     )
     .map_err(|e| e.to_string())?
@@ -1082,6 +1519,36 @@ pub fn ninjutsu_family_activatable_sources(
     hand_sources.chain(command_sources).collect()
 }
 
+/// Enumerates the Priority holder's finite Ninjutsu-family primers through the
+/// existing source, timing, cost, and return-creature authorities.
+pub(in crate::game) fn priority_ninjutsu_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityNinjutsuAnnouncement> {
+    let player = principal.semantic_holder();
+    ninjutsu_family_activatable_sources(state, player)
+        .into_iter()
+        .filter_map(|(ninjutsu_object_id, _, variant, cost)| {
+            (ninjutsu_timing_ok(&state.phase, &variant)
+                && crate::game::casting::can_pay_ability_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    ninjutsu_object_id,
+                    None,
+                    &cost,
+                ))
+            .then_some((ninjutsu_object_id, variant))
+        })
+        .flat_map(|(ninjutsu_object_id, variant)| {
+            returnable_creatures_for_variant(state, player, &variant)
+                .into_iter()
+                .map(move |creature_to_return| {
+                    PriorityNinjutsuAnnouncement::new(ninjutsu_object_id, creature_to_return)
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,12 +1557,14 @@ mod tests {
     use crate::ai_support::legal_actions;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution, ManaProduction,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::HexproofFilter;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1110,12 +1579,229 @@ mod tests {
         )
     }
 
+    /// CR 702.16k: "protection from that player" is the player bearer's
+    /// `FromPlayer(SpecificPlayer)` arm; the source matches when that player
+    /// controls (or, off the battlefield, owns) it.
+    #[test]
+    fn player_bearer_from_player_specific_player_matches_controller_or_owner() {
+        let mut owned_source = make_obj();
+        owned_source.zone = Zone::Graveyard;
+        owned_source.controller = PlayerId(0);
+        owned_source.owner = PlayerId(1);
+
+        let protection =
+            ProtectionTarget::FromPlayer(ControllerRef::SpecificPlayer { id: PlayerId(1) });
+        assert!(
+            source_matches_protection_target_for_player(&protection, PlayerId(0), &owned_source),
+            "CR 702.16k: a source owned by the named player matches"
+        );
+        let mut other = owned_source.clone();
+        other.owner = PlayerId(0);
+        assert!(
+            !source_matches_protection_target_for_player(&protection, PlayerId(0), &other),
+            "a source neither controlled nor owned by the named player does not match"
+        );
+    }
+
+    /// CR 702.16: the player bearer has no chosen attributes, so the chosen
+    /// quality arms are inert for it; a concrete color still matches.
+    #[test]
+    fn player_bearer_reads_concrete_colors_and_ignores_chosen_attributes() {
+        let mut red_source = make_obj();
+        red_source.color = vec![ManaColor::Red];
+
+        assert!(source_matches_protection_target_for_player(
+            &ProtectionTarget::Color(ManaColor::Red),
+            PlayerId(0),
+            &red_source,
+        ));
+        assert!(!source_matches_protection_target_for_player(
+            &ProtectionTarget::Color(ManaColor::Blue),
+            PlayerId(0),
+            &red_source,
+        ));
+        assert!(!source_matches_protection_target_for_player(
+            &ProtectionTarget::ChosenColor,
+            PlayerId(0),
+            &red_source,
+        ));
+    }
+
+    /// CR 702.11d: the hexproof-from filter matcher is bearer-independent, so
+    /// the player path reuses it.
+    #[test]
+    fn hexproof_filter_matches_concrete_quality_for_any_bearer() {
+        let mut blue_source = make_obj();
+        blue_source.color = vec![ManaColor::Blue];
+
+        assert!(source_matches_hexproof_filter(
+            &HexproofFilter::Color(ManaColor::Blue),
+            &blue_source,
+        ));
+        assert!(!source_matches_hexproof_filter(
+            &HexproofFilter::Color(ManaColor::Black),
+            &blue_source,
+        ));
+    }
+
+    #[test]
+    fn lose_hexproof_removal_matches_every_quality() {
+        use crate::types::keywords::HexproofFilter;
+
+        // CR 702.11d/e: losing hexproof removes every qualified hexproof ability.
+        for candidate in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+            Keyword::HexproofFrom(HexproofFilter::CardType("Artifact".into())),
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".into())),
+            Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+        ] {
+            assert!(
+                keyword_matches_removal(&candidate, &Keyword::Hexproof),
+                "lose hexproof must remove {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_unrelated_and_reverse_boundary() {
+        use crate::types::keywords::{HexproofFilter, WardCost};
+
+        let qualified = Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black));
+        assert!(keyword_matches_removal(
+            &Keyword::Hexproof,
+            &Keyword::Hexproof
+        ));
+        assert!(keyword_matches_removal(&qualified, &qualified));
+        assert!(!keyword_matches_removal(&Keyword::Hexproof, &qualified));
+        for candidate in [
+            Keyword::Shroud,
+            Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            Keyword::Indestructible,
+            Keyword::Flying,
+        ] {
+            assert!(!keyword_matches_removal(&candidate, &Keyword::Hexproof));
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_existing_variant_scope() {
+        use crate::types::keywords::WardCost;
+
+        assert!(keyword_matches_removal(
+            &Keyword::Ward(WardCost::PayLife(3)),
+            &Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+        ));
+        assert_eq!(Keyword::Banding.kind(), KeywordKind::Unknown);
+        assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
+        assert!(keyword_matches_removal(
+            &Keyword::Toxic(2),
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Banding,
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Toxic(1),
+            &Keyword::Banding
+        ));
+    }
+
     #[test]
     fn has_keyword_simple_match() {
         let mut obj = make_obj();
         obj.keywords.push(Keyword::Flying);
         assert!(has_keyword(&obj, &Keyword::Flying));
         assert!(!has_keyword(&obj, &Keyword::Haste));
+    }
+
+    /// CR 603.10 + CR 608.2i + CR 400.7: the declared `HeldObject` decides the
+    /// kind answer. A graveyard card granted flashback by an identity-targeted
+    /// command-zone grant (not materialized into its `keywords`) answers true
+    /// as the live object, and as a rescoped clone of it declared `Live`; the
+    /// same clone declared `Detached` answers from its own keywords. A
+    /// battlefield object answers from its own keywords either way.
+    #[test]
+    fn effective_keyword_kind_of_live_and_detached() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let emblem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: card })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    }]),
+            );
+        }
+        let live = &state.objects[&card];
+        assert!(
+            !has_keyword_kind(live, KeywordKind::Flashback),
+            "guard: the grant is not materialized into the card's keywords"
+        );
+        assert!(object_has_effective_keyword_kind(
+            &state,
+            card,
+            KeywordKind::Flashback
+        ));
+        assert!(effective_keyword_kind_of(
+            &state,
+            live,
+            HeldObject::Live,
+            KeywordKind::Flashback
+        ));
+        let mut rescoped = live.clone();
+        rescoped.controller = PlayerId(1);
+        assert!(
+            effective_keyword_kind_of(&state, &rescoped, HeldObject::Live, KeywordKind::Flashback),
+            "a rescoped view of the live object keeps its off-zone grant"
+        );
+        assert!(
+            !effective_keyword_kind_of(
+                &state,
+                &rescoped,
+                HeldObject::Detached,
+                KeywordKind::Flashback
+            ),
+            "a detached object answers from its own keywords"
+        );
+
+        let mut flier = make_obj();
+        flier.keywords.push(Keyword::Flying);
+        for held in [HeldObject::Live, HeldObject::Detached] {
+            assert!(effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Flying
+            ));
+            assert!(!effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Haste
+            ));
+        }
     }
 
     #[test]
@@ -1526,6 +2212,160 @@ mod tests {
             &no_choice,
             &creature_source,
         ));
+    }
+
+    /// CR 702.16a + CR 201.2: `source_matches_protection_target`'s
+    /// `ChosenCardName` arm resolves against the *protected* object's own
+    /// chosen card name. A source with matching name matches; a source with a
+    /// different name does not. An object with no chosen card name is matched by
+    /// nothing through this arm.
+    #[test]
+    fn source_matches_protection_target_chosen_card_name() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut protected = make_obj();
+        protected
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+
+        let mut bear_source = make_obj();
+        bear_source.name = "Grizzly Bears".to_string();
+        let mut giant_source = make_obj();
+        giant_source.name = "Hill Giant".to_string();
+
+        assert!(
+            source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &bear_source,
+            ),
+            "named source must match protection from chosen card name Grizzly Bears"
+        );
+        assert!(
+            !source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &giant_source,
+            ),
+            "different named source must NOT match protection from chosen card name Grizzly Bears"
+        );
+
+        // No chosen card name -> the arm protects from nothing.
+        let no_choice = make_obj();
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::ChosenCardName,
+            &no_choice,
+            &bear_source,
+        ));
+    }
+
+    /// CR 702.16i: an unexpanded color-set quality matches nothing through
+    /// `source_matches_protection_target`; only `resolve_granted_protection`
+    /// turns it into concrete `Color` qualities.
+    #[test]
+    fn unexpanded_each_color_quality_matches_nothing() {
+        let protected = make_obj();
+        let mut source = make_obj();
+        source.color = vec![ManaColor::Red];
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            &protected,
+            &source,
+        ));
+    }
+
+    /// CR 702.16i + CR 903.4 + CR 903.4f: the color-set members are the colors
+    /// outside the controller's commander identity (WUBRG order), empty when the
+    /// player has no commander, and every color for a colorless commander.
+    #[test]
+    fn protection_color_set_members_outside_commander_identity() {
+        use crate::types::format::FormatConfig;
+
+        let set = ProtectionColorSet::OutsideCommanderColorIdentity;
+        let mut state = GameState::new(FormatConfig::commander(), 2, 7);
+        // CR 903.4f: no commander -> undefined -> no colors.
+        assert!(protection_color_set_members(&state, &set, PlayerId(0)).is_empty());
+
+        let cmd = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd).unwrap();
+            obj.is_commander = true;
+            obj.base_color = vec![ManaColor::Blue, ManaColor::Red];
+        }
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            vec![ManaColor::White, ManaColor::Black, ManaColor::Green]
+        );
+
+        // Colorless commander -> protection from each of the five colors.
+        state.objects.get_mut(&cmd).unwrap().base_color = vec![];
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            ManaColor::ALL.to_vec()
+        );
+        // The other player has no commander.
+        assert!(protection_color_set_members(&state, &set, PlayerId(1)).is_empty());
+    }
+
+    /// CR 702.16 + CR 702.16i: `resolve_granted_protection` expands set and chosen
+    /// qualities and passes concrete qualities through unchanged.
+    #[test]
+    fn resolve_granted_protection_expands_and_passes_through() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(3);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        let you = PlayerId(0);
+
+        // Concrete qualities resolve to exactly themselves.
+        for quality in [
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::CardType("artifacts".to_string()),
+            ProtectionTarget::Multicolored,
+            ProtectionTarget::Everything,
+        ] {
+            assert_eq!(
+                resolve_granted_protection(&state, &quality, source, you),
+                vec![quality.clone()]
+            );
+        }
+
+        // Chosen color with no recorded choice resolves to nothing, then to the choice.
+        assert!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you)
+                .is_empty()
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::White));
+        assert_eq!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you),
+            vec![ProtectionTarget::Color(ManaColor::White)]
+        );
+
+        // A color set with no commander resolves to nothing (CR 903.4f).
+        assert!(resolve_granted_protection(
+            &state,
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            source,
+            you,
+        )
+        .is_empty());
     }
 
     /// CR 702.16a + CR 205.3m + #881: "protection from [creature subtype]" — the
@@ -1980,6 +2820,25 @@ mod tests {
         (state, attacker_id, ninja_id)
     }
 
+    #[test]
+    fn priority_offers_ninjutsu_to_an_active_teams_non_active_member() {
+        let (mut state, _, _) = setup_ninjutsu_scenario();
+        state.format_config = crate::types::format::FormatConfig::two_headed_giant();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("an active-team priority holder has a principal");
+
+        assert_eq!(
+            priority_ninjutsu_announcements(&state, &principal).len(),
+            1,
+            "a teammate of the active player may take ninjutsu during the team's priority"
+        );
+    }
+
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose
     /// battlefield entry parks on a replacement-ordering prompt (two opposite-
     /// direction enter tap-state `Moved` effects — one enters tapped, one enters
@@ -2122,7 +2981,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::BecomeCopy {
-                            recipient: TargetFilter::SelfRef,
+                            recipient: crate::types::ability::CopyRecipient::Source,
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             duration: None,
                             mana_value_limit: None,
@@ -2245,6 +3104,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -2600,6 +3461,58 @@ mod tests {
             effective_keyword_mana_cost(&state, id, KeywordKind::Flashback),
             None,
             "Flashback (compound-cost kind) must be refused by the single authority",
+        );
+    }
+
+    /// CR 702.174a + CR 702.174b: the promised [something] is the discriminant that
+    /// selects the gift effect ("The specific effect is defined by the [something]
+    /// listed"), so `effective_gift_kind` must report which kind was promised — not
+    /// merely that Gift is present. The value reaches the casting prompt as
+    /// `WaitingFor::OptionalCostChoice`'s `gift_kind`, which is what the client
+    /// renders; a blanket `None` would silently strip the promise from the prompt
+    /// with no other observable effect.
+    #[test]
+    fn effective_gift_kind_reports_each_promised_kind() {
+        for kind in [
+            GiftKind::Card,
+            GiftKind::Treasure,
+            GiftKind::Food,
+            GiftKind::TappedFish,
+            GiftKind::ExtraTurn,
+        ] {
+            let mut state = GameState::new_two_player(1);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Gifted Spell".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.keywords.push(Keyword::Gift(kind.clone()));
+                obj.base_keywords = obj.keywords.clone();
+            }
+            assert_eq!(
+                effective_gift_kind(&state, id),
+                Some(kind.clone()),
+                "{kind:?} must survive to the casting prompt",
+            );
+        }
+
+        // No Gift keyword: the prompt must not claim a promise that wasn't made.
+        let mut state = GameState::new_two_player(1);
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Spell".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(
+            effective_gift_kind(&state, plain),
+            None,
+            "an object without Gift must report no promised kind",
         );
     }
 

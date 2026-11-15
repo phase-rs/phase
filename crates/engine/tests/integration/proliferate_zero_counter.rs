@@ -6,10 +6,12 @@
 use engine::game::effects::counters::resolve_remove;
 use engine::game::effects::proliferate::{apply_proliferate, resolve};
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{
+    Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, PendingEffectResolved, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -24,6 +26,7 @@ fn remove_all_plus_one(obj: ObjectId, state: &mut GameState) {
             counter_type: Some(CounterType::Plus1Plus1),
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         },
         vec![TargetRef::Object(obj)],
         ObjectId(998),
@@ -101,6 +104,7 @@ fn issue_1995_stale_zero_map_entry_does_not_reopen_proliferate() {
         &mut state,
         PlayerId(0),
         &[TargetRef::Object(creature)],
+        PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(999)),
         &mut apply_events,
     );
 
@@ -140,6 +144,7 @@ fn issue_1995_mixed_zero_and_positive_only_proliferates_present_kinds() {
         &mut state,
         PlayerId(0),
         &[TargetRef::Object(artifact)],
+        PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(999)),
         &mut events,
     );
 

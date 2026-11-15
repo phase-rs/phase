@@ -1,10 +1,11 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
+use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, StaticCondition, TargetFilter,
-    TypeFilter,
+    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, PlayerScope, QuantityExpr,
+    QuantityRef, SourceExclusion, StaticCondition, TargetFilter, TypeFilter,
 };
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{HexproofFilter, Keyword};
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -111,6 +112,191 @@ fn parse(
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     parse_oracle_text(oracle_text, card_name, &keyword_names, &types, &subtypes)
+}
+
+/// CR 118.12 + CR 603.12: the measured resolution-time disjunctive optional-
+/// payment family is exact. Every member must lower a root PayCost(OneOf), and
+/// none may retain the dedicated strict-gap marker.
+#[test]
+fn msh_resolution_optional_payment_family_has_no_strict_gaps() {
+    use engine::types::ability::{
+        AbilityCondition, AbilityCost, AbilityDefinition, TargetFilter, TypeFilter,
+    };
+    use engine::types::mana::{ManaCost, ManaCostShard};
+
+    fn has_strict_gap(ability: &AbilityDefinition) -> bool {
+        matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "reflexive optional payment"
+        ) || ability.sub_ability.as_deref().is_some_and(has_strict_gap)
+            || ability.else_ability.as_deref().is_some_and(has_strict_gap)
+    }
+
+    fn has_type(filter: &TargetFilter, expected: &TypeFilter) -> bool {
+        matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(expected))
+    }
+
+    fn sacrifice_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(cost, AbilityCost::Sacrifice(cost) if has_type(&cost.target, expected))
+    }
+
+    fn discard_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(
+            cost,
+            AbilityCost::Discard { filter: Some(filter), .. } if has_type(filter, expected)
+        )
+    }
+
+    const CARDS: [(&str, &str); 12] = [
+        ("Contract Hero", "When this creature enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\nWhenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, this creature gets +2/+0 until end of turn."),
+        ("K'un-Lun Warrior", "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card."),
+        ("Anthropede", "Reach\nWhen this creature enters, you may discard a card or pay {2}. When you do, destroy target Room."),
+        ("Treetop Sentries", "Reach\nWhen this creature enters, you may forage. If you do, draw a card. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Nimble Hobbit", "Whenever this creature attacks, you may sacrifice a Food or pay {2}{W}. When you do, tap target creature an opponent controls."),
+        ("Euru, Acorn Scrounger", "When Euru, Acorn Scrounger enters, you may forage. When you do, conjure a card named Chitterspitter onto the battlefield.\nWhenever one or more Squirrels you control deal combat damage to a player, you may sacrifice a token. If you do, put an acorn counter on each permanent you control named Chitterspitter."),
+        ("Reckless Detective", "Whenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, draw a card and this creature gets +2/+0 until end of turn."),
+        ("Isu the Abominable", "You may look at the top card of your library any time.\nYou may play snow lands and cast snow spells from the top of your library.\nWhenever another snow permanent you control enters, you may pay {G}, {W}, or {U}. If you do, put a +1/+1 counter on Isu."),
+        ("Crypt Lurker", "When this creature enters, you may sacrifice a creature or discard a creature card. If you do, draw a card."),
+        ("Bushy Bodyguard", "Offspring {2} (You may pay an additional {2} as you cast this spell. If you do, when this creature enters, create a 1/1 token copy of it.)\nWhen this creature enters, you may forage. If you do, put two +1/+1 counters on it. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Bullseye, Death Dealer", "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.\n{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target."),
+        ("Curious Forager", "When this creature enters, you may forage. When you do, return target permanent card from your graveyard to your hand. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+    ];
+    for (name, oracle) in CARDS {
+        let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .chain(
+                    parsed
+                        .triggers
+                        .iter()
+                        .filter_map(|trigger| trigger.execute.as_deref())
+                )
+                .all(|ability| !has_strict_gap(ability)),
+            "{name} retained the dedicated strict gap: {parsed:#?}"
+        );
+        let root = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| {
+                trigger.execute.as_deref().filter(|ability| {
+                    matches!(
+                        ability.effect.as_ref(),
+                        Effect::PayCost {
+                            cost: AbilityCost::OneOf { .. },
+                            ..
+                        }
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("{name} did not lower PayCost(OneOf): {parsed:#?}"));
+        let Effect::PayCost {
+            cost: AbilityCost::OneOf { costs },
+            ..
+        } = root.effect.as_ref()
+        else {
+            unreachable!();
+        };
+        assert!(root.optional, "{name} must preserve its printed may");
+        let when_you_do = matches!(
+            root.sub_ability
+                .as_deref()
+                .and_then(|tail| tail.condition.as_ref()),
+            Some(AbilityCondition::WhenYouDo)
+        );
+        match name {
+            "Contract Hero" | "K'un-Lun Warrior" | "Reckless Detective" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact), "{name}");
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert!(!when_you_do);
+            }
+            "Anthropede" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert_eq!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2)
+                    }
+                );
+                assert!(when_you_do);
+            }
+            "Treetop Sentries"
+            | "Bushy Bodyguard"
+            | "Curious Forager"
+            | "Euru, Acorn Scrounger" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Exile {
+                        count: 3,
+                        zone: Some(Zone::Graveyard),
+                        ..
+                    }
+                ));
+                assert!(sacrifice_leaf(
+                    &costs[1],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert_eq!(
+                    when_you_do,
+                    matches!(name, "Curious Forager" | "Euru, Acorn Scrounger")
+                );
+            }
+            "Nimble Hobbit" => {
+                assert!(sacrifice_leaf(
+                    &costs[0],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 2, ref shards }
+                    } if shards == &[ManaCostShard::White]
+                ));
+                assert!(when_you_do);
+            }
+            "Isu the Abominable" => {
+                let shards: Vec<_> = costs
+                    .iter()
+                    .map(|cost| match cost {
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 0, shards },
+                        } if shards.len() == 1 => shards[0],
+                        other => panic!("Isu branch must be one colored pip: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    shards,
+                    vec![
+                        ManaCostShard::Green,
+                        ManaCostShard::White,
+                        ManaCostShard::Blue
+                    ]
+                );
+                assert!(!when_you_do);
+            }
+            "Crypt Lurker" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Creature));
+                assert!(discard_leaf(&costs[1], &TypeFilter::Creature));
+                assert!(!when_you_do);
+            }
+            "Bullseye, Death Dealer" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact));
+                assert!(discard_leaf(
+                    &costs[1],
+                    &TypeFilter::Non(Box::new(TypeFilter::Land))
+                ));
+                assert!(when_you_do);
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -521,6 +707,7 @@ fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
         Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::SourceChosenPlayer,
             permanent_type: None,
+            source_scope: SourceExclusion::Include,
         })
     );
 }
@@ -800,7 +987,7 @@ fn snapshot_harold_and_bob_first_numens() {
 fn inverted_as_long_as_flash_grant_attaches_condition() {
     // CR 601.3b + CR 702.8a + CR 611.3a: The inverted conditional flash-grant
     // "As long as <cond>, you may cast [type] spells as though they had flash"
-    // must lower to a `CastWithKeyword { Flash }` static carrying the condition
+    // must lower to a `CastWithFlash` static carrying the condition
     // — not silently collapse into a bare conditionless Continuous fallback.
     let result = parse(
         "As long as it's your turn, you may cast creature spells as though they had flash.",
@@ -813,21 +1000,14 @@ fn inverted_as_long_as_flash_grant_attaches_condition() {
     let static_def = result
         .statics
         .iter()
-        .find(|static_def| {
-            matches!(
-                static_def.mode,
-                StaticMode::CastWithKeyword {
-                    keyword: Keyword::Flash
-                }
-            )
-        })
-        .expect("expected inverted flash grant to lower to CastWithKeyword { Flash }");
+        .find(|static_def| matches!(static_def.mode, StaticMode::CastWithFlash))
+        .expect("expected inverted flash grant to lower to CastWithFlash");
 
     // "it's your turn" is recognized by parse_static_condition → DuringYourTurn,
     // not just a generic Unrecognized fallback.
     assert!(
         matches!(static_def.condition, Some(StaticCondition::DuringYourTurn)),
-        "expected DuringYourTurn condition on the CastWithKeyword static, \
+        "expected DuringYourTurn condition on the CastWithFlash static, \
          got condition: {:#?}",
         static_def.condition
     );
@@ -933,5 +1113,314 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         "Brood Birthing's static must remain the functional GrantAbility grant, \
          got: {:#?}",
         result.statics[0]
+    );
+}
+
+/// Issue #6504: Jeweled Amulet's "note the type of mana spent to pay this
+/// activation cost" / "add one mana of this artifact's last noted type" pair
+/// must parse to the typed `Effect::NoteManaSpent` / `ManaProduction::NotedType`
+/// building block, not fall through to `Effect::Unimplemented`.
+#[test]
+fn jeweled_amulet_notes_and_reads_back_mana_type() {
+    use engine::types::ability::{ManaProduction, QuantityExpr};
+
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note the type of mana \
+         spent to pay this activation cost. Activate only if there are no charge \
+         counters on this artifact.\n{T}, Remove a charge counter from this \
+         artifact: Add one mana of this artifact's last noted type.",
+        "Jeweled Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        result.abilities.len(),
+        2,
+        "Jeweled Amulet has two top-level activated abilities: {:#?}",
+        result.abilities
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent, got {:#?}",
+        note_sub.effect
+    );
+
+    let add_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Mana { .. }))
+        .unwrap_or_else(|| panic!("no Mana ability parsed: {:#?}", result.abilities));
+    match &*add_ability.effect {
+        Effect::Mana { produced, .. } => match produced {
+            ManaProduction::NotedType { count } => {
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Fixed { value: 1 },
+                    "expected 'one mana' to parse as count=1"
+                );
+            }
+            other => panic!("expected ManaProduction::NotedType, got {other:#?}"),
+        },
+        other => unreachable!("filtered to Effect::Mana above, got {other:#?}"),
+    }
+}
+
+/// Issue #6504: the note clause is a composed grammar (article + cost-referent
+/// axes independently optional/variable), not a Jeweled-Amulet-shaped sentence
+/// tag — a hypothetical sibling printing the articleless "note type" and the
+/// shorter "this cost" (rather than "this activation cost") must reach
+/// `Effect::NoteManaSpent` with no new parser arm. `Amber Amulet` here is not
+/// a real printed card; it exercises the grammar's structural variants that
+/// `parse_note_mana_spent_clause`'s unit tests cover in isolation, end to end
+/// through the full Oracle-text pipeline.
+#[test]
+fn note_mana_spent_grammar_accepts_a_hypothetical_sibling_wording() {
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note type of mana \
+         spent to pay this cost. Activate only if there are no charge \
+         counters on this artifact.",
+        "Amber Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent for the articleless/shorter-cost \
+         sibling wording, got {:#?}",
+        note_sub.effect
+    );
+}
+
+/// Issue #6504 (coverage-honesty guard): Ice Cauldron prints Jeweled Amulet's
+/// sibling "note the type AND AMOUNT of mana spent..." / "add ... last noted
+/// type and amount of mana" pair, which `parse_note_mana_spent_clause` and
+/// `ManaProduction::NotedType` deliberately do not model (see the doc comment
+/// on `parse_note_mana_spent_clause`). A production-parser assertion — not
+/// just the isolated `parse_note_mana_spent_clause` unit tests — is required
+/// here: it proves the parser actually REACHES both noted-mana clauses
+/// (rather than failing earlier in the sentence for an unrelated reason) and
+/// that each still falls through to `Effect::Unimplemented`, so an upstream
+/// routing/fallback change can't silently start reporting Ice Cauldron as
+/// supported or partially supported. Paired with
+/// `jeweled_amulet_notes_and_reads_back_mana_type`'s positive full-Oracle
+/// assertion that the same grammar area reaches `Effect::NoteManaSpent` for
+/// Jeweled Amulet's singular-type wording.
+#[test]
+fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
+    let result = parse(
+        "{X}, {T}: You may exile a nonland card from your hand. You may cast that \
+         card for as long as it remains exiled. Put a charge counter on this \
+         artifact and note the type and amount of mana spent to pay this \
+         activation cost. Activate only if there are no charge counters on this \
+         artifact.\n{T}, Remove a charge counter from this artifact: Add this \
+         artifact's last noted type and amount of mana. Spend this mana only to \
+         cast the last card exiled with this artifact.",
+        "Ice Cauldron",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    // First ability: exile -> cast -> put counter -> note (type and amount).
+    // The note clause is reached only by walking through three chained
+    // sub-abilities, proving the parser gets all the way to the noted-mana
+    // subject rather than failing earlier for an unrelated reason.
+    let exile_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| panic!("no exile ability parsed: {:#?}", result.abilities));
+    let cast_sub = exile_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("exile has no cast sub-ability: {exile_ability:#?}"));
+    let counter_sub = cast_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("cast has no counter sub-ability: {cast_sub:#?}"));
+    let note_sub = counter_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("counter has no note sub-ability: {counter_sub:#?}"));
+    // The gap is identified by the clause it RECORDS plus the parser's verdict on that
+    // clause, not by the clause's first word. `note` is a known clause head, so the
+    // refusal is `VerbArguments`. This venue is a separate crate, so it asserts the
+    // wire-name half (`ClauseGapKind`, `pub`) and the fragment half through the `pub`
+    // accessor; the phrase half of the verdict is covered in-crate by the
+    // `gap_diagnosis` table, which tests the same function over its input range.
+    const NOTE_CLAUSE: &str = "note the type and amount of mana spent to pay this activation cost";
+    let Effect::Unimplemented { name, .. } = &*note_sub.effect else {
+        panic!(
+            "Ice Cauldron's 'type AND amount' noted-mana subject must stay \
+             Unimplemented, not be swallowed by parse_note_mana_spent_clause's \
+             singular-type grammar; got {:#?}",
+            note_sub.effect
+        );
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+    assert_eq!(
+        note_sub.effect.unimplemented_description(),
+        Some(NOTE_CLAUSE),
+        "the recorded fragment names the exact clause that gapped"
+    );
+
+    // Second ability: the mana-producing "add ... last noted type and amount
+    // of mana" must not be matched by `ManaProduction::NotedType`'s
+    // singular-type pattern. Same identification: the recorded clause, not its
+    // first word.
+    // The recorded fragment is the clause as printed (self-reference normalized to
+    // `~`), measured from the parser rather than assumed.
+    const ADD_CLAUSE: &str = "Add ~'s last noted type and amount of mana";
+    let mana_ability = result
+        .abilities
+        .iter()
+        .find(|a| a.effect.unimplemented_description() == Some(ADD_CLAUSE))
+        .unwrap_or_else(|| {
+            panic!(
+                "Ice Cauldron's 'last noted type and amount of mana' must stay \
+                 Unimplemented, not be matched by ManaProduction::NotedType's \
+                 singular-type pattern; got {:#?}",
+                result.abilities
+            )
+        });
+    // `unimplemented_description` is `None` for every other effect shape, so matching
+    // `ADD_CLAUSE` above already established both the variant and the recorded
+    // fragment — the selector IS the "names the exact clause that gapped" assertion,
+    // and it is order-independent where a "first Unimplemented" scan was not.
+    let Effect::Unimplemented { name, .. } = &*mana_ability.effect else {
+        unreachable!("only Effect::Unimplemented has an unimplemented_description")
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+}
+
+/// Havi's historic graveyard threshold must lower as a typed static condition
+/// without disturbing Sage Project's supported `ChangeZone` return.
+#[test]
+fn havi_the_all_father_full_card_parser_snapshot() {
+    let parsed = parse(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)\nSage Project — Whenever Havi or another legendary creature you control dies, return target legendary creature card with lesser mana value from your graveyard to the battlefield tapped.",
+        "Havi, the All-Father",
+        &[],
+        &["Legendary", "Creature"],
+        &["God"],
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            matches!(
+                &static_def.condition,
+                Some(StaticCondition::QuantityComparison { .. })
+            )
+        }),
+        "Havi's first line must produce its conditional static: {parsed:#?}"
+    );
+    fn contains_change_zone(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::ChangeZone { .. })
+            || def.sub_ability.as_deref().is_some_and(contains_change_zone)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_change_zone)
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.execute.as_deref().is_some_and(contains_change_zone)),
+        "Sage Project's supported return must remain a ChangeZone effect: {parsed:#?}"
+    );
+    insta::assert_json_snapshot!("havi_the_all_father_full_card", &parsed);
+}
+
+/// Elenda's full printed text must route both continuous abilities through the
+/// public parser and preserve their distinct starting-life thresholds.
+#[test]
+fn elenda_saint_of_dusk_full_card_parser() {
+    let parsed = parse(
+        "Lifelink, hexproof from instants\nAs long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+        "Elenda, Saint of Dusk",
+        &[
+            Keyword::Lifelink,
+            Keyword::HexproofFrom(HexproofFilter::CardType("instants".to_string())),
+        ],
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "both printed continuous abilities must parse: {parsed:#?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the full Elenda card must not leave parse warnings: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                })
+        }),
+        "the first static must gate on life above starting: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 10 },
+                })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddPower { value: 5 })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddToughness { value: 5 })
+        }),
+        "the additional +5/+5 must use LifeAboveStarting >= 10: {parsed:#?}"
     );
 }

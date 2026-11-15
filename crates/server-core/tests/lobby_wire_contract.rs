@@ -46,6 +46,9 @@ fn canonical_client_frames_parse_via_broker() {
         client_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
+        state_codecs: Vec::new(),
     };
     let json = serde_json::to_string(&canonical).unwrap();
     match lb::parse_lobby_client_message(&json) {
@@ -53,14 +56,51 @@ fn canonical_client_frames_parse_via_broker() {
             lb::LobbyClientMessage::ClientHello {
                 client_version,
                 build_commit,
+                lobby_protocol_version,
                 ..
             } => {
                 assert_eq!(client_version, "0.1.0");
                 assert_eq!(build_commit, "abc");
+                // The additive field must survive the canonical -> broker
+                // parse; the broker gates on it.
+                assert_eq!(lobby_protocol_version, Some(lb::LOBBY_PROTOCOL_VERSION));
             }
             other => panic!("expected ClientHello, got {other:?}"),
         },
         other => panic!("expected ClientHello, got {other:?}"),
+    }
+}
+
+/// A canonical create frame's `requested_code` survives the broker's parse.
+#[test]
+fn canonical_create_frame_keeps_requested_code_through_the_broker_parse() {
+    let canonical = sc::ClientMessage::CreateGameWithSettings {
+        deck: sc::DeckData::default(),
+        display_name: "Host".into(),
+        public: true,
+        password: None,
+        timer_seconds: None,
+        player_count: 2,
+        match_config: Default::default(),
+        ai_seats: Vec::new(),
+        format_config: None,
+        room_name: None,
+        host_peer_id: Some("peer-1".into()),
+        draft_metadata: None,
+        start_when_full: true,
+        ranked: false,
+        requested_code: Some("AB12CD".into()),
+        booster_pack_pool: None,
+    };
+    let json = serde_json::to_string(&canonical).unwrap();
+    match lb::parse_lobby_client_message(&json) {
+        lb::ParsedFrame::Message(msg) => match *msg {
+            lb::LobbyClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            other => panic!("expected CreateGameWithSettings, got {other:?}"),
+        },
+        other => panic!("expected CreateGameWithSettings, got {other:?}"),
     }
 }
 
@@ -99,7 +139,8 @@ fn lobby_server_messages_byte_identical_to_canonical() {
         message: "deck invalid".into(),
         code: Some(lb::ServerErrorCode::DeckRejected),
     };
-    let sc_typed = sc::ServerMessage::deck_rejected("deck invalid");
+    let sc_typed =
+        sc::ServerMessage::error_with_code(sc::ServerErrorCode::DeckRejected, "deck invalid");
     assert_eq!(
         serde_json::to_string(&lb_typed).unwrap(),
         r#"{"type":"Error","data":{"message":"deck invalid","code":"deck_rejected"}}"#
@@ -108,6 +149,24 @@ fn lobby_server_messages_byte_identical_to_canonical() {
         serde_json::to_string(&lb_typed).unwrap(),
         serde_json::to_string(&sc_typed).unwrap()
     );
+
+    // The requested-room-code reasons (lobby protocol 10), through the same
+    // parameterized constructor on both enums.
+    for (code, wire) in [
+        (lb::ServerErrorCode::GameNotFound, "game_not_found"),
+        (lb::ServerErrorCode::CodeInUse, "code_in_use"),
+    ] {
+        let lb_coded = lb::LobbyServerMessage::error_with_code(code, "m");
+        let sc_coded = sc::ServerMessage::error_with_code(code, "m");
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            format!(r#"{{"type":"Error","data":{{"message":"m","code":"{wire}"}}}}"#)
+        );
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            serde_json::to_string(&sc_coded).unwrap()
+        );
+    }
 
     // Pong.
     let lb_pong = lb::LobbyServerMessage::Pong { timestamp: 7 };
@@ -137,6 +196,7 @@ fn lobby_server_messages_byte_identical_to_canonical() {
     let sc_gc = sc::ServerMessage::GameCreated {
         game_code: "GAME01".into(),
         player_token: "tok".into(),
+        full_key: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_gc).unwrap(),
@@ -173,18 +233,75 @@ fn server_hello_mode_byte_identical() {
         build_commit: "abc".into(),
         protocol_version: lb::PROTOCOL_VERSION,
         mode: lb::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(lb::LOBBY_PROTOCOL_VERSION),
     };
     let sc_hello = sc::ServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
         mode: sc::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
         // None + skip_serializing_if keeps the wire identical to the lobby
         // broker's ServerHello, which has no public_url field.
         public_url: None,
+        wire_formats: Vec::new(),
+        heartbeat: None,
+        command_correlation: None,
+        state_codecs: Vec::new(),
+        selected_state_codec: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),
         serde_json::to_string(&sc_hello).unwrap()
+    );
+}
+
+#[test]
+fn native_codec_capability_is_lost_at_the_broker_boundary() {
+    let canonical = sc::ClientMessage::ClientHello {
+        client_version: "codec-peer".into(),
+        build_commit: "codec-build".into(),
+        protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
+        state_codecs: vec![sc::StateCodec::StateCodecV1],
+    };
+    let lb::ParsedFrame::Message(broker) =
+        lb::parse_lobby_client_message(&serde_json::to_string(&canonical).unwrap())
+    else {
+        panic!("broker must accept additive hello metadata")
+    };
+    let projected: sc::ClientMessage =
+        serde_json::from_str(&serde_json::to_string(&broker).unwrap()).unwrap();
+    assert!(matches!(projected,
+        sc::ClientMessage::ClientHello { state_codecs, .. } if state_codecs.is_empty()));
+    // Existing broker unknown-tag behavior, not a new capability authority.
+    assert!(!matches!(
+        lb::parse_lobby_client_message(
+            &serde_json::to_string(&sc::ClientMessage::ResyncState).unwrap()
+        ),
+        lb::ParsedFrame::Message(_)
+    ));
+}
+
+#[test]
+fn omitted_codec_client_hello_is_byte_identical_to_broker() {
+    let canonical = sc::ClientMessage::ClientHello {
+        client_version: "legacy-peer".into(),
+        build_commit: "legacy-build".into(),
+        protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
+        state_codecs: Vec::new(),
+    };
+    let broker = lb::LobbyClientMessage::ClientHello {
+        client_version: "legacy-peer".into(),
+        build_commit: "legacy-build".into(),
+        protocol_version: lb::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(lb::LOBBY_PROTOCOL_VERSION),
+    };
+    assert_eq!(
+        serde_json::to_string(&canonical).unwrap(),
+        serde_json::to_string(&broker).unwrap()
     );
 }

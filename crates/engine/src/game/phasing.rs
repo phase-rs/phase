@@ -293,11 +293,12 @@ pub fn execute_untap_step_phasing(state: &mut GameState, events: &mut Vec<GameEv
 /// Returns the player ids that transitioned (empty if already phased out or
 /// the player is not in the game).
 ///
-/// Per the player-phasing invariant list on `PlayerStatus`, callers do NOT
-/// need to scatter exclusion checks: the four filter choke points
-/// (`add_players` for targeting, `get_valid_attack_targets` for combat,
-/// `apply_damage_after_replacement` for damage, and `check_player_life` for
-/// SBA) handle every downstream consequence transparently.
+/// Per the player-phasing invariant list on `PlayerStatus`, callers do NOT need to
+/// scatter exclusion checks — but the filter choke points (`add_players` for targeting,
+/// `get_valid_attack_targets` for combat, `apply_damage_after_replacement` for damage,
+/// `check_player_life` for SBA) do NOT cover candidate/offer lists materialized outside
+/// them: those sites route through `game::players::player_exists_for_choice`, the
+/// choice-enumeration choke point.
 pub fn phase_out_player(
     state: &mut GameState,
     player_id: PlayerId,
@@ -1157,7 +1158,9 @@ mod tests {
         // Mark the Aura as bestowed (it has both Enchantment and Creature types).
         if let Some(obj) = state.objects.get_mut(&bestow_id) {
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.bestow_form = Some(BestowFormState);
+            obj.bestow_form = Some(BestowFormState {
+                removed_creature_subtypes: vec!["Bear".into()],
+            });
         }
 
         // Phase out the host (and the bestow Aura cascades indirectly).
@@ -1191,6 +1194,12 @@ mod tests {
         assert!(
             !obj.card_types.subtypes.iter().any(|s| s == "Aura"),
             "CR 702.103g: Aura subtype removed on revert"
+        );
+        // CR 205.1a: the creature types the bestow form removed come back.
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Bear")
+                && obj.base_card_types.subtypes.iter().any(|s| s == "Bear"),
+            "CR 205.1a: creature subtype restored on 702.103g revert"
         );
     }
 }

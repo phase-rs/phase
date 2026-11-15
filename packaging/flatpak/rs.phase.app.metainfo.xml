@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for the phase.rs desktop shell.
+
+  Without this file the package still installs and runs, but software centres
+  render it as an unnamed entry with no icon or description, so it is part of
+  the package rather than an extra.
+
+  Deliberately absent: <screenshots/> and a reviewed OARS content rating.
+  Both are Flathub listing requirements rather than build requirements, and
+  both need assets and a judgement call that belong to the maintainer — see
+  the distribution-channel question in the pull request.
+-->
+<component type="desktop-application">
+  <id>rs.phase.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <name>Phase</name>
+  <summary>Play Magic: The Gathering against AI opponents and other players</summary>
+
+  <description>
+    <p>
+      phase.rs is a Magic: The Gathering game engine with an in-browser client.
+      The desktop shell loads the current release channel, so the application
+      itself stays current without reinstalling the package.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Play against AI opponents or other players online</li>
+      <li>Draft, sealed, and constructed formats</li>
+      <li>Deck building with the full card catalogue</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">rs.phase.app.desktop</launchable>
+
+  <url type="homepage">https://phase-rs.dev</url>
+  <url type="bugtracker">https://github.com/phase-rs/phase/issues</url>
+
+  <content_rating type="oars-1.1" />
+</component>

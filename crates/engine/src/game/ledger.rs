@@ -1,13 +1,18 @@
 //! Final authority for composable per-event ledger facts.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::TriggerDefinitionRef;
-use crate::types::game_state::{GameState, SpellCastRecord};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    AbilityActivationRecord, AbilityUsageKey, CastOccurrence, GameState, SpellCastRecord,
+};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
-    ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedLedgerEditReplayInvariantError,
-    ResolvedOncePerTurnPermission, ResolvedTriggerLedgerEdit,
+    ledger_edit_is_invalid, ResolvedLedgerEdit, ResolvedLedgerEditCommand,
+    ResolvedLedgerEditReplayInvariantError, ResolvedOncePerTurnPermission,
+    ResolvedTriggerLedgerEdit,
 };
+use crate::types::zones::Zone;
 
 /// Constructs, applies, and journals one exact semantic ledger edit.
 ///
@@ -36,7 +41,7 @@ pub fn record_spell_cast(
     state: &mut GameState,
     player: PlayerId,
     record: SpellCastRecord,
-) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
+) -> Result<CastOccurrence, ResolvedLedgerEditReplayInvariantError> {
     let expected_turn_history_len = history_len(
         state
             .spells_cast_this_turn_by_player
@@ -63,22 +68,75 @@ pub fn record_spell_cast(
             expected_turn_history_len,
             expected_game_history_len,
         },
-    )
+    )?;
+    Ok(CastOccurrence {
+        caster: player,
+        turn_journal_index: expected_turn_history_len,
+    })
+}
+
+/// Validate every fallible spell-cast ledger precondition without mutation.
+///
+/// CR 601.2g provides the mana-ability window before payment, CR 601.2h pays
+/// the total cost, and CR 601.2i makes the spell cast. Cast finalization calls
+/// this before those payment/finalization steps or changing the announced
+/// object's zone. Mana payment cannot mutate these cast-history axes, so a
+/// later [`record_spell_cast`] cannot discover an overflow after the cast has
+/// partially committed.
+pub(crate) fn validate_spell_cast_recording(
+    state: &GameState,
+    player: PlayerId,
+) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
+    if !state.players.iter().any(|candidate| candidate.id == player) {
+        return Err(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+            player,
+        ));
+    }
+    history_len(
+        state
+            .spells_cast_this_turn_by_player
+            .get(&player)
+            .map_or(0, |history| history.len()),
+    )?;
+    history_len(
+        state
+            .spells_cast_this_game_by_player
+            .get(&player)
+            .map_or(0, |history| history.len()),
+    )?;
+    state
+        .spells_cast_this_game
+        .get(&player)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
+    Ok(())
 }
 
 /// CR 602.5b: Increment exactly one activated-ability occurrence's turn and
-/// game counters.
+/// game counters, and (CR 602.2 + CR 601.2i) append its captured
+/// [`AbilityActivationRecord`] to its activator's turn journal. The single
+/// write path for the journal: only the stack-placement authority passes a
+/// record; a mana ability's completion counts with `None` (mana abilities are
+/// not journaled).
 pub fn record_ability_activation(
     state: &mut GameState,
-    source: ObjectId,
-    ability_index: usize,
+    key: AbilityUsageKey,
+    record: Option<AbilityActivationRecord>,
 ) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
-    let key = (source, ability_index);
+    let expected_turn_history_len = match &record {
+        Some(record) => Some(history_len(
+            state
+                .abilities_activated_this_turn_by_player
+                .get(&record.activator)
+                .map_or(0, |history| history.len()),
+        )?),
+        None => None,
+    };
     resolve_and_apply_ledger_edit(
         state,
         ResolvedLedgerEdit::AbilityActivated {
-            source,
-            ability_index,
             expected_turn_count: state
                 .activated_abilities_this_turn
                 .get(&key)
@@ -89,6 +147,37 @@ pub fn record_ability_activation(
                 .get(&key)
                 .copied()
                 .unwrap_or(0),
+            key,
+            record: record.map(Box::new),
+            expected_turn_history_len,
+        },
+    )
+}
+
+/// CR 700.13: Record that the player has committed a crime this turn after
+/// the targeting action survives its complete announcement and is placed on
+/// the stack. Individual `CrimeCommitted` events are still emitted for every
+/// qualifying action; this durable record only backs the per-turn condition.
+pub fn record_crime_committed(
+    state: &mut GameState,
+    player: PlayerId,
+) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
+    let expected_turn_count = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+            player,
+        ))?
+        .crimes_committed_this_turn;
+    if expected_turn_count > 0 {
+        return Ok(());
+    }
+    resolve_and_apply_ledger_edit(
+        state,
+        ResolvedLedgerEdit::CrimeCommitted {
+            player,
+            expected_turn_count,
         },
     )
 }
@@ -112,6 +201,83 @@ pub fn consume_once_per_turn_permission(
         state,
         ResolvedLedgerEdit::OncePerTurnPermission { source, permission },
     )
+}
+
+/// CR 121.1 + CR 121.2 + CR 121.4: Capture and install one post-replacement
+/// draw's exact bookkeeping. The zone-change hub has already installed
+/// `drawn_object` before this ledger command is recorded; replay therefore
+/// never selects a library card or re-runs replacement effects.
+///
+/// `drawn_object` is absent only when an attempted draw found an empty library.
+/// The returned boolean tells the continuation-only miracle hook whether this
+/// command established the player's first draw of the turn.
+pub fn resolve_and_apply_cards_drawn(
+    state: &mut GameState,
+    player: PlayerId,
+    drawn_object: Option<ObjectIncarnationRef>,
+    attempted_empty_library: bool,
+) -> Result<bool, ResolvedLedgerEditReplayInvariantError> {
+    let player_state = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+            player,
+        ))?;
+    let expected_drawn_cards_len = history_len(
+        state
+            .cards_drawn_this_turn
+            .get(&player)
+            .map_or(0, |drawn_cards| drawn_cards.len()),
+    )?;
+    let settled_card = drawn_object.is_some();
+    let expected_first_card_drawn_this_turn =
+        state.first_card_drawn_this_turn.get(&player).copied();
+    let resulting_first_card_drawn_this_turn =
+        expected_first_card_drawn_this_turn.or_else(|| drawn_object.map(|object| object.object_id));
+    let established_first_draw = settled_card && expected_first_card_drawn_this_turn.is_none();
+    let resulting_drawn_cards_len = if settled_card {
+        expected_drawn_cards_len
+            .checked_add(1)
+            .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?
+    } else {
+        expected_drawn_cards_len
+    };
+
+    resolve_and_apply_ledger_edit(
+        state,
+        ResolvedLedgerEdit::CardsDrawn {
+            player,
+            drawn_object,
+            attempted_empty_library,
+            expected_has_drawn_this_turn: player_state.has_drawn_this_turn,
+            resulting_has_drawn_this_turn: if settled_card {
+                true
+            } else {
+                player_state.has_drawn_this_turn
+            },
+            expected_cards_drawn_this_turn: player_state.cards_drawn_this_turn,
+            resulting_cards_drawn_this_turn: if settled_card {
+                player_state.cards_drawn_this_turn.saturating_add(1)
+            } else {
+                player_state.cards_drawn_this_turn
+            },
+            expected_cards_drawn_this_step: player_state.cards_drawn_this_step,
+            resulting_cards_drawn_this_step: if settled_card {
+                player_state.cards_drawn_this_step.saturating_add(1)
+            } else {
+                player_state.cards_drawn_this_step
+            },
+            expected_drew_from_empty_library: player_state.drew_from_empty_library,
+            resulting_drew_from_empty_library: player_state.drew_from_empty_library
+                || attempted_empty_library,
+            expected_drawn_cards_len,
+            resulting_drawn_cards_len,
+            expected_first_card_drawn_this_turn,
+            resulting_first_card_drawn_this_turn,
+        },
+    )?;
+    Ok(established_first_draw)
 }
 
 /// Applies one exact ledger edit without an event dispatcher, replacement
@@ -168,6 +334,25 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
             state.spells_cast_this_turn = next_turn_count;
             state.spells_cast_this_game.insert(*player, next_game_count);
+            // CR 601.2i + CR 603.4: every finalized cast opens the
+            // since-window of each player for whom the caster is an opponent
+            // ("since your last turn ended" readers). The caster's own window
+            // and teammates' windows are untouched. Team-aware via
+            // `players::is_opponent`, mirroring the scope filters.
+            let caster = *player;
+            let windowed: Vec<PlayerId> = state
+                .players
+                .iter()
+                .map(|candidate| candidate.id)
+                .filter(|id| *id != caster && crate::game::players::is_opponent(state, *id, caster))
+                .collect();
+            for candidate in &mut state.players {
+                if windowed.contains(&candidate.id) {
+                    candidate.opponent_spells_cast_since_own_last_turn = candidate
+                        .opponent_spells_cast_since_own_last_turn
+                        .saturating_add(1);
+                }
+            }
             state
                 .spells_cast_this_turn_by_player
                 .entry(*player)
@@ -180,21 +365,49 @@ pub fn apply_resolved_ledger_edit(
                 .push_back(record.clone());
         }
         ResolvedLedgerEdit::AbilityActivated {
-            source,
-            ability_index,
+            key,
             expected_turn_count,
             expected_game_count,
+            record,
+            expected_turn_history_len,
         } => {
-            let key = (*source, *ability_index);
+            // CR 602.2 + CR 601.2i: the record and its history length are a
+            // pair; a legacy command carries neither and appends nothing.
+            match (record, expected_turn_history_len) {
+                (Some(record), Some(_)) if record.source != key.source => {
+                    // CR 602.2: the record must describe the activation this
+                    // command counts, not another source's.
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                    );
+                }
+                (Some(record), Some(expected_len)) => {
+                    let actual = state
+                        .abilities_activated_this_turn_by_player
+                        .get(&record.activator)
+                        .map_or(0, |history| history.len());
+                    if history_len(actual)? != *expected_len {
+                        return Err(
+                            ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                        );
+                    }
+                }
+                (None, None) => {}
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                    );
+                }
+            }
             if state
                 .activated_abilities_this_turn
-                .get(&key)
+                .get(key)
                 .copied()
                 .unwrap_or(0)
                 != *expected_turn_count
                 || state
                     .activated_abilities_this_game
-                    .get(&key)
+                    .get(key)
                     .copied()
                     .unwrap_or(0)
                     != *expected_game_count
@@ -211,10 +424,128 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
             state
                 .activated_abilities_this_turn
-                .insert(key, next_turn_count);
+                .insert(key.clone(), next_turn_count);
             state
                 .activated_abilities_this_game
-                .insert(key, next_game_count);
+                .insert(key.clone(), next_game_count);
+            if let Some(record) = record {
+                state
+                    .abilities_activated_this_turn_by_player
+                    .entry(record.activator)
+                    .or_default()
+                    .push_back(record.as_ref().clone());
+            }
+        }
+        ResolvedLedgerEdit::CrimeCommitted {
+            player,
+            expected_turn_count,
+        } => {
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|candidate| candidate.id == *player)
+                .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+                    *player,
+                ))?;
+            if *expected_turn_count != 0
+                || player_state.crimes_committed_this_turn != *expected_turn_count
+            {
+                return Err(
+                    ResolvedLedgerEditReplayInvariantError::CrimeCommittedPreconditionMismatch,
+                );
+            }
+            player_state.crimes_committed_this_turn = expected_turn_count
+                .checked_add(1)
+                .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
+        }
+        ResolvedLedgerEdit::CardsDrawn {
+            player,
+            drawn_object,
+            expected_has_drawn_this_turn,
+            resulting_has_drawn_this_turn,
+            expected_cards_drawn_this_turn,
+            resulting_cards_drawn_this_turn,
+            expected_cards_drawn_this_step,
+            resulting_cards_drawn_this_step,
+            expected_drew_from_empty_library,
+            resulting_drew_from_empty_library,
+            expected_drawn_cards_len,
+            expected_first_card_drawn_this_turn,
+            resulting_first_card_drawn_this_turn,
+            ..
+        } => {
+            if ledger_edit_is_invalid(&command.edit) {
+                return Err(ResolvedLedgerEditReplayInvariantError::CardsDrawnPreconditionMismatch);
+            }
+            let Some(player_index) = state
+                .players
+                .iter()
+                .position(|candidate| candidate.id == *player)
+            else {
+                return Err(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+                    *player,
+                ));
+            };
+            let current_drawn_cards_len = history_len(
+                state
+                    .cards_drawn_this_turn
+                    .get(player)
+                    .map_or(0, |drawn_cards| drawn_cards.len()),
+            )?;
+            let current_first_card_drawn_this_turn =
+                state.first_card_drawn_this_turn.get(player).copied();
+            let player_state = &state.players[player_index];
+            if player_state.has_drawn_this_turn != *expected_has_drawn_this_turn
+                || player_state.cards_drawn_this_turn != *expected_cards_drawn_this_turn
+                || player_state.cards_drawn_this_step != *expected_cards_drawn_this_step
+                || player_state.drew_from_empty_library != *expected_drew_from_empty_library
+                || current_drawn_cards_len != *expected_drawn_cards_len
+                || current_first_card_drawn_this_turn != *expected_first_card_drawn_this_turn
+            {
+                return Err(ResolvedLedgerEditReplayInvariantError::CardsDrawnPreconditionMismatch);
+            }
+            if let Some(expected) = drawn_object {
+                let found = state
+                    .objects
+                    .get(&expected.object_id)
+                    .map(ObjectIncarnationRef::from_object);
+                if found != Some(*expected) {
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::DrawnObjectMismatch {
+                            expected: *expected,
+                            found,
+                        },
+                    );
+                }
+                if state.objects[&expected.object_id].zone == Zone::Library {
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::DrawnObjectStillInLibrary(
+                            *expected,
+                        ),
+                    );
+                }
+            }
+
+            let player_state = &mut state.players[player_index];
+            player_state.has_drawn_this_turn = *resulting_has_drawn_this_turn;
+            player_state.cards_drawn_this_turn = *resulting_cards_drawn_this_turn;
+            player_state.cards_drawn_this_step = *resulting_cards_drawn_this_step;
+            player_state.drew_from_empty_library = *resulting_drew_from_empty_library;
+            if let Some(object) = drawn_object {
+                crate::game::effects::drawn_this_turn_choice::record_drawn_card(
+                    state,
+                    *player,
+                    object.object_id,
+                );
+            }
+            match resulting_first_card_drawn_this_turn {
+                Some(object) => {
+                    state.first_card_drawn_this_turn.insert(*player, *object);
+                }
+                None => {
+                    state.first_card_drawn_this_turn.remove(player);
+                }
+            }
         }
         ResolvedLedgerEdit::TriggerFired { trigger, edit } => match edit {
             ResolvedTriggerLedgerEdit::OncePerTurn => {
@@ -231,6 +562,15 @@ pub fn apply_resolved_ledger_edit(
                 if !state
                     .triggers_fired_this_turn_per_opponent
                     .insert((trigger.clone(), *opponent))
+                {
+                    return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
+                }
+            }
+            // CR 603.2h: the source's controller took this ability's indicated action.
+            ResolvedTriggerLedgerEdit::IndicatedActionTaken { player } => {
+                if !state
+                    .trigger_indicated_actions_this_turn
+                    .insert((trigger.clone(), *player))
                 {
                     return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
                 }
@@ -294,5 +634,381 @@ pub fn apply_resolved_ledger_edit(
 }
 
 fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
-    u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)
+    let len =
+        u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
+    (len != u32::MAX)
+        .then_some(len)
+        .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::game_object::GameObject;
+    use crate::types::ability::{TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::resolved_commands::{ResolvedCommandOrdinal, RulesExecutionNodeRef};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+    use crate::types::CardId;
+
+    #[test]
+    fn record_spell_cast_returns_zero_based_per_caster_turn_occurrences() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(71),
+            CardId(71),
+            PlayerId(0),
+            "Coordinate Test".to_string(),
+            Zone::Stack,
+        );
+        let record = crate::game::restrictions::spell_cast_record_for(
+            &object,
+            Zone::Hand,
+            crate::types::game_state::CastingVariant::Normal,
+            false,
+        );
+
+        let first = record_spell_cast(&mut state, PlayerId(0), record.clone())
+            .expect("first cast is recorded");
+        let second = record_spell_cast(&mut state, PlayerId(0), record.clone())
+            .expect("second cast is recorded");
+        let other = record_spell_cast(&mut state, PlayerId(1), record)
+            .expect("other player's first cast is recorded");
+
+        assert_eq!(
+            first,
+            CastOccurrence {
+                caster: PlayerId(0),
+                turn_journal_index: 0
+            }
+        );
+        assert_eq!(
+            second,
+            CastOccurrence {
+                caster: PlayerId(0),
+                turn_journal_index: 1
+            }
+        );
+        assert_eq!(
+            other,
+            CastOccurrence {
+                caster: PlayerId(1),
+                turn_journal_index: 0
+            }
+        );
+        assert_eq!(state.spells_cast_this_turn_by_player[&PlayerId(0)].len(), 2);
+        assert_eq!(state.spells_cast_this_turn_by_player[&PlayerId(1)].len(), 1);
+
+        let before_turn = state.spells_cast_this_turn;
+        let before_game = state.spells_cast_this_game.clone();
+        let before_turn_history = state.spells_cast_this_turn_by_player.clone();
+        let before_game_history = state.spells_cast_this_game_by_player.clone();
+        let before_journal = state.resolved_rules_journal.entries().len();
+        assert_eq!(
+            history_len(u32::MAX as usize),
+            Err(ResolvedLedgerEditReplayInvariantError::CounterOverflow)
+        );
+        assert_eq!(state.spells_cast_this_turn, before_turn);
+        assert_eq!(state.spells_cast_this_game, before_game);
+        assert_eq!(state.spells_cast_this_turn_by_player, before_turn_history);
+        assert_eq!(state.spells_cast_this_game_by_player, before_game_history);
+        assert_eq!(state.resolved_rules_journal.entries().len(), before_journal);
+    }
+
+    /// CR 601.2i + CR 603.4: every finalized cast opens the since-window of
+    /// each player for whom the caster is an opponent ("since your last turn
+    /// ended" readers). The caster's own window is untouched by their own
+    /// cast.
+    #[test]
+    fn record_spell_cast_opens_opponents_since_windows_only() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(71),
+            CardId(71),
+            PlayerId(1),
+            "Window Test".to_string(),
+            Zone::Stack,
+        );
+        let record = crate::game::restrictions::spell_cast_record_for(
+            &object,
+            Zone::Hand,
+            crate::types::game_state::CastingVariant::Normal,
+            false,
+        );
+
+        record_spell_cast(&mut state, PlayerId(1), record.clone())
+            .expect("opponent cast is recorded");
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "opponent's cast must open the controller's window"
+        );
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 0,
+            "caster's own window must be untouched by their own cast"
+        );
+
+        record_spell_cast(&mut state, PlayerId(0), record).expect("controller cast is recorded");
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's cast must open the opponent's window"
+        );
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's window must be unchanged by their own cast"
+        );
+    }
+
+    #[test]
+    fn max_times_replay_resolves_recipient_key() {
+        let object_id = ObjectId(1);
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(1),
+            PlayerId(0),
+            "Granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+            TriggerDefinition::new(TriggerMode::Attacks),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(object_id, object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(trigger.clone(), 2);
+
+        let command = ResolvedLedgerEditCommand {
+            edit: ResolvedLedgerEdit::TriggerFired {
+                trigger: trigger.clone(),
+                edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old: 2 },
+            },
+            cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
+        };
+
+        apply_resolved_ledger_edit(&mut state, &command).expect("legacy replay resolves grant key");
+        assert_eq!(
+            state.trigger_fire_counts_this_turn.get(&trigger).copied(),
+            Some(3)
+        );
+        assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
+
+    /// CR 603.2h: the indicated-action fact is one (definition, player) pair per turn; a
+    /// second record of the same pair is a replay invariant violation, not a silent no-op.
+    #[test]
+    fn indicated_action_taken_records_once_per_definition_and_player() {
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Indicated action source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+            TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(ObjectId(1), object);
+        let edit = ResolvedTriggerLedgerEdit::IndicatedActionTaken {
+            player: PlayerId(0),
+        };
+
+        assert!(state.trigger_indicated_actions_this_turn.is_empty());
+        record_trigger_fired(&mut state, trigger.clone(), edit.clone())
+            .expect("first indicated action records");
+        assert_eq!(
+            *state.trigger_indicated_actions_this_turn,
+            std::collections::HashSet::from([(trigger.clone(), PlayerId(0))])
+        );
+        assert!(
+            state.triggers_fired_this_turn.is_empty(),
+            "the indicated-action fact is not a firing"
+        );
+        assert_eq!(
+            record_trigger_fired(&mut state, trigger, edit),
+            Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded)
+        );
+        assert_eq!(state.trigger_indicated_actions_this_turn.len(), 1);
+    }
+
+    fn activation_source(state: &mut GameState) -> ObjectId {
+        let id = ObjectId(81);
+        state.objects.insert(
+            id,
+            GameObject::new(
+                id,
+                CardId(81),
+                PlayerId(0),
+                "Journal Source".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        // CR 602.5c: the source holds a real printed ability so the tests
+        // derive the same per-instance key the production record path uses.
+        let ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+        );
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&id).expect("just inserted").abilities)
+            .push(ability);
+        id
+    }
+
+    /// CR 602.5c: the production key for the source's printed ability at index
+    /// 0 — the same derivation `record_ability_activation` uses.
+    fn usage_key(state: &GameState, source: ObjectId) -> AbilityUsageKey {
+        crate::game::restrictions::ability_usage_key(state, source, 0)
+            .expect("the source holds its printed ability")
+    }
+
+    fn activation_command(
+        key: AbilityUsageKey,
+        expected_count: u32,
+        record: Option<AbilityActivationRecord>,
+        expected_turn_history_len: Option<u32>,
+    ) -> ResolvedLedgerEditCommand {
+        ResolvedLedgerEditCommand {
+            edit: ResolvedLedgerEdit::AbilityActivated {
+                key,
+                expected_turn_count: expected_count,
+                expected_game_count: expected_count,
+                record: record.map(Box::new),
+                expected_turn_history_len,
+            },
+            cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
+        }
+    }
+
+    fn journal_record(state: &GameState, source: ObjectId) -> AbilityActivationRecord {
+        crate::game::casting::capture_activation_record_from(
+            state,
+            PlayerId(0),
+            source,
+            None,
+            &[crate::types::ability::TargetRef::Player(PlayerId(1))],
+        )
+        .expect("the source exists")
+    }
+
+    /// CR 602.2 + CR 601.2i: a replayed activation with its record appends
+    /// exactly that record, and a stale history length is refused whole.
+    #[test]
+    fn activation_replay_appends_its_record_and_refuses_a_stale_history_length() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
+        let record = journal_record(&state, source);
+        apply_resolved_ledger_edit(
+            &mut state,
+            &activation_command(key.clone(), 0, Some(record.clone()), Some(0)),
+        )
+        .expect("a paired record replays");
+        assert_eq!(
+            state.abilities_activated_this_turn_by_player[&PlayerId(0)]
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![record.clone()]
+        );
+        assert_eq!(state.activated_abilities_this_turn[&key], 1);
+
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_ledger_edit(
+                &mut state,
+                &activation_command(key, 1, Some(record), Some(0)),
+            ),
+            Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
+        );
+        assert!(state == before, "a refused replay changes nothing");
+    }
+
+    /// A legacy `AbilityActivated` (recorded before the journal existed)
+    /// carries neither half and still advances the counters, but appends no
+    /// journal row: nothing is invented for an activation whose facts were
+    /// never captured.
+    #[test]
+    fn a_legacy_activation_replay_appends_no_journal_row() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
+        apply_resolved_ledger_edit(&mut state, &activation_command(key.clone(), 0, None, None))
+            .expect("a legacy command replays");
+        assert_eq!(state.activated_abilities_this_turn[&key], 1);
+        assert_eq!(state.activated_abilities_this_game[&key], 1);
+        assert!(
+            state.abilities_activated_this_turn_by_player.is_empty(),
+            "no journal row from a legacy command"
+        );
+    }
+
+    /// r5c #4: only `(None, None)` and `(Some, Some)` are well-formed. Either
+    /// half alone is refused at apply, before any counter moves.
+    #[test]
+    fn a_half_present_activation_record_pair_is_refused_at_apply() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
+        let record = journal_record(&state, source);
+        for (label, command) in [
+            (
+                "record without length",
+                activation_command(key.clone(), 0, Some(record.clone()), None),
+            ),
+            (
+                "length without record",
+                activation_command(key.clone(), 0, None, Some(0)),
+            ),
+        ] {
+            let before = state.clone();
+            assert_eq!(
+                apply_resolved_ledger_edit(&mut state, &command),
+                Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch),
+                "{label}"
+            );
+            assert!(state == before, "{label}: nothing changes");
+        }
+    }
+
+    /// CR 602.2: a record for a different source than the command counts is
+    /// refused at apply, before any counter moves.
+    #[test]
+    fn an_activation_record_for_another_source_is_refused_at_apply() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
+        let mut record = journal_record(&state, source);
+        apply_resolved_ledger_edit(
+            &mut state,
+            &activation_command(key.clone(), 0, Some(record.clone()), Some(0)),
+        )
+        .expect("reach guard: the matching record replays");
+        record.source = ObjectId(source.0 + 1);
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_ledger_edit(
+                &mut state,
+                &activation_command(key, 1, Some(record), Some(1)),
+            ),
+            Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
+        );
+        assert!(state == before, "nothing changes");
+    }
 }

@@ -15,6 +15,12 @@
 //!   CARGO_TARGET_DIR=/tmp/forge-dbg cargo run \
 //!       -p phase-ai --bin combat_priority_bench
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::time::{Duration, Instant};
 
 use engine::ai_support;

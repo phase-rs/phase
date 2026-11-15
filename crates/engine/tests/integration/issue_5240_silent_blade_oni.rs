@@ -39,6 +39,7 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -49,6 +50,7 @@ const SILENT_BLADE_ONI_ORACLE: &str = "Ninjutsu {4}{U}{B} ({4}{U}{B}, Return an 
 attacker you control to hand: Put this card onto the battlefield from your hand tapped and \
 attacking.)\nWhenever this creature deals combat damage to a player, look at that player's \
 hand. You may cast a spell from among those cards without paying its mana cost.";
+const HAND_REVEAL_CMC_GATE_ORACLE: &str = "Whenever this creature deals combat damage to a player, look at that player's hand. You may cast a creature spell with mana value 2 or less from among those cards without paying its mana cost.";
 
 /// CR 603.2 + CR 701.20a + CR 118.9: the DamageDone trigger's execute chain
 /// must be `RevealHand { TriggeringPlayer, reveal: false }` followed by a
@@ -235,5 +237,76 @@ fn silent_blade_oni_offers_free_cast_from_damaged_players_hand() {
         runner.state().players[0].mana_pool.total(),
         p0_mana_before,
         "the cast must be free — no mana spent"
+    );
+}
+
+/// The hand-bound branch must retain property predicates from its typed cast
+/// gate. This drives the combat trigger through the production reveal and cast
+/// pipeline: all candidates reach the revealed hand, but only the creature at
+/// or below the printed mana-value ceiling reaches the cast-choice prompt.
+#[test]
+fn hand_reveal_cast_respects_the_mana_value_gate() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Hand Reveal CMC Source", 3, 2)
+        .from_oracle_text(HAND_REVEAL_CMC_GATE_ORACLE)
+        .id();
+    let legal_creature = scenario
+        .add_creature_to_hand(P1, "Legal Hand Creature", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let over_limit_creature = scenario
+        .add_creature_to_hand(P1, "Over-Limit Hand Creature", 3, 3)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let noncreature_inside_ceiling = scenario
+        .add_spell_to_hand(P1, "Noncreature Hand Instant", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+
+    let mut runner = scenario.build();
+    run_combat(&mut runner, vec![source], vec![]);
+
+    for _ in 0..40 {
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should drain the combat trigger");
+            }
+            ref other => panic!("unexpected waiting state while draining: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == P0),
+        "reach guard: the cast permission must reach P0's optional choice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the free-cast permission must succeed");
+
+    let WaitingFor::EffectZoneChoice { cards, zone, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "accepting the hand-reveal cast permission must open its candidate choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(zone, Zone::Hand);
+    assert!(
+        cards.contains(&legal_creature),
+        "reach guard: the mana-value-2 creature must be offered; offered = {cards:?}"
+    );
+    assert!(
+        !cards.contains(&over_limit_creature),
+        "the mana-value-3 creature must not be offered; offered = {cards:?}"
+    );
+    assert!(
+        !cards.contains(&noncreature_inside_ceiling),
+        "the mana-value-2 instant must not be offered by a creature-only permission; \
+         offered = {cards:?}"
     );
 }

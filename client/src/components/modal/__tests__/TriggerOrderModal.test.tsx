@@ -51,7 +51,9 @@ describe("TriggerOrderModal", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("Soul Warden")).toBeInTheDocument();
+      const triggers = screen.getAllByRole("listitem");
+      expect(triggers[0]).toHaveTextContent("Soul Warden");
+      expect(triggers[1]).toHaveTextContent("Ajani's Pridemate");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm Order" }));

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ParsedCondition::IsDuringUpkeep becomes CurrentPhaseIs { phases } for named-step activation restrictions (Desert class). GameState activation restrictions now serialize the CurrentPhaseIs tag, which older full-game and P2P readers cannot decode."
+}

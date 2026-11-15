@@ -33,7 +33,7 @@ import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
 import { trackEvent } from "../services/telemetry";
-import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types";
+import { AdapterError, AdapterErrorCode, type PersistedGameState } from "../adapter/types";
 
 /**
  * Attempt to repopulate the engine's thread-local state from the last-known
@@ -43,7 +43,7 @@ import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types
  * the current mode is not locally recoverable.
  */
 export async function attemptStateRehydrate(): Promise<boolean> {
-  const { adapter, gameState, gameMode, gameId } = useGameStore.getState();
+  const { adapter, gameState, gameMode, gameId, gameSessionGeneration } = useGameStore.getState();
 
   if (!adapter) {
     debugLog("engine-recovery: no adapter", "warn");
@@ -60,7 +60,7 @@ export async function attemptStateRehydrate(): Promise<boolean> {
   // Prefer the live store snapshot. Fall back to IDB only if the store
   // has also been cleared (rare — only happens if something has nuked
   // the in-memory state without a full reload).
-  let snapshot: GameState | null = gameState;
+  let snapshot: PersistedGameState | null = gameState;
   let usedIdbFallback = false;
   if (!snapshot && gameId) {
     try {
@@ -89,6 +89,19 @@ export async function attemptStateRehydrate(): Promise<boolean> {
     // restore when `MULTIPLAYER_MODE` is set, but we've already short-
     // circuited non-ai/non-local modes above.
     await adapter.restoreState(snapshot);
+    const resumed = await adapter.resumeRestoredGameState?.();
+    if (resumed) {
+      const current = useGameStore.getState();
+      if (current.adapter !== adapter || current.gameSessionGeneration !== gameSessionGeneration) {
+        debugLog("engine-recovery: session changed before restored automation completed", "warn");
+        return true;
+      }
+      current.commitEngineSnapshot(resumed.snapshot, {
+        events: [],
+        logEntries: resumed.presentation.logEntries,
+        extraState: { restoredStackAutomation: resumed.presentation },
+      });
+    }
     debugLog(
       `engine-recovery: rehydrated from ${usedIdbFallback ? "IDB" : "store"}`,
       "warn",

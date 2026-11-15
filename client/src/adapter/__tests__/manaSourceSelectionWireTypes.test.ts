@@ -34,6 +34,7 @@ describe("mana-source selection wire types", () => {
         },
       },
       { OnlyForSpellWithColorCount: { comparator: "EQ", count: 2 } },
+      { OnlyForSpellColor: "Red" },
       {
         OnlyForSpellFromZone: {
           zone: "Hand",
@@ -48,6 +49,7 @@ describe("mana-source selection wire types", () => {
         ],
       },
       { OnlyForSpecialAction: "UnlockDoor" },
+      "Impossible",
       "ConvokePayment",
     ];
     const action: GameAction = {
@@ -57,6 +59,7 @@ describe("mana-source selection wire types", () => {
           source: { object_id: 17, incarnation: 3 },
           ability_index: 0,
           mana_type: "Blue",
+          output: { type: "Concrete", data: "Blue" },
           atomic_combination: null,
           restrictions,
           penalty: "None",

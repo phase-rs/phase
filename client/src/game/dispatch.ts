@@ -1,5 +1,11 @@
-import type { BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
-import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, PersistedGameState, RewindOption, WaitingFor } from "../adapter/types";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "../adapter/generated/interaction";
+import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
+import { reportStructuredActionRejection } from "./actionRejectionReporter";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
@@ -8,12 +14,15 @@ import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
-import { flashInGameRolls } from "./diceContest";
+import { flashCompletedScry, flashInGameRolls } from "./diceContest";
+import { flashUnActionEvents } from "./unActions";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
-  isMultiplayerMode,
+  captureTrustedCheckpoint,
+  isAuthorityRemote,
+  nextGameSessionGeneration,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -21,7 +30,7 @@ import {
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { pressureMultiplier, stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
+import { pressureMultiplier } from "../utils/stackPressure";
 import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
@@ -30,6 +39,19 @@ import { applySpellPaymentPreference } from "./castPaymentMode";
  * in AnimationOverlay, so sound aligns with the visual impact moment.
  */
 const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "GroupedDamageFlurry"]);
+
+/** Localized, upper-cased turn-banner headline. The whole template goes
+ *  through i18n so a translated player name never lands inside an English
+ *  sentence. */
+export function turnBannerText(turnPlayerId: number, isYourTurn: boolean): string {
+  const text = isYourTurn
+    ? i18n.t("turnBanner.yourTurn")
+    : i18n.t("turnBanner.opponentTurn", { name: getOpponentDisplayName(turnPlayerId) });
+  return text.toLocaleUpperCase(i18n.language);
+}
+
+/** Step-synced SFX not yet played; cancelled when the tab is hidden mid-animation. */
+const scheduledSfxTimers = new Set<ReturnType<typeof setTimeout>>();
 
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
@@ -42,7 +64,11 @@ function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
         audioManager.playSfxForStep(immediate);
       } else {
         const delay = offset;
-        setTimeout(() => audioManager.playSfxForStep(immediate), delay);
+        const timer = setTimeout(() => {
+          scheduledSfxTimers.delete(timer);
+          audioManager.playSfxForStep(immediate);
+        }, delay);
+        scheduledSfxTimers.add(timer);
       }
     }
     offset += step.duration * multiplier;
@@ -61,6 +87,10 @@ interface PendingLocalAction {
   session: BoundGameSession | null;
   /** WaitingFor object that prompted this local action. */
   waitingFor: WaitingFor | null;
+  proposal?: AiActionProposal;
+  proposalOutcome?: (outcome: "applied" | "stale") => void;
+  /** Loop-issued (auto-pass) rather than player-initiated: no undo checkpoint. */
+  automated: boolean;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -70,32 +100,116 @@ interface PendingRemoteUpdate {
   snapshot: EngineSnapshot;
   events: GameEvent[];
   logEntries?: GameLogEntry[];
+  /** See `processRemoteUpdateInner`: `undefined` and `[]` mean different things. */
+  rewindTargets?: RewindOption[];
+  /**
+   * How many remote updates this entry stands for (1 + the number coalesced
+   * into it while it waited). A large count means the client is far behind
+   * the table, so the entry commits without replaying animations.
+   */
+  coalesced: number;
+  /** Every caller merged into this entry; settled together, in arrival order. */
+  waiters: RemoteWaiter[];
   resolve: () => void;
   reject: (err: unknown) => void;
 }
 
+interface RemoteWaiter {
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
+/**
+ * One settlement shared by every caller merged into a queued remote entry.
+ * Built outside `enqueueRemoteUpdate` so its closures retain only the waiter
+ * list, never a superseded snapshot, and settle iteratively rather than
+ * through a chain of nested callbacks.
+ */
+function sharedRemoteSettlement(waiters: RemoteWaiter[]): Pick<PendingRemoteUpdate, "resolve" | "reject"> {
+  return {
+    resolve: () => {
+      for (const waiter of waiters.splice(0)) waiter.resolve();
+    },
+    reject: (err) => {
+      for (const waiter of waiters.splice(0)) waiter.reject(err);
+    },
+  };
+}
+
 type PendingWork = PendingLocalAction | PendingRemoteUpdate;
 
-type BoundGameSession = {
+export type BoundGameSession = {
   adapter: EngineAdapter;
   generation: number;
 };
 
 type GameSessionPreferenceAction = Extract<
   GameAction,
-  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" } | { type: "UnAction" }
 >;
 
 /** Module-level mutex — replaces useRef from the hook version. */
 let isAnimating = false;
 
-/** Unified queue for local actions and remote state updates. */
+/**
+ * Unified queue for local actions and remote state updates.
+ *
+ * Bounded: adjacent remote updates are coalesced (see `enqueueRemoteUpdate`),
+ * so it retains at most one engine snapshot per run of consecutive remote
+ * updates. Without that, a backgrounded tab (timers throttled to >= 1 s, far
+ * slower when intensively throttled) accumulates every update the server
+ * pushes, each holding a full multi-MB snapshot, until the tab is discarded.
+ */
 const pendingQueue: PendingWork[] = [];
 
 /**
+ * Remote updates replay their animations only while the client is caught up.
+ * Once more than this many entries wait behind the one being processed (or the
+ * entry itself stands for more than this many coalesced updates), animating
+ * each would only stretch the lag, so the update commits immediately.
+ */
+const MAX_ANIMATED_BACKLOG = 2;
+
+/** True while the tab is in the background, where timers are throttled and nobody watches. */
+function isDocumentHidden(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
+/**
+ * Waits out an animation, but never on a hidden tab: it returns at once if the
+ * tab is already hidden and ends early if it becomes hidden mid-wait. Hidden
+ * timers are throttled (down to about once a minute), which would otherwise
+ * stall every queued update, including a P2P host's AI actions, behind one wait.
+ */
+function waitForAnimation(ms: number): Promise<void> {
+  if (isDocumentHidden()) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
+      resolve();
+    };
+    const onVisibility = () => {
+      if (!isDocumentHidden()) return;
+      // Nobody is watching: drop the presentation still in flight (queued
+      // animation steps and pending step SFX) so it cannot replay stale on
+      // return, then let the update commit straight to its final state.
+      for (const timer of scheduledSfxTimers) clearTimeout(timer);
+      scheduledSfxTimers.clear();
+      useAnimationStore.getState().clearQueue();
+      finish();
+    };
+    const timer = setTimeout(finish, ms);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
+  });
+}
+
+/**
  * Identifies the game state for which the current dispatch pipeline is valid.
- * Restoring a saved game replaces the engine state wholesale, so work queued
- * for the old state must neither run nor release a newer dispatch's mutex.
+ * Restoring a saved game replaces the engine state wholesale, and a game-session
+ * boundary abandons it outright, so work queued for the old state must neither
+ * run nor release a newer dispatch's mutex. Bumped only by
+ * `abandonPendingDispatches`.
  */
 let dispatchGeneration = 0;
 
@@ -115,11 +229,17 @@ let inFlightLocalAction: {
   waitingFor: WaitingFor | null;
 } | null = null;
 
+/** The post-event state the normalizer reads spell announcements from, when a
+ *  card-flight layer will present them. */
+function announcementStateFor(state: GameState): GameState | null {
+  return useAnimationStore.getState().cardVfxReady ? state : null;
+}
+
 function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
 }
 
-function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
+export function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
   if (!session) return true;
   const game = useGameStore.getState();
   return (
@@ -143,14 +263,39 @@ function sameBoundGameSession(
   return a?.adapter === b?.adapter && a?.generation === b?.generation;
 }
 
-/** Discard dispatch work that belongs to the game state being replaced. */
-function abandonDispatchesForStateRestore(): void {
+/**
+ * Discard every queued and in-flight dispatch and release the mutex.
+ *
+ * Two callers, both of which abandon the game the pending work belongs to:
+ * `restoreGameState` (the engine state is replaced wholesale) and
+ * `clearPromptOverlayState` (a game-session boundary). Bumping
+ * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
+ * decline, so a `processAction` continuation still in flight can neither commit
+ * nor release a newer dispatch's mutex. That covers the action and remote
+ * dispatch pipelines. `dispatchInteraction` also captures this generation and
+ * its bound session, then checks both after each asynchronous boundary.
+ * `restoreGameState` still commits without capturing the generation, so it
+ * remains unaffected by the bump and can write.
+ * Queued work is *resolved*, not rejected: a caller
+ * awaiting an action in an abandoned game has nothing to recover from and
+ * must not see a spurious rejection.
+ */
+export function abandonPendingDispatches(): void {
   dispatchGeneration += 1;
   inFlightLocalAction = null;
   isAnimating = false;
   while (pendingQueue.length > 0) {
     pendingQueue.shift()!.resolve();
   }
+}
+
+/**
+ * True while no local dispatch or remote update is in flight or queued.
+ * The stale-screen watchdog gates on this: while work is pending, the
+ * committed state legitimately lags the adapter's snapshot.
+ */
+export function isDispatchIdle(): boolean {
+  return !isAnimating && pendingQueue.length === 0 && inFlightLocalAction === null;
 }
 
 function releaseDispatchMutex(generation: number): void {
@@ -163,6 +308,12 @@ function releaseDispatchMutex(generation: number): void {
   } else {
     isAnimating = false;
   }
+}
+
+/** Actions that report a physical event (an Un-card touch) rather than answer
+ *  a prompt: every submission is a separate instance. */
+function isRepeatableEvent(action: GameAction): boolean {
+  return action.type === "UnAction" && action.data.action.type === "TouchObject";
 }
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
@@ -180,10 +331,22 @@ function waitingForActorMatches(
   if (typeof data !== "object" || data === null) return false;
   const fields = data as Record<string, unknown>;
 
-  if (waitingFor.type === "Priority") {
+  // CR 723: under a turn-control effect (Emrakul, the Promised End;
+  // Mindslaver; etc.) a single-actor WaitingFor's `player` field names the
+  // semantic seat whose decision this is, which can differ from the
+  // authenticated actor actually submitting it (the controller). The engine
+  // keeps `gameState.priority_player` synced to the authorized submitter for
+  // whichever WaitingFor is current — for every single-actor variant, not
+  // just "Priority" (`sync_priority_player_from_waiting_for` in
+  // `public_state.rs` runs off `WaitingFor::acting_player()`, which every
+  // single-actor variant implements). Every variant carrying a `player`
+  // field must therefore consult it too, not only "Priority" — otherwise a
+  // queued action for e.g. a flashback sacrifice-cost PayCost prompt gets
+  // dropped as "stale" purely because the controller's id doesn't match the
+  // controlled seat's id (#6431).
+  if ("player" in fields) {
     return fields.player === actor || gameState?.priority_player === actor;
   }
-  if (fields.player === actor) return true;
 
   const pending = fields.pending;
   return (
@@ -200,15 +363,34 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   if (
     next.action.type === "SetPhaseStops"
     || next.action.type === "SetPriorityPassingMode"
+    || next.action.type === "CancelAutoPass"
+    || next.action.type === "SetMayTriggerAutoChoice"
+    || next.action.type === "SetReplacementAutoChoice"
   ) {
+    return true;
+  }
+  if (next.action.type === "UnAction") {
+    // CR 400.7: an Un-card touch must target the object's exact live incarnation.
+    // A delayed touch queued across a prompt change (such as during Cloudshift)
+    // must not trigger a returned permanent that is now a new object.
+    if (next.action.data.action.type === "TouchObject") {
+      const target = next.action.data.action.data.target;
+      const { gameState } = useGameStore.getState();
+      const touchable = gameState?.un_actions?.touchable;
+      return touchable?.some(
+        (t) => t.object_id === target.object_id && t.incarnation === target.incarnation,
+      ) ?? false;
+    }
     return true;
   }
   const { gameState, legalActions, waitingFor } = useGameStore.getState();
   if (Object.is(next.waitingFor, waitingFor)) return true;
   if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
   if (legalActions.some((action) => actionsEqual(action, next.action))) return true;
+  // Resolve All begins from Priority but is deliberately absent from normal
+  // legal actions: it opens its own engine-authored consent protocol.
   return (
-    next.action.type === "PassPriority" &&
+    (next.action.type === "PassPriority" || next.action.type === "BeginResolveAll") &&
     waitingFor?.type === "Priority" &&
     gameState != null
   );
@@ -241,6 +423,7 @@ function isStaleAction(err: unknown): boolean {
 }
 
 function actionErrorMessage(err: unknown): string {
+  if (err instanceof AdapterError && err.rejection) return err.rejection.message;
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err.length > 0) return err;
   return i18n.t("actionError.unknownEngineError");
@@ -257,10 +440,14 @@ function shouldShowActionError(err: unknown): boolean {
   return !isStateLost(err) && !isEnginePanic(err) && !isEngineUnresponsive(err) && !isStaleAction(err);
 }
 
-function showActionError(action: GameAction, err: unknown): void {
+function reportActionError(err: unknown, action?: GameAction): void {
   if (!shouldShowActionError(err)) return;
+  const title = i18n.t("actionError.title", {
+    action: action ? actionLabel(action) : i18n.t("actionError.genericAction"),
+  });
+  if (reportStructuredActionRejection(err, title) !== "not-structured") return;
   useAppNotificationStore.getState().showNotification({
-    title: i18n.t("actionError.title", { action: actionLabel(action) }),
+    title,
     description: actionErrorMessage(err),
   });
 }
@@ -270,6 +457,9 @@ async function processAction(
   actor: number,
   generation: number,
   session: BoundGameSession | null,
+  proposal?: AiActionProposal,
+  proposalOutcome?: (outcome: "applied" | "stale") => void,
+  automated = false,
 ): Promise<void> {
   if (!isDispatchContextCurrent(generation, session)) return;
   const { adapter, gameState } = useGameStore.getState();
@@ -282,17 +472,32 @@ async function processAction(
   const snapshot = useAnimationStore.getState().captureSnapshot();
   currentSnapshot = snapshot;
 
-  // 2. Save undo history if applicable. Three conditions must hold:
+  // 2. Save undo history if applicable. Five conditions must hold:
   //    a) Action is unrevealed-information (UNDOABLE_ACTIONS).
   //    b) Single-player — rewinding one client desyncs multiplayer.
   //    c) Stack is currently empty. Checkpoints exist only at stack-empty
   //       boundaries so undo always lands before the activation/trigger
   //       sequence that put things on the stack, never mid-resolution.
-  const { gameMode } = useGameStore.getState();
+  //    d) Actor is not an AI seat — machine passes would fill the ring with
+  //       states the AI loop instantly re-applies, so undo would land nowhere.
+  //    e) Not loop-automated (auto-pass) — same re-application one beat later.
+  const { gameMode, aiSeatIds } = useGameStore.getState();
   const shouldSaveHistory =
     UNDOABLE_ACTIONS.has(action.type) &&
-    !isMultiplayerMode(gameMode) &&
-    gameState.stack.length === 0;
+    !isAuthorityRemote(gameMode) &&
+    gameState.stack.length === 0 &&
+    !aiSeatIds.includes(actor) &&
+    !automated;
+
+  // Fire the trusted-envelope capture WITHOUT awaiting it: both engine
+  // transports execute requests strictly in call order (worker message FIFO;
+  // fallback promise chain), so an export issued here runs before the submit
+  // below and observes the pre-action state — while the action itself pays
+  // no added latency. Awaited at commit time, after animations. A failed
+  // capture degrades to no checkpoint for this action rather than failing it.
+  const checkpointPromise = shouldSaveHistory
+    ? captureTrustedCheckpoint(adapter).catch(() => null)
+    : null;
 
   // 3. Call WASM — get events without updating state yet.
   // `actor` is the authenticated seat ID of whoever initiated this dispatch
@@ -304,9 +509,26 @@ async function processAction(
   // PWA update desync, worker restart, etc.), transparently rehydrate from
   // the store snapshot and retry once. Safe because submitAction fails
   // before mutating any engine state when the cell is None.
+  const submit = async () => {
+    if (!proposal) return adapter.submitAction(action, actor);
+    if (!adapter.submitAiActionProposal) {
+      throw new Error("Current adapter cannot submit engine-issued AI proposals");
+    }
+    const outcome = await adapter.submitAiActionProposal(proposal);
+    if (outcome.status === "stale") return null;
+    if (outcome.status === "rejected") throw actionRejectionError(outcome.rejection);
+    return outcome.result;
+  };
   let result;
   try {
-    result = await adapter.submitAction(action, actor);
+    result = await submit();
+    // A stale AI capability is a benign race: its action was never applied.
+    // The controller observes the unchanged prompt and asks the engine again.
+    if (result === null) {
+      proposalOutcome?.("stale");
+      return;
+    }
+    proposalOutcome?.("applied");
   } catch (err) {
     if (!isDispatchContextCurrent(generation, session)) return;
     // Stale click after a priority/turn shift: the engine's actor-auth guard
@@ -349,7 +571,12 @@ async function processAction(
     // that explicitly and surface via Layer 3 rather than letting the error
     // escape uncaught.
     try {
-      result = await adapter.submitAction(action, actor);
+      result = await submit();
+      if (result === null) {
+        proposalOutcome?.("stale");
+        return;
+      }
+      proposalOutcome?.("applied");
     } catch (retryErr) {
       if (!isDispatchContextCurrent(generation, session)) return;
       // Prefer the captured panic message over the bare retry tag — that's
@@ -434,40 +661,55 @@ async function processAction(
   );
   if (resolvedCount > 0) recordStackResolutions(resolvedCount);
 
-  // 4. Checkpoint: save pre-action state on turn boundaries for debug restore
+  // 4. Checkpoint: save trusted post-action state on turn boundaries for
+  // debug restore. Rendered screen states are viewer projections the restore
+  // ingress rejects, so turn checkpoints capture the engine-authored envelope
+  // like undo checkpoints do. Post-action: the TurnStarted event fired during
+  // this action, so "saved at turn start" is the state where the new turn
+  // began. Best-effort: a failed capture skips this boundary.
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent) {
-    const prev = useGameStore.getState();
-    const updated = [...prev.turnCheckpoints, gameState].slice(-MAX_UNDO_HISTORY);
-    useGameStore.setState({ turnCheckpoints: updated });
-    if (prev.gameId) saveCheckpoints(prev.gameId, updated);
+    const turnCheckpoint = await captureTrustedCheckpoint(adapter).catch(() => null);
+    // Re-check after the await: a session boundary mid-capture must not let
+    // a stale checkpoint land in (or persist under) the replacement game.
+    if (turnCheckpoint && isDispatchContextCurrent(generation, session)) {
+      const prev = useGameStore.getState();
+      const updated = [...prev.turnCheckpoints, turnCheckpoint].slice(-MAX_UNDO_HISTORY);
+      useGameStore.setState({ turnCheckpoints: updated });
+      if (prev.gameId) saveCheckpoints(prev.gameId, updated);
+    }
   }
 
   // 5. Flash turn banner directly (bypasses animation queue for reliability)
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count (skipped turns excluded). Engine increments
     // turns_taken before TurnStarted fires, so newState already has the value.
     const turnNumber = newState.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
   }
+
+  // A hidden tab (e.g. a P2P host whose AI keeps acting in the background)
+  // skips presentation entirely: queued animation steps, notices and SFX would
+  // only pile up behind throttled timers and replay stale on return.
+  const skipPresentation = isDocumentHidden();
 
   // 5b. Surface in-game dice/coin rolls out-of-band (DiceRollOverlay), the same
   // way the turn banner bypasses the animation queue. These events are marked
   // NON_VISUAL so normalizeEvents skips them below.
-  flashInGameRolls(events);
+  if (!skipPresentation) {
+    flashInGameRolls(events);
+    flashCompletedScry(events);
+    flashUnActionEvents(events);
+  }
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = skipPresentation
+    ? []
+    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
   // 7. Play animations (unless instant — multiplier === 0). Fold in stack
   //    pressure so per-resolution timing collapses under depth OR recent churn —
@@ -479,7 +721,7 @@ async function processAction(
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(newState);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshotResult.seq);
 
     // Schedule SFX synced with each step's visual timing
     scheduleSfxForSteps(steps, multiplier);
@@ -489,7 +731,7 @@ async function processAction(
       (sum, step) => sum + step.duration * multiplier,
       0,
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+    await waitForAnimation(totalDuration);
   } else if (steps.length > 0) {
     // Instant speed: fire all SFX immediately
     for (const step of steps) {
@@ -509,14 +751,19 @@ async function processAction(
   // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
   // THIS older pair is dropped rather than clobbering it.
   if (!isDispatchContextCurrent(generation, session)) return;
+  const checkpoint = checkpointPromise ? await checkpointPromise : null;
+  // Re-check after the await: a session boundary mid-animation must not let
+  // a stale checkpoint resurrect history into the replacement game.
+  if (!isDispatchContextCurrent(generation, session)) return;
   const store = useGameStore.getState();
-  const stateHistory = shouldSaveHistory
-    ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+  const stateHistory = checkpoint
+    ? [...store.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
     : undefined;
   store.commitEngineSnapshot(snapshotResult, {
     events,
     logEntries: result.log_entries ?? [],
     stateHistory,
+    extraState: { restoredStackAutomation: null },
   });
 
   // Play victory/defeat stinger on GameOver
@@ -550,12 +797,27 @@ async function processQueue(generation: number): Promise<void> {
           waitingFor: next.waitingFor,
         };
         try {
-          await processAction(next.action, next.actor, generation, next.session);
+          await processAction(
+            next.action,
+            next.actor,
+            generation,
+            next.session,
+            next.proposal,
+            next.proposalOutcome,
+            next.automated,
+          );
         } finally {
           if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
         }
       } else {
-        await processRemoteUpdateInner(next.snapshot, next.events, next.logEntries, generation);
+        await processRemoteUpdateInner(
+          next.snapshot,
+          next.events,
+          next.logEntries,
+          generation,
+          next.rewindTargets,
+          next.coalesced,
+        );
       }
       next.resolve();
     } catch (err) {
@@ -565,7 +827,7 @@ async function processQueue(generation: number): Promise<void> {
       }
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
       if (next.kind === "local") {
-        showActionError(next.action, err);
+        reportActionError(err, next.action);
       }
       next.reject(err);
       // If processAction escalated to Layer 3 (notifyEngineLost already
@@ -613,11 +875,18 @@ async function processQueue(generation: number): Promise<void> {
  * The engine itself enforces `actor === authorized_submitter(state)`, so a
  * misrouted action fails cleanly rather than silently applying as the
  * wrong player.
+ *
+ * `automated` marks loop-issued passes (auto-pass) rather than
+ * player-initiated actions; they skip undo checkpoints (the loop would
+ * re-apply the restored state one beat later) but are otherwise identical.
  */
 async function dispatchActionInternal(
   action: GameAction,
   actor: number,
   session: BoundGameSession | null,
+  proposal?: AiActionProposal,
+  proposalOutcome?: (outcome: "applied" | "stale") => void,
+  automated = false,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
   const { gameMode } = useGameStore.getState();
@@ -632,8 +901,12 @@ async function dispatchActionInternal(
 
   if (isAnimating) {
     // Same action + same actor + same prompt is a duplicate. A changed prompt
-    // is a new decision even when the payload is structurally identical.
+    // is a new decision even when the payload is structurally identical. An
+    // Un-card touch is an event, not a decision: each one is its own instance,
+    // so a repeat while an earlier touch is in flight is never a duplicate.
+    const repeatable = isRepeatableEvent(submittedAction);
     if (
+      !repeatable &&
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
       sameBoundGameSession(inFlightLocalAction.session, session) &&
@@ -642,7 +915,7 @@ async function dispatchActionInternal(
     ) {
       return;
     }
-    for (const pending of pendingQueue) {
+    for (const pending of repeatable ? [] : pendingQueue) {
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
@@ -661,6 +934,9 @@ async function dispatchActionInternal(
         actor,
         session,
         waitingFor: currentWaitingFor,
+        proposal,
+        proposalOutcome,
+        automated,
         resolve,
         reject,
       });
@@ -676,11 +952,11 @@ async function dispatchActionInternal(
     waitingFor: currentWaitingFor,
   };
   try {
-    await processAction(submittedAction, actor, generation, session);
+    await processAction(submittedAction, actor, generation, session, proposal, proposalOutcome, automated);
   } catch (e) {
     if (!isDispatchContextCurrent(generation, session)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
-    showActionError(submittedAction, e);
+    reportActionError(e, submittedAction);
     throw e;
   } finally {
     if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
@@ -691,8 +967,85 @@ async function dispatchActionInternal(
 export function dispatchAction(
   action: GameAction,
   actor: number = getPlayerId(),
+  opts?: { automated?: boolean },
 ): Promise<void> {
-  return dispatchActionInternal(action, actor, null);
+  return dispatchActionInternal(action, actor, null, undefined, undefined, opts?.automated ?? false);
+}
+
+/** Dispatch an engine-issued AI proposal without ever reconstructing its action. */
+export async function dispatchAiActionProposal(
+  proposal: AiActionProposal,
+): Promise<{ status: "applied" | "stale" }> {
+  let outcome: "applied" | "stale" = "stale";
+  await dispatchActionInternal(proposal.action, proposal.actor, null, proposal, (submitted) => {
+    outcome = submitted;
+  });
+  return { status: outcome };
+}
+
+/**
+ * Submit an engine-authored interaction response through the same adapter and
+ * atomic snapshot boundary used by ordinary game actions.  The response is
+ * opaque: UI callers cannot materialize or reinterpret a GameAction.
+ */
+export async function dispatchInteraction(
+  submission: InteractionSubmission,
+  actor: number = getPlayerId(),
+): Promise<{ status: "applied" | "stale" }> {
+  const { adapter, gameState, gameMode, gameSessionGeneration } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return { status: "stale" };
+  }
+
+  const generation = dispatchGeneration;
+  const session: BoundGameSession = { adapter, generation: gameSessionGeneration };
+
+  try {
+    if (!adapter.submitInteraction) {
+      throw new AdapterError(
+        AdapterErrorCode.UNSUPPORTED,
+        "This game connection does not support interaction responses",
+        false,
+      );
+    }
+    const result = await adapter.submitInteraction(submission, actor);
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
+    const snapshot = await adapter.getSnapshot();
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
+    const committed = useGameStore.getState().commitEngineSnapshot(snapshot, {
+      events: result.events,
+      logEntries: result.log_entries ?? [],
+      extraState: { restoredStackAutomation: null },
+    });
+    return { status: committed ? "applied" : "stale" };
+  } catch (err) {
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
+
+    reportActionError(err);
+    throw err;
+  }
+}
+
+/**
+ * Ask the active adapter to preview an interaction response. Resolving `null` means this
+ * transport cannot preview, or the engine advanced while the request ran — in both cases the
+ * caller renders its own defined no-answer state rather than an error. An adapter or transport
+ * FAILURE rejects, exactly as the mana-payment preview does; the caller catches it.
+ */
+export async function previewInteractionResponse(
+  request: InteractionPreviewRequest,
+  actor: number = getPlayerId(),
+): Promise<InteractionPreview | null> {
+  const { adapter, gameState, gameMode } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return null;
+  }
+  if (!adapter.previewInteraction) return null;
+  const previewEpoch = useGameStore.getState().engineCommitEpoch;
+  const preview = await adapter.previewInteraction(request, actor);
+  return useGameStore.getState().engineCommitEpoch === previewEpoch ? preview : null;
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is
@@ -715,47 +1068,63 @@ async function processRemoteUpdateInner(
   events: GameEvent[],
   logEntries: GameLogEntry[] = [],
   generation: number,
+  rewindTargets?: RewindOption[],
+  coalesced = 1,
 ): Promise<void> {
   if (!isCurrentDispatchGeneration(generation)) return;
   const state = snapshot.state;
+  // Hidden tab or a deep backlog: skip the animation wait entirely (the same
+  // effect as a zero speed multiplier), and stay silent — an SFX burst for a
+  // board nobody is looking at, or for updates already stale, is noise.
+  const skipAnimation =
+    isDocumentHidden()
+    || pendingQueue.length > MAX_ANIMATED_BACKLOG
+    // A merged batch carries only its latest snapshot, so animating earlier
+    // updates' events against it can misplace their objects (e.g. a token the
+    // later update already removed). Any merge commits without animation.
+    || coalesced > 1;
 
   // 1. Capture positions before updating state (for lookups during animation)
   currentSnapshot = useAnimationStore.getState().captureSnapshot();
 
-  // 2. Flash turn banner
-  const turnEvent = events.find((e) => e.type === "TurnStarted");
+  // 2. Flash turn banner (the latest turn start: a coalesced batch can span several)
+  const turnEvent = [...events].reverse().find((e) => e.type === "TurnStarted");
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
-    const myId = getPlayerId();
-    let bannerText: string;
-    if (turnPlayerId === myId) {
-      bannerText = "YOUR TURN";
-    } else {
-      const oppName = getOpponentDisplayName(turnPlayerId);
-      bannerText = `${oppName.toUpperCase()}'S TURN`;
-    }
+    const isYourTurn = turnPlayerId === getPlayerId();
+    const bannerText = turnBannerText(turnPlayerId, isYourTurn);
     // CR 500: per-player turn count from the post-update state.
     const turnNumber = state.players[turnPlayerId]?.turns_taken ?? 1;
-    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber, isYourTurn);
+  }
+
+  // A skipped (hidden or catch-up) batch queues no per-event notices: they would
+  // replay one by one long after the board caught up. The log still has them.
+  if (!skipAnimation) {
+    flashInGameRolls(events);
+    flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = skipAnimation
+    ? []
+    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
   // 4. Play animations (unless instant — multiplier === 0)
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(state);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshot.seq);
     scheduleSfxForSteps(steps, multiplier);
 
     const totalDuration = steps.reduce(
       (sum, step) => sum + step.duration * multiplier,
       0,
     );
-    await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+    await waitForAnimation(totalDuration);
   } else if (steps.length > 0) {
     for (const step of steps) {
       audioManager.playSfxForStep(step.effects);
@@ -766,7 +1135,19 @@ async function processRemoteUpdateInner(
   //    update that was superseded while its animation played is dropped rather
   //    than clobbering the newer state.
   if (!isCurrentDispatchGeneration(generation)) return;
-  useGameStore.getState().commitEngineSnapshot(snapshot, { events, logEntries });
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    events,
+    logEntries,
+    extraState: { restoredStackAutomation: null },
+  });
+  // Written INSIDE the generation gate, alongside the snapshot it describes:
+  // outside it, a superseded update would clobber the list with a stale one.
+  // `undefined` means "this transport does not publish rollback targets" (p2p,
+  // draft) and leaves the store alone; `[]` means "the server published none"
+  // and clears it. The two are deliberately not collapsed.
+  if (rewindTargets) {
+    useGameStore.getState().setRewindTargets(rewindTargets);
+  }
 
   // 6. Play victory/defeat stinger on GameOver
   const gameOverEvent = events.find((e) => e.type === "GameOver");
@@ -790,34 +1171,95 @@ export async function processRemoteUpdate(
   snapshot: EngineSnapshot,
   events: GameEvent[],
   logEntries?: GameLogEntry[],
+  rewindTargets?: RewindOption[],
 ): Promise<void> {
   if (isAnimating) {
-    return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", snapshot, events, logEntries, resolve, reject });
-    });
+    return enqueueRemoteUpdate(snapshot, events, logEntries, rewindTargets);
   }
 
   const generation = dispatchGeneration;
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(snapshot, events, logEntries, generation);
+    await processRemoteUpdateInner(snapshot, events, logEntries, generation, rewindTargets);
   } finally {
     releaseDispatchMutex(generation);
   }
 }
 
 /**
- * Restore a previously captured GameState snapshot.
+ * Queue a remote update behind the work in flight, coalescing it into the
+ * queue's last entry when that entry is also a remote update.
+ *
+ * Remote updates are full engine snapshots, so only the newest one matters for
+ * state; the older ones contribute history. The merged entry therefore keeps
+ * the higher-`seq` snapshot (the same ordering `commitEngineSnapshot` gates
+ * on, so an out-of-order older update never wins), concatenates events and log
+ * entries in arrival order so the game log stays complete, and carries the
+ * rewind targets published alongside the winning snapshot. A queued local
+ * action is never overtaken: coalescing only looks at the LAST entry, so a
+ * `remote, local, remote` queue keeps all three in order.
+ *
+ * Every coalesced caller's promise settles together with the merged entry.
+ */
+function enqueueRemoteUpdate(
+  snapshot: EngineSnapshot,
+  events: GameEvent[],
+  logEntries: GameLogEntry[] | undefined,
+  rewindTargets: RewindOption[] | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const last = pendingQueue[pendingQueue.length - 1];
+    if (last?.kind !== "remote") {
+      const waiters: RemoteWaiter[] = [{ resolve, reject }];
+      pendingQueue.push({
+        kind: "remote",
+        snapshot,
+        events,
+        logEntries,
+        rewindTargets,
+        coalesced: 1,
+        waiters,
+        ...sharedRemoteSettlement(waiters),
+      });
+      return;
+    }
+
+    const incomingIsNewest = snapshot.seq >= last.snapshot.seq;
+    if (incomingIsNewest) last.snapshot = snapshot;
+    // From its first merge the entry owns its sidecar arrays (the first
+    // caller's arrays are not mutated); later merges append in place rather
+    // than recopying the accumulated history on every update.
+    if (last.coalesced === 1) {
+      last.events = [...last.events];
+      if (last.logEntries) last.logEntries = [...last.logEntries];
+    }
+    for (const event of events) last.events.push(event);
+    if (logEntries && logEntries.length > 0) {
+      const merged = (last.logEntries ??= []);
+      for (const entry of logEntries) merged.push(entry);
+    }
+    // `undefined` means "this transport publishes no rewind targets" and must
+    // not erase a list that was published; otherwise the winner's list wins.
+    last.rewindTargets = incomingIsNewest
+      ? (rewindTargets ?? last.rewindTargets)
+      : (last.rewindTargets ?? rewindTargets);
+    last.coalesced += 1;
+    last.waiters.push({ resolve, reject });
+  });
+}
+
+/**
+ * Restore a previously captured game-state snapshot or trusted persistence envelope.
  * Returns null on success, or an error message string on failure.
  */
 export async function restoreGameState(
-  state: GameState,
+  state: PersistedGameState,
   options: { preserveCheckpoints?: boolean } = {},
 ): Promise<string | null> {
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
-  abandonDispatchesForStateRestore();
+  abandonPendingDispatches();
   try {
     await adapter.restoreState(state);
   } catch (err) {
@@ -831,12 +1273,19 @@ export async function restoreGameState(
     : [];
   useGameStore.getState().commitEngineSnapshot(snapshot, {
     extraState: {
+      // A restore that keeps this game's checkpoints rewinds the same game; any
+      // other restore (an import) replaces it, so it starts a new game session
+      // and session-bound work (e.g. the Show AI Hand request) re-binds to it.
+      ...(options.preserveCheckpoints
+        ? {}
+        : { gameSessionGeneration: nextGameSessionGeneration() }),
       events: [],
       eventHistory: [],
       logHistory: [],
       nextLogSeq: 0,
       stateHistory: [],
       turnCheckpoints: preservedCheckpoints,
+      restoredStackAutomation: null,
     },
   });
   if (gameId) {
@@ -847,129 +1296,21 @@ export async function restoreGameState(
   return null;
 }
 
-const BATCH_CHUNK_SIZE = 5;
-// Under "Instant" stack pressure (a multi-hundred/thousand identical-trigger
-// storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted. Keep
-// large storms in engine-owned fast-forward batches so partial stacks collapse
-// before the frontend pays the per-chunk `getSnapshot` cost.
-// The value is intentionally large: the worker boundary already keeps the main
-// thread responsive, while this still lets the overlay update during truly
-// pathological stacks.
-const BATCH_CHUNK_INSTANT = 5_000;
-const BATCH_CHUNK_BASE_DELAY_MS = 150;
-let batchResolveInProgress = false;
-
-export async function dispatchResolveAll(
-  requester: number,
-  aiSeats: { playerId: number; difficulty: string }[],
-): Promise<void> {
-  if (batchResolveInProgress) return;
-  const { adapter: batchAdapter } = useGameStore.getState();
-  if (!batchAdapter) {
-    debugLog("dispatchResolveAll: no adapter");
-    return;
-  }
-  if (!batchAdapter.resolveAll || aiSeats.length === 0) {
-    // No batch drain (multiplayer transports), or no AI deciders for the other
-    // seats (local hotseat — every seat is a human, #4978): those seats are
-    // humans, and CR 117.4 entitles each of them to their own priority window
-    // before anything resolves — the engine must not pass on their behalf.
-    // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
-    // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
-    // this player receives priority and clears itself when the stack empties
-    // or grows (an opponent responded).
-    await dispatchAction(
-      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
-      requester,
-    );
-    return;
-  }
-
-  batchResolveInProgress = true;
-  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
-  const { setIsResolvingAll, setResolutionProgress } = useGameStore.getState();
-  setIsResolvingAll(true);
-  // Storm-origin denominator: latched from the FIRST chunk's `total` because
-  // the engine reports the *remaining* stack per chunk (shrinks as it drains),
-  // so only the first chunk carries the true origin count.
-  let latchedTotal = 0;
-  // Engine-authoritative gross resolved count, accumulated across chunks.
-  let resolvedSoFar = 0;
-
-  try {
-    for (;;) {
-      // Re-evaluate pressure each iteration: a storm shrinks as it drains, so
-      // it eventually drops back to the animated 5-at-a-time path near the end.
-      const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
-      const instant = stackPressureFromLength(stackLen) === "Instant";
-      const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
-
-      const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
-        requester, aiSeats, chunkSize,
-      );
-
-      if (latchedTotal === 0) latchedTotal = batchResult.total;
-      resolvedSoFar += batchResult.itemsResolved;
-      // Keep the throughput tracker warm so a storm draining below Instant keeps
-      // its animated tail fast instead of snapping back to full pacing.
-      // `itemsResolved` is a net-shrink count (can lag the true gross when a
-      // resolution spawns triggers) — an acceptable under-count here since the
-      // batch path is already depth-gated, where the depth axis dominates pacing.
-      if (batchResult.itemsResolved > 0) recordStackResolutions(batchResult.itemsResolved);
-      // Surface progress only for a genuine storm (trivial multi-item resolves
-      // drain too fast to render). Clamp to the latched total: `itemsResolved`
-      // is a net-shrink count that can lag the true gross when a resolution
-      // spawns triggers, so clamping keeps the bar monotonic and lets it
-      // complete. `resolved`/`total` are engine-provided — no frontend derivation.
-      if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
-        setResolutionProgress({
-          resolved: Math.min(resolvedSoFar, latchedTotal),
-          total: latchedTotal,
-        });
-      }
-
-      // One atomic pair per chunk, committed through the single authority. The
-      // store's `waitingFor` therefore comes from the snapshot's own state, not
-      // from `batchResult.waitingFor` — the pair must stay self-consistent.
-      // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
-      // worker FIFO guarantees this snapshot reflects at least the chunk's end
-      // state.
-      const snapshot = await batchAdapter.getSnapshot();
-      useGameStore.getState().commitEngineSnapshot(snapshot);
-
-      // Anything other than Priority ends the drain — GameOver included, since
-      // the drain only continues while this seat keeps receiving priority.
-      const done =
-        batchResult.itemsResolved === 0 ||
-        snapshot.state.stack.length === 0 ||
-        snapshot.state.waiting_for.type !== "Priority";
-      if (done) break;
-
-      if (instant) {
-        // Yield one frame so the resolution-progress overlay repaints between
-        // chunks. This rAF is the load-bearing progress fix — without it,
-        // back-to-back Instant chunks never let the browser paint, producing
-        // the "wait, then N vanish at once" symptom.
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        continue;
-      }
-
-      const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
-      if (chunkDelay > 0) {
-        await new Promise<void>((r) => setTimeout(r, chunkDelay));
-      } else {
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      }
-    }
-
-    const { gameId, adapter } = useGameStore.getState();
-    const newState = useGameStore.getState().gameState;
-    if (gameId && adapter && newState) {
-      await saveAuthoritativeGame(gameId, adapter, newState);
-    }
-  } finally {
-    batchResolveInProgress = false;
-    setIsResolvingAll(false);
-    setResolutionProgress(null);
-  }
+/**
+ * Begin the engine-owned Resolve All consent transaction. The final grant
+ * installs and runs the shared stack-resolution session in the engine; the
+ * browser never drains a Ready prefix or selects which future entries pass.
+ */
+export async function dispatchResolveAll(requester: number): Promise<void> {
+  await dispatchAction(
+    // CR 117.3d: the button is the requester's own pre-commitment. `Own` cannot
+    // be blocked by a seat that declines or an AI seat that never answers;
+    // `Shared` (the table-wide consent proposal the engine uses for stack
+    // compression) is deliberately not reachable from this control.
+    {
+      type: "BeginResolveAll",
+      data: { max_resolutions: 0, scope: { type: "Own" } },
+    },
+    requester,
+  );
 }

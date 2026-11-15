@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { GameObject } from "../../adapter/types";
 import { groupByName, partitionByType } from "../battlefieldProps";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../test/factories/gameObjectFactory";
+import { buildGameState } from "../../test/factories/gameStateFactory";
+import { buildPlayerBattlefieldView } from "../gameStateView";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -215,6 +218,20 @@ describe("partitionByType", () => {
 });
 
 describe("groupByName", () => {
+  it("never folds a melded permanent into a same-named group", () => {
+    const objects = [
+      makeGameObject({ id: 1, name: "Brisela, Voice of Nightmares" }),
+      makeGameObject({ id: 2, name: "Brisela, Voice of Nightmares", merge_kind: "Meld", merged_components: [2, 3] }),
+    ];
+
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
+
+    expect(groups).toHaveLength(2);
+    expect(groups.find((g) => g.ids.includes(2))).toMatchObject({ ids: [2], count: 1 });
+    expect(groups.find((g) => g.ids.includes(2))?.representative.isMelded).toBe(true);
+    expect(groups.find((g) => g.ids.includes(1))?.representative.isMelded).toBe(false);
+  });
+
   it("stacks matching permanents by name and tapped state", () => {
     const objects = [
       makeGameObject({ id: 1, name: "Forest" }),
@@ -222,7 +239,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Mountain" }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatchObject({ name: "Forest", ids: [1, 2], count: 2 });
@@ -236,7 +253,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Forest", tapped: false }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     const untapped = groups.find((g) => !g.representative.tapped);
@@ -251,8 +268,14 @@ describe("groupByName", () => {
       makeGameObject({ id: 2, name: "Grizzly Bears", counters: { Plus1Plus1: 1 } }),
       makeGameObject({ id: 3, name: "Grizzly Bears", attachments: [99] }),
     ];
+    // The group identity reads the ENGINE's rows, so the fixture supplies them; `obj.counters` is
+    // kept in sync only so the object stays a plausible engine snapshot.
+    const counterDisplay = {
+      "1": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+      "2": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+    };
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, counterDisplay, false);
 
     // Two copies with identical counters stack; the one with an attachment is solo
     expect(groups).toHaveLength(2);
@@ -267,7 +290,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Orc Army" }),
     ];
 
-    const groups = groupByName(objects, new Set([2]));
+    const groups = groupByName(objects, new Set([2]), undefined, undefined, false);
 
     // The ring-bearer (id 2) never gets hidden behind a non-bearer
     // representative in a collapsed group — it always has its own entry so
@@ -283,8 +306,13 @@ describe("groupByName", () => {
       makeGameObject({ id: 2, name: "Grizzly Bears", counters: { Plus1Plus1: 2 } }),
       makeGameObject({ id: 3, name: "Grizzly Bears", counters: { Plus1Plus1: 1 } }),
     ];
+    const counterDisplay = {
+      "1": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+      "2": { pills: [{ counter: "Plus1Plus1", count: 2 }] },
+      "3": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+    };
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, counterDisplay, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -298,7 +326,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", power: 2, toughness: 2 }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -312,7 +340,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", power: 2, toughness: 2 }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -326,7 +354,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Llanowar Elves", keywords: [] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -342,7 +370,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Spectral Sailor", keywords: [ward2] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -356,7 +384,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", color: ["Green"] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -369,7 +397,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 9, name: "Mountain" }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups[0].name).toBe("Forest");
     expect(groups[0].representative.id).toBe(5);
@@ -417,7 +445,7 @@ describe("groupByName", () => {
       color: ["Black", "Green"],
     });
 
-    const groups = groupByName([attackPest, diesPest]);
+    const groups = groupByName([attackPest, diesPest], undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
     expect(groups.map((g) => g.count).sort()).toEqual([1, 1]);
@@ -465,7 +493,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
   });
@@ -515,7 +543,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
   });
@@ -534,12 +562,12 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
     expect(groups).toHaveLength(2);
   });
 
-  it("groups face-down permanents by public characteristics instead of hidden names", () => {
+  it("keeps face-down permanents separate in battlefield order", () => {
     const objects = [
       makeGameObject({
         id: 54,
@@ -559,14 +587,11 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined, false);
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0]).toMatchObject({
-      name: "Face-down card",
-      ids: [54, 55],
-      count: 2,
-    });
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.ids)).toEqual([[54], [55]]);
+    expect(groups.map((group) => group.name)).toEqual(["Face-down card", "Face-down card"]);
   });
 
   // DESIGN STEP 4 (∞-pile): groupByName marks a group isUnboundedPile iff EVERY
@@ -593,7 +618,7 @@ describe("groupByName", () => {
     const pile = new Set([1, 2]);
 
     // Both tapped Saprolings are pile members → the group is ∞.
-    const infinite = groupByName(tappedFodder, undefined, pile);
+    const infinite = groupByName(tappedFodder, undefined, pile, undefined, false);
     expect(infinite).toHaveLength(1);
     expect(infinite[0].isUnboundedPile).toBe(true);
 
@@ -607,12 +632,203 @@ describe("groupByName", () => {
       toughness: 1,
       card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
     });
-    const mixed = groupByName([...tappedFodder, untapped], undefined, pile);
+    const mixed = groupByName([...tappedFodder, untapped], undefined, pile, undefined, false);
     const untappedGroup = mixed.find((g) => g.ids.includes(3));
     expect(untappedGroup?.isUnboundedPile).toBe(false);
 
     // Empty pile set → no group is ∞ (the dominant no-loop case; also the default).
-    expect(groupByName(tappedFodder)[0].isUnboundedPile).toBe(false);
-    expect(groupByName(tappedFodder, undefined, new Set())[0].isUnboundedPile).toBe(false);
+    expect(groupByName(tappedFodder, undefined, undefined, undefined, false)[0].isUnboundedPile).toBe(false);
+    expect(groupByName(tappedFodder, undefined, new Set(), undefined, false)[0].isUnboundedPile).toBe(false);
+  });
+
+  // CR 122.1 + CR 732.2a: the group identity keys on the engine's RENDERED counter rows, so a
+  // collapsed group's representative can never speak for a member that renders differently. This
+  // is the live `GroupedPermanent` representative bug — the collapsed branch subscribes the
+  // counter projection for `ids[0]` alone.
+  it("splits a group whose members disagree on their counter rows, and only then", () => {
+    const twins = () => [
+      makeGameObject({ id: 1, name: "Pentad Prism", counters: { charge: 4 } }),
+      makeGameObject({ id: 2, name: "Pentad Prism", counters: { charge: 4 } }),
+    ];
+
+    // NEGATIVE — THE FIX. Byte-identical counter maps; only id 1 is `∞`-annotated. `magnitude` is
+    // absent on id 2's row exactly as the engine omits the serde default.
+    const divergent = groupByName(twins(), undefined, undefined, {
+      "1": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+      "2": { pills: [{ counter: "charge", count: 4 }] },
+    }, false);
+    expect(divergent).toHaveLength(2);
+    expect(divergent.find((g) => g.ids.includes(1))?.ids).toEqual([1]);
+
+    // POSITIVE — THE REACH-GUARD. The SAME two objects with the SAME entry collapse into one
+    // group, which is what proves the split above is caused by the ∞ divergence and by nothing
+    // else (a groupKey that split on object id would pass the negative arm vacuously).
+    const identical = groupByName(twins(), undefined, undefined, {
+      "1": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+      "2": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+    }, false);
+    expect(identical).toHaveLength(1);
+    expect(identical[0].ids).toEqual([1, 2]);
+
+    // FREE ARM 1 — objects with no entry at all still collapse, i.e. the new fragment does not
+    // accidentally key on identity.
+    expect(groupByName(twins(), undefined, undefined, {}, false)).toHaveLength(1);
+
+    // FREE ARM 2 — the DE-split direction (behavior change #5). The engine drops zero-count
+    // finite rows (CR 122.1), so a `{charge: 0}` permanent and a counterless one publish the same
+    // (empty) row set and now render identically. Reading `obj.counters` here instead of the
+    // projection splits them, as the head revision did.
+    const zeroVsAbsent = [
+      makeGameObject({ id: 1, name: "Pentad Prism", counters: { charge: 0 } }),
+      makeGameObject({ id: 2, name: "Pentad Prism", counters: {} }),
+    ];
+    expect(groupByName(zeroVsAbsent, undefined, undefined, {}, false)).toHaveLength(1);
+  });
+});
+
+describe("owner-printing battlefield identity", () => {
+  const a = { set_code: "own", collector_number: "01" };
+  const b = { set_code: "own", collector_number: "02" };
+  const card = (id: number, printing?: GameObject["printing"]) =>
+    buildGameObjectWithCoreTypes(["Creature"], { id, name: "Alpha", printing,
+      printed_ref: { oracle_id: "oracle-a", face_name: "Alpha" } });
+  const ids = (objects: GameObject[], enabled: boolean) =>
+    groupByName(objects, undefined, undefined, undefined, enabled).map((group) => group.ids);
+
+  it("compares both delivered fields by value, with null and omission equal", () => {
+    const objects = [
+      card(1, a),
+      card(2, { collector_number: "01", set_code: "own" }),
+      card(3, b),
+      card(4, { set_code: "other", collector_number: "01" }),
+      card(5, null),
+      card(6),
+    ];
+    expect(ids(objects, true)).toEqual([[1, 2], [3], [4], [5, 6]]);
+    expect(ids(objects, false)).toEqual([[1, 2, 3, 4, 5, 6]]);
+  });
+
+  it.each(["different", "face", "missing", "equal", "legacy"] as const)(
+    "groups the effective selected authority, not just the pair: %s", (authority) => {
+      const first = card(1, a);
+      const second = card(2, a);
+      if (authority === "different") second.printed_ref = { oracle_id: "oracle-b", face_name: "Alpha" };
+      if (authority === "face") second.printed_ref = { oracle_id: "oracle-a", face_name: "Reverse" };
+      if (authority === "missing" || authority === "legacy") second.printed_ref = null;
+      if (authority === "legacy") first.printed_ref = null;
+      for (const objects of [[first, second], [second, first]]) {
+        const order = objects.map((object) => object.id);
+        expect(ids(objects, true)).toEqual(["different", "face", "missing"].includes(authority)
+          ? order.map((id) => [id]) : [order]);
+        expect(ids(objects, false)).toEqual([order]);
+      }
+    },
+  );
+
+  it("coalesces transformed legacy names but separates identified emblem own art", () => {
+    const objects = [card(1, a), card(2, a)];
+    for (const [index, object] of objects.entries()) {
+      object.printed_ref = null;
+      object.transformed = true;
+      object.back_face = { ...objects[index], name: index === 0 ? "Front A" : "Front B" };
+    }
+    for (const order of [objects, [...objects].reverse()]) {
+      expect(ids(order, true)).toEqual([order.map((object) => object.id)]);
+      expect(ids(order, false)).toEqual([order.map((object) => object.id)]);
+    }
+    for (const object of objects) {
+      object.transformed = false;
+      object.is_emblem = true;
+      object.emblem_source = { name: "Creator", printed_ref: { oracle_id: "creator", face_name: "Creator" }, printing: b };
+      object.printed_ref = { oracle_id: `own-${object.id}`, face_name: "Alpha" };
+    }
+    for (const order of [objects, [...objects].reverse()]) {
+      expect(ids(order, true)).toEqual(order.map((object) => [object.id]));
+      expect(ids(order, false)).toEqual([order.map((object) => object.id)]);
+    }
+  });
+
+  it.each([
+    [{ set_code: "OWN", collector_number: "01" }, a],
+    [{ set_code: " own", collector_number: "01" }, a],
+    [{ set_code: "own", collector_number: "1" }, a],
+    [{ set_code: "own", collector_number: "01 " }, a],
+    [{ set_code: "a|b", collector_number: "c" }, { set_code: "a", collector_number: "b|c" }],
+    [{ set_code: "", collector_number: "" }, null],
+    [{ set_code: "invalid", collector_number: "x" }, { set_code: "foreign", collector_number: "x" }],
+  ])("never normalizes or admits printing identity (%j vs %j)", (left, right) => {
+    const objects = [card(1, left), card(2, { ...left }), card(3, right)];
+    expect(ids(objects, true)).toEqual([[1, 2], [3]]);
+    expect(ids(objects, false)).toEqual([[1, 2, 3]]);
+  });
+
+  it.each([false, true])("keeps concealed singletons and face-up absent twins (%s)", (enabled) => {
+    const objects = [
+      { ...card(7), face_down: true },
+      { ...card(8, null), face_down: true },
+      card(9),
+      card(10, null),
+    ];
+    expect(ids(objects, enabled)).toEqual([[7], [8], [9, 10]]);
+    expect(ids([], enabled)).toEqual([]);
+  });
+
+  it("preserves insertion order, representatives and every-member infinity after splitting", () => {
+    const objects = [card(5, a), card(2, b), card(8, a), card(3, b), card(9, null), card(10)];
+    const grouped = (enabled: boolean) =>
+      groupByName(objects, undefined, new Set([5, 8, 2]), undefined, enabled)
+        .map((group) => [group.ids, group.count, group.representative.id, group.isUnboundedPile]);
+    expect(grouped(false)).toEqual([[[5, 2, 8, 3, 9, 10], 6, 5, false]]);
+    expect(grouped(true)).toEqual([
+      [[5, 8], 2, 5, true], [[2, 3], 2, 2, false], [[9, 10], 2, 9, false],
+    ]);
+    expect(groupByName([card(2, b)], undefined, new Set([2]), undefined, true)[0].isUnboundedPile).toBe(true);
+  });
+
+  it.each([false, true])("retains legacy nonprinting boundaries and first-member order (%s)", (enabled) => {
+    const differences: Partial<GameObject>[] = [
+      { tapped: true }, { power: 3 }, { damage_marked: 1 }, { is_commander: true },
+      { is_token: true }, { token_rules_text: "Distinct delivered text" },
+      { keywords: ["Flying"] }, { color: ["Red"] }, { attachments: [99] },
+      { has_summoning_sickness: true }, { transformed: true }, { flipped: true },
+      { merge_kind: "Meld", merged_components: [2, 3] },
+    ];
+    for (const difference of differences) {
+      const objects = [card(5, a), { ...card(2, a), ...difference }, card(8, { ...a })];
+      const groups = groupByName(objects, undefined, undefined, undefined, enabled);
+      expect(groups.map((group) => [group.ids, group.count, group.representative.id]))
+        .toEqual([[[5, 8], 2, 5], [[2], 1, 2]]);
+    }
+    const objects = [card(5, a), card(2, a), card(8, a)];
+    expect(groupByName(objects, new Set([2]), undefined, undefined, enabled)
+      .map((group) => group.ids)).toEqual([[5, 8], [2]]);
+    expect(groupByName(objects, undefined, undefined, {
+      "2": { pills: [{ counter: "charge", count: 1 }] },
+    }, enabled).map((group) => group.ids)).toEqual([[5, 8], [2]]);
+  });
+
+  it("threads the viewer choice through all five builder rows without selecting by owner", () => {
+    const types = ["Creature", "Land", "Artifact", "Planeswalker", "Battle"] as const;
+    const objects = types.flatMap((type, index) =>
+      [a, { ...a }, b].map((printing, member) =>
+        buildGameObjectWithCoreTypes([type], {
+          id: index * 10 + member + 1, name: type, printing, owner: 1, controller: 0,
+          printed_ref: { oracle_id: "oracle-a", face_name: type },
+        })));
+    const state = buildGameState({ objects: buildObjectMap(...objects), battlefield: objects.map((object) => object.id) });
+    for (const enabled of [false, true]) {
+      const view = buildPlayerBattlefieldView(state, 0, enabled);
+      for (const [index, row] of ["creatures", "lands", "support", "planeswalkers", "other"].entries()) {
+        expect(view[row as keyof typeof view].map((group) => group.ids)).toEqual(enabled
+          ? [[index * 10 + 1, index * 10 + 2], [index * 10 + 3]]
+          : [[index * 10 + 1, index * 10 + 2, index * 10 + 3]]);
+      }
+      expect(buildPlayerBattlefieldView(state, 1, enabled)).toEqual({
+        creatures: [], lands: [], support: [], planeswalkers: [], other: [],
+      });
+      expect(buildPlayerBattlefieldView(null, 0, enabled)).toEqual({
+        creatures: [], lands: [], support: [], planeswalkers: [], other: [],
+      });
+    }
   });
 });

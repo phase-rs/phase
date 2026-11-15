@@ -147,4 +147,19 @@ describe("UnhandledWaitingForModal round-trip (issue #337)", () => {
       container.querySelector('[data-unhandled-waiting-for="OrphanEngineChoice"]'),
     ).not.toBeNull();
   });
+
+  it("ResolutionOptionalPaymentChoice is registered and never reaches the safety net", () => {
+    vi.mocked(isWaitingForHandled).mockImplementation((wf) => realIsHandled(wf));
+    const waitingFor: WaitingFor = {
+      type: "ResolutionOptionalPaymentChoice",
+      data: { player: 0, source_id: 7, costs: [] },
+    };
+    seedStoreFromState(waitingFor, { gameMode: "ai", activePlayerId: 0 });
+
+    const { container } = render(
+      <UnhandledWaitingForModal onExit={vi.fn()} exitLabel="Return to menu" />,
+    );
+    expect(realIsHandled(waitingFor)).toBe(true);
+    expect(container.firstChild).toBeNull();
+  });
 });

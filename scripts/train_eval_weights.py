@@ -60,8 +60,11 @@ MAX_WEIGHT_SCALE = 2.5
 
 # Self-play harvest features. Names are exactly the EvalWeights struct fields, so
 # each fitted coefficient maps DIRECTLY onto its weight (no proxy map). All 9 are
-# fitted; `energy_offset` is a fixed-coefficient control fed to the regression and
-# then discarded (matching the engine's post-weighting energy offset).
+# fitted; `energy_offset` and `mana_development_offset` are two fixed-coefficient
+# controls fed to the regression and then discarded (matching the engine's
+# post-weighting offsets). Feeding them in keeps their explanatory power off the
+# correlated fitted features rather than biasing `hand_size` / `zone_quality` /
+# `card_advantage`.
 SELFPLAY_FEATURE_NAMES = [
     "life",
     "board_presence",
@@ -73,7 +76,8 @@ SELFPLAY_FEATURE_NAMES = [
     "zone_quality",
     "synergy",
 ]
-SELFPLAY_CONTROL = "energy_offset"
+SELFPLAY_CONTROLS = ["energy_offset", "mana_development_offset"]
+MIN_HARVEST_SCHEMA = 3
 
 # Smoke thresholds under --allow-tiny-corpus (vs the production 1000 / 100).
 TINY_GLOBAL_MIN = 10
@@ -457,8 +461,12 @@ def load_selfplay_corpus(
     """Read JSONL harvest shards, skip meta lines, bucket rows by turn phase.
 
     Returns (phase_features, phase_labels, meta, files, seeds) where
-    phase_features values are (N, 10) arrays (9 fitted features + the
-    `energy_offset` control) and phase_labels values are (N,) arrays of 0/1.
+    phase_features values are (N, 11) arrays (9 fitted features + the two
+    fixed-coefficient controls) and phase_labels values are (N,) arrays of 0/1.
+
+    Only schema-3-or-newer shards are admitted. Schema 2 used the same
+    `mana_development_offset` name for an absolute count, so pooling it with the
+    signed schema-3 differential would corrupt the fitted weights.
     """
     files = sorted(glob.glob(glob_pattern))
     if not files:
@@ -473,9 +481,16 @@ def load_selfplay_corpus(
     meta: dict = {}
     seeds: set = set()
     total = 0
-    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
+    accepted_files = []
 
     for path in files:
+        shard_schema = None
+        excluded_reason = None
+        shard_meta: dict = {}
+        shard_feat: dict[str, list[list[float]]] = {"early": [], "mid": [], "late": []}
+        shard_lab: dict[str, list[int]] = {"early": [], "mid": [], "late": []}
+        shard_seeds: set = set()
+        shard_total = 0
         with open(path) as handle:
             for line in handle:
                 line = line.strip()
@@ -483,16 +498,41 @@ def load_selfplay_corpus(
                     continue
                 obj = json.loads(line)
                 if "meta" in obj:
-                    # First meta line wins for provenance; shards share a run.
-                    if not meta:
-                        meta = obj["meta"]
+                    shard_schema = int(obj["meta"].get("schema", 0))
+                    if shard_schema < MIN_HARVEST_SCHEMA:
+                        excluded_reason = f"schema {shard_schema} < {MIN_HARVEST_SCHEMA}"
+                        break
+                    # Preserve the first accepted metadata line for provenance.
+                    if not shard_meta:
+                        shard_meta = obj["meta"]
                     continue
+                if shard_schema is None:
+                    excluded_reason = "missing harvest metadata"
+                    break
                 feats = obj["features"]
                 phase = turn_phase(int(obj["turn"]))
-                phase_feat[phase].append([float(feats[name]) for name in columns])
-                phase_lab[phase].append(1 if obj["won"] else 0)
-                seeds.add(int(obj["seed"]))
-                total += 1
+                row = [float(feats[name]) for name in SELFPLAY_FEATURE_NAMES]
+                row += [float(feats[name]) for name in SELFPLAY_CONTROLS]
+                shard_feat[phase].append(row)
+                shard_lab[phase].append(1 if obj["won"] else 0)
+                shard_seeds.add(int(obj["seed"]))
+                shard_total += 1
+        if excluded_reason:
+            print(f"Skipping {path}: {excluded_reason}", file=sys.stderr)
+            continue
+        if shard_schema is None:
+            print(f"Skipping {path}: missing harvest metadata", file=sys.stderr)
+            continue
+        # A shard is admitted atomically: a late invalid metadata marker must not
+        # leak rows collected before it into the training corpus.
+        for phase in ["early", "mid", "late"]:
+            phase_feat[phase].extend(shard_feat[phase])
+            phase_lab[phase].extend(shard_lab[phase])
+        if not meta:
+            meta = shard_meta
+        seeds.update(shard_seeds)
+        total += shard_total
+        accepted_files.append(path)
 
     phase_features = {}
     phase_labels = {}
@@ -501,7 +541,9 @@ def load_selfplay_corpus(
             phase_features[phase] = np.asarray(phase_feat[phase], dtype=np.float64)
             phase_labels[phase] = np.asarray(phase_lab[phase], dtype=np.int64)
         else:
-            phase_features[phase] = np.empty((0, len(columns)))
+            phase_features[phase] = np.empty(
+                (0, len(SELFPLAY_FEATURE_NAMES) + len(SELFPLAY_CONTROLS))
+            )
             phase_labels[phase] = np.empty(0)
         print(
             f"  {phase}: {len(phase_features[phase])} samples",
@@ -509,7 +551,7 @@ def load_selfplay_corpus(
         )
 
     print(f"\nTotal self-play samples: {total}", file=sys.stderr)
-    return phase_features, phase_labels, meta, files, seeds
+    return phase_features, phase_labels, meta, accepted_files, seeds
 
 
 def train_selfplay_model(
@@ -558,18 +600,22 @@ def train_selfplay_model(
 def extract_selfplay_weights(model: LogisticRegression, phase_name: str) -> tuple[dict, dict]:
     """Map self-play coefficients DIRECTLY onto weight names (no proxy map).
 
-    The `energy_offset` control coefficient is recorded but discarded — it is a
-    fixed serve-time offset, not a fitted weight. Remaining coefficients are
+    The `energy_offset` and `mana_development_offset` control coefficients are
+    recorded but discarded — both are fixed serve-time offsets, not fitted
+    weights. Remaining coefficients are
     `abs()`-ed and scaled so the max maps to MAX_WEIGHT_SCALE. HAND_TUNED is NOT
     applied: self-play measures every weight.
     """
-    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
-    raw_coefs = {name: round(float(coef), 6) for name, coef in zip(columns, model.coef_[0])}
+    columns = SELFPLAY_FEATURE_NAMES + SELFPLAY_CONTROLS
+    raw_coefs = {
+        name: round(float(coef), 6)
+        for name, coef in zip(columns, model.coef_[0], strict=True)
+    }
 
     print(f"  {phase_name} raw coefficients:", file=sys.stderr)
     for name, coef in raw_coefs.items():
         sign = "+" if coef >= 0 else ""
-        tag = " (control, discarded)" if name == SELFPLAY_CONTROL else ""
+        tag = " (control, discarded)" if name in SELFPLAY_CONTROLS else ""
         print(f"    {name}: {sign}{coef}{tag}", file=sys.stderr)
 
     fitted = {name: raw_coefs[name] for name in SELFPLAY_FEATURE_NAMES}
@@ -647,7 +693,7 @@ def run_selfplay(args) -> None:
         "base_seeds": sorted(seeds),
         "total_sample_count": total_samples,
         "feature_names": SELFPLAY_FEATURE_NAMES,
-        "control_feature": SELFPLAY_CONTROL,
+        "control_features": SELFPLAY_CONTROLS,
         "turn_boundaries": {
             "early": f"turns 1-{EARLY_MAX}",
             "mid": f"turns {EARLY_MAX + 1}-{MID_MAX}",

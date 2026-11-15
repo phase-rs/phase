@@ -12,8 +12,8 @@
 
 use crate::game::targeting::extract_source_from_event;
 use crate::types::ability::{
-    CastingPermission, DelayedTriggerCondition, Effect, EffectError, EffectKind, ExiledSpellRider,
-    PermissionGrantee, ResolvedAbility, TargetFilter, TargetRef,
+    CastingPermission, DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError,
+    EffectKind, ExiledSpellRider, PermissionGrantee, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -56,12 +56,15 @@ pub fn resolve(
         // CR 614.1a: only a spell still on the stack can be redirected as it
         // resolves; if it already left the stack (countered, fizzled) there is
         // nothing to replace.
+        // CR 607.2b + CR 113.7a: the linking source is the object whose ability
+        // this is, even when that object has since left (CR 400.7).
+        let link_source = ability.source_ref(state);
         if let Some(obj) = state.objects.get_mut(&spell_id) {
             if obj.zone == Zone::Stack {
                 // CR 607.2b: record the linking source so the eventual exile is
                 // tracked as "exiled with [this source]". Presence of this
                 // typed source is also the CR 614.1a exile-instead marker.
-                obj.exile_from_stack_linked_source = Some(ability.source_id);
+                obj.exile_from_stack_linked_source = link_source;
                 if let Some(rider) = on_exile {
                     // CR 603.7a: stamp the typed rider so the stack router
                     // applies the consequence when the replacement is actually
@@ -104,7 +107,15 @@ pub fn apply_exile_rider(
         ExiledSpellRider::ReturnTo {
             destination,
             timing,
-        } => arm_return_to(state, exiled_id, controller, source_id, destination, timing),
+        } => arm_return_to(
+            state,
+            exiled_id,
+            controller,
+            source_id,
+            destination,
+            timing,
+            events,
+        ),
         // CR 702.170c: the card is now in exile, so it may become plotted. Route
         // through the single grant-permission authority so `turn_plotted` is
         // stamped and the `BecomesPlotted` event fires exactly as for the
@@ -160,9 +171,12 @@ fn arm_return_to(
     source_id: ObjectId,
     destination: Zone,
     timing: DelayedTriggerCondition,
+    events: &mut Vec<GameEvent>,
 ) {
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             // CR 603.7c: only return the card if it is still in exile.
             origin: Some(Zone::Exile),
             destination,
@@ -201,14 +215,20 @@ fn arm_return_to(
         controller,
     );
 
-    state.delayed_triggers.push(DelayedTrigger {
-        // CR 603.7b: when the one-shot return fires (Feather: "at the
-        // beginning of the next end step").
-        condition: timing,
-        ability,
-        controller,
-        source_id,
-        // CR 603.7b: one-shot — removed after it fires.
-        one_shot: true,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            // CR 603.7b: when the one-shot return fires (Feather: "at the
+            // beginning of the next end step").
+            condition: timing,
+            ability: Box::new(ability),
+            controller,
+            source_id,
+            // CR 603.7b: one-shot — removed after it fires.
+            one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        },
+        events,
+    );
 }

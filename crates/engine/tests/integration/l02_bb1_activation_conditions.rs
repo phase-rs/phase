@@ -15,10 +15,10 @@ use engine::game::restrictions::{check_activation_restrictions, record_battlefie
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, AggregateFunction, Comparator,
-    ControllerRef, CountScope, DamageChannel, DamageKindFilter, FilterProp, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
-    TargetFilter, TargetRef, TriggerCondition, TypeFilter, ZoneRef,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, AggregateFunction,
+    CardTypeSetSource, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
+    FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    QuantityExpr, QuantityRef, TargetFilter, TargetRef, TriggerCondition, TypeFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -318,7 +318,10 @@ fn s3_pucas_eye_parse_distinct_colors_eq_five() {
         ParsedCondition::QuantityComparison {
             lhs:
                 QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctColorsAmongPermanents { filter },
+                    qty:
+                        QuantityRef::DistinctColorsAmong {
+                            source: CardTypeSetSource::Objects { filter },
+                        },
                 },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 5 },
@@ -332,7 +335,7 @@ fn s3_pucas_eye_parse_distinct_colors_eq_five() {
             ),
             other => panic!("expected Typed filter with controller You, got {other:?}"),
         },
-        other => panic!("expected DistinctColorsAmongPermanents EQ 5, got {other:?}"),
+        other => panic!("expected DistinctColorsAmong(Objects) EQ 5, got {other:?}"),
     }
 }
 

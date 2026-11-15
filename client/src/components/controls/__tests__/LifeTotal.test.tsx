@@ -2,24 +2,11 @@ import { act } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Make framer-motion's `animate` apply instantly so the displayed value is
-// deterministic in jsdom (no real animation frames to wait on).
-vi.mock("framer-motion", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("framer-motion")>();
-  return {
-    ...actual,
-    animate: (target: { set?: (v: number) => void }, value: number) => {
-      target.set?.(value);
-      return { stop: () => {} };
-    },
-  };
-});
-
 import {
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
   type AnimationStep,
 } from "../../../animation/types.ts";
-import { useAnimationStore } from "../../../stores/animationStore.ts";
+import { type QueuedStep, useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -34,9 +21,10 @@ function setLife(playerId: number, life: number) {
 }
 
 // A combat step that damages `playerId` for `amount` (LifeChanged + DamageDealt).
-function combatDamageStep(playerId: number, amount: number): AnimationStep {
+function combatDamageStep(playerId: number, amount: number): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: { type: "LifeChanged", data: { player_id: playerId, amount } },
@@ -58,9 +46,10 @@ function combatDamageStep(playerId: number, amount: number): AnimationStep {
   };
 }
 
-function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): AnimationStep {
+function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: {
@@ -101,39 +90,25 @@ describe("LifeTotal", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
   });
 
-  // Issue #1560: a combat-damage step pre-advances the internal accumulator and
-  // schedules a DEFERRED (impact-synced) animation. If the animation queue is
-  // interrupted before that animation runs, the displayed number must still
-  // reconcile to the authoritative settled life — it must never get stuck.
-  it("reconciles the display when a deferred damage animation is cancelled (#1560)", () => {
+  it("always renders the snapshot life while a stale damage animation is active", () => {
     render(<LifeTotal playerId={0} />);
-    expect(screen.getByText("20")).toBeInTheDocument();
-
-    // Combat damage arrives: schedules the deferred impact animation, but it has
-    // not run yet (impact timer pending).
     act(() => {
-      useAnimationStore.setState({ activeStep: combatDamageStep(0, -3) });
+      setLife(0, 38);
     });
-    // Display still 20 — the deferred animation hasn't fired.
-    expect(screen.getByText("20")).toBeInTheDocument();
+    expect(screen.getByText("38")).toBeInTheDocument();
 
-    // Queue is interrupted (e.g. a concurrent dispatch clears it) BEFORE the
-    // impact timer fires — the deferred animation is cancelled, never runs.
+    // This models a late LifeChanged(-2) event arriving after the full snapshot
+    // has already established the authoritative value of 38.
     act(() => {
-      useAnimationStore.setState({ activeStep: null });
+      useAnimationStore.setState({ activeStep: combatDamageStep(0, -2) });
+      vi.advanceTimersByTime(900);
     });
 
-    // The engine's real life total settles in gameStore.
-    act(() => {
-      setLife(0, 17);
-    });
-
-    // Pre-fix this stayed at 20 (the desync). It must now show 17.
-    expect(screen.getByText("17")).toBeInTheDocument();
-    expect(screen.queryByText("20")).not.toBeInTheDocument();
+    expect(screen.getByText("38")).toBeInTheDocument();
+    expect(screen.queryByText("36")).not.toBeInTheDocument();
   });
 
-  it("reconciles the display for life changes with no animation step (instant speed)", () => {
+  it("updates when the snapshot life changes without an animation step", () => {
     render(<LifeTotal playerId={0} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -144,7 +119,7 @@ describe("LifeTotal", () => {
     expect(screen.getByText("15")).toBeInTheDocument();
   });
 
-  it("delays grouped flurry displayOnly life movement until the shared impact time", () => {
+  it("does not derive a grouped flurry life total from its display event", () => {
     render(<LifeTotal playerId={0} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -153,26 +128,9 @@ describe("LifeTotal", () => {
     });
 
     act(() => {
-      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
     });
     expect(screen.getByText("20")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.getByText("17")).toBeInTheDocument();
-  });
-
-  it("reconciles grouped flurry displayOnly life movement if the impact timer is cancelled", () => {
-    render(<LifeTotal playerId={0} />);
-
-    act(() => {
-      useAnimationStore.setState({ activeStep: groupedDamageStep(0, -3) });
-      useAnimationStore.setState({ activeStep: null });
-      setLife(0, 17);
-    });
-
-    expect(screen.getByText("17")).toBeInTheDocument();
   });
 
   it("does not move life for grouped flurry without a consumed LifeChanged effect", () => {
@@ -186,7 +144,36 @@ describe("LifeTotal", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
   });
 
-  it("delays grouped flurry displayOnly lifelink gain until the shared impact time", () => {
+  it("renders the engine's unbounded life as ∞ and still flashes a life change", () => {
+    useGameStore.setState({
+      gameState: buildGameState({ derived: { life_magnitude: { 1: "Unbounded" } } }),
+    });
+    render(
+      <>
+        <LifeTotal playerId={0} hideLabel />
+        <LifeTotal playerId={1} hideLabel />
+      </>,
+    );
+
+    const readout = screen.getByText("∞");
+    expect(readout).toHaveAttribute("title", "Unbounded life (∞)");
+    expect(readout).toHaveAttribute("aria-label", "Unbounded life (∞)");
+    expect(readout).toHaveClass("text-green-400");
+    expect(screen.getByText("20")).not.toHaveAttribute("title");
+
+    act(() => {
+      useAnimationStore.setState({
+        activeStep: {
+          duration: 300,
+          snapshotSeq: 1,
+          effects: [{ event: { type: "LifeChanged", data: { player_id: 1, amount: 3 } }, duration: 300 }],
+        },
+      });
+    });
+    expect(screen.getByText("∞")).toHaveClass("bg-green-500/30");
+  });
+
+  it("does not derive a lifelink gain from a grouped flurry display event", () => {
     render(<LifeTotal playerId={1} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -195,13 +182,61 @@ describe("LifeTotal", () => {
     });
 
     act(() => {
-      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
     });
     expect(screen.getByText("20")).toBeInTheDocument();
+  });
 
-    act(() => {
-      vi.advanceTimersByTime(1);
+  describe("a seat with no life total (the Horde)", () => {
+    function setHordeSeat(playerId: number, libraryLength: number) {
+      useGameStore.setState((s) => {
+        const prev = s.gameState ?? buildGameState();
+        const players = prev.players.map((p, i) =>
+          i === playerId
+            ? {
+                ...p,
+                has_no_life_total: true,
+                // Life stays at its frozen starting value — that's exactly the
+                // number we must NOT show.
+                life: 20,
+                library: Array.from({ length: libraryLength }, (_, n) => n + 1),
+              }
+            : p,
+        );
+        return { gameState: { ...prev, players } };
+      });
+    }
+
+    it("shows the library count instead of the frozen life total", () => {
+      setHordeSeat(0, 287);
+      render(<LifeTotal playerId={0} />);
+
+      expect(screen.getByText("287")).toBeInTheDocument();
+      // The whole point: the meaningless life total must not be rendered.
+      expect(screen.queryByText("20")).not.toBeInTheDocument();
     });
-    expect(screen.getByText("23")).toBeInTheDocument();
+
+    it("tracks the library shrinking as the Horde is milled", () => {
+      setHordeSeat(0, 300);
+      render(<LifeTotal playerId={0} />);
+      expect(screen.getByText("300")).toBeInTheDocument();
+
+      // Damage/life loss on the Horde is redirected into milling, so progress
+      // shows up as the library dropping.
+      act(() => {
+        setHordeSeat(0, 296);
+      });
+      expect(screen.getByText("296")).toBeInTheDocument();
+    });
+
+    it("leaves normal seats rendering their life total", () => {
+      // Positive control: the branch must be scoped to flagged seats only, not
+      // applied to every player.
+      setHordeSeat(0, 287);
+      render(<LifeTotal playerId={1} />);
+
+      expect(screen.getByText("20")).toBeInTheDocument();
+      expect(screen.queryByText("287")).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,0 +1,78 @@
+name: Merge queue janitor
+
+# Cancels CI runs belonging to dissolved merge groups.
+#
+# Every time the merge queue gains or loses an entry it re-synthesizes the whole
+# group: the old `gh-readonly-queue/<base>/pr-<N>-<sha>` refs are deleted and new
+# ones are created, each minting a fresh full CI run. The superseded runs are NOT
+# cleaned up by `concurrency` — ci.yml keys its group on `github.ref`, which is
+# unique per synthesized ref, so `cancel-in-progress` can never match them.
+#
+# There is no way to fix this in the concurrency key itself. GitHub's expression
+# language has no regex or split, so a `concurrency.group` cannot extract the PR
+# number from the ref; and keying on the base branch would cancel LIVE speculative
+# groups, which the queue reads as a failed check and evicts the entry for.
+#
+# So the cleanup is explicit: a run whose `head_branch` no longer resolves to a ref
+# can never check out and can never report. Cancelling it is pure garbage
+# collection. On 2026-07-24 a single evening accumulated 22 such runs (~198 queued
+# jobs) against a 20-job concurrency cap.
+#
+# Ref-absence is an orphan test, NOT a liveness test — an already-completed run's
+# ref also gets reaped. Only queued/in_progress runs are considered, so a finished
+# run is never touched.
+#
+# Limitation: during a hosted-runner outage this janitor is itself queued and
+# cannot run. It prevents accumulation in normal operation, not during a stall.
+
+on:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: merge-queue-janitor
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    name: Cancel dissolved merge-group runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel runs whose merge-group ref no longer exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Live merge-group refs, one per line.
+          gh api "/repos/$REPO/git/matching-refs/heads/gh-readonly-queue" \
+            --jq '.[].ref | sub("^refs/heads/"; "")' | sort > live_refs.txt
+          echo "live merge-group refs: $(wc -l < live_refs.txt)"
+
+          reaped=0
+          for status in queued in_progress; do
+            gh api "/repos/$REPO/actions/runs?event=merge_group&status=$status&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .head_branch] | @tsv' > "runs_$status.tsv" || true
+
+            while IFS=$'\t' read -r id branch; do
+              [ -n "${id:-}" ] || continue
+              if grep -qxF "$branch" live_refs.txt; then
+                continue    # group is still live — leave it alone
+              fi
+              echo "orphan ($status): $id  $branch"
+              # `cancel` is deferred for a run that never reached a runner; fall
+              # back to force-cancel, which bypasses that precondition.
+              gh api -X POST "/repos/$REPO/actions/runs/$id/cancel" --silent \
+                || gh api -X POST "/repos/$REPO/actions/runs/$id/force-cancel" --silent \
+                || echo "  could not cancel $id (already terminal?)"
+              reaped=$((reaped + 1))
+            done < "runs_$status.tsv"
+          done
+
+          echo "reaped $reaped dissolved merge-group run(s)"

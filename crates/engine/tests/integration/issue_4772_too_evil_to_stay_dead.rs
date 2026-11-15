@@ -224,7 +224,7 @@ fn too_evil_to_stay_dead_with_teamwork_still_reanimates() {
 // dq-f: the NARROW (no-teamwork) branch's "mana value 4 or less" clause TRAILS
 // its zone clause ("target creature card in your graveyard with mana value 4 or
 // less"). Before the zone-then-mana-value second pass in
-// `parse_type_phrase_with_ctx`, that clause was dropped, so the narrow branch
+// `parse_type_phrase_folding_with_ctx`, that clause was dropped, so the narrow branch
 // behaved identically to the broad (teamwork-paid) branch — any creature card in
 // the graveyard was a legal target regardless of mana value. This test pins that
 // dq-f now correctly restricts the no-teamwork target slot.

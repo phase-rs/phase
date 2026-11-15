@@ -1,7 +1,9 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import { isAiDifficulty } from "../../../constants/ai";
 import { ACTIVE_DECK_KEY, isRandomDeckSelection } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
@@ -10,10 +12,13 @@ import { ManaSymbol } from "../../mana/ManaSymbol";
 import { useCardImage } from "../../../hooks/useCardImage";
 import { useResumables } from "../../../hooks/useResumables";
 import { useCardDataStore } from "../../../stores/cardDataStore";
+import { evaluateDeckCompatibility } from "../../../services/deckCompatibility";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
-  getRepresentativeCard,
+  getDeckColorIdentityPips,
+  getRepresentativeDeckVisual,
+  loadDeck,
 } from "../deckHelpers";
 
 interface ActionDef {
@@ -22,8 +27,8 @@ interface ActionDef {
   tone: MenuTileTone;
   icon: string;
   motif: TileMotif;
-  titleKey: string;
-  descKey: string;
+  titleKey: ParseKeys<"menu">;
+  descKey: ParseKeys<"menu">;
   gated: boolean;
 }
 const ACTIONS: ActionDef[] = [
@@ -58,7 +63,7 @@ function CardActionButton({ action, disabled }: { action: ActionDef; disabled: b
 function ResumeHero() {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
-  const { match, matchSummary, quickDraft, pod, resumeMatch } = useResumables();
+  const { match, matchSummary, retainedResult, quickDraft, pod, resumeMatch, viewRetainedResult } = useResumables();
 
   // Build the ordered candidate list: the saved match leads (most-relevant
   // resumable), then drafts by recency. Nothing to resume → render nothing.
@@ -74,7 +79,7 @@ function ResumeHero() {
   // turn it is, and your own life — never bare unlabeled numbers.
   const modeLabel = match ? t(`home.dashboard.mode.${match.mode}`) : "";
   const difficultyLabel =
-    match && match.mode === "ai" && match.difficulty
+    match && match.mode === "ai" && isAiDifficulty(match.difficulty)
       ? t(`aiDifficulty.levels.${match.difficulty}`)
       : null;
   // GameFormat is PascalCase ("PauperCommander"); space compound names for display.
@@ -103,7 +108,20 @@ function ResumeHero() {
     onResume: resumeMatch,
   };
 
-  const ordered = [matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
+  // A finished match whose result is retained locally still owes the server an
+  // acknowledgement. It is not resumable gameplay, but the Menu must not strand
+  // it: the unresolved result leads the list so reopening re-displays it and
+  // retries the ACK. A successful ACK clears the pointer, which removes it.
+  const retainedFormatLabel = retainedResult?.formatConfig?.format?.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const retainedEntry = retainedResult && {
+    cta: t("home.resume.viewResult"),
+    title: retainedFormatLabel || t(`home.dashboard.mode.${retainedResult.mode}`) || t("home.resume.title"),
+    chip: "",
+    meta: [] as string[],
+    onResume: viewRetainedResult,
+  };
+
+  const ordered = [retainedEntry, matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
   if (ordered.length === 0) return null;
   const [primary, secondary] = ordered;
 
@@ -167,6 +185,7 @@ function ActiveDeckCard() {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
   const [name, setName] = useState<string | null>(null);
+  const [colors, setColors] = useState<string[] | null>(null);
   useEffect(() => setName(localStorage.getItem(ACTIVE_DECK_KEY)), []);
 
   // Resolve the deck's representative card so the card can show real art, the
@@ -174,8 +193,39 @@ function ActiveDeckCard() {
   // an empty name yields no src and falls back to the loading shimmer.
   const randomDeckSelected = isRandomDeckSelection(name);
   const displayName = randomDeckSelected ? t("myDecks.randomDeckTile") : name;
-  const repCard = name && !randomDeckSelected ? getRepresentativeCard(name) : null;
-  const { src: artSrc } = useCardImage(repCard ?? "", { size: "art_crop" });
+  const representativeVisual = name && !randomDeckSelected ? getRepresentativeDeckVisual(name) : null;
+  const { src: artSrc, advanceFailedSource } = useCardImage(representativeVisual?.name ?? "", {
+    size: "art_crop",
+    sourcePrinting: representativeVisual?.sourcePrinting,
+  });
+
+  useEffect(() => {
+    if (!name || randomDeckSelected) {
+      setColors(null);
+      return;
+    }
+
+    const catalogColors = getDeckColorIdentity(name);
+    if (catalogColors !== null) {
+      setColors(catalogColors);
+      return;
+    }
+
+    const deck = loadDeck(name);
+    if (!deck) {
+      setColors(null);
+      return;
+    }
+
+    let cancelled = false;
+    setColors(null);
+    void evaluateDeckCompatibility(deck, { summaryOnly: true }).then((result) => {
+      if (!cancelled) setColors(result.color_identity);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [name, randomDeckSelected]);
 
   if (!name) {
     return (
@@ -186,11 +236,18 @@ function ActiveDeckCard() {
     );
   }
   const count = randomDeckSelected ? 0 : getDeckCardCount(name);
-  const colors = randomDeckSelected ? [] : getDeckColorIdentity(name);
+  const colorPips = randomDeckSelected ? null : getDeckColorIdentityPips(colors);
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => navigate("/my-decks")}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigate("/my-decks");
+        }
+      }}
       className="group flex cursor-pointer flex-col overflow-hidden rounded-card border border-hairline surface-card text-left transition-colors hover:border-hairline-hover"
     >
       {/* Art header: representative card art with the section label and the
@@ -198,7 +255,12 @@ function ActiveDeckCard() {
           dark backing chip so they stay legible over any artwork. */}
       <div className="relative h-24 overflow-hidden">
         {artSrc ? (
-          <img src={artSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+          <img
+            src={artSrc}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => advanceFailedSource?.(artSrc)}
+          />
         ) : (
           <div className="absolute inset-0 animate-pulse bg-gray-800" />
         )}
@@ -206,9 +268,9 @@ function ActiveDeckCard() {
         <div className={`${SECTION_LABEL} absolute left-3 top-2.5 z-10 drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]`}>
           {t("home.dashboard.activeDeck")}
         </div>
-        {colors.length > 0 && (
+        {colorPips && (
           <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-            {colors.map((c) => <ManaSymbol key={c} shard={c} size="xs" />)}
+            {colorPips.map((color) => <ManaSymbol key={color} shard={color} size="xs" />)}
           </div>
         )}
       </div>
@@ -219,7 +281,7 @@ function ActiveDeckCard() {
           <span className="text-xs text-fg-muted tabular-nums">{t("home.dashboard.cards", { count })}</span>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 

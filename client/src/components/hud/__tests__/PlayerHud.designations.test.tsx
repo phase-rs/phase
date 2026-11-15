@@ -1,10 +1,11 @@
 import { act } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
-import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
+import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 import { PlayerHud } from "../PlayerHud.tsx";
 
 describe("PlayerHud designations", () => {
@@ -86,6 +87,16 @@ describe("PlayerHud designations", () => {
     });
   });
 
+  describe("Enduring Story", () => {
+    it("renders only for the designated local player", () => {
+      act(() => {
+        useGameStore.setState({ gameState: buildGameState({ enduring_story: [0] }) });
+      });
+      render(<PlayerHud />);
+      expect(screen.getByLabelText("Enduring Story")).toBeInTheDocument();
+    });
+  });
+
   describe("Ring level", () => {
     it("renders the ring counter at level 3 for the local player", () => {
       act(() => {
@@ -139,19 +150,63 @@ describe("PlayerHud designations", () => {
     });
   });
 
+  // CR 309.4b-c: the dungeon badge is driven ONLY by the engine projection
+  // `derived.dungeon_rooms` — the FE has no room table, so it derives neither
+  // the room's name nor what that room's ability does.
   describe("Dungeon", () => {
-    it("renders the dungeon badge when the local player is venturing", () => {
+    it("renders the dungeon badge naming the room the marker is on", () => {
       act(() => {
         useGameStore.setState({
           gameState: buildGameState({
             dungeon_progress: {
               "0": { current_dungeon: "LostMineOfPhandelver", current_room: 1, completed: [] },
             },
+            derived: {
+              dungeon_rooms: {
+                "0": {
+                  dungeon: "LostMineOfPhandelver",
+                  dungeon_name: "Lost Mine of Phandelver",
+                  room: {
+                    index: 1,
+                    name: "Goblin Lair",
+                    text: "Create a 1/1 red Goblin creature token.",
+                  },
+                  room_count: 7,
+                  card: {
+                    oracle_id: "5c446a7f-0301-4343-b0df-146cf2db605b",
+                    scryfall_id: "59b11ff8-f118-4978-87dd-509dc0c8c932",
+                    face_name: "Lost Mine of Phandelver",
+                  },
+                  rooms: [
+                    {
+                      index: 0,
+                      name: "Cave Entrance",
+                      text: "Scry 1.",
+                      next_rooms: [1, 2],
+                      marker: { x_permille: 500, y_permille: 215 },
+                    },
+                    {
+                      index: 1,
+                      name: "Goblin Lair",
+                      text: "Create a 1/1 red Goblin creature token.",
+                      next_rooms: [3, 4],
+                      marker: { x_permille: 310, y_permille: 390 },
+                    },
+                  ],
+                },
+              },
+            },
           }),
         });
       });
       render(<PlayerHud />);
-      expect(screen.getByLabelText("Venturing in Lost Mine, room 2")).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Venturing in Lost Mine of Phandelver, Goblin Lair, room 2 of 7"),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Lost Mine of Phandelver")).toBeInTheDocument();
+      // The chip itself shows the marker's place in the dungeon; the room's
+      // name and printed effect now live in the map panel the chip opens.
+      expect(screen.getByText("2/7")).toBeInTheDocument();
     });
 
     it("does not render when the player has progress but no active dungeon", () => {
@@ -175,6 +230,30 @@ describe("PlayerHud designations", () => {
             dungeon_progress: {
               "1": { current_dungeon: "Undercity", current_room: 0, completed: [] },
             },
+            derived: {
+              dungeon_rooms: {
+                "1": {
+                  dungeon: "Undercity",
+                  dungeon_name: "Undercity",
+                  room: { index: 0, name: "Secret Entrance", text: "Scry 1." },
+                  room_count: 9,
+                  card: {
+                    oracle_id: "36b61021-72f0-4c22-a41d-9b2f093d7ca8",
+                    scryfall_id: "2c65185b-6cf0-451d-985e-56aa45d9a57d",
+                    face_name: "Undercity",
+                  },
+                  rooms: [
+                    {
+                      index: 0,
+                      name: "Secret Entrance",
+                      text: "Scry 1.",
+                      next_rooms: [1, 2],
+                      marker: { x_permille: 500, y_permille: 268 },
+                    },
+                  ],
+                },
+              },
+            },
           }),
         });
       });
@@ -184,18 +263,23 @@ describe("PlayerHud designations", () => {
   });
 
   // CR 732.2a: the `∞` HUD badge is driven ONLY by the engine projection
-  // `derived.unbounded_resources` — the FE never derives which axes are unbounded.
+  // `derived.unbounded_families` — the FE derives neither which axes are unbounded, nor the
+  // family they group into, nor whether a collapse is coming.
   describe("Unbounded resources (∞)", () => {
-    it("renders an ∞ badge for the local player's engine-attributed axis", () => {
+    it("renders an ∞ badge for the local player's engine-attributed family", () => {
       act(() => {
         useGameStore.setState({
           gameState: buildGameState({
-            derived: { unbounded_resources: [{ player: 0, axis: "TokensCreated" }] },
+            derived: {
+              unbounded_families: [
+                { player: 0, family: "tokens", state: { type: "Unscheduled" } },
+              ],
+            },
           }),
         });
       });
       render(<PlayerHud />);
-      // REVERT-PROBE: stop reading `derived.unbounded_resources` (or remove the
+      // REVERT-PROBE: stop reading `derived.unbounded_families` (or remove the
       // PlayerHud map) → the badge is absent → this assertion fails.
       expect(screen.getByLabelText("Unbounded tokens (∞)")).toBeInTheDocument();
     });
@@ -203,41 +287,102 @@ describe("PlayerHud designations", () => {
     it("does not render when there are no unbounded resources", () => {
       act(() => {
         useGameStore.setState({
-          gameState: buildGameState({ derived: { unbounded_resources: [] } }),
+          gameState: buildGameState({ derived: { unbounded_families: [] } }),
         });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
     });
 
-    it("does not render when only an opponent has an unbounded axis", () => {
-      act(() => {
-        useGameStore.setState({
-          gameState: buildGameState({
-            derived: { unbounded_resources: [{ player: 1, axis: "TokensCreated" }] },
-          }),
-        });
-      });
-      render(<PlayerHud />);
-      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
-    });
-
-    it("collapses multiple axes of the same family into one badge", () => {
+    it("does not render when only an opponent has an unbounded family", () => {
       act(() => {
         useGameStore.setState({
           gameState: buildGameState({
             derived: {
-              unbounded_resources: [
-                { player: 0, axis: { Mana: "Red" } },
-                { player: 0, axis: { Mana: "Blue" } },
+              unbounded_families: [
+                { player: 1, family: "tokens", state: { type: "Unscheduled" } },
               ],
             },
           }),
         });
       });
       render(<PlayerHud />);
-      // Six Mana(color) rows would collapse the same way: one mana family badge.
-      expect(screen.getAllByLabelText("Unbounded mana (∞)")).toHaveLength(1);
+      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
+    });
+
+    // The "two mana axes collapse to one badge" case MOVED TO THE ENGINE as
+    // `derived_views::tests::two_mana_axes_fold_to_one_family_row`; migrating it IS the evidence
+    // that the fold left the display layer. What remains here is the render-level consequence:
+    // the engine hands down one row per family, so the HUD renders one badge per row.
+  });
+
+  // The mana-pool `∞` marker is a SECOND ∞ surface — rendered by `ManaPoolSummary` beside the pool
+  // pills, not in the badge strip. It used to answer "is mana unbounded?" by running the client's
+  // `familyOf` mirror over `derived.unbounded_resources`: a family derivation in the display layer,
+  // which is exactly what `ResourceAxis`'s own doc claimed the frontend never does.
+  //
+  // These two cases DELIBERATELY put the channels in conflict. On the wire they never disagree
+  // (`derive_views` emits both from one loop over `unbounded_resources`), so an AGREEING fixture
+  // cannot tell which channel is the authority — it goes green either way. Disagreement is the only
+  // shape that discriminates, and it discriminates in both directions.
+  describe("Unbounded mana pool marker (∞)", () => {
+    const withPool = (derived: GameState["derived"]) =>
+      buildGameState({
+        players: buildPlayers([
+          {
+            id: 0,
+            mana_pool: {
+              mana: [{ color: "Blue", source_id: 1, pip_id: 1, snow: false, restrictions: [] }],
+            },
+          },
+          { id: 1 },
+        ]),
+        derived,
+      });
+
+    // The badge-strip badge for the `mana` family carries the SAME aria-label as this marker, so
+    // an unscoped query matches both (measured: `getByLabelText` found two elements). Every
+    // assertion below is scoped to the pool row, and the throw is the reach-guard — a null query
+    // inside a row that never rendered would be vacuous, and `ManaPoolSummary` returns `null`
+    // outright on an empty pool.
+    const manaPoolRow = (): HTMLElement => {
+      const row = document.querySelector<HTMLElement>("[data-mana-pool-summary]");
+      if (!row) throw new Error("the mana pool row did not render; the assertion would be vacuous");
+      return row;
+    };
+
+    it("follows the engine's family channel, not the axis list", () => {
+      act(() => {
+        // Engine says: no mana family unbounded. The axis list says the opposite.
+        useGameStore.setState({
+          gameState: withPool({
+            unbounded_resources: [{ player: 0, axis: { Mana: "Blue" } }],
+            unbounded_families: [],
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // REVERT-PROBE (negative direction): restore
+      // `unboundedResources.some((u) => familyOf(u.axis) === "mana")` ⇒ the marker appears ⇒ this
+      // fails. NOT vacuous: the sibling below renders the marker from this same pool, so absence
+      // here is the channel choice, not an unreachable render.
+      expect(within(manaPoolRow()).queryByLabelText("Unbounded mana (∞)")).toBeNull();
+    });
+
+    it("renders from the family channel alone, with no unbounded axis row", () => {
+      act(() => {
+        // Engine says: mana family unbounded. The axis list is empty.
+        useGameStore.setState({
+          gameState: withPool({
+            unbounded_resources: [],
+            unbounded_families: [{ player: 0, family: "mana", state: { type: "Unscheduled" } }],
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // REVERT-PROBE (positive direction): the old `familyOf` derivation over an EMPTY
+      // `unbounded_resources` yields `false` ⇒ the marker is absent ⇒ this fails.
+      expect(within(manaPoolRow()).getByLabelText("Unbounded mana (∞)")).toBeInTheDocument();
     });
   });
 });

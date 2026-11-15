@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
+import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
+  isPlanechaseFamilyFormat,
   isSetupFormat,
   SETUP_FORMATS,
 } from "../data/formatRegistry";
@@ -13,16 +15,28 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import { HordeDeckSelector } from "../components/setup/HordeDeckSelector";
+import { hordeMinimumPlayers } from "../data/challengeDeckRegistry";
+import type { ChallengeDeck } from "../adapter/types";
+import {
+  catalogRequestKey,
+  useAiDeckCatalog,
+  useSettledAiCatalog,
+} from "../services/aiDeckCatalog";
+import { PileSourceChoice } from "../components/menu/PileSourceChoice";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
+import { IntegerField } from "../components/ui/IntegerField";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
-  COLOR_DOT_CLASS,
-  getRepresentativeCard,
+  getRepresentativeDeckVisual,
   getDeckCardCount,
+  getDeckColorIdentityPips,
 } from "../components/menu/deckHelpers";
+import { ManaSymbol } from "../components/mana/ManaSymbol";
+import { cappedMatchType, useBestOfThreeCeiling } from "../components/lobby/HostSetup";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import {
   ACTIVE_DECK_KEY,
@@ -30,6 +44,7 @@ import {
   loadSavedDeckBracket,
   touchDeckPlayed,
 } from "../constants/storage";
+import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
 import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
@@ -39,6 +54,7 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
+import { DEFAULT_PILE_CHOICE, pileSourceParam, type PileChoice } from "../services/pileSource";
 
 // --- Format trigger styling ---
 //
@@ -65,7 +81,7 @@ function setupDefaults(format: GameFormat): FormatConfig | null {
 // --- Component ---
 
 export function GameSetupPage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -82,12 +98,16 @@ export function GameSetupPage() {
   // Format picker modal -- opened by the hero chip below the title. Mobile
   // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
   const [formatPickerOpen, setFormatPickerOpen] = useState(false);
+  const formatPickerTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Format & config state
   const [selectedFormat, setSelectedFormat] = useState<GameFormat | null>(null);
   const [formatConfig, setFormatConfig] = useState<FormatConfig | null>(null);
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
+  const ceiling = useBestOfThreeCeiling(formatConfig?.format ?? null);
+  const effectiveMatchType = cappedMatchType(matchType, ceiling);
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
   const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
@@ -99,6 +119,29 @@ export function GameSetupPage() {
   const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
+  // One legal-catalog analysis shared by the AI seats and the human pool's
+  // bracket base (per-deck legality + bracket estimates run sequentially, so a
+  // second call would double the "Analyzing decks" pass).
+  const aiCatalog = useAiDeckCatalog({
+    selectedFormat: formatConfig?.format,
+    selectedMatchType: effectiveMatchType,
+  });
+  // Last settled catalog for the human pool, bound to the format/match
+  // request that produced it: inventory rescans within the same request keep
+  // the previous legal universe until the fresh one lands, while a parameter
+  // change (or a failed new request) exposes nothing rather than a stale
+  // differently-keyed snapshot.
+  const settledAiCatalog = useSettledAiCatalog(
+    aiCatalog,
+    catalogRequestKey(formatConfig?.format, effectiveMatchType),
+  );
+  const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  // A pile is picked for one format; any format change returns to the default pile.
+  const [pileFormat, setPileFormat] = useState(selectedFormat);
+  if (pileFormat !== selectedFormat) {
+    setPileFormat(selectedFormat);
+    setPile(DEFAULT_PILE_CHOICE);
+  }
   const [setupError, setSetupError] = useState<string | null>(() => {
     const state = location.state as { setupError?: string } | null;
     return state?.setupError ?? null;
@@ -111,6 +154,8 @@ export function GameSetupPage() {
   const setLastFormat = usePreferencesStore((s) => s.setLastFormat);
   const setLastMatchType = usePreferencesStore((s) => s.setLastMatchType);
   const setLastPlayerCount = usePreferencesStore((s) => s.setLastPlayerCount);
+  const hordeChallengeDeck = usePreferencesStore((s) => s.hordeChallengeDeck);
+  const setHordeChallengeDeck = usePreferencesStore((s) => s.setHordeChallengeDeck);
 
   // Restore last session on mount
   useEffect(() => {
@@ -129,7 +174,12 @@ export function GameSetupPage() {
     const defaults = setupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
-    setPlayerCount(restoredLastFormat ? lastPlayerCount : defaults.min_players);
+    // A co-Horde pick (e.g. Two Towers) stored from a prior session needs its
+    // extra seats even if the saved count predates the pick.
+    const restoredCount = restoredLastFormat ? lastPlayerCount : defaults.min_players;
+    const restoreFloor =
+      fmt === "Horde" ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck) : 0;
+    setPlayerCount(Math.max(restoredCount, restoreFloor));
     setMatchType(restoredLastFormat ? lastMatchType : "Bo1");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -138,14 +188,37 @@ export function GameSetupPage() {
     if (!defaults) return;
     setSelectedFormat(format);
     setFormatConfig(defaults);
-    setPlayerCount(defaults.min_players);
+    // The picked challenge deck may need co-Horde seats above the format's
+    // own range — the engine rejects undersized tables, so fold the deck's
+    // minimum into the fresh count rather than starting stranded.
+    const deckFloor =
+      format === "Horde"
+        ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck)
+        : defaults.min_players;
+    const count = Math.max(defaults.min_players, deckFloor);
+    setPlayerCount(count);
     setLastFormat(format);
-    setLastPlayerCount(defaults.min_players);
-    if (defaults.min_players !== 2) {
+    setLastPlayerCount(count);
+    if (count !== 2) {
       setMatchType("Bo1");
       setLastMatchType("Bo1");
     }
     setSetupError(null);
+  }
+
+  function handleHordeDeckChange(deck: ChallengeDeck) {
+    setHordeChallengeDeck(deck);
+    // Same stranded-table guard when the pick changes mid-setup: a co-Horde
+    // deck needs extra seats the spinner would otherwise leave short.
+    const minimum = hordeMinimumPlayers(deck);
+    if (playerCount < minimum) {
+      setPlayerCount(minimum);
+      setLastPlayerCount(minimum);
+      if (minimum !== 2) {
+        setMatchType("Bo1");
+        setLastMatchType("Bo1");
+      }
+    }
   }
 
   // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
@@ -172,12 +245,13 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
-    if (formatConfig.format === "Planechase") return;
+    if (isPlanechaseFamilyFormat(formatConfig.format)) return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
     if (!activeDeckName && !suppliesDeck) return;
-    if (activeDeckName && !isRandomDeckSelection(activeDeckName)) touchDeckPlayed(activeDeckName);
+    if (!pile.legal) return;
+    if (activeDeckName && !isRandomDeckSelection(activeDeckName)) void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, activeDeckName), "run-unguarded");
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
     // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
@@ -201,7 +275,7 @@ export function GameSetupPage() {
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
-      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig });
     }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
@@ -209,8 +283,22 @@ export function GameSetupPage() {
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
+    const pileName = pileSourceParam(pile.source);
+    // Horde: carry the picked challenge deck in the URL so it survives reload and
+    // lands in the saved game record. GamePage applies it to the FormatConfig via
+    // `withChallengeDeck` (which applies that deck's whole engine-resolved
+    // configuration: HordeRuleset plus survivor deck-shape axes).
+    const hordeDeckParam =
+      formatConfig.format === "Horde" ? `&hordeDeck=${hordeChallengeDeck}` : "";
+    const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
+    // The URL carries the format NAME only, so the edited config (starting
+    // life) has to ride along out-of-band or GamePage re-derives it from
+    // `FORMAT_DEFAULTS` and silently discards the edit. Router state — the
+    // same channel `useBroker` uses — rather than a URL param, because the
+    // native-engine route above deliberately writes no resume pointer.
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}${hordeDeckParam}`,
+      { state: { formatConfig } },
     );
   };
 
@@ -220,17 +308,24 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
-  const formatSupportsAi = selectedFormat !== "Planechase";
+  const formatSupportsAi = !isPlanechaseFamilyFormat(selectedFormat);
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;
-  const noLegalAiDecks = !suppliesDeck && legalAiDeckCount === 0;
+  // Horde: the AI seat plays the engine-supplied challenge deck (the Horde deck
+  // is injected at game load), so — like a fixed-deck format — the user is not
+  // required to provide a legal AI deck. Without this, the AI-deck catalog's
+  // known-format filter drops every deck (none is tagged "Horde") and Start is
+  // wrongly disabled.
+  const aiDeckSuppliedByEngine = selectedFormat === "Horde";
+  const noLegalAiDecks =
+    !suppliesDeck && !aiDeckSuppliedByEngine && legalAiDeckCount === 0;
   // Block start only while the card DB is actively loading — not on `error`/`idle`,
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi =
-    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading || !pile.legal;
 
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).
@@ -242,16 +337,19 @@ export function GameSetupPage() {
     !randomDeckSelected &&
     cedhMode &&
     !isDeckCedhLegal(humanDeckBracket);
-  const representativeCard = useMemo(
-    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getRepresentativeCard(activeDeckName) : null),
+  const representativeVisual = useMemo(
+    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getRepresentativeDeckVisual(activeDeckName) : null),
     [activeDeckName],
   );
   const deckCardCount = useMemo(
     () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getDeckCardCount(activeDeckName) : 0),
     [activeDeckName],
   );
-  const { src: deckArtSrc } = useCardImage(representativeCard ?? "", { size: "art_crop" });
-  const colors = selectedCompat?.color_identity ?? [];
+  const { src: deckArtSrc, advanceFailedSource: advanceFailedDeckArtSource } = useCardImage(
+    representativeVisual?.name ?? "",
+    { size: "art_crop", sourcePrinting: representativeVisual?.sourcePrinting },
+  );
+  const colorPips = getDeckColorIdentityPips(selectedCompat?.color_identity ?? null);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -272,6 +370,7 @@ export function GameSetupPage() {
           return (
             <div className="flex justify-center">
               <button
+                ref={formatPickerTriggerRef}
                 type="button"
                 onClick={() => setFormatPickerOpen(true)}
                 aria-haspopup="dialog"
@@ -325,13 +424,14 @@ export function GameSetupPage() {
           <MyDecks
             mode="select"
             selectedFormat={selectedFormat ?? undefined}
-            selectedMatchType={matchType}
+            selectedMatchType={effectiveMatchType}
             onSelectDeck={handleSelectDeck}
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
             randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
+            aiCatalog={settledAiCatalog}
           />
 
           {/* Sidebar */}
@@ -383,7 +483,12 @@ export function GameSetupPage() {
                 <div>
                   <div className="aspect-[5/3] overflow-hidden rounded-xl bg-gray-800">
                     {deckArtSrc ? (
-                      <img src={deckArtSrc} alt="" className="h-full w-full object-cover" />
+                      <img
+                        src={deckArtSrc}
+                        alt=""
+                        className="h-full w-full object-cover"
+                        onError={() => advanceFailedDeckArtSource?.(deckArtSrc)}
+                      />
                     ) : (
                       <div className="h-full w-full animate-pulse bg-gray-800" />
                     )}
@@ -406,17 +511,13 @@ export function GameSetupPage() {
                     </button>
                   </div>
                   <div className="mt-1 flex items-center gap-2">
-                    <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
-                      {colors.map((c) => (
-                        <span
-                          key={c}
-                          className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[c] ?? "bg-gray-400"}`}
-                        />
-                      ))}
-                      {colors.length === 0 && (
-                        <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
-                      )}
-                    </div>
+                    {colorPips && (
+                      <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
+                        {colorPips.map((color) => (
+                          <ManaSymbol key={color} shard={color} size="xs" />
+                        ))}
+                      </div>
+                    )}
                     <span className="text-xs text-gray-300">{t("gameSetup.deckPreview.cardCount", { count: deckCardCount })}</span>
                   </div>
                   {selectedCompat && (
@@ -476,15 +577,44 @@ export function GameSetupPage() {
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">{t("gameSetup.config.startingLife")}</span>
-                    <input
-                      type="number"
+                    <IntegerField
                       value={formatConfig.starting_life}
-                      onChange={(e) =>
-                        setFormatConfig({ ...formatConfig, starting_life: Number(e.target.value) })
+                      min={1}
+                      onCommit={(starting_life) =>
+                        setFormatConfig({ ...formatConfig, starting_life })
                       }
                       className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
                     />
                   </label>
+
+                  {formatConfig.commander_damage_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.commanderDamage")}</span>
+                      <IntegerField
+                        value={formatConfig.commander_damage_threshold}
+                        min={1}
+                        onCommit={(commander_damage_threshold) =>
+                          setFormatConfig({ ...formatConfig, commander_damage_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
+                  {formatConfig.poison_counter_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.poisonCounters")}</span>
+                      <IntegerField
+                        value={formatConfig.poison_counter_threshold}
+                        min={1}
+                        max={U8_MAX}
+                        onCommit={(poison_counter_threshold) =>
+                          setFormatConfig({ ...formatConfig, poison_counter_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
 
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
@@ -494,7 +624,14 @@ export function GameSetupPage() {
                       </div>
                       <input
                         type="range"
-                        min={formatConfig.min_players}
+                        min={
+                          formatConfig.format === "Horde"
+                            ? Math.max(
+                                formatConfig.min_players,
+                                hordeMinimumPlayers(hordeChallengeDeck),
+                              )
+                            : formatConfig.min_players
+                        }
                         max={formatConfig.max_players}
                         value={playerCount}
                         onChange={(e) => {
@@ -516,7 +653,7 @@ export function GameSetupPage() {
                       type="button"
                       onClick={() => { setMatchType("Bo1"); setLastMatchType("Bo1"); }}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo1"
+                        effectiveMatchType === "Bo1"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
                       }`}
@@ -526,12 +663,12 @@ export function GameSetupPage() {
                     <button
                       type="button"
                       onClick={() => { setMatchType("Bo3"); setLastMatchType("Bo3"); }}
-                      disabled={playerCount !== 2}
+                      disabled={bo3Disabled}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo3"
+                        effectiveMatchType === "Bo3"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                      } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                      } ${bo3Disabled ? "cursor-not-allowed opacity-40" : ""}`}
                     >
                       BO3
                     </button>
@@ -543,7 +680,7 @@ export function GameSetupPage() {
                     <span className="text-xs text-slate-400" title={t("common:comboDetector.title")}>
                       {t("common:comboDetector.label")}
                     </span>
-                    <div className="grid grid-cols-3 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
+                    <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                       <button
                         type="button"
                         onClick={() => setLoopDetection({ type: "Off" })}
@@ -554,17 +691,6 @@ export function GameSetupPage() {
                         }`}
                       >
                         {t("common:comboDetector.off")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setLoopDetection({ type: "On" })}
-                        className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                          loopDetection.type === "On"
-                            ? "bg-indigo-600 text-white"
-                            : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                        }`}
-                      >
-                        {t("common:comboDetector.on")}
                       </button>
                       <button
                         type="button"
@@ -613,12 +739,31 @@ export function GameSetupPage() {
               {/* Separator */}
               <div className="border-t border-white/8" />
 
+              {/* Horde: pick the self-piloting deck the survivors face. The AI
+                  seat's library is engine-supplied, so this replaces the usual
+                  AI deck selection for this format. */}
+              {selectedFormat === "Horde" && (
+                <>
+                  <HordeDeckSelector
+                    value={hordeChallengeDeck}
+                    onChange={handleHordeDeckChange}
+                  />
+                  <div className="border-t border-white/8" />
+                </>
+              )}
+              <PileSourceChoice
+                format={selectedFormat}
+                value={pile.source}
+                onChange={setPile}
+              />
+
               {/* AI opponent configuration */}
               <AiOpponentConfig
                 selectedFormat={formatConfig?.format}
-                selectedMatchType={matchType}
+                selectedMatchType={effectiveMatchType}
                 opponentCount={Math.max(1, playerCount - 1)}
                 onCandidateCountChange={setLegalAiDeckCount}
+                catalog={aiCatalog}
               />
 
               {setupError && (
@@ -652,6 +797,7 @@ export function GameSetupPage() {
         title={t("gameSetup.formatPicker.title")}
         subtitle={t("gameSetup.formatPicker.subtitle")}
         onClose={() => setFormatPickerOpen(false)}
+        returnFocusRef={formatPickerTriggerRef}
         maxWidthClassName="max-w-3xl"
         bodyClassName="overflow-y-auto px-4 pt-4 lg:px-6 lg:pt-6"
       >

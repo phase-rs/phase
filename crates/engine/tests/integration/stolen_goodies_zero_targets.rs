@@ -52,10 +52,13 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
         .get_mut(&picnic)
         .unwrap()
         .back_face = Some(BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Stolen Goodies".to_string(),
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             core_types: vec![CoreType::Sorcery],
@@ -79,6 +82,7 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
 
     let pool = &mut runner.state_mut().players[P0.0 as usize].mana_pool;

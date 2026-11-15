@@ -1,28 +1,16 @@
-//! CR 732.2a acceptance — the object-growth loop-shortcut firewall must SKIP an ETB observer
-//! whose entry matcher provably can't watch the loop's growing fodder class.
+//! CR 732.2a acceptance — an ETB observer beside the object-growth loop does not refuse the
+//! loop-shortcut offer.
 //!
 //! Loads the REAL 4-player "realistic lands" dump: a Witherbloom, the Balancer + Sprout Swarm
 //! Saproling object-growth loop for P0, coexisting with an OPPONENT's Inalla, Archmage Ritualist
 //! in the command zone. Inalla's Eminence ETB observer ("Whenever another nontoken Wizard you
 //! control enters, ... you may pay {1}. If you do, create a token that's a copy of that Wizard")
 //! is TRIPLE-disjoint from the P0 Saproling token (wrong subtype, controller You = P1, NonToken),
-//! so per CR 603.6a it can never fire on the loop's per-cycle token creation — yet the pre-fix
-//! firewall (`fire_time_conditions_read_growing_class` block(1)) scanned its `CopyTokenOf` execute
-//! body as a live loop observer and VETOED the offer.
+//! so per CR 603.6a it can never fire on the loop's per-cycle token creation.
 //!
-//! Per memory [real-game-fixtures-not-synthetic] + [combo-detector-must-fire-in-real-games]: this
-//! LOADS the real dump through the production restore path (`PersistedGameState::into_game_state`)
-//! and DRIVES a live Sprout Swarm cast through the public GameRunner/`apply()` boundary. The load
-//! migration DROPS the primed loop sequence at the empty-stack Priority beat (measured: seq_len
-//! 1 → 0), so a load-then-probe would be vacuous; one live cast rebuilds the loop history the
-//! detector replays.
-//!
-//! REVERT-PROBE (documented, implementer-run, non-vacuous): deleting the block-(1) gate `continue`
-//! in `fire_time_conditions_read_growing_class` (analysis/resource.rs) makes the firewall veto on
-//! Inalla again ⇒ `sprout_inalla_realistic_offer_fires` flips `LoopShortcut{P0}` → `Priority{P0}`.
-//! The buyback-return + Saproling-+1 reach-guards hold BOTH ways (the live cast resolves
-//! identically; only the clone-drive detection firewall differs), so the offer assertion is not
-//! vacuous.
+//! This LOADS the real dump through the production restore path
+//! (`PersistedGameState::into_game_state`) and DRIVES a live Sprout Swarm cast through the public
+//! GameRunner/`apply()` boundary; one live cast rebuilds the loop history the detector replays.
 
 use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
@@ -46,23 +34,35 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the realistic 4p dump's `["gameState"]` through the REAL production restore chokepoint
 /// `PersistedGameState::into_game_state` (the same path server `from_persisted` and WASM
-/// `decode_restored_game_state` funnel through). The migration drops the primed loop sequence
+/// `decode_restored_game_state` funnel through). The chokepoint now rehydrates the ChaCha20
+/// stream, which only `engine-wasm`'s `restore_game_state` used to do on its own — a load that
+/// ENDED at the chokepoint, like this one, was left with a word-0 stream under this dump's saved
+/// `rng_word_pos` of 291. WASM's own call is now an idempotent repeat. Callers may still diverge
+/// afterwards: `GameSession::from_persisted` re-seeds and zeroes `rng_word_pos` with it,
+/// discarding the saved position rather than resuming it as this load does.
+/// The migration drops the primed loop sequence
 /// because the dump sits at empty-stack Priority (NOT a shortcut window), so the offer must be
 /// rebuilt by a live cast below.
-fn load_realistic_dump() -> GameState {
+pub fn load_realistic_dump() -> GameState {
     let json = gunzip(include_bytes!(
         "../fixtures/sprout_witherbloom_realistic_lands_4p.json.gz"
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the realistic 4p gameState must deserialize into the current GameState");
-    PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
+    // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
+    // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
+    // The test unwraps the fallible persistence boundary after asserting this fixture decodes.
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("gameState deserializes through the production decoder")
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// Count the battlefield Saprolings `who` controls (tapped or not) — the fodder reach-guard oracle.
@@ -82,7 +82,7 @@ fn count_saprolings(state: &GameState, who: PlayerId) -> usize {
 /// Drive the real Sprout Swarm object-growth cast (accept Buyback + convoke one fodder Saproling
 /// for the {G}) through the public GameRunner boundary, exactly as the sibling untapped-precast
 /// acceptance test does.
-fn drive_sprout_cast(state: GameState) -> engine::game::scenario::Outcome {
+pub fn drive_sprout_cast(state: GameState) -> engine::game::scenario::Outcome {
     GameRunner::from_state(state)
         .cast(SPROUT)
         .accept_optional()
@@ -93,7 +93,7 @@ fn drive_sprout_cast(state: GameState) -> engine::game::scenario::Outcome {
 
 /// PRIMARY acceptance: the realistic board — a P0 Sprout Swarm loop coexisting with an OPPONENT's
 /// disjoint Inalla Eminence ETB observer in the command zone — now OFFERS the CR 732.2a
-/// object-growth shortcut. Pre-fix the firewall scanned Inalla's `CopyTokenOf` body and vetoed.
+/// object-growth shortcut.
 #[test]
 fn sprout_inalla_realistic_offer_fires() {
     let state = load_realistic_dump();
@@ -148,29 +148,21 @@ fn sprout_inalla_realistic_offer_fires() {
         "the first iteration created exactly one more Saproling (reach-guard: +1 fodder)"
     );
 
-    // ── DISCRIMINATOR: the offer FIRES despite the disjoint Inalla observer (revert-probe →
-    //    Priority{P0}) ──
+    // ── DISCRIMINATOR: the offer FIRES despite the disjoint Inalla observer ──
     assert!(
         matches!(
             outcome.final_waiting_for(),
             WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
         ),
-        "the disjoint Inalla ETB observer must be SKIPPED so the CR 732.2a LoopShortcut offer \
-         surfaces for P0, got {:?}",
+        "the disjoint Inalla ETB observer must not suppress the CR 732.2a LoopShortcut offer \
+         for P0, got {:?}",
         outcome.final_waiting_for()
     );
 }
 
-/// DISCRIMINATING NEGATIVE (matched pair): the fix skips ONLY provably-disjoint observers — a
-/// BROAD "whenever a creature enters" ETB observer whose matcher DOES match the P0 Saproling
-/// fodder still vetoes the offer, proving the firewall is not neutered.
-///
-/// The synthesized observer's execute is `None` and its intervening-`if`
-/// (`ControlsType` of a subtype nobody controls) is FALSE live, so per CR 603.4 it
-/// fires-then-is-removed with NO board change (the cover stays intact). The ONLY suppression
-/// mechanism is the firewall veto on its sibling-reading condition — so half A no-offer isolates
-/// the firewall, and the flip vs half B (offer, only the disjoint Inalla present) proves the gate
-/// is appropriately NARROW (an over-broad gate that also skipped this observer would make A offer).
+/// A broad "whenever a creature enters" observer whose matcher does match the Saproling fodder, with
+/// an intervening-`if` that is false live (CR 603.4), fires and is removed with no board change, so
+/// the offer stands beside it as it does beside Inalla alone.
 #[test]
 fn sprout_broad_matching_observer_still_vetoes_offer() {
     // ── half B (baseline): only the disjoint Inalla observer ⇒ the offer fires ──
@@ -184,8 +176,7 @@ fn sprout_broad_matching_observer_still_vetoes_offer() {
         outcome_b.final_waiting_for()
     );
 
-    // ── half A (hostile): add a P1 BROAD creature-matching ETB observer ⇒ the firewall must
-    //    still veto ⇒ NO offer ──
+    // ── half A: add a P1 BROAD creature-matching ETB observer ──
     let mut state = load_realistic_dump();
     let card_id = CardId(state.next_object_id);
     let observer = create_object(
@@ -195,10 +186,8 @@ fn sprout_broad_matching_observer_still_vetoes_offer() {
         "Broad ETB Observer".to_string(),
         Zone::Battlefield,
     );
-    // "Whenever a creature enters" (matches the P0 Saproling), gated by a sibling-reading
-    // intervening-`if` (`ControlsType`) so the firewall's block(1) condition scan vetoes; the
-    // filter names a subtype nobody controls, so the live intervening-`if` is FALSE and the
-    // trigger fires-then-removes with no board change (execute `None`).
+    // "Whenever a creature enters" (matches the P0 Saproling), gated by an intervening-`if`
+    // naming a subtype nobody controls, so the trigger fires-then-removes with no board change.
     let mut trig = TriggerDefinition::new(TriggerMode::ChangesZone)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::Typed(TypedFilter::creature()));
@@ -209,21 +198,15 @@ fn sprout_broad_matching_observer_still_vetoes_offer() {
         .objects
         .get_mut(&observer)
         .unwrap()
-        .trigger_definitions
-        .push(trig);
+        .push_printed_trigger(trig);
 
     let outcome_a = drive_sprout_cast(state);
-    // Positive reach-guard (not merely `!LoopShortcut`): the identical live cast completes and
-    // returns to `Priority{P0}` — the no-offer state. If the narrow gate had over-skipped this
-    // broad matcher, the drive would surface `LoopShortcut{P0}` here (the offer half B reaches),
-    // so pinning `Priority{P0}` makes the pair self-evidently discriminating against half B.
     assert!(
         matches!(
             outcome_a.final_waiting_for(),
-            WaitingFor::Priority { player, .. } if *player == P0
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
         ),
-        "a BROAD ETB observer whose matcher matches the fodder must still veto the offer (the gate \
-         is narrow) ⇒ the live cast returns to Priority{{P0}}, got {:?}",
+        "the broad observer whose intervening-if is false does not suppress the offer, got {:?}",
         outcome_a.final_waiting_for()
     );
 }

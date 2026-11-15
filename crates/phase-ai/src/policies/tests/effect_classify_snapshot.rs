@@ -17,7 +17,9 @@
 //!    `SetTapState`), and a spread of formerly-wildcarded variants now proven
 //!    to return `Contextual`.
 
-use engine::types::ability::{Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter};
+use engine::types::ability::{
+    Effect, EffectScope, EventCounterReproductionCount, QuantityExpr, TapStateChange, TargetFilter,
+};
 use engine::types::counter::CounterType;
 use engine::types::zones::{EtbTapState, Zone};
 
@@ -25,6 +27,8 @@ use crate::policies::effect_classify::{effect_polarity, EffectPolarity};
 
 fn change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination,
         target: TargetFilter::Any,
@@ -82,6 +86,34 @@ fn beneficial_classifications_unchanged() {
     );
 }
 
+/// CR 122.1: `ReproduceEventCounters` is Contextual across its whole design space,
+/// not a static self-buff. The reproduced kind is event-derived (can be harmful)
+/// and the target may be another creature (Aragorn's "up to one other target
+/// creature"), so neither the sign nor the recipient is knowable at classify time.
+/// Discriminating coverage over both axes — target {SelfRef, other} × per-kind
+/// {SameNumber, PerKind} — guards against a regression that re-hardcodes any form
+/// to Beneficial/Harmful.
+#[test]
+fn reproduce_event_counters_is_contextual_across_axes() {
+    for target in [TargetFilter::SelfRef, TargetFilter::Any] {
+        for per_kind_count in [
+            EventCounterReproductionCount::SameNumber,
+            EventCounterReproductionCount::PerKind(1),
+        ] {
+            let effect = Effect::ReproduceEventCounters {
+                target: target.clone(),
+                per_kind_count,
+            };
+            assert_eq!(
+                effect_polarity(&effect),
+                EffectPolarity::Contextual,
+                "{effect:?} must classify as Contextual (event-derived kind, \
+                 possibly non-self target)",
+            );
+        }
+    }
+}
+
 #[test]
 fn harmful_classifications_unchanged() {
     assert_eq!(
@@ -98,6 +130,7 @@ fn harmful_classifications_unchanged() {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         }),
         EffectPolarity::Harmful
     );
@@ -142,6 +175,14 @@ fn contextual_classifications_unchanged() {
         effect_polarity(&Effect::Amass {
             subtype: "Zombie".to_string(),
             count: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }),
+        EffectPolarity::Contextual
+    );
+    // CR 701.71a: empower Jace — classified beside Amass.
+    assert_eq!(
+        effect_polarity(&Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 2 },
         }),
         EffectPolarity::Contextual
     );
@@ -172,6 +213,9 @@ fn contextual_classifications_unchanged() {
         Effect::SolveCase,
         Effect::HeistExile,
         Effect::ProcessRadCounters,
+        // CR 701.33: abandoning a scheme is Contextual (ongoing pressure vs.
+        // cycling to the next scheme is card-specific).
+        Effect::AbandonScheme,
     ] {
         assert_eq!(
             effect_polarity(&effect),

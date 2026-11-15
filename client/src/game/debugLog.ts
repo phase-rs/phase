@@ -26,6 +26,12 @@ export function debugLog(message: string, level: DebugLogLevel = "error"): void 
     phase: gameState?.phase ?? "PreCombatMain",
     category: "Debug",
     segments: [{ type: "Text", value: `[${level.toUpperCase()}] ${message}` }],
+    presentation: {
+      importance: "Diagnostic",
+      tone: "Diagnostic",
+      boundary: "None",
+      visibility: "Public",
+    },
   };
 
   useGameStore.setState((prev) => ({

@@ -1,4 +1,4 @@
-import type { GameObject } from "../adapter/types.ts";
+import type { CardPrinting, GameObject, PrintedRef, TokenArtDescriptor } from "../adapter/types.ts";
 import type { TokenSearchFilters } from "./scryfall.ts";
 
 /**
@@ -25,6 +25,15 @@ export interface CardImageLookup {
   faceName?: string;
   name: string;
   faceIndex: number;
+  /** Delivered live printing, or emblem-source printing; never recovered locally. */
+  ownerPrinting?: CardPrinting | null;
+}
+
+/** Owner admission uses the same identity as the selected object or emblem source. */
+export function ownerPrintedRefOf(lookup: CardImageLookup): PrintedRef | undefined {
+  return lookup.oracleId && lookup.faceName
+    ? { oracle_id: lookup.oracleId, face_name: lookup.faceName }
+    : undefined;
 }
 
 /**
@@ -49,11 +58,15 @@ export interface CardImageLookup {
  *      stashes the original front-face characteristics there, and
  *      `scripts/gen-scryfall-images.sh` indexes only front-face names. See
  *      issue #90 (The Legend of Kuruk) for context.
+ *
+ * Printing follows the same authority as the image identity: the live object,
+ * or the existing emblem-source branch. Omit an undefined carrier value to
+ * preserve legacy descriptors; explicit null remains authoritative.
  */
 export function cardImageLookup(
   obj: Pick<
     GameObject,
-    "name" | "transformed" | "back_face" | "printed_ref" | "is_emblem" | "emblem_source"
+    "name" | "transformed" | "back_face" | "printed_ref" | "is_emblem" | "emblem_source" | "printing"
   >,
 ): CardImageLookup {
   if (obj.printed_ref) {
@@ -62,6 +75,7 @@ export function cardImageLookup(
       faceName: obj.printed_ref.face_name,
       name: obj.name,
       faceIndex: obj.transformed ? 1 : 0,
+      ...(obj.printing === undefined ? {} : { ownerPrinting: obj.printing }),
     };
   }
 
@@ -77,6 +91,7 @@ export function cardImageLookup(
       oracleId: obj.emblem_source.printed_ref?.oracle_id,
       faceName: obj.emblem_source.printed_ref?.face_name,
       faceIndex: 0,
+      ...(obj.emblem_source.printing === undefined ? {} : { ownerPrinting: obj.emblem_source.printing }),
     };
   }
 
@@ -84,28 +99,93 @@ export function cardImageLookup(
     return {
       name: obj.back_face?.name ?? obj.name,
       faceIndex: 1,
+      ...(obj.printing === undefined ? {} : { ownerPrinting: obj.printing }),
     };
   }
-  return { name: obj.name, faceIndex: 0 };
+  return {
+    name: obj.name,
+    faceIndex: 0,
+    ...(obj.printing === undefined ? {} : { ownerPrinting: obj.printing }),
+  };
+}
+
+/**
+ * Format an engine-authoritative keyword family name for Scryfall's `kw:`
+ * predicate ("FirstStrike" → "first strike"). The engine owns which
+ * keywords a token intrinsically has; this only adjusts letter casing and
+ * word boundaries for the query language. Raw `Unknown` payloads (already
+ * plain strings) pass through lowercased.
+ */
+export function formatKeywordForScryfall(family: string): string | null {
+  const name = family
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim()
+    .toLowerCase();
+  return name || null;
+}
+
+/**
+ * Boundary-safe codec for a keyword list traveling through the image
+ * request path as one string. Plain comma joins are ambiguous — an
+ * `Unknown` keyword payload is an arbitrary string that may itself contain
+ * commas — so the list is JSON-encoded instead.
+ */
+export function encodeTokenFilterKeywords(keywords: string[]): string {
+  return JSON.stringify(keywords);
+}
+
+export function decodeTokenFilterKeywords(encoded: string): string[] {
+  if (encoded === "") return [];
+  try {
+    const parsed: unknown = JSON.parse(encoded);
+    return Array.isArray(parsed)
+      ? parsed.filter((k): k is string => typeof k === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
  * Build the Scryfall token-search filters for an engine game object.
  *
- * `hasAbilities` is derived purely from engine-provided fields — no rules
- * inference. A vanilla token (e.g. a 1/1 white Human from Wedding Announcement)
- * yields `hasAbilities: false`, narrowing art selection to a vanilla printing;
- * a Spirit token with flying yields `true`. See issue #502.
+ * The engine-owned `token_art` descriptor is the single authority for the
+ * token's intrinsic (printed) body — P/T, colors, subtypes, keyword
+ * families, and the ability summary. The client only formats those values
+ * into Scryfall predicates here; it never re-derives which characteristics
+ * are intrinsic.
+ *
+ * Descriptor-less objects (cards, non-tokens, and tokens from older
+ * snapshots) fall back to the legacy live-field lookup, preserving
+ * pre-descriptor behavior exactly.
  */
 export function tokenFiltersForObject(obj: GameObject): TokenSearchFilters {
+  const art: TokenArtDescriptor | null | undefined = obj.token_art;
+  if (art) {
+    const keywords = [
+      ...new Set(
+        (art.keywords ?? [])
+          .map(formatKeywordForScryfall)
+          .filter((k): k is string => k !== null),
+      ),
+    ];
+    return {
+      power: art.power,
+      toughness: art.toughness,
+      colors: art.colors,
+      subtypes: art.subtypes,
+      keywords: keywords.length > 0 ? keywords : undefined,
+      hasAbilities: art.has_abilities,
+    };
+  }
   return {
     power: obj.power,
     toughness: obj.toughness,
     colors: obj.color,
     subtypes: obj.card_types?.subtypes,
     hasAbilities:
-      obj.keywords.length > 0 ||
-      obj.abilities.length > 0 ||
+      (obj.keywords?.length ?? 0) > 0 ||
+      (obj.abilities?.length ?? 0) > 0 ||
       (obj.token_rules_text?.length ?? 0) > 0,
   };
 }
@@ -114,15 +194,17 @@ export function tokenFiltersForObject(obj: GameObject): TokenSearchFilters {
  * Maps a battlefield/stack `GameObject` to the props `CardImage` needs to render
  * it — resolving MDFC faces, token search filters, and token image refs. Shared
  * by every choice modal that renders object choices as card images.
+ * Owner printing follows the lookup authority without reading viewer preferences.
  */
 export function objectImageProps(obj: GameObject) {
-  const { name, faceIndex, oracleId, faceName } = cardImageLookup(obj);
+  const { name, faceIndex, oracleId, faceName, ownerPrinting } = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
   return {
     cardName: name,
     faceIndex,
     oracleId,
     faceName,
+    ...(ownerPrinting === undefined ? {} : { ownerPrinting }),
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
     tokenImageRef: isToken ? obj.token_image_ref : undefined,

@@ -211,6 +211,7 @@ fn modes_chosen_ref_resolves_off_committed_spell() {
         card_id,
         controller: P0,
         object_id: atarka,
+        cast_mana_value: None,
     });
 
     let expr = QuantityExpr::Ref {
@@ -259,6 +260,7 @@ fn modes_chosen_ref_reads_event_object_not_source() {
         card_id,
         controller: P0,
         object_id: second,
+        cast_mana_value: None,
     });
     // source_id = riku (the trigger source, chosen_modes=[2]).
     assert_eq!(
@@ -279,6 +281,7 @@ fn modes_chosen_ref_reads_event_object_not_source() {
         card_id: empty_card,
         controller: P0,
         object_id: first,
+        cast_mana_value: None,
     });
     assert_eq!(
         resolve_quantity(runner.state(), &expr, P0, riku),

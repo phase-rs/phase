@@ -8,6 +8,12 @@
 //!   CARGO_TARGET_DIR=/tmp/forge-prof-target cargo run --profile profiling \
 //!       -p phase-ai --bin legal-actions-bench -- path/to/state.json
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs;
 use std::time::{Duration, Instant};
 

@@ -6,17 +6,20 @@ use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-    EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
-    TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator,
+    ControllerRef, Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange,
+    TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::format::FormatConfig;
+use crate::types::game_state::{AutoPassMode, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use crate::types::phase::{PhaseGroup, PhaseStop, PhaseStopScope, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -64,6 +67,8 @@ fn hand_to_battlefield_choice_ability(
 ) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -84,11 +89,11 @@ fn hand_to_battlefield_choice_ability(
     )
 }
 
-/// Verify that combat is skipped when there are no attackers and no triggers.
-/// With no BeginCombat triggers and no potential attackers, auto_advance()
-/// skips straight to PostCombatMain.
+/// CR 507.2 + CR 508.1a: Even with no attackers and no beginning-of-combat
+/// triggers, beginning of combat has an active-player priority window before
+/// the active player makes the (here forced-empty) attacker declaration.
 #[test]
-fn combat_skipped_when_no_attackers_no_triggers() {
+fn begin_combat_window_precedes_forced_empty_attacker_declaration() {
     let mut state = new_game(42);
     state.turn_number = 2;
     state.phase = Phase::PreCombatMain;
@@ -98,24 +103,23 @@ fn combat_skipped_when_no_attackers_no_triggers() {
         player: PlayerId(0),
     };
 
-    // Create a 0/1 creature with no triggers — can't attack, no combat triggers.
-    let creature_id = create_object(
-        &mut state,
-        CardId(200),
+    // Stops make both windows observable; otherwise the forced empty
+    // declaration is deliberately auto-submitted by the normal auto-pass loop.
+    state.phase_stops.insert(
         PlayerId(0),
-        "Wall".to_string(),
-        Zone::Battlefield,
+        vec![
+            PhaseStop {
+                phase: Phase::BeginCombat,
+                scope: PhaseStopScope::OwnTurn,
+            },
+            PhaseStop {
+                phase: Phase::DeclareAttackers,
+                scope: PhaseStopScope::OwnTurn,
+            },
+        ],
     );
-    {
-        let obj = state.objects.get_mut(&creature_id).unwrap();
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.power = Some(0);
-        obj.toughness = Some(1);
-    }
 
-    // Pass priority twice (P0 passes, then P1 passes) with empty stack.
-    // This advances from PreCombatMain → BeginCombat → no triggers, no
-    // attackers → skip to PostCombatMain.
+    // Passing the precombat-main priority window reaches beginning of combat.
     let result1 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert!(matches!(
         result1.waiting_for,
@@ -126,18 +130,238 @@ fn combat_skipped_when_no_attackers_no_triggers() {
 
     let result2 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    // We should now be at PostCombatMain with empty stack.
-    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(matches!(
+        result2.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
     assert!(
         state.stack.is_empty(),
-        "Stack should be empty — no triggers exist. Stack: {:?}",
+        "the no-trigger window must not fabricate stack work: {:?}",
         state.stack
     );
+    assert!(state.pending_trigger.is_none());
+
+    // Both players then pass the mandated beginning-of-combat window. The
+    // downstream DeclareAttackers prompt remains visible despite its forced
+    // empty declaration because the explicit stop overrides auto-submit.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let result4 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::DeclareAttackers);
+    assert!(matches!(
+        result4.waiting_for,
+        WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            ref valid_attacker_ids,
+            ..
+        } if valid_attacker_ids.is_empty()
+    ));
+
+    // Submit the only legal declaration through the production action path.
+    // CR 508.8 skips DeclareBlockers and CombatDamage, but CR 511.1 still
+    // begins EndCombat and grants priority.
+    let empty_declaration = apply_as_current(
+        &mut state,
+        GameAction::DeclareAttackers {
+            attacks: vec![],
+            bands: vec![],
+        },
+    )
+    .expect("the empty declaration offered by the engine must be submitable");
+    assert_eq!(state.phase, Phase::EndCombat);
+    assert!(matches!(
+        empty_declaration.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+
+    // The normal priority loop ends EndCombat and enters the postcombat main
+    // phase after both players pass.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let postcombat = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::PostCombatMain);
     assert!(
-        state.pending_trigger.is_none(),
-        "No pending trigger should exist"
+        state.combat.is_none(),
+        "combat ends after the EndCombat step"
     );
-    assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        postcombat.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
+/// CR 510.4 + CR 511.1 + CR 117.3a: completed combat-damage and end-of-combat
+/// steps each expose their ordinary active-player priority window. The
+/// turn-boundary auto-pass session is re-armed before each opponent pass so the
+/// phase-stop interruption is exercised through the production `apply` path.
+#[test]
+fn combat_phase_stops_pause_damage_and_end_combat_windows() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::DeclareBlockers;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    let attacker = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(0),
+        "Combat Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&attacker).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+    }
+    state.combat = Some(crate::game::combat::CombatState {
+        attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+            attacker,
+            PlayerId(1),
+        )],
+        ..Default::default()
+    });
+    state.current_combat_attacker_restriction = Some(TargetFilter::Any);
+    state.current_combat_attacker_restriction_source = Some(attacker);
+    state.waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(1),
+        valid_blocker_ids: Vec::new(),
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
+    };
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![
+            PhaseStop {
+                phase: Phase::CombatDamage,
+                scope: PhaseStopScope::AllTurns,
+            },
+            PhaseStop {
+                phase: Phase::EndCombat,
+                scope: PhaseStopScope::AllTurns,
+            },
+        ],
+    );
+
+    // Finish the blocker declaration, then pass the declare-blockers priority
+    // window. The next pass enters CombatDamage through the normal reducer.
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::DeclareBlockers {
+            assignments: Vec::new(),
+        },
+    )
+    .unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let damage_stop = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::CombatDamage);
+    assert!(matches!(
+        damage_stop.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "CombatDamage stop must interrupt the armed auto-pass session"
+    );
+
+    // Pass through the damage-step priority window, then repeat the same
+    // production flow for EndCombat.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let end_combat_stop = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::EndCombat);
+    assert!(matches!(
+        end_combat_stop.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        state.combat.is_some(),
+        "combat remains during EndCombat priority"
+    );
+    assert!(
+        state.current_combat_attacker_restriction.is_some(),
+        "EndCombat restriction remains live during its priority window"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "EndCombat stop must interrupt the armed auto-pass session"
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert!(state.combat.is_none(), "combat clears after EndCombat ends");
+    assert!(
+        state.current_combat_attacker_restriction.is_none(),
+        "EndCombat restriction clears after the step ends"
+    );
+}
+
+/// CR 500.8 + CR 507.2: An inserted combat phase gets the same
+/// beginning-of-combat priority window as the natural combat phase.
+#[test]
+fn inserted_begin_combat_gets_priority_window() {
+    let mut state = setup_game_at_main_phase();
+    state.phase = Phase::EndCombat;
+    state
+        .extra_phases
+        .push(crate::types::game_state::ExtraPhase {
+            anchor: Phase::EndCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+            id: crate::types::identifiers::ExtraPhaseId::default(),
+        });
+
+    let mut events = Vec::new();
+    let end_combat_waiting = crate::game::turns::auto_advance(&mut state, &mut events);
+
+    assert_eq!(state.phase, Phase::EndCombat);
+    assert!(matches!(
+        end_combat_waiting,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+
+    // End Combat is a real priority-bearing step even when no creature
+    // attacked. Passing it lets the inserted phase become the next entry.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let waiting_for = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(state.combat.is_some());
+    assert!(matches!(
+        waiting_for.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
 }
 
 /// CR 503.1a: Upkeep triggers fire when the upkeep step begins.
@@ -244,6 +468,61 @@ fn begin_combat_trigger_fires_with_attackers() {
         !state.stack.is_empty() || state.pending_trigger.is_some(),
         "BeginCombat trigger should have fired"
     );
+}
+
+/// CR 603.3b + CR 507.2: A phase-trigger ordering prompt is a stronger result
+/// than the ordinary beginning-of-combat priority window and must propagate
+/// unchanged through the phase interpreter.
+#[test]
+fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
+    let mut state = setup_game_at_main_phase();
+    for (card_id, amount) in [(201_u64, 1), (202, 2)] {
+        let source_id = create_object(
+            &mut state,
+            CardId(card_id),
+            PlayerId(0),
+            format!("Combat trigger {card_id}"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.power = Some(1);
+        source.toughness = Some(1);
+        source.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .phase(Phase::BeginCombat)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: amount },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .trigger_zones(vec![Zone::Battlefield]),
+        );
+    }
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(
+        state.combat.is_some(),
+        "combat state is available to the prompt"
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            ref triggers,
+        } if triggers.len() == 2
+    ));
 }
 
 /// CR 507.1: BeginCombat triggers fire even without potential attackers.
@@ -588,7 +867,7 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         "paying {{1}} must place one +1/+1 counter on the lone Shrine"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "the {{1}} must actually be paid on accept"
     );
@@ -1052,6 +1331,7 @@ fn setup_esper_sentinel_unless_payment(pay_mana: bool) -> GameState {
             ))
             .constraint(TriggerConstraint::NthSpellThisTurn {
                 n: 1,
+                comparator: Comparator::EQ,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default()
                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
@@ -1742,8 +2022,9 @@ fn card_name_choice_validates_against_all_card_names() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string(), "Counterspell".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -1760,8 +2041,9 @@ fn card_name_choice_validates_against_all_card_names() {
 
     // Reset state for invalid test
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -1782,8 +2064,9 @@ fn card_name_choice_is_case_insensitive() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -1834,13 +2117,17 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
         ability: Box::new(ability),
         trigger_event: None,
+        trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
+        decision_subject_id: None,
         source_id,
         description: None,
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
 
     let result = apply_as_current(
@@ -1884,10 +2171,13 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
         ability: Box::new(ability),
         trigger_event: None,
+        trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
+        decision_subject_id: None,
         remaining: vec![],
         source_id,
         description: None,
@@ -1940,6 +2230,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2018,6 +2309,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2088,6 +2380,7 @@ fn unless_pay_success_runs_if_a_player_does_sub_ability() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2177,6 +2470,7 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2200,8 +2494,9 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
 }
 
 /// CR 603.3b + CR 701.22a: if an unless-payment branch pauses on a
-/// resolution choice, triggers produced by that branch wait until the choice
-/// finishes instead of clobbering the choice prompt.
+/// resolution choice, no scry trigger exists until the controller completes
+/// the top/bottom choice; its watchers then resolve without clobbering the
+/// prompt.
 #[test]
 fn unless_pay_resolution_choice_defers_branch_triggers() {
     let mut state = setup_game_at_main_phase();
@@ -2281,6 +2576,7 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2292,10 +2588,9 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     };
     assert_eq!(player, PlayerId(0));
     assert_eq!(cards.len(), 2);
-    assert_eq!(
-        state.deferred_triggers.len(),
-        2,
-        "the two scry watcher triggers should be parked until ScryChoice resolves"
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "scry watchers must not trigger before the controller completes ScryChoice"
     );
 
     let hand_after_scry_prompt = state.players[0].hand.len();
@@ -2312,7 +2607,11 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     }
 
     assert_eq!(state.players[0].hand.len(), hand_after_scry_prompt + 1);
-    assert_eq!(state.players[0].life, life_after_scry_prompt + 1);
+    assert_eq!(
+        state.players[0].life,
+        life_after_scry_prompt + 1,
+        "the completed-scry watcher resolves after ScryChoice finishes"
+    );
 }
 
 /// CR 118.12: When the unless cost is declined, the primary effect runs
@@ -2359,6 +2658,7 @@ fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2403,6 +2703,7 @@ fn unless_pay_success_with_no_sub_ability_is_inert() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2463,6 +2764,7 @@ fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2504,6 +2806,7 @@ fn unless_energy_payment_deducts_energy_and_skips_effect() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2566,6 +2869,7 @@ fn unless_discard_payment_filters_eligible_hand_cards() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2679,6 +2983,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -2694,11 +2999,15 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+        mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
@@ -2755,6 +3064,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![chosen_land, unchosen_land],
         count: 2,
@@ -2770,11 +3080,15 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+        mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
@@ -2806,6 +3120,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -2821,11 +3136,15 @@ fn effect_zone_choice_up_to_respects_min_count() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+        mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
@@ -2845,6 +3164,7 @@ fn choose_one_of_enters_branch_choice_state() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![draw_ability(1), draw_ability(2)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -2889,10 +3209,12 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         source_id,
         branches: vec![branch_gain, branch_lose],
         branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
-        parent_targets: vec![],
+        parent_occurrences: Default::default(),
         context: Default::default(),
+        continuation: None,
         replacement_applied: Default::default(),
         remaining_players: vec![],
+        trigger_context: None,
     };
 
     apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
@@ -2926,6 +3248,7 @@ fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3019,6 +3342,7 @@ fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3074,6 +3398,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3083,6 +3408,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, token_branch],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3201,6 +3527,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -3217,7 +3544,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let waiting_for = engine_replacement::apply_post_replacement_effect(
         &mut state,
         &effect_def,
-        Some(source_id),
+        engine_replacement::ContinuationSubjects::affected_only(Some(source_id)),
         None,
         None,
         Default::default(),
@@ -3227,6 +3554,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     assert!(matches!(
         waiting_for,
         Some(WaitingFor::NamedChoice {
+            free_entry: None,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             ..
         })
@@ -3250,6 +3578,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
 
     // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
         options: vec![
@@ -3323,9 +3652,11 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    assert!(state.battlefield.contains(&siege_id));
+    // CR 614.12a: the anchor word is chosen before the Siege enters.
+    assert!(!state.battlefield.contains(&siege_id));
     match resolve.waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player,
             choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
             source: Some(source),
@@ -3335,7 +3666,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
             assert_eq!(source.prompt.identity.reference.object_id, siege_id);
             assert_eq!(
                 source.binding,
-                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
             );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
@@ -3350,6 +3681,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     )
     .unwrap();
 
+    assert!(state.battlefield.contains(&siege_id));
     assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
 }
 
@@ -3360,6 +3692,7 @@ fn restricted_color_choice_rejects_excluded_color() {
 
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color_excluding(vec![ManaColor::White]),
         options: vec![
@@ -3423,7 +3756,7 @@ fn copy_target_choice_resolves_become_copy() {
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 crate::types::ability::Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Any,
                     duration: None,
                     mana_value_limit: Some(
@@ -3448,6 +3781,7 @@ fn copy_target_choice_resolves_become_copy() {
         source_id: clone_id,
         valid_targets: vec![target_id],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Player chooses to copy Grizzly Bears
@@ -3525,7 +3859,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -3542,6 +3876,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
         source_id: assassin,
         valid_targets: vec![ghave],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -3615,6 +3950,7 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
         source_id: deeps,
         valid_targets: vec![citadel],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -3625,6 +3961,7 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
     )
     .expect("Echoing Deeps should copy Sunken Citadel");
     let WaitingFor::NamedChoice {
+        free_entry: None,
         player,
         source: Some(source),
         options,
@@ -3882,7 +4219,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -3922,6 +4259,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -4069,7 +4407,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     duration: None,
                     mana_value_limit: None,
@@ -4103,6 +4441,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let _waiting = apply_as_current(
@@ -4182,6 +4521,7 @@ fn copy_target_choice_rejects_invalid_target() {
         source_id: clone_id,
         valid_targets: vec![valid_id], // Bird is NOT in valid targets
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Try to choose invalid target
@@ -4262,6 +4602,8 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let reflexive = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4284,7 +4626,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
@@ -4332,6 +4674,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         source_id: spidey,
         valid_targets: vec![elesh],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -4456,6 +4799,8 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
             ..crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::ParentTarget,
@@ -4475,7 +4820,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
@@ -4508,6 +4853,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         source_id: cloner,
         valid_targets: vec![source_card],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Accumulate events across the full resolution so we can count
@@ -4951,6 +5297,7 @@ fn rewind_to_next_p0_upkeep(state: &mut GameState) {
     state.priority_player = PlayerId(0);
     state.stack.clear();
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
     // CR 603.3c + CR 603.3d: clear the in-construction cursor too —
     // symmetric with `pending_trigger`. Without this, a trigger pushed
     // earlier in the test could leave `pending_trigger_entry` pointing

@@ -9,11 +9,13 @@ name = "phase-server"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot = "0.12"
 server-core = { path = "../server-core" }
 lobby-broker = { path = "../lobby-broker" }
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
+state-codec = { path = "../state-codec" }
 draft-core = { path = "../draft-core" }
 rand = "0.9"
 axum = { version = "0.8", features = ["ws"] }
@@ -23,15 +25,17 @@ minisign-verify = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["brotli", "rustls-tls-webpki-roots"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
 serde = { workspace = true }
 serde_json = "1"
+flate2 = "1"
 tempfile = "3"
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 url = "2"
+futures-util = { version = "0.3", features = ["sink"] }
 ngrok = { version = "0.18", optional = true }
 
 [features]
@@ -41,5 +45,7 @@ ngrok = { version = "0.18", optional = true }
 ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
-futures-util = "0.3"
 tokio-tungstenite = "0.29"
+tokio = { version = "1", features = ["test-util"] }
+# GameScenario/GameRunner (bandwidth_budget_tests) sit behind the engine's `test-support` feature.
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }

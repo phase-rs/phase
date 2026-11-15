@@ -21,7 +21,7 @@
 //! CR 400.7j + CR 608.2k: the sacrificed object's last-known information is
 //! captured before it changes zones, so cost-paid-object property references
 //! resolve at ability resolution.
-//! CR 701.21: Sacrifice keyword action (verified: docs/MagicCompRules.txt:3443).
+//! CR 701.21: Sacrifice keyword action.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
@@ -101,6 +101,7 @@ fn greater_good_draws_equal_to_sacrificed_power_then_discards_three() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     assert!(
@@ -172,6 +173,7 @@ fn greater_good_draw_count_tracks_modified_power() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     runner
@@ -250,6 +252,7 @@ fn discard_cost_populates_cost_paid_object() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the discard-cost ability must succeed");
     assert!(
@@ -303,6 +306,7 @@ fn greater_good_zero_power_creature_draws_zero_still_discards() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     runner
@@ -351,6 +355,7 @@ fn cost_paid_object_does_not_leak_between_activations() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("first activation must succeed");
     runner
@@ -371,6 +376,7 @@ fn cost_paid_object_does_not_leak_between_activations() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("second activation must succeed");
     runner
@@ -452,6 +458,7 @@ fn multi_sacrifice_cost_count_is_honored() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the count: 2 sacrifice ability must succeed");
 
@@ -532,6 +539,7 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
             .act(GameAction::ActivateAbility {
                 source_id: host_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activating the count: 2 sacrifice ability must succeed");
         assert!(
@@ -592,6 +600,7 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
             .act(GameAction::ActivateAbility {
                 source_id: host_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activating the count: 2 sacrifice ability must succeed");
 
@@ -607,13 +616,12 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
     }
 }
 
-/// CR 601.2c + CR 701.21a — non-modal activated abilities with sacrifice
-/// costs must pay that cost before choosing targets when target legality or
-/// effect quantities depend on the sacrificed object. This mirrors Dina-style
-/// abilities that sacrifice one creature, then target another creature with an
-/// effect sized by `CostPaidObject`.
+/// CR 602.2b + CR 601.2c/h — target declaration precedes paying a sacrifice
+/// cost even when the effect's later quantity reads the sacrificed object's
+/// last-known information. This mirrors Dina-style abilities that sacrifice
+/// one creature, then put counters on a target creature based on its power.
 #[test]
-fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
+fn sacrifice_cost_selects_target_before_cost_paid_object_exists() {
     let ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::PutCounter {
@@ -640,8 +648,7 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
         .id();
     let victim_id = scenario.add_creature(P0, "Victim", 3, 3).id();
     let target_id = scenario.add_creature(P0, "Counter Target", 1, 1).id();
-    // A second legal creature target so auto-select does not skip the post-sacrifice
-    // target prompt when only one creature remains after the victim leaves play.
+    // A second legal creature target keeps target selection interactive.
     scenario.add_creature(P0, "Alternate Target", 2, 2);
 
     let mut runner = scenario.build();
@@ -649,40 +656,31 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the sacrifice-cost ability must succeed");
     assert!(
         matches!(
             &runner.state().waiting_for,
-            engine::types::WaitingFor::PayCost {
-                kind: engine::types::PayCostKind::Sacrifice,
-                ..
-            }
+            engine::types::WaitingFor::TargetSelection { .. }
         ),
-        "activating must prompt for sacrifice before target selection, got {:?}",
+        "activating must prompt for a target before the sacrifice cost, got {:?}",
         runner.state().waiting_for,
     );
-
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![victim_id],
-        })
-        .expect("selecting the sacrifice victim must succeed");
-
     match &runner.state().waiting_for {
         engine::types::WaitingFor::TargetSelection { target_slots, .. } => {
             assert_eq!(target_slots.len(), 1, "the effect has one target slot");
             let legal_targets = &target_slots[0].legal_targets;
             assert!(
                 legal_targets.contains(&TargetRef::Object(target_id)),
-                "the post-sacrifice target creature must be legal",
+                "the declared target creature must be legal before payment",
             );
             assert!(
-                !legal_targets.contains(&TargetRef::Object(victim_id)),
-                "the sacrificed creature must not remain targetable after cost payment",
+                legal_targets.contains(&TargetRef::Object(victim_id)),
+                "the sacrifice candidate is legal while targets are declared",
             );
         }
-        other => panic!("expected target selection after sacrifice cost, got {other:?}"),
+        other => panic!("expected target selection before sacrifice cost, got {other:?}"),
     }
 
     runner
@@ -690,12 +688,17 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
             targets: vec![TargetRef::Object(target_id)],
         })
         .expect("selecting the remaining creature target must succeed");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![victim_id],
+        })
+        .expect("selecting the sacrifice victim after target declaration must succeed");
     runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().objects[&victim_id].zone,
         Zone::Graveyard,
-        "the victim must be sacrificed before target selection",
+        "the victim must be sacrificed after target selection",
     );
     assert_eq!(
         runner.state().objects[&target_id]

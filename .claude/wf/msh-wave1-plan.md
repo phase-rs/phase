@@ -262,10 +262,10 @@ All parser dispatch uses combinators: `value(.., tag(..))` for the three new `Si
 **Risk-scaled verification:** `cargo fmt --all` (always direct). Parser combinator gate (`check-parser-combinators.sh`) + targeted parser tests for the new arms. Tilt `clippy` + `test-engine` for the engine seams (matcher/index/effects) — these are shared trigger-machinery changes, so collect strong Tilt evidence before marking fixed. Do NOT run `cargo build/clippy/test` directly (target-lock contention).
 
 ## CR numbers (all grep-verified against `docs/MagicCompRules.txt`)
-- **CR 701.50 / 701.50a / 701.50b / 701.50c / 701.50e** — Connive (line 3707–3719). ✓
-- **CR 601.1a** — "playing a card" = play as land or cast as spell (line 2451). ✓ (Klaw)
-- **CR 601.2i** — abilities trigger when a spell is cast (line 2473). ✓
-- **CR 305.1 / 701.18a** — play a land special action (lines 1688 / 3412). ✓ (Klaw land half)
+- **CR 701.50 / 701.50a / 701.50b / 701.50c / 701.50e** — Connive. ✓
+- **CR 601.1a** — "playing a card" = play as land or cast as spell. ✓ (Klaw)
+- **CR 601.2i** — abilities trigger when a spell is cast. ✓
+- **CR 305.1 / 701.18a** — play a land special action. ✓ (Klaw land half)
 - **CR 115.1** — becomes the target of a spell or ability (verified). ✓ (Loki)
 - **CR 603.2** — event→trigger matching / index over-approximation (verified). ✓
 - Once-each-turn: handled by existing `TriggerConstraint::OncePerTurn` (no new CR assertion needed).

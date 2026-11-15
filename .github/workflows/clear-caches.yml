@@ -24,7 +24,8 @@ on:
           - scryfall
           - binaryen
           - rust
-          - pnpm
+          - node
+          - cardgen
           - all
 
 permissions:
@@ -35,39 +36,71 @@ jobs:
   clear:
     name: Delete matching caches
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # sccache alone runs to hundreds of entries and each delete is one API call.
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
     steps:
+      # Prefixes must match keys that actually exist. `gh cache list --key` is a
+      # PREFIX match, so each pattern below is the shortest prefix covering its
+      # whole family:
+      #   * Rust toolchain caches are written by actions-rust-lang/setup-rust-toolchain,
+      #     which prefixes every key `v0-rust-` — a bare `rust-` matches nothing.
+      #   * sccache is the Rust compilation cache and dominates the repo quota, so
+      #     "clear rust" means both families.
+      #   * the pnpm store key is `node-cache-Linux-x64-pnpm-…`; `node-cache-` covers
+      #     that and the npm variant beside it.
+      #   * `binaryen-` covers both the current `binaryen-version_…` keys and the
+      #     older `binaryen-<ver>-<arch>` ones.
       - name: Resolve cache key prefixes
         id: prefixes
         run: |
           case "${{ inputs.target }}" in
             mtgjson)  echo "patterns=mtgjson- scryfall-" >> "$GITHUB_OUTPUT" ;;
             scryfall) echo "patterns=mtgjson- scryfall-" >> "$GITHUB_OUTPUT" ;;
-            binaryen) echo "patterns=binaryen-version_" >> "$GITHUB_OUTPUT" ;;
-            rust)     echo "patterns=rust-" >> "$GITHUB_OUTPUT" ;;
-            pnpm)     echo "patterns=node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
-            all)      echo "patterns=mtgjson- scryfall- binaryen-version_ rust- node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
+            binaryen) echo "patterns=binaryen-" >> "$GITHUB_OUTPUT" ;;
+            rust)     echo "patterns=v0-rust- sccache/" >> "$GITHUB_OUTPUT" ;;
+            node)     echo "patterns=node-cache-" >> "$GITHUB_OUTPUT" ;;
+            cardgen)  echo "patterns=cardgen-" >> "$GITHUB_OUTPUT" ;;
+            all)      echo "patterns=mtgjson- scryfall- binaryen- v0-rust- sccache/ node-cache- cardgen-" >> "$GITHUB_OUTPUT" ;;
           esac
 
+      # A single list call is capped by --limit, and families here run to hundreds
+      # of entries (sccache alone), so one pass would delete a slice and report
+      # success. Re-list until a pass finds nothing, and stop early if a pass
+      # makes no progress so an undeletable key cannot spin forever.
       - name: Delete caches
         run: |
           set -euo pipefail
           deleted=0
           for prefix in ${{ steps.prefixes.outputs.patterns }}; do
             echo "::group::Caches matching '$prefix'"
-            # gh cache list prints: ID  KEY  SIZE  REF  LAST_ACCESSED
-            keys=$(gh cache list --limit 100 --key "$prefix" --json key --jq '.[].key' || true)
-            if [ -z "$keys" ]; then
-              echo "(none)"
-            else
+            before_prefix=$deleted
+            while :; do
+              # No `|| true`: a failed list would come back empty, break the
+              # loop, and report success having deleted nothing — the same
+              # silent no-op this workflow is being fixed for.
+              keys=$(gh cache list --limit 1000 --key "$prefix" --json key --jq '.[].key')
+              if [ -z "$keys" ]; then
+                break
+              fi
+              before_pass=$deleted
               while IFS= read -r key; do
-                echo "Deleting: $key"
-                gh cache delete "$key" && deleted=$((deleted + 1)) || echo "  (already gone)"
+                # </dev/null: gh would otherwise consume the rest of the key
+                # list from this loop's stdin and delete only the first one.
+                if gh cache delete "$key" </dev/null >/dev/null 2>&1; then
+                  deleted=$((deleted + 1))
+                else
+                  echo "  not deletable, skipping: $key"
+                fi
               done <<< "$keys"
-            fi
+              if [ "$deleted" -eq "$before_pass" ]; then
+                echo "  no progress in a full pass; stopping this prefix"
+                break
+              fi
+            done
+            echo "  removed $((deleted - before_prefix)) for '$prefix'"
             echo "::endgroup::"
           done
           echo "Deleted $deleted cache entr$([ $deleted -eq 1 ] && echo y || echo ies)."
