@@ -464,9 +464,14 @@ impl CardDatabase {
     /// the ORDER is load-bearing, such as an RNG draw whose result has to
     /// match across peers and replays.
     pub fn faces_in_scan_order(&self) -> impl Iterator<Item = &CardFace> {
+        self.face_iter_in_scan_order().map(|(_, face)| face)
+    }
+
+    /// `face_iter` in the deterministic order `faces_in_scan_order` documents.
+    pub fn face_iter_in_scan_order(&self) -> impl Iterator<Item = (&str, &CardFace)> {
         self.search_face_keys
             .iter()
-            .filter_map(|key| self.face_index.get(key))
+            .filter_map(|key| self.face_index.get(key).map(|face| (key.as_str(), face)))
     }
 
     /// Coverage subtype lexicon: every subtype printed on a loaded face, the same
