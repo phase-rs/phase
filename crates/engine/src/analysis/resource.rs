@@ -28962,6 +28962,7 @@ mod tests {
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         };
 
@@ -29135,6 +29136,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 vec![],
                 src,

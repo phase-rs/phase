@@ -305,7 +305,9 @@ fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
         | CoreType::Scheme
         | CoreType::Conspiracy
         | CoreType::Boss
-        | CoreType::Event => None,
+        | CoreType::Event
+        // CR 313.3: vanguard cards have no subtypes.
+        | CoreType::Vanguard => None,
     }
 }
 
@@ -2931,8 +2933,10 @@ fn evaluate_condition_inner(
         StaticCondition::WasCast { zone } => state
             .objects
             .get(&source_id)
-            .and_then(|obj| obj.cast_from_zone)
-            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
+            .filter(|obj| obj.cast_from_zone.is_some())
+            // CR 601.2a + CR 707.13: a cast from outside the game satisfies a bare
+            // "was cast" but no named origin zone.
+            .is_some_and(|obj| zone.is_none_or(|z| obj.cast_origin_zone() == Some(z))),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => {
             super::effects::ring::is_current_ring_bearer(state, controller, source_id)

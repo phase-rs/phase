@@ -858,6 +858,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
                 .collect();
             events.push(GameEvent::CardsRevealed {
                 player,
+                occurrences: state.disclosed_occurrences(chosen),
                 card_ids: chosen.to_vec(),
                 card_names: revealed_names,
             });

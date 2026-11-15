@@ -24,9 +24,8 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_source_anaphoric_pronoun,
-    parse_type_phrase_folding, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
-    superlative_property_filter_prop,
+    parse_shared_quality, parse_source_anaphoric_pronoun, parse_type_phrase_folding,
+    parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -7555,6 +7554,17 @@ fn target_filter_origin_zones(filter: &TargetFilter) -> Option<Vec<Zone>> {
         TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| match prop {
             FilterProp::InZone { zone } => Some(vec![*zone]),
             FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            // CR 305.1 + CR 601.2a: "from anywhere other than <zone>" is the negation
+            // of a single origin zone. A land is always played from a ZONE (it can't
+            // come from outside the game, CR 400.11), so the land-play history keeps
+            // the explicit zone list — every zone a card can be played from except
+            // `zone` — while the spell half keeps the negation itself.
+            FilterProp::Not { prop } => match prop.as_ref() {
+                FilterProp::InZone { zone } => Some(
+                    crate::parser::oracle_target::cast_capable_zones_except(*zone),
+                ),
+                _ => None,
+            },
             _ => None,
         }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -10152,9 +10162,13 @@ fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<Filt
     let (rest, _) = peek_zone_boundary(rest).ok()?;
 
     let consumed = leading_ws + trimmed.len() - rest.len();
+    // CR 601.2a + CR 707.13 + CR 400.11: "from anywhere other than <zone>" is the
+    // NEGATION of "from <zone>", not a positive list of the remaining zones — a spell
+    // cast from outside the game (Garth One-Eye's copy) is from no zone, so it is
+    // not from <zone> and must satisfy the clause.
     Some((
-        vec![FilterProp::InAnyZone {
-            zones: cast_capable_zones_except(zone),
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone }),
         }],
         consumed,
     ))
@@ -11897,7 +11911,8 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// CR 400.7 + CR 608.2c: Parse "a[n] [type] (is|was) [verb-phrase] this way"
 /// — the noun-anaphoric clause that gates a sub-ability on the LKI of an
 /// object the parent effect just operated on (destroyed, exiled, sacrificed,
-/// returned, discarded, milled, countered, or "put onto the battlefield").
+/// returned, discarded, milled, countered, "put onto the battlefield",
+/// "put into a graveyard", or "put into exile").
 ///
 /// CR 303.4f / CR 301.5b are the host-rules that motivate the present-tense
 /// "is put onto the battlefield this way" variant — Aura/Equipment ETB
@@ -11917,9 +11932,9 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// `remainder` is the input after the consumed " this way" suffix (caller is
 /// responsible for stripping any trailing punctuation like ", " or ".").
 /// `destination` is `Some(zone)` for wording that names an arrival zone
-/// ("enters", "put onto the battlefield", "dies", or "put into a graveyard")
-/// and `None` for cause-bound verbs. On `wasn't`/`was not` the negation is
-/// exposed via `negated`.
+/// ("enters", "put onto the battlefield", "dies", "put into a graveyard",
+/// or "put into exile") and `None` for cause-bound verbs. On `wasn't`/`was not`
+/// the negation is exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
@@ -12022,8 +12037,9 @@ fn parse_active_this_way_quantifier(input: &str) -> OracleResult<'_, ThisWayOccu
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThisWayVerbScope {
     /// Every verb the rider grammar covers: the present-tense "enters"/"enter"
-    /// branch plus "put onto the battlefield", "destroyed", "exiled",
-    /// "sacrificed", "returned", "discarded", "milled", "countered".
+    /// branch plus "put onto the battlefield", "put into a graveyard",
+    /// "put into exile", "destroyed", "exiled", "sacrificed", "returned",
+    /// "discarded", "milled", "countered".
     AnyZoneChange,
     /// Battlefield-entry verbs only: the present-tense "enters"/"enter" branch
     /// plus "put onto the battlefield". CR 614.1c replacement classification is
@@ -12171,6 +12187,15 @@ pub fn parse_zone_changed_this_way_head_scoped(
             value(
                 (Some(crate::types::zones::Zone::Graveyard), ThisWayVerb::Die),
                 tag("put into a graveyard"),
+            ),
+            // CR 608.2c + CR 701.13a + CR 614.6: "put into exile" names the
+            // arrival (Corpse Appraiser: "If a card is put into exile this
+            // way, …"). Distinct from cause-bound "exiled this way": a
+            // replacement that redirects the move away from exile defeats
+            // this clause, because the replaced event never happened.
+            value(
+                (Some(crate::types::zones::Zone::Exile), ThisWayVerb::Exile),
+                tag("put into exile"),
             ),
         ))
         .parse(rest)?,
@@ -14957,14 +14982,14 @@ mod tests {
             );
         };
 
-        let zones = properties.iter().find_map(|prop| match prop {
-            FilterProp::InAnyZone { zones } => Some(zones),
-            _ => None,
-        });
-        let zones = zones.expect("expected InAnyZone origin qualifier");
-        assert!(!zones.contains(&Zone::Hand));
-        assert!(zones.contains(&Zone::Exile));
-        assert!(zones.contains(&Zone::Graveyard));
+        // CR 601.2a + CR 400.11: the spell half is the negation of a cast from the hand.
+        assert!(
+            properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            }),
+            "expected Not(InZone(Hand)) origin qualifier, got {properties:?}"
+        );
+        assert!(land_zones.contains(&Zone::Graveyard));
     }
 
     /// Helper: assert a condition is `LandsPlayedThisTurn{Controller, None} >= 1`.
@@ -25578,6 +25603,22 @@ mod tests {
         assert_eq!(rest, ", draw a card");
         assert!(!negated);
         assert_eq!(destination, Some(Zone::Graveyard));
+
+        // CR 608.2c + CR 701.13a + CR 614.6: destination-bound exile wording
+        // (Corpse Appraiser) is the exile sibling of "put into a graveyard".
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
+            "a card is put into exile this way, look at the top three cards",
+        )
+        .unwrap();
+        assert_eq!(rest, ", look at the top three cards");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Exile));
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert_eq!(type_filters, vec![TypeFilter::Card]);
+            }
+            other => panic!("expected Typed Card, got {other:?}"),
+        }
     }
 
     /// Every imperative verb in the `alt` chain must round-trip; this guards

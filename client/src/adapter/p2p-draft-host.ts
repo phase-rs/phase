@@ -399,6 +399,7 @@ interface ExportedDraftSession {
        * plural-submission wire landed has none.
        */
       commanders?: string[];
+      companion?: string | null;
     }
   >;
 }
@@ -413,8 +414,10 @@ function deckPayload(
   mainDeck: string[],
   sideboard: string[],
   commander: string[] = [],
+  companion: string[] = [],
 ): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander };
+  // An absent companion keeps the pre-companion payload shape.
+  return { main_deck: mainDeck, sideboard, commander, ...(companion.length > 0 ? { companion } : {}) };
 }
 
 function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
@@ -1225,7 +1228,7 @@ export class P2PDraftHost {
           await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, {
             kind: "network",
             deliverySession: originatingSession,
-          });
+          }, msg.companion);
         } finally {
           if (originatingSession && this.pendingDeckSubmissionBySession.get(originatingSession) === msg.submissionId) {
             this.pendingDeckSubmissionBySession.delete(originatingSession);
@@ -1474,7 +1477,7 @@ export class P2PDraftHost {
   /**
    * Host submits their own deck (seat 0).
    */
-  async submitHostDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+  async submitHostDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     return this.enqueueAuthoritativeMutation(() => {
       if (!this.draftStarted) throw new Error("Draft not started");
       // CR 903.3: the designation is part of the payload's identity, so it
@@ -1489,7 +1492,7 @@ export class P2PDraftHost {
       // and must reach the reducer, or `submitted_decks` keeps B. Receipts are
       // set only under new ids and persisted/restored in insertion order, so
       // the last seat-0 entry is the latest accepted one.
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
       const latestReceipt = [...this.deckSubmissionReceipts.entries()]
         .filter(([, receipt]) => receipt.seat === 0)
         .pop();
@@ -1502,6 +1505,7 @@ export class P2PDraftHost {
         commanders,
         retrySubmission ?? crypto.randomUUID(),
         { kind: "hostLocal" },
+        companion,
       );
     });
   }
@@ -1833,11 +1837,12 @@ export class P2PDraftHost {
     commanders: string[],
     submissionId: string,
     origin: DeckSubmissionOrigin = { kind: "legacyDirect" },
+    companion?: string | null,
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
     let receiptDurable = false;
     try {
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
       const previous = this.deckSubmissionReceipts.get(submissionId);
       let view: DraftPlayerView;
       if (previous) {
@@ -1852,7 +1857,11 @@ export class P2PDraftHost {
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.awaitAdmittedHostView(() => this.adapter.submitDeckForSeat(seat, mainDeck, commanders));
+        view = await this.awaitAdmittedHostView(() =>
+          companion !== undefined
+            ? this.adapter.submitDeckForSeat(seat, mainDeck, commanders, companion)
+            : this.adapter.submitDeckForSeat(seat, mainDeck, commanders),
+        );
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.
@@ -1913,8 +1922,11 @@ export class P2PDraftHost {
    * designation. Both call sites must agree, or a receipt lookup and a receipt
    * comparison can disagree about whether two submissions are the same.
    */
-  private deckPayloadFingerprint(mainDeck: string[], commanders: string[]): string {
-    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+  private deckPayloadFingerprint(mainDeck: string[], commanders: string[], companion?: string | null): string {
+    // A companion-free payload keeps the original two-part form, so receipts
+    // persisted before companion designations existed still match a retry.
+    const base = `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+    return companion ? `${base}|${companion}` : base;
   }
 
   private async publishAcceptedDeckSubmission(
@@ -3142,6 +3154,7 @@ export class P2PDraftHost {
       submitted.main_deck,
       sideboardFromPool(session, seat, submitted.main_deck),
       submitted.commanders ?? [],
+      submitted.companion ? [submitted.companion] : [],
     );
   }
 
