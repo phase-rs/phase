@@ -1755,6 +1755,16 @@ pub struct ZoneChangeRecord {
     /// accumulated event vector.
     #[serde(default)]
     pub co_departed: Vec<ObjectId>,
+    /// CR 603.6a: ObjectIds of the other objects the SAME event moved onto the battlefield (every
+    /// battlefield entry of one completed logical zone-change group: Storm of Souls' or Living
+    /// Death's mass return), excluding this object. Stamped only by
+    /// `LogicalZoneChangeGroup::stamp_battlefield_entries` when the group completes; empty for a
+    /// lone entry, an entry outside a group, and a group still paused. A newcomer listed here
+    /// observes this entry and its entry counter prefix (CR 122.6) although the group delivered
+    /// this object first; every other event keeps each newcomer's own entry boundary. This is the
+    /// authority for entry simultaneity: trigger collection must not infer it from event order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_entered: Vec<ObjectId>,
     /// CR 400.7: the entrant's incarnation captured AFTER its battlefield-entry
     /// bump, so a later leave + re-entry (same ObjectId, higher incarnation) is
     /// distinguishable from the original entrant at intervening-if recheck.
@@ -1901,6 +1911,8 @@ struct ZoneChangeRecordWire {
     #[serde(default)]
     co_departed: Vec<ObjectId>,
     #[serde(default)]
+    co_entered: Vec<ObjectId>,
+    #[serde(default)]
     entered_incarnation: Option<u64>,
     #[serde(default)]
     attached_to: Option<AttachTarget>,
@@ -1946,6 +1958,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -1982,6 +1995,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             combat_status,
             block_pairs,
             co_departed,
+            co_entered,
             entered_incarnation,
             attached_to,
             turn_zone_change_index,
@@ -2354,6 +2368,7 @@ impl ZoneChangeRecord {
             combat_status: ZoneChangeCombatStatus::default(),
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -3784,9 +3799,13 @@ pub struct LatchedSuppressTrigger {
 
 /// Complete ownership for one logical zone-change action.
 ///
-/// Both pause carriers persist this same shape. It deliberately has no serde
-/// defaults: an active legacy carrier cannot reconstruct the original member
-/// set, terminal outcomes, or already-delivered event authority safely.
+/// Both pause carriers persist this same shape. Its terminal and occurrence
+/// authority deliberately has no serde defaults: an active legacy carrier cannot
+/// reconstruct the original member set, terminal outcomes, or already-delivered
+/// event authority safely. `announced_members` alone defaults to empty, because a
+/// legacy carrier without it only loses the CR 614.4 co-entrant exclusion for its
+/// later members (they are checked against every permanent on the battlefield, as
+/// before).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
@@ -3810,6 +3829,13 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_after_latched: bool,
     pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order. A member's battlefield entry proposal is stamped with the others
+    /// (`CoEntrants`), so a member delivered earlier is not a replacement source for a later one.
+    /// A group parked by an older build has none; its later members are checked against every
+    /// permanent on the battlefield, as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub announced_members: Vec<ObjectIncarnationRef>,
 }
 
 /// Wire-only mirror used to reject malformed paused logical-zone authority at
@@ -3828,6 +3854,8 @@ struct LogicalZoneChangeGroupWire {
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    #[serde(default)]
+    announced_members: Vec<ObjectIncarnationRef>,
 }
 
 impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
@@ -3844,6 +3872,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
+            announced_members: wire.announced_members,
         }
     }
 }
@@ -4088,7 +4117,20 @@ impl LogicalZoneChangeGroup {
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
+            announced_members: Vec::new(),
         }
+    }
+
+    /// CR 614.4: record every announced member as it was when the event began.
+    pub(crate) fn with_announced_members(mut self, members: Vec<ObjectIncarnationRef>) -> Self {
+        self.announced_members = members;
+        self
+    }
+
+    /// CR 614.4 + CR 603.6a: every announced member as it was when the event began, in
+    /// announcement order (empty for a group parked by an older build).
+    pub fn announced_members(&self) -> &[ObjectIncarnationRef] {
+        &self.announced_members
     }
 
     /// Install the one authoritative pre-delivery trigger latch. Re-latching a
@@ -4712,6 +4754,58 @@ impl LogicalZoneChangeGroup {
         }
         Ok(())
     }
+
+    /// CR 603.6a: stamp each battlefield entry of this completed group with the other objects the
+    /// group moved onto the battlefield, so trigger collection reads one event, not an order. The
+    /// group's entrants are its retained moves to the battlefield from another zone
+    /// (`from: Some(_)`). An object created on the battlefield while the group delivers
+    /// (`from: None`: CR 111.1, a token another effect puts onto the battlefield) is not one of
+    /// them. Fewer than two entrants stamp nothing. Known gap: membership is read from the
+    /// occurrence shape, so a card that a replacement effect moves onto the battlefield while the
+    /// group delivers would be stamped as a co-entrant. No printed card reaches it: the
+    /// battlefield-destination replacements (Obstinate Baloth's, Out of the Tombs') replace a
+    /// discard or a draw, which no entry's delivery performs.
+    pub fn stamp_battlefield_entries(&mut self) {
+        let mut entrant_ids: Vec<ObjectId> = Vec::new();
+        for occurrence in &self.all_origin_occurrences {
+            if let Some(object_id) = battlefield_entrant(&occurrence.event) {
+                if !entrant_ids.contains(&object_id) {
+                    entrant_ids.push(object_id);
+                }
+            }
+        }
+        if entrant_ids.len() < 2 {
+            return;
+        }
+        for occurrence in &mut self.all_origin_occurrences {
+            let Some(object_id) = battlefield_entrant(&occurrence.event) else {
+                continue;
+            };
+            let GameEvent::ZoneChanged { record, .. } = &mut occurrence.event else {
+                unreachable!("battlefield_entrant matches only ZoneChanged occurrences");
+            };
+            record.co_entered = entrant_ids
+                .iter()
+                .copied()
+                .filter(|entrant| *entrant != object_id)
+                .collect();
+        }
+    }
+}
+
+/// CR 603.6a: the object a retained group occurrence moved onto the battlefield from another zone,
+/// or `None` for any other occurrence (a departure, or an object created on the battlefield).
+fn battlefield_entrant(event: &GameEvent) -> Option<ObjectId> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from: Some(_),
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(*object_id)
 }
 
 /// The one zone-change delivery currently paused inside a logical owner.
@@ -5023,6 +5117,16 @@ pub struct PendingChangeZoneIteration {
     /// pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 611.2e + CR 614.12: the with-entry effect derived at the ChangeZone
+    /// instruction's resolver entry (the source, controller and continuous
+    /// modifications of a same-resolution "is/has" instruction that applies
+    /// with the entry), carried across a replacement-ordering / as-enters
+    /// pause so a resumed entry still carries it (Xu-Ifit, Osteoharmonist's
+    /// "has no abilities" withholds the entrant's own entry abilities).
+    /// `None` = no such effect. Mirrors the `face_down_profile` carry-through
+    /// above; never re-derived at the drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
     /// CR 401.4 + CR 701.24a: Library placement override carried across a
     /// replacement-ordering pause so Endurance-style "on the bottom of their
     /// library" still suppresses auto-shuffle on resume.
@@ -5032,7 +5136,7 @@ pub struct PendingChangeZoneIteration {
     /// position of a terminal-shuffle operation, carried across the pause.
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
@@ -5204,6 +5308,39 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+    /// CR 608.2c + CR 603.7a: the tracked set the producing instruction published when it
+    /// paused with this owner parked ("those tokens"). On completion the owner extends exactly
+    /// this set with every token it created and re-establishes it as the chain's set, so the
+    /// parked tail binds it even when a nested resolution reset the chain scope. `None` for an
+    /// owner that never paused under a tracked-set consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referent_set: Option<TrackedSetId>,
+    /// CR 614.6 + CR 608.2c: see [`OfferedBatchCustody`]. Set only by the owner's own
+    /// replacement-prompt park; settled by the delivery that hands the batch's tokens over,
+    /// or by the owner's adoption on resume.
+    #[serde(default, skip_serializing_if = "OfferedBatchCustody::is_settled")]
+    pub offered_batch: OfferedBatchCustody,
+}
+
+/// CR 614.6 + CR 608.2c: whether the batch a CopyToken owner offered to the replacement
+/// pipeline still owes the owner its tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OfferedBatchCustody {
+    /// Every batch the owner offered has handed it its tokens (or none is outstanding).
+    #[default]
+    Settled,
+    /// The offered batch's creation event paused on a replacement prompt, and no delivery
+    /// has handed its tokens over yet. If the answer replaces the event with a different
+    /// creation (Jinnie Fay's Cats or Dogs, Moonlit Meditation's or Esix's copies), that
+    /// creation's tokens are this batch's tokens (CR 614.6), and the owner adopts them when
+    /// it resumes.
+    AtReplacementPrompt,
+}
+
+impl OfferedBatchCustody {
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled)
+    }
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -7100,7 +7237,7 @@ pub struct PendingBatchZoneMoveRequest {
     /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
     #[serde(
         default,
-        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
     )]
     pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18923,6 +19060,16 @@ pub enum WaitingFor {
         /// `enter_transformed` / `enters_under_player` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+        /// CR 611.2e + CR 614.12: the with-entry effect derived at the
+        /// ChangeZone instruction's resolver entry and carried across the
+        /// `EffectZoneChoice` round-trip, so the resumed move of a chosen card
+        /// carries the same-resolution "is/has" effect that applies with its
+        /// entry (a "has no abilities" effect still withholds its own entry
+        /// abilities). Mirrors the `face_down_profile` carry-through above.
+        /// Never re-derived at the resume. `None` at every non-ChangeZone
+        /// producer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
         /// CR 122.1 + CR 614.1c: Unconditional entry-time counters carried across
         /// the `EffectZoneChoice` round-trip (e.g. "enters with two +1/+1
         /// counters").
@@ -18947,7 +19094,7 @@ pub enum WaitingFor {
         /// chosen merged permanent's components share it on resume.
         #[serde(
             default,
-            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+            skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
         /// Exact origin/identity snapshot for a fresh CR 401.4 owner
@@ -33033,6 +33180,20 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 603.6a: the zone change that put the exact object `identity` onto the
+    /// battlefield this turn (its `entered_incarnation`). An incarnation enters at most once.
+    /// `None` when it has not entered this turn (the ledger is per-turn).
+    pub(crate) fn incarnation_entry_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record.to_zone == Zone::Battlefield
+                && record.entered_incarnation == Some(identity.incarnation)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -33059,11 +33220,7 @@ impl GameState {
             .and_then(|history| history.get(&identity.incarnation))?;
         let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
-        let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
-            record.object_id == object_id
-                && record.to_zone == Zone::Battlefield
-                && record.entered_incarnation == Some(identity.incarnation)
-        });
+        let entered_this_turn = self.incarnation_entry_record(identity).is_some();
         Some(ConniveSubject {
             snapshot: EventObjectSnapshot {
                 identity,
@@ -33624,7 +33781,15 @@ impl GameState {
                 identity: ObjectIncarnationRef::from_object(object),
             })
             .collect();
+        // CR 614.4: every announced member, wherever it is, as the object it is before
+        // any member moves (`CoEntrants`).
+        let identities = announced_members
+            .iter()
+            .filter_map(|object_id| self.objects.get(object_id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect();
         LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+            .with_announced_members(identities)
     }
 
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
@@ -37197,6 +37362,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
@@ -37245,6 +37411,7 @@ impl GameState {
                 combat_status,
                 block_pairs,
                 co_departed: _,
+                co_entered: _,
                 entered_incarnation: _,
                 attached_to: _,
                 turn_zone_change_index: _,
@@ -37470,6 +37637,7 @@ impl GameState {
                 | GameEvent::UnTellPerformed { .. }
                 | GameEvent::PhraseSaid { .. }
                 | GameEvent::GotchaSaid { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
@@ -37733,6 +37901,7 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
@@ -43403,6 +43572,8 @@ mod tests {
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(42),
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
         state
     }
@@ -45505,6 +45676,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -46369,6 +46541,35 @@ mod tests {
             panic!("legacy deferred fixture retains its zone-change event");
         };
         assert_eq!(record.recorded_turn_number, 0);
+    }
+
+    /// CR 603.6a: `co_entered` is omitted when empty, a record without it (resolution wire v12
+    /// and earlier) decodes with no co-entrants, and a stamped record round-trips.
+    #[test]
+    fn zone_change_record_co_entered_is_omitted_when_empty_and_roundtrips() {
+        let lone = ZoneChangeRecord::test_minimal(
+            ObjectId(9_005),
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        );
+        let wire = serde_json::to_value(&lone).expect("record serializes");
+        assert!(
+            wire.get("co_entered").is_none(),
+            "an empty co_entered is omitted: {wire}"
+        );
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("a record without co_entered decodes");
+        assert!(decoded.co_entered.is_empty());
+
+        let stamped = ZoneChangeRecord {
+            co_entered: vec![ObjectId(7)],
+            ..lone
+        };
+        let wire = serde_json::to_value(&stamped).expect("stamped record serializes");
+        assert_eq!(wire["co_entered"], serde_json::json!([7]));
+        let decoded: ZoneChangeRecord =
+            serde_json::from_value(wire).expect("stamped record decodes");
+        assert_eq!(decoded.co_entered, vec![ObjectId(7)]);
     }
 
     fn persisted_zone_change_record(
@@ -59815,6 +60016,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -60733,6 +60935,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -61056,6 +61259,18 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the with-entry effect must survive the
+            // pause/resume serde round-trip (Xu-Ifit, Osteoharmonist).
+            with_entry_effect: Some(Box::new(crate::types::proposed_event::WithEntryEffect {
+                source_id: ObjectId(7),
+                controller: PlayerId(0),
+                modifications: vec![
+                    crate::types::ability::ContinuousModification::AddSubtype {
+                        subtype: "Skeleton".to_string(),
+                    },
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ],
+            })),
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
@@ -61088,8 +61303,30 @@ mod tests {
             parsed.face_down_profile, original.face_down_profile,
             "face_down_profile must survive the pause/resume round-trip"
         );
+        assert!(original.with_entry_effect.is_some());
+        assert_eq!(
+            parsed.with_entry_effect, original.with_entry_effect,
+            "with_entry_effect must survive the pause/resume round-trip"
+        );
         assert_eq!(parsed, original);
 
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // carrier without the key (the v12-and-earlier shape) decodes `None`, and `None`
+        // is omitted.
+        let mut absent = carrier.clone();
+        absent
+            .as_object_mut()
+            .expect("pending carrier serializes as an object")
+            .remove("with_entry_effect")
+            .expect("a carried with-entry effect is serialized");
+        let decoded: PendingChangeZoneIteration =
+            serde_json::from_value(absent).expect("reads without the key");
+        assert_eq!(decoded.with_entry_effect, None);
+        let retained = serde_json::to_value(&decoded).expect("serialize carrier without an effect");
+        assert!(
+            retained.get("with_entry_effect").is_none(),
+            "None must not be serialized: {retained}"
+        );
         let mut missing_actor = serde_json::to_value(&original).expect("serialize carrier");
         missing_actor
             .as_object_mut()
@@ -61208,6 +61445,100 @@ mod tests {
             vec![LogicalZoneChangeTerminalOutcome::Pending]
         );
         assert!(group.all_origin_occurrences.is_empty());
+    }
+
+    /// U3 — CR 614.4 + CR 603.6a: the group records every announced member (the hand member
+    /// too, which is no prospective battlefield member) as it was at allocation. The field
+    /// round-trips, and a group serialized without it decodes with none and still validates.
+    #[test]
+    fn logical_zone_change_group_records_and_round_trips_announced_members() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(71);
+        let hand_id = ObjectId(72);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(71),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut hand = GameObject::new(
+            hand_id,
+            CardId(72),
+            PlayerId(0),
+            "hand member".to_string(),
+            Zone::Hand,
+        );
+        hand.incarnation = 7;
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(hand_id, hand);
+        state.battlefield.push_back(battlefield_id);
+
+        let mut group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
+
+        assert_eq!(
+            group.announced_members(),
+            &[
+                ObjectIncarnationRef::of(battlefield_id, 4),
+                ObjectIncarnationRef::of(hand_id, 7),
+            ]
+        );
+        let value = serde_json::to_value(&group).expect("group serializes");
+        let roundtripped: LogicalZoneChangeGroup =
+            serde_json::from_value(value.clone()).expect("group deserializes");
+        assert_eq!(roundtripped, group);
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("group serializes as an object")
+            .remove("announced_members")
+            .expect("announced members are serialized");
+        let legacy: LogicalZoneChangeGroup =
+            serde_json::from_value(legacy).expect("a legacy group decodes and validates");
+        assert!(legacy.announced_members().is_empty());
+        assert_eq!(
+            legacy.prospective_battlefield_members,
+            group.prospective_battlefield_members
+        );
+    }
+
+    /// U4 — CR 400.7 + CR 603.6a: `incarnation_entry_record` finds the ledger row that put
+    /// that exact incarnation onto the battlefield, and none for an incarnation that never
+    /// entered.
+    #[test]
+    fn incarnation_entry_record_finds_each_incarnations_own_entry() {
+        let mut state = GameState::new_two_player(19);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Returned card".to_string(),
+            Zone::Graveyard,
+        );
+        let identity = |state: &GameState| ObjectIncarnationRef::from_object(&state.objects[&card]);
+        let in_graveyard = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let first = identity(&state);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Battlefield, &mut Vec::new());
+        let second = identity(&state);
+        assert_ne!(first, second, "each entry is a new object");
+
+        assert!(state.incarnation_entry_record(in_graveyard).is_none());
+        let first_record = state
+            .incarnation_entry_record(first)
+            .expect("the first entry is recorded");
+        let second_record = state
+            .incarnation_entry_record(second)
+            .expect("the second entry is recorded");
+        assert_eq!(first_record.entered_incarnation, Some(first.incarnation));
+        assert_eq!(second_record.entered_incarnation, Some(second.incarnation));
+        assert!(!std::ptr::eq(first_record, second_record));
     }
 
     #[test]
@@ -61550,6 +61881,85 @@ mod tests {
         }
     }
 
+    /// CR 603.6a: the entry stamp lists, on each retained move onto the battlefield from another
+    /// zone, the group's other such entrants. A departure and an object created on the
+    /// battlefield (CR 111.1) are not entrants and stay unstamped.
+    #[test]
+    fn logical_zone_change_group_stamps_battlefield_entries() {
+        fn graveyard_card(id: u64, name: &str) -> GameObject {
+            GameObject::new(
+                ObjectId(id),
+                CardId(id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            )
+        }
+        fn zone_changed(object: &GameObject, from: Option<Zone>, to: Zone) -> GameEvent {
+            GameEvent::ZoneChanged {
+                object_id: object.id,
+                from,
+                to,
+                record: Box::new(object.snapshot_for_zone_change(object.id, from, to)),
+            }
+        }
+        fn stamped_group(events: &[GameEvent]) -> LogicalZoneChangeGroup {
+            let mut group = LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(5), Vec::new());
+            group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("test group owns an explicit pre-delivery latch");
+            group
+                .append_delivery_events(events)
+                .expect("append the group's occurrences");
+            group.stamp_battlefield_entries();
+            group
+        }
+        fn co_entered(group: &LogicalZoneChangeGroup) -> Vec<(ObjectId, Vec<ObjectId>)> {
+            group
+                .all_origin_occurrences
+                .iter()
+                .map(|occurrence| {
+                    let GameEvent::ZoneChanged {
+                        object_id, record, ..
+                    } = &occurrence.event
+                    else {
+                        unreachable!("test retained only zone changes");
+                    };
+                    (*object_id, record.co_entered.clone())
+                })
+                .collect()
+        }
+
+        let giant = graveyard_card(91, "Hill Giant");
+        let warden = graveyard_card(92, "Soul Warden");
+        let mut forest = graveyard_card(93, "Forest");
+        forest.zone = Zone::Battlefield;
+        let token = graveyard_card(94, "Spirit");
+
+        let group = stamped_group(&[
+            zone_changed(&giant, Some(Zone::Graveyard), Zone::Battlefield),
+            zone_changed(&forest, Some(Zone::Battlefield), Zone::Graveyard),
+            zone_changed(&token, None, Zone::Battlefield),
+            zone_changed(&warden, Some(Zone::Graveyard), Zone::Battlefield),
+        ]);
+        assert_eq!(
+            co_entered(&group),
+            vec![
+                (giant.id, vec![warden.id]),
+                (forest.id, Vec::new()),
+                (token.id, Vec::new()),
+                (warden.id, vec![giant.id]),
+            ]
+        );
+
+        let lone = stamped_group(&[zone_changed(
+            &giant,
+            Some(Zone::Graveyard),
+            Zone::Battlefield,
+        )]);
+        assert_eq!(co_entered(&lone), vec![(giant.id, Vec::new())]);
+    }
+
     #[test]
     fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
         let wf = WaitingFor::EffectZoneChoice {
@@ -61581,6 +61991,18 @@ mod tests {
                 ward: None,
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
+            // CR 611.2e + CR 614.12: the with-entry effect must keep its value
+            // across the `EffectZoneChoice` round-trip.
+            with_entry_effect: Some(Box::new(crate::types::proposed_event::WithEntryEffect {
+                source_id: ObjectId(10),
+                controller: PlayerId(0),
+                modifications: vec![
+                    crate::types::ability::ContinuousModification::AddSubtype {
+                        subtype: "Skeleton".to_string(),
+                    },
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ],
+            })),
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -61599,6 +62021,40 @@ mod tests {
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);
+        let WaitingFor::EffectZoneChoice {
+            with_entry_effect: parsed_effect,
+            ..
+        } = &parsed
+        else {
+            panic!("expected EffectZoneChoice, got {parsed:?}");
+        };
+        assert!(
+            parsed_effect.is_some(),
+            "the with-entry effect must survive the round-trip"
+        );
+
+        // CR 611.2e + CR 614.12: the carrier is optional on the wire — a
+        // choice without the key (the v12-and-earlier shape) decodes `None`, and `None`
+        // is omitted.
+        let mut absent = serde_json::to_value(&wf).expect("serialize");
+        absent["data"]
+            .as_object_mut()
+            .expect("EffectZoneChoice payload object")
+            .remove("with_entry_effect")
+            .expect("a carried with-entry effect is serialized");
+        let decoded: WaitingFor = serde_json::from_value(absent).expect("reads without the key");
+        let WaitingFor::EffectZoneChoice {
+            with_entry_effect, ..
+        } = &decoded
+        else {
+            panic!("expected EffectZoneChoice, got {decoded:?}");
+        };
+        assert_eq!(*with_entry_effect, None);
+        let retained = serde_json::to_value(&decoded).expect("serialize choice without an effect");
+        assert!(
+            retained["data"].get("with_entry_effect").is_none(),
+            "None must not be serialized: {retained}"
+        );
     }
 
     /// CR 608.2c: the performer carried on a `ChangeZone` selection round-trips
@@ -61627,6 +62083,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
