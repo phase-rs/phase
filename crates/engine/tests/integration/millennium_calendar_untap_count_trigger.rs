@@ -32,13 +32,15 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::AbilityKind;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -207,6 +209,400 @@ fn millennium_calendar_win_fires_at_one_thousand_time_counters() {
         runner.life(P1),
         1000,
         "each opponent must lose 1,000 life: 2000 - 1000 = 1000"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the win trigger resolves"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Matrix rows 2-6 (issue #10940): hostile windows that must not count, the
+/// doubling pin, the sub-threshold rest, and the multiplayer win.
+///
+/// Row 2 — an effect-untap outside your untap step (verbatim-Oracle Twiddle
+/// during your upkeep) puts no counters; paired positive is row 1.
+/// Row 3 — untaps during an opponent's untap step put no counters (your
+/// tapped permanents stay tapped); paired positive is row 1.
+/// Row 4 — {2},{T} doubles only your own Calendar's time counters.
+/// Row 5 — 999 counters through priority: no sacrifice, no life change;
+/// paired positive is row 6.
+/// Row 6 — 3-player win: each opponent loses 1,000 life.
+fn generic_mana(n: usize) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn blue_mana(n: usize) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn activated_index(runner: &GameRunner, source: ObjectId) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.kind, AbilityKind::Activated))
+        .expect("the source must expose its activated ability")
+}
+
+/// Discriminating reach guard for the hostile-window rows: the Calendar's
+/// first-line head must parse to the fieldless `TriggerMode::Untaps` unit
+/// variant. Fails pre-fix (the head is Unknown), holds post-fix — every
+/// negative below is vacuous without it.
+fn has_untaps_trigger(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .trigger_definitions
+        .iter_unchecked()
+        .any(|t| t.definition.mode == TriggerMode::Untaps)
+}
+
+/// The win half parses to a `StateCondition` trigger (already supported).
+fn has_state_condition_trigger(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .trigger_definitions
+        .iter_unchecked()
+        .any(|t| t.definition.mode == TriggerMode::StateCondition)
+}
+
+/// Row 2: an effect-untap outside your untap step puts no time counters on
+/// The Millennium Calendar (CR 603.2: the "during your untap step" window is
+/// part of the trigger event, and an upkeep untap is outside it. CR 701.26:
+/// the untap action).
+///
+/// Twiddle's Oracle text is verbatim: "You may tap or untap target artifact,
+/// creature, or land."
+///
+/// Paired positive: row 1 — the same untap inside your untap step counts 3.
+#[test]
+fn millennium_calendar_ignores_effect_untap_outside_untap_step() {
+    const TWIDDLE: &str = "You may tap or untap target artifact, creature, or land.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    let calendar = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    let land = scenario.add_basic_land(P0, ManaColor::White);
+    let twiddle = scenario
+        .add_spell_to_hand_from_oracle(P0, "Twiddle", true, TWIDDLE)
+        .id();
+    scenario.with_mana_pool(P0, blue_mana(1));
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&land).unwrap().tapped = true;
+
+    assert!(
+        has_untaps_trigger(&runner, calendar),
+        "reach guard: the Calendar head must parse to TriggerMode::Untaps"
+    );
+
+    // Cast Twiddle on the tapped land, accept the may, choose untap.
+    runner
+        .cast(twiddle)
+        .target_object(land)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "Twiddle's may-untap must pause at the optional-effect choice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting Twiddle's may must be legal");
+    let WaitingFor::ChooseOneOfBranch {
+        player,
+        source_id,
+        branches,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Twiddle must offer tap or untap, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, twiddle);
+    let index = branches
+        .iter()
+        .position(|branch| branch.description.as_deref() == Some("untap"))
+        .expect("Twiddle must offer an untap branch");
+    runner
+        .act(GameAction::ChooseBranch { index })
+        .expect("choosing untap must be legal");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "reach guard: Twiddle must have untapped the land during the upkeep"
+    );
+    assert_eq!(
+        runner.state().objects[&twiddle].zone,
+        Zone::Graveyard,
+        "reach guard: Twiddle must have resolved"
+    );
+    assert_eq!(
+        time_counters(&runner, calendar),
+        0,
+        "an untap outside your untap step must put no time counters on The Millennium Calendar"
+    );
+    assert_eq!(
+        runner.state().objects[&calendar].zone,
+        Zone::Battlefield,
+        "no counters means no win trigger"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after Twiddle resolves"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Row 3: untaps during an OPPONENT's untap step put no time counters on The
+/// Millennium Calendar (CR 502.3: the turn-based action untaps only the
+/// active player's permanents, so yours stay tapped. CR 603.2: the window
+/// names YOUR untap step).
+///
+/// Paired positive: row 1 — your own untap step counts 3.
+#[test]
+fn millennium_calendar_ignores_opponent_untap_step() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Island");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    let calendar = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    let own_lands = [
+        scenario.add_basic_land(P0, ManaColor::White),
+        scenario.add_basic_land(P0, ManaColor::Blue),
+        scenario.add_basic_land(P0, ManaColor::Black),
+    ];
+    let foe_lands = [
+        scenario.add_basic_land(P1, ManaColor::Red),
+        scenario.add_basic_land(P1, ManaColor::Green),
+    ];
+    let mut runner = scenario.build();
+    for land in own_lands.iter().chain(foe_lands.iter()) {
+        runner.state_mut().objects.get_mut(land).unwrap().tapped = true;
+    }
+
+    assert!(
+        has_untaps_trigger(&runner, calendar),
+        "reach guard: the Calendar head must parse to TriggerMode::Untaps"
+    );
+
+    // Drive into P1's upkeep; P1's untap step runs on the way.
+    let turn = runner.state().turn_number;
+    let steps = drive_until(&mut runner, |state| {
+        state.turn_number == turn + 1 && state.phase == Phase::Upkeep
+    });
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach guard: the drive must land in P1's upkeep"
+    );
+    assert!(
+        steps.contains(&Phase::Untap),
+        "reach guard: an untap step must have run: {steps:?}"
+    );
+    for land in foe_lands {
+        assert!(
+            !runner.state().objects[&land].tapped,
+            "reach guard: CR 502.3 must have untapped the active player's lands"
+        );
+    }
+    for land in own_lands {
+        assert!(
+            runner.state().objects[&land].tapped,
+            "reach guard: the inactive player's lands must stay tapped"
+        );
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        time_counters(&runner, calendar),
+        0,
+        "untaps during an opponent's untap step must put no time counters on The Millennium Calendar"
+    );
+    assert_eq!(
+        runner.state().objects[&calendar].zone,
+        Zone::Battlefield,
+        "no counters means no win trigger"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the drive"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Row 4: dedicated doubling pin — {2},{T} doubles the time counters on The
+/// Millennium Calendar itself (3 → exactly 6), leaves a hostile zero at zero
+/// and opponent counters untouched (CR 608.2c: "Double the number of time
+/// counters on The Millennium Calendar" names the source object).
+#[test]
+fn millennium_calendar_activation_doubles_only_own_time_counters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, generic_mana(2));
+    let own = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    scenario.with_counter(own, CounterType::Time, 3);
+    let hostile_zero = scenario
+        .add_artifact_from_oracle(P1, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    let hostile_two = scenario
+        .add_artifact_from_oracle(P1, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    scenario.with_counter(hostile_two, CounterType::Time, 2);
+    let mut runner = scenario.build();
+
+    // Production activation: fund {2} from the pool, pay {T} by tapping.
+    let idx = activated_index(&runner, own);
+    runner.activate(own, idx).resolve();
+
+    assert_eq!(
+        time_counters(&runner, own),
+        6,
+        "doubling 3 time counters must give exactly 6"
+    );
+    assert!(
+        runner.state().objects[&own].tapped,
+        "the {T} cost must leave the Calendar tapped"
+    );
+    assert_eq!(
+        time_counters(&runner, hostile_zero),
+        0,
+        "a hostile zero must stay zero"
+    );
+    assert_eq!(
+        time_counters(&runner, hostile_two),
+        2,
+        "opponent counters must be untouched"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the activation resolves"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Row 5: 999 time counters through priority — no sacrifice, no life change
+/// (CR 603.8: the StateCondition win trigger matches only at 1,000 or more).
+///
+/// Paired positive: row 6 — 1,000 fires.
+#[test]
+fn millennium_calendar_below_threshold_does_not_win() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 2000);
+    let calendar = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    scenario.with_counter(calendar, CounterType::Time, 999);
+    let mut runner = scenario.build();
+
+    assert!(
+        has_state_condition_trigger(&runner, calendar),
+        "reach guard: the win line must parse to a StateCondition trigger"
+    );
+
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&calendar].zone,
+        Zone::Battlefield,
+        "999 counters are below the 1,000 threshold, so the Calendar must stay"
+    );
+    assert_eq!(runner.life(P1), 2000, "no life change below the threshold");
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Row 6: 3-player win — at 1,000 time counters The Millennium Calendar is
+/// sacrificed and EACH opponent loses 1,000 life (CR 603.8 state trigger;
+/// "each opponent" spans both opponents).
+#[test]
+fn millennium_calendar_win_hits_each_opponent_in_three_player() {
+    const P2: PlayerId = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 2000);
+    scenario.with_life(P2, 2000);
+    let calendar = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    scenario.with_counter(calendar, CounterType::Time, 1000);
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    assert!(
+        has_state_condition_trigger(&runner, calendar),
+        "reach guard: the win line must parse to a StateCondition trigger"
+    );
+
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&calendar].zone,
+        Zone::Graveyard,
+        "the win trigger must sacrifice The Millennium Calendar"
+    );
+    assert_eq!(
+        runner.life(P1),
+        1000,
+        "the first opponent must lose 1,000 life: 2000 - 1000 = 1000"
+    );
+    assert_eq!(
+        runner.life(P2),
+        1000,
+        "the second opponent must lose 1,000 life: 2000 - 1000 = 1000"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "the controller must lose no life"
     );
     assert!(
         runner.state().stack.is_empty(),

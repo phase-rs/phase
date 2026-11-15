@@ -6086,6 +6086,7 @@ pub(crate) fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+        value(vec![Phase::Untap], tag("untap step")),
         value(
             vec![Phase::Upkeep],
             alt((tag("upkeep step"), tag("upkeep"))),
