@@ -4584,6 +4584,46 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 /// static builders take only the `CounterType` to set
 /// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
 pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(CounterType, &str)> {
+    let rest = parse_cast_this_way_rider_subject(lower)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" enters with ")
+        .parse(rest)
+        .ok()?;
+    // CR 122.1: the printed rider is always a single counter ("a [counter]").
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
+        .parse(rest)
+        .ok()?;
+    Some((counter_type, rest))
+}
+
+/// CR 614.1d + CR 110.5b + CR 607.1c: Shared recognizer for the linked "if you
+/// cast a spell this way, that <permanent> enters tapped" rider (Edgar, Master
+/// Machinist). Same gate and anaphoric subject grammar as
+/// [`parse_cast_this_way_enters_with_counter`] (one authority:
+/// [`parse_cast_this_way_rider_subject`]); returns the unconsumed remainder so
+/// the caller can require the rider to be complete ("enters tapped and
+/// attacking" leaves " and attacking" and is declined there).
+pub(crate) fn parse_cast_this_way_enters_tapped(lower: &str) -> Option<&str> {
+    let rest = parse_cast_this_way_rider_subject(lower)?;
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>(" enters "),
+        alt((tag("tapped"), tag("the battlefield tapped"))),
+    )
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
+/// CR 607.1 + CR 607.1c: the optional gate and the subject of a cast-this-way
+/// entry rider, up to (not including) its " enters …" verb phrase. The subject
+/// is anaphoric for the spell the permission let you cast ("that creature",
+/// "that artifact creature", "that permanent", "it") or the card itself for a
+/// self-granting permission (`~`, or the raw "this creature/permanent/artifact"
+/// forms that `swallow_check` passes un-normalized).
+fn parse_cast_this_way_rider_subject(lower: &str) -> Option<&str> {
     // CR 608.2c: optional "if you cast a spell this way," / "if you do," gate.
     // The rider only fires for a spell cast via the granted permission; the
     // runtime gates on the actual cast, so the condition prefix carries no
@@ -4612,11 +4652,7 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
     let (rest, _) = alt((
         value(
             (),
-            (
-                tag::<_, _, OracleError<'_>>("that "),
-                anaphoric_type_noun,
-                tag(" enters with "),
-            ),
+            (tag::<_, _, OracleError<'_>>("that "), anaphoric_type_noun),
         ),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
         // creature" in the printed Oracle text. The main parse pipeline
@@ -4628,23 +4664,15 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         // the normalized and literal CR 201.5 self-reference forms must be
         // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
-        value((), tag("~ enters with ")),
-        value((), tag("it enters with ")),
-        value((), tag("this creature enters with ")),
-        value((), tag("this permanent enters with ")),
-        value((), tag("this artifact enters with ")),
+        value((), tag("~")),
+        value((), tag("it")),
+        value((), tag("this creature")),
+        value((), tag("this permanent")),
+        value((), tag("this artifact")),
     ))
     .parse(lower)
     .ok()?;
-    // CR 122.1: the printed rider is always a single counter ("a [counter]").
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
-        .parse(rest)
-        .ok()?;
-    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
-        .parse(rest)
-        .ok()?;
-    Some((counter_type, rest))
+    Some(rest)
 }
 
 /// CR 614.1c + CR 122.1 + CR 205.1b: Parse the "the creature cast this way
@@ -26934,6 +26962,7 @@ fn try_parse_class_wide_graveyard_cast_grant(lower: &str, ctx: &ParseContext) ->
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool,
         cast_limit,
