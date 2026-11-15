@@ -938,7 +938,7 @@ describe("LLM seats on a message thread", () => {
 
   it("hands the engine both clocks as each request is built, unadjusted", async () => {
     bindSeatToProvider();
-    // The monotonic clock, which stops while the machine sleeps.
+    // The monotonic clock, which can stop while the machine sleeps.
     const monotonic = 1_000;
     vi.spyOn(performance, "now").mockImplementation(() => monotonic);
     const replies = [THREAD_LOST, { proposal: proposal(CAST, "llm-after-sleep") }];

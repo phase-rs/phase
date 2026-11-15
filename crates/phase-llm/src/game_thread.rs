@@ -158,8 +158,8 @@ pub struct ClockReading {
 ///
 /// While the machine is awake both clocks advance together, apart from the
 /// rounding a browser applies to each reading and a slow drift, both far below
-/// a second over a thread's five-minute lifetime. A sleep, which stops the
-/// monotonic clock, or a correction, which steps the wall clock, moves them
+/// a second over a thread's five-minute lifetime. A sleep that stops the
+/// monotonic clock, or a correction that steps the wall clock, moves them
 /// apart by its whole length. A smaller tolerance reads more intervals as
 /// unknown, at one more create each; a larger one lets a wall-clock step back
 /// that nearly cancels a sleep pass for agreement.
@@ -1232,38 +1232,55 @@ mod tests {
     }
 
     /// The budget counts every part of the context, not just the uncached
-    /// remainder Anthropic reports as `input_tokens`.
+    /// remainder Anthropic reports as `input_tokens`: cache reads and cache
+    /// writes each count, so either alone can carry a thread past it, and the
+    /// two together just inside it are continued.
     #[test]
     fn the_size_budget_counts_cache_reads_and_writes() {
-        let mut memory = LlmThreadMemory::new();
-        let first = decision(1, AiDifficulty::Medium);
-        memory
-            .decision_request(SEAT, &threaded(), &first, &log(2), CLOCKS)
-            .unwrap();
-        let cached = json!({
-            "id": "msg_1",
-            "stop_reason": "end_turn",
-            "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 20,
-                "cache_read_input_tokens": THREAD_CONTEXT_BUDGET_TOKENS,
-                "cache_creation_input_tokens": 500,
-            },
-        })
-        .to_string();
-        accept_reply(&mut memory, LlmProvider::Anthropic, &cached);
-        let next = memory
-            .decision_request(
-                SEAT,
-                &threaded(),
-                &decision(2, AiDifficulty::Medium),
-                &log(3),
-                CLOCKS,
-            )
-            .unwrap()
-            .request;
-        assert!(is_create(&next));
+        // What 10 input and 20 output tokens leave of the budget.
+        let room = THREAD_CONTEXT_BUDGET_TOKENS - 30;
+        // Cache reads, cache writes, and whether the thread is continued.
+        let cases = [
+            (room + 1, 0, false),
+            (0, room + 1, false),
+            (room / 2, room - room / 2, true),
+        ];
+        for (read, written, continued) in cases {
+            let mut memory = LlmThreadMemory::new();
+            let first = decision(1, AiDifficulty::Medium);
+            memory
+                .decision_request(SEAT, &threaded(), &first, &log(2), CLOCKS)
+                .unwrap();
+            let cached = json!({
+                "id": "msg_1",
+                "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": written,
+                },
+            })
+            .to_string();
+            accept_reply(&mut memory, LlmProvider::Anthropic, &cached);
+            let next = memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(2, AiDifficulty::Medium),
+                    &log(3),
+                    CLOCKS,
+                )
+                .unwrap()
+                .request;
+            assert_eq!(
+                continued_from(&next).is_some(),
+                continued,
+                "{read} cache reads, {written} cache writes: {}",
+                body(&next)
+            );
+        }
     }
 
     #[test]
