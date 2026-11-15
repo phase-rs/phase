@@ -252,7 +252,6 @@ mod strategic_betrayal_6505;
 pub mod support;
 mod swallow_optional_you_may;
 mod target_instance_identity_9280;
-mod teferi_temporal_pilgrim_ultimate;
 mod terra_herald_optional_prompt;
 mod tezzeret_cruel_captain_emblem;
 mod thada_adel_search_damaged_player;
