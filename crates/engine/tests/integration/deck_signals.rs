@@ -156,3 +156,29 @@ fn deck_signals_over_the_shared_fixture_reads_a_known_counterspell() {
     assert_eq!(counterspells.count, 1);
     assert_eq!(counterspells.contributing, ["Counterspell"]);
 }
+
+#[test]
+fn deck_signals_counts_life_payable_phyrexian_spell_as_free_interaction() {
+    let Some(db) = shared_db() else {
+        return;
+    };
+    for name in ["Gut Shot", "Lightning Bolt"] {
+        assert!(
+            db.get_face_by_name(name).is_some(),
+            "{name} must be in the committed fixture"
+        );
+    }
+    // CR 107.4f: Gut Shot's {R/P} can be paid with 2 life, so it is castable
+    // for no mana. Lightning Bolt's {R} is the mana-required control.
+    let deck = PlayerDeckList {
+        commander: vec!["Mountain".into()],
+        main_deck: vec!["Gut Shot".into(), "Lightning Bolt".into()],
+        ..Default::default()
+    };
+
+    let signals = deck_signals(&deck, db).expect("commander produces signals");
+    let free = &signals.readings[&DeckSignalKind::FreeInteraction];
+
+    assert_eq!(free.count, 1);
+    assert_eq!(free.contributing, ["Gut Shot"]);
+}

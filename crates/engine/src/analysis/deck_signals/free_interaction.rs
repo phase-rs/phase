@@ -21,6 +21,7 @@
 //! provenance.
 
 use crate::analysis::deck_signals::{control, DeckCard};
+use crate::game::mana_payment::is_native_phyrexian_shard;
 use crate::types::ability::{AbilityCost, SpellCastingOptionKind};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -56,11 +57,7 @@ fn is_free_cast(card: &DeckCard<'_>) -> bool {
         SpellCastingOptionKind::CastWithoutManaCost => true,
         SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => false,
     });
-    let has_printed_zero_cost = matches!(
-        &face.mana_cost,
-        ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0
-    );
-    let is_zero_cost_nonpermanent = has_printed_zero_cost
+    let is_zero_cost_nonpermanent = printed_cost_is_payable_without_mana(&face.mana_cost)
         && face
             .card_type
             .core_types
@@ -68,6 +65,23 @@ fn is_free_cast(card: &DeckCard<'_>) -> bool {
             .any(|card_type| matches!(card_type, CoreType::Instant | CoreType::Sorcery))
         && !face.card_type.core_types.contains(&CoreType::Land);
     has_free_option || is_zero_cost_nonpermanent
+}
+
+/// Whether a printed mana cost can be paid without spending any mana.
+///
+/// A printed `{0}` qualifies, as does a cost with no generic part whose every
+/// shard is a printed Phyrexian or hybrid Phyrexian symbol. CR 107.4f: a
+/// Phyrexian mana symbol can be paid with 2 life instead of mana, and a hybrid
+/// Phyrexian symbol can be paid with 2 life instead of either component color,
+/// so such a cost needs no mana (Gut Shot `{R/P}`, Mental Misstep `{U/P}`). Any
+/// generic part, or a non-Phyrexian shard, still requires mana, and
+/// [`ManaCost::NoCost`] is not a payable cost (CR 202.3a / CR 118.6).
+fn printed_cost_is_payable_without_mana(cost: &ManaCost) -> bool {
+    matches!(
+        cost,
+        ManaCost::Cost { shards, generic }
+            if *generic == 0 && shards.iter().copied().all(is_native_phyrexian_shard)
+    )
 }
 
 /// Returns whether every component of an alternative cost is mana-free.
@@ -154,14 +168,12 @@ mod measurement_tests {
                 SpellCastingOptionKind::AsThoughHadFlash
                 | SpellCastingOptionKind::CastAdventure => false,
             });
-            let arm_2 = matches!(
-                &face.mana_cost,
-                ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0
-            ) && face
-                .card_type
-                .core_types
-                .iter()
-                .any(|kind| matches!(kind, CoreType::Instant | CoreType::Sorcery))
+            let arm_2 = printed_cost_is_payable_without_mana(&face.mana_cost)
+                && face
+                    .card_type
+                    .core_types
+                    .iter()
+                    .any(|kind| matches!(kind, CoreType::Instant | CoreType::Sorcery))
                 && !face.card_type.core_types.contains(&CoreType::Land);
             let card = DeckCard {
                 face,
@@ -405,6 +417,52 @@ mod tests {
         let cards = cards(&entries);
 
         assert_eq!(free_interaction(&cards), (0, Vec::new()));
+    }
+
+    #[test]
+    fn free_interaction_counts_phyrexian_only_printed_costs() {
+        let mut mono = face(
+            "Mono Phyrexian",
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianRed],
+                generic: 0,
+            },
+        );
+        mono.abilities.push(counter_ability());
+        let mut hybrid = face(
+            "Hybrid Phyrexian",
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianRed, ManaCostShard::PhyrexianBlue],
+                generic: 0,
+            },
+        );
+        hybrid.abilities.push(counter_ability());
+        let mut generic_part = face(
+            "Generic Phyrexian",
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianRed],
+                generic: 1,
+            },
+        );
+        generic_part.abilities.push(counter_ability());
+        let mut mixed = face(
+            "Mixed Phyrexian",
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianRed, ManaCostShard::Red],
+                generic: 0,
+            },
+        );
+        mixed.abilities.push(counter_ability());
+        let entries = [mono, hybrid, generic_part, mixed]
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect::<Vec<_>>();
+        let cards = cards(&entries);
+
+        assert_eq!(
+            free_interaction(&cards),
+            (2, vec!["Mono Phyrexian".into(), "Hybrid Phyrexian".into()])
+        );
     }
 
     #[test]
