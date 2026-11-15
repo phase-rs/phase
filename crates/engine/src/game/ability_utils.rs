@@ -8497,14 +8497,24 @@ fn per_opponent_fanout_object_filter_as(
         return None;
     }
     let filter = rewrite_declared_target_player(&filter, player.clone());
-    // CR 109.4: the printed anaphor "that opponent controls" may lower with no
-    // controller at all (The Doctor's Childhood Barn, Mega Flare). The paired
-    // opponent IS that controller, so an unconstrained filter is scoped to it —
-    // otherwise the slot would offer the whole table, including the caster's own
-    // permanents. `player` is `You` where the filter is evaluated with the
-    // paired opponent as its controller, and `SpecificPlayer` at a retarget's
-    // slot pool, so one scoping serves both readers.
-    Some(scope_unbound_filter_controller(&filter, player))
+    // CR 109.4: the printed anaphor "that opponent controls" lowers as `You`,
+    // or with no controller at all (The Doctor's Childhood Barn, Mega Flare).
+    // The paired opponent IS that controller.
+    //
+    // Under `player: You` the filter is evaluated with the paired opponent as
+    // its controller (`find_legal_object_targets_for_ability_with_filter_controller`),
+    // so `You` already means the right seat and only the unbound form needs
+    // scoping. Under a `SpecificPlayer` pool — a retarget's slot pool — the
+    // filter is evaluated with the RETARGETING spell's controller, so `You`
+    // must be bound too, or the pool offers the caster's own permanents.
+    Some(match player {
+        ControllerRef::You => scope_unbound_filter_controller(&filter, player),
+        bound => rewrite_relative_controller(
+            &filter,
+            &|controller| matches!(controller, ControllerRef::You),
+            &bound,
+        ),
+    })
 }
 
 fn per_opponent_fanout_legal_object_targets(
