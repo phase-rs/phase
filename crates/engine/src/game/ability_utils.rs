@@ -13933,6 +13933,7 @@ mod tests {
                     },
                     target: TargetFilter::Player,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 }),
                 true,
                 &expected,
@@ -14051,8 +14052,8 @@ mod tests {
                 position: crate::types::ability::LibraryPosition::Top,
                 arranger: None,
             }),
-            true,
-            &[TargetFilter::LastRevealed],
+            false,
+            &[],
         );
         let cast: Effect = serde_json::from_str(
             r#"{"type":"CastFromZone","target":{"type":"LastRevealed"},"without_paying_mana_cost":true,"mode":"Cast"}"#,
@@ -17968,6 +17969,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: crate::types::zones::Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(10),
@@ -18039,6 +18041,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Player,
                 destination: crate::types::zones::Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(10),
@@ -18070,6 +18073,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Player,
                 destination: crate::types::zones::Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(10),
@@ -18109,6 +18113,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Controller,
                 destination: crate::types::zones::Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         )
         .player_scope(crate::types::ability::PlayerFilter::Opponent);
@@ -19379,6 +19384,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
                 vec![],
                 ObjectId(1),
@@ -24397,6 +24403,7 @@ mod tests {
                 count: zone_count((ControllerRef::TargetPlayer, CountBinding::Anaphoric)),
                 target: TargetFilter::Player,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }),
             "Mill{{TargetZoneCardCount, Player}} (Cut Your Losses) must NOT add a second slot",
         );
@@ -24437,6 +24444,7 @@ mod tests {
                 count: zone_count((ControllerRef::TargetPlayer, CountBinding::Explicit)),
                 target: TargetFilter::Player,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }),
             "Mill{{Explicit TargetZoneCardCount, Player}} needs the count slot",
         );
