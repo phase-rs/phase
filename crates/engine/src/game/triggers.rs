@@ -31541,6 +31541,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
@@ -32159,6 +32160,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -32350,6 +32352,7 @@ pub mod tests {
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
@@ -32557,6 +32560,7 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -32678,6 +32682,7 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
@@ -32756,6 +32761,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
@@ -32818,6 +32824,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
@@ -33009,6 +33016,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
@@ -33170,6 +33178,7 @@ pub mod tests {
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
@@ -33456,6 +33465,8 @@ pub mod tests {
                             AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
                                     library_shuffle: Default::default(),
                                     origin: None,
                                     destination: Zone::Exile,
@@ -37463,6 +37474,7 @@ pub mod tests {
         // CR 115.1: "Put a land from your hand" doesn't target — selection at resolution.
 
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
@@ -37494,6 +37506,7 @@ pub mod tests {
         // "Exile target creature" should still extract the target filter
 
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -51648,6 +51661,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
@@ -52523,6 +52537,7 @@ pub mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52716,6 +52731,7 @@ pub mod tests {
         // Sacrifice exactly these three (count == pool) via the interactive
         // selection handler.
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![observer, b1, b2],
             count: 3,
@@ -52869,6 +52885,7 @@ pub mod tests {
         // Mass ChangeZone battlefield→hand over all three creatures.
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52931,6 +52948,7 @@ pub mod tests {
     ) {
         let effect = match carrier {
             LogicalZoneProductionCarrier::ChangeZone => Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52978,6 +52996,7 @@ pub mod tests {
             LogicalZoneProductionCarrier::ChangeZone => {
                 let ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination,
@@ -53063,6 +53082,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 origin: None,
                                 destination: redirected_destination,
@@ -55811,6 +55831,7 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 origin: None,
                                 destination: Zone::Exile,
@@ -56052,6 +56073,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -56182,6 +56204,7 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,

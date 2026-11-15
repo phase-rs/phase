@@ -4,12 +4,16 @@
 //! affect and how many cards that fix alone would make supported.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::Serialize;
 use strum::IntoEnumIterator;
 
+use crate::database::legality::LegalityFormat;
+use crate::database::CardDatabase;
 use crate::game::coverage::{
-    normalize_oracle_pattern, CardCoverageResult, GapDetail, GapDiagnosis, ResolverFeatureFamily,
+    analyze_coverage, normalize_oracle_pattern, retain_faces_legal_in, CardCoverageResult,
+    GapDetail, GapDiagnosis, ResolverFeatureFamily,
 };
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 
@@ -269,6 +273,86 @@ pub fn analyze_gaps(cards: &[CardCoverageResult]) -> GapAnalysis {
             .map(|(label, category)| (label, category.finish()))
             .collect(),
     }
+}
+
+/// The `parser-gap-analyzer` report body and its format filter's row counts.
+pub struct GapReport {
+    pub analysis: GapAnalysis,
+    /// Present when a format filter ran.
+    pub retained: Option<RetainedRows>,
+}
+
+pub struct RetainedRows {
+    pub format: LegalityFormat,
+    pub kept: usize,
+    pub before: usize,
+}
+
+/// Analyzes coverage, keeps the faces legal in `format`, groups their gaps, and keeps only `category`.
+pub fn gap_report(
+    card_db: &CardDatabase,
+    format: Option<LegalityFormat>,
+    category: Option<GapClass>,
+) -> GapReport {
+    let mut cards = analyze_coverage(card_db).cards;
+    let retained = format.map(|format| {
+        let before = cards.len();
+        retain_faces_legal_in(&mut cards, card_db, format);
+        RetainedRows {
+            format,
+            kept: cards.len(),
+            before,
+        }
+    });
+    let mut analysis = analyze_gaps(&cards);
+    if let Some(class) = category {
+        let label = class.label();
+        analysis.categories.retain(|key, _| *key == label);
+    }
+    GapReport { analysis, retained }
+}
+
+/// Why `gap_report_from_args` made no report; the binary words each case.
+pub enum GapArgsError {
+    Usage,
+    UnknownCategory(String),
+    UnknownFormat(String),
+    Load(PathBuf, Box<dyn std::error::Error>),
+}
+
+/// Runs `parser-gap-analyzer` against `<data-root>/card-data.json`.
+/// Pass an explicit data root before `--format` or `--category`.
+/// With no arguments after the program name, reads the data root from `PHASE_CARDS_PATH`.
+pub fn gap_report_from_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<GapReport, GapArgsError> {
+    let args: Vec<String> = args.into_iter().skip(1).collect();
+    let (mut format, mut category) = (None, None);
+    let mut args_iter = args.iter();
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "--category" => {
+                let raw = args_iter.next().cloned().unwrap_or_default();
+                let class = GapClass::from_label(&raw);
+                category = Some(class.ok_or(GapArgsError::UnknownCategory(raw))?);
+            }
+            "--format" => {
+                let raw = args_iter.next().cloned().unwrap_or_default();
+                let key = LegalityFormat::from_key(&raw);
+                format = Some(key.ok_or(GapArgsError::UnknownFormat(raw))?);
+            }
+            _ => {}
+        }
+    }
+    let root = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .or_else(|| std::env::var("PHASE_CARDS_PATH").ok())
+        .ok_or(GapArgsError::Usage)?;
+    let export = PathBuf::from(root).join("card-data.json");
+    let db = CardDatabase::from_export(&export).map_err(|e| GapArgsError::Load(export, e))?;
+    Ok(gap_report(&db, format, category))
 }
 
 #[cfg(test)]

@@ -3132,6 +3132,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
+        performed_by,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
@@ -3170,6 +3171,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // The bounded-move duration is a public effect parameter, not
                 // private hand info — pass it through the redaction.
                 duration: duration.clone(),
+                // Who performs the move is public, like the duration.
+                performed_by,
             };
         }
     }
@@ -4952,7 +4955,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
@@ -5037,7 +5040,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         redact_secret_agenda_choices(obj);
         obj.card_types = Default::default();
         obj.mana_cost = crate::types::mana::ManaCost::NoCost;
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.color.clear();
     }
 }
@@ -11522,6 +11525,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
@@ -11710,6 +11714,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,

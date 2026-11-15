@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
@@ -3435,6 +3436,7 @@ fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
 
     let entry_then_life = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: mimeoplasm },
@@ -14558,6 +14560,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
     ] {
         let mut runner = GameRunner::from_state(base_state.clone());
         runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: P0,
             cards: vec![hand_first, library_first, hand_second, library_second],
             count: 4,
