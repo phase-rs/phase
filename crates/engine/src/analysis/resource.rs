@@ -9445,6 +9445,9 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
     s.battlefield_entry_observations.clear();
+    // Indexes the ledger cleared above; a loop that passes an instruction
+    // boundary advances it every period.
+    s.instruction_boundary_marks.clear();
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -19427,6 +19430,19 @@ mod tests {
         assert!(projected.battlefield_entry_observations.is_empty());
     }
 
+    /// The instruction-boundary marks index the zone-change ledger, which the
+    /// projection clears; two periods of a loop that passes an instruction
+    /// boundary differ only in them (CR 732.2a).
+    #[test]
+    fn project_out_resources_clears_instruction_boundary_marks() {
+        let mut state = GameState::new_two_player(7);
+        state.instruction_boundary_marks = vec![1, 3];
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.instruction_boundary_marks.is_empty());
+    }
+
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;
     /// whether it reads the growing class is the confirmer's replay to answer (CR 732.2a).
     #[test]
@@ -20712,6 +20728,8 @@ mod tests {
             filter: crate::types::ability::default_target_filter_any(),
             optional,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         }
     }
 
