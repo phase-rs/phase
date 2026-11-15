@@ -6126,10 +6126,6 @@ fn rw_effect(
         // ---- Control (SetMembership external) ----
         Effect::GainControl { target: _ }
         | Effect::GainControlAll { target: _ }
-        | Effect::GiveControl {
-            target: _,
-            recipient: _,
-        }
         | Effect::ExchangeControl {
             target_a: _,
             target_b: _,
@@ -6137,6 +6133,22 @@ fn rw_effect(
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            (p, Some(WriteScope::External))
+        }
+        // CR 603.10a + CR 608.2c: the handoff reads its object filter AND its
+        // recipient filter, and either can name a per-member-bound referent — the
+        // per-object assignment (`ChoiceAssignment`) is a record the resolving
+        // ability keyed to its own population members. Both are profiled through
+        // the one filter profiler (which also records the member-bound bit), so a
+        // same-event group of distinct sources cannot take the auto-order path.
+        Effect::GiveControl { target, recipient } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            flag_legacy_write_target(&mut p, target);
+            flag_member_bound_write_target(&mut p, target);
+            p.merge(rw_target_filter(target));
+            p.merge(rw_target_filter(recipient));
             (p, Some(WriteScope::External))
         }
 

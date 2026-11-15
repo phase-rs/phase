@@ -2666,11 +2666,95 @@ then lose that much life.";
         assert!(!ability_reads_sibling_mutable(&handoff));
         let profile = ability_rw_profile(&handoff);
         assert!(!profile.reads_and_writes_event_object());
-        // Recorded, not asserted: decided by `rw_effect`'s pre-existing control
-        // arm, which consults neither filter.
-        println!(
-            "V3b.7 RECORD handoff reads_member_bound = {}",
-            profile.reads_member_bound()
+        // CR 603.10a: the handoff itself is member-bound, through BOTH of its
+        // filters — either reference alone is enough.
+        assert!(
+            profile.reads_member_bound(),
+            "the assignment handoff is member-bound"
+        );
+        let give = |target: TargetFilter, recipient: TargetFilter| {
+            ability_rw_profile(&ResolvedAbility::new(
+                Effect::GiveControl { target, recipient },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        assert!(
+            give(
+                assignment(ChoiceAssignmentSide::Objects),
+                TargetFilter::Controller
+            )
+            .reads_member_bound(),
+            "the object filter alone makes the handoff member-bound"
+        );
+        assert!(
+            give(
+                TargetFilter::Typed(TypedFilter::creature()),
+                assignment(ChoiceAssignmentSide::PlayerForObject)
+            )
+            .reads_member_bound(),
+            "the recipient filter alone makes the handoff member-bound"
+        );
+        assert!(
+            !give(
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Controller
+            )
+            .reads_member_bound(),
+            "control: a handoff that names no per-member record is not member-bound"
+        );
+    }
+
+    /// V3b.7 (ordering): CR 603.3b + CR 603.10a — a group of same-event
+    /// handoffs from distinct sources cannot take the auto-order path when the
+    /// handoff reads its own per-member assignment: each source's record
+    /// differs, so the identical-function proof is unavailable and the group
+    /// prompts. The control is the same group shape over a handoff that reads
+    /// no per-member record, which the ordering authority orders without
+    /// asking; and the member-bound group is auto-ordered when every member
+    /// shares one source, where one shared record makes the function identical.
+    #[test]
+    fn assignment_handoff_prompts_a_same_event_group_of_distinct_sources() {
+        use crate::game::ability_rw::{
+            ability_rw_profile, profiles_conflict, ControllerUniformity, GroupStructure,
+            SourceCensus,
+        };
+
+        let group = |all_same_source: bool| GroupStructure {
+            same_event: true,
+            all_same_source,
+            all_sources_self_departed: false,
+            event_object_excludes_sources: false,
+            event_object_present: false,
+            source_census: SourceCensus::unknown(),
+            controller_uniformity: ControllerUniformity::Mixed,
+        };
+        let give = |target: TargetFilter, recipient: TargetFilter| {
+            ability_rw_profile(&ResolvedAbility::new(
+                Effect::GiveControl { target, recipient },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        let handoff = give(
+            assignment(ChoiceAssignmentSide::Objects),
+            assignment(ChoiceAssignmentSide::PlayerForObject),
+        );
+        let plain = give(TargetFilter::SelfRef, TargetFilter::Controller);
+
+        assert!(
+            profiles_conflict(&handoff, &group(false)),
+            "distinct sources over per-member records must prompt"
+        );
+        assert!(
+            !profiles_conflict(&plain, &group(false)),
+            "control: a source-independent handoff over distinct sources is auto-ordered"
+        );
+        assert!(
+            !profiles_conflict(&handoff, &group(true)),
+            "control: one shared source shares one record, so the handoff is auto-ordered"
         );
     }
 }
