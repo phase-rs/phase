@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    DigSource, DurationEvent, Effect, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
+    AbilityCondition, DigSource, DurationEvent, Effect, EffectKind, KeywordAction, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -18,15 +19,15 @@ use crate::types::actions::{
 use crate::types::events::ManaTapState;
 use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
-    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
-    DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, BatchCompletion,
+    CastOfferKind, CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree,
+    DistributionScope, DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PendingManaAbility,
+    PersistedRestoreError, PostReplacementDrainStack, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress,
+    StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -35,7 +36,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -1546,7 +1547,7 @@ fn apply_action_boundary_core(
     } else {
         Some(semantic_owner)
     };
-    let preserve_interaction = interaction::action_preserves_interaction(&action);
+    let preserve_interaction = interaction::action_preserves_interaction(state, &action);
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -1747,7 +1748,7 @@ fn apply_action_boundary_core(
     // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
     // Reaching here with something to realize means the action settled WITHOUT running
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
-    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
     // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
     // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
@@ -2377,6 +2378,7 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
     if recovered_terminal_rest {
@@ -2386,7 +2388,6 @@ pub(crate) fn finalize_persisted_restore(
     // publishing it itself. Synchronize that wait before the one display
     // finalization below.
     finalize_rules_state(state);
-    restore_engine_derived_retarget_prompts(state)?;
     finalize_display_state(state);
     Ok(())
 }
@@ -2394,33 +2395,46 @@ pub(crate) fn finalize_persisted_restore(
 /// CR 707.10c + CR 115.7d: re-derive the engine-owned parts of a parked
 /// retarget prompt on the restored board before it is published — the copy
 /// target walk (mode, replayed picks, offered targets and keep permissions)
-/// and a `RetargetChoice`'s per-position `keep_is_distinct`.
+/// and every derived field of a `RetargetChoice`.
 fn restore_engine_derived_retarget_prompts(
     state: &mut GameState,
 ) -> Result<(), PersistedRestoreError> {
     effects::copy_choice::restore_copy_target_walk(state)?;
     if let WaitingFor::RetargetChoice {
+        player,
         stack_entry_index,
-        slots,
-        keep_is_distinct,
+        scope,
         ..
-    } = &state.waiting_for
+    } = state.waiting_for.clone()
     {
-        let recomputed = state
-            .stack
-            .get(*stack_entry_index)
-            .and_then(|entry| entry.ability())
-            .map(|ability| {
-                crate::game::ability_utils::retarget_keep_is_distinct(state, ability, slots)
-            })
-            .unwrap_or_default();
-        if recomputed != *keep_is_distinct {
-            if let WaitingFor::RetargetChoice {
-                keep_is_distinct, ..
-            } = &mut state.waiting_for
-            {
-                *keep_is_distinct = recomputed;
-            }
+        if let Some(prompt) =
+            effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
+        {
+            state.waiting_for = prompt;
+        } else {
+            let mut events = Vec::new();
+            let waiting_for = complete_retarget(state, &mut events, player, stack_entry_index)
+                .map_err(|error| {
+                    PersistedRestoreError::PrioritySettlementFailed(error.to_string())
+                })?;
+            // CR 608.2c + CR 608.2n + CR 603.3: completing the no-choice
+            // instruction also owes the ordinary resolution boundary. Its
+            // pipeline finishes the owning spell and settles the resulting
+            // trigger batch, or preserves a new continuation prompt. It makes
+            // no priority pass or decision to resolve another stack entry.
+            // Scan this same buffer so continuation events are not discarded.
+            // As in persisted terminal-rest settlement, a serialized
+            // construction recipient is not authority for exceptional priority.
+            state.pending_trigger_construction_priority_recipient = None;
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                &mut events,
+                0,
+                &waiting_for,
+                false,
+                false,
+            )
+            .map_err(|error| PersistedRestoreError::PrioritySettlementFailed(error.to_string()))?;
         }
     }
     Ok(())
@@ -2681,7 +2695,6 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    super::un_actions::refresh_menu(state);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve
@@ -2749,6 +2762,10 @@ fn finish_action_boundary_with_lifecycle(
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
     elide_middle_repetitions(&mut result.events);
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
@@ -9796,15 +9813,20 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
             _ => None,
         })
         .flatten()
-        .map(|occurrence| occurrence.object_id)
+        .copied()
         .collect::<HashSet<_>>();
 
     for event in events {
-        if let GameEvent::CardsRevealed { card_ids, .. } = event {
-            let unpublished = card_ids
+        // CR 400.7 + CR 701.20a/d: bind the publication to the occurrence the
+        // event disclosed, never to whatever object now holds that storage id.
+        // A card the same action reordered within its library afterwards is a
+        // new object nobody was shown, so it gets no public reveal or identity
+        // fact; the event's names keep the historical record.
+        if let GameEvent::CardsRevealed { occurrences, .. } = event {
+            let unpublished = occurrences
                 .iter()
-                .copied()
-                .filter(|card_id| !controller_reveals.contains(card_id))
+                .filter(|occurrence| !controller_reveals.contains(occurrence))
+                .filter_map(|&occurrence| state.disclosure_survivor(occurrence))
                 .collect::<Vec<_>>();
             state
                 .resolve_and_apply_information(
@@ -10212,14 +10234,6 @@ pub(crate) fn drain_pending_cost_move_resume(
     Ok(Some(waiting_for))
 }
 
-/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
-/// for every state except a parked counter-cost root whose replacement subtree
-/// is still live: `resume_resolution_frames` advances one top frame per pass,
-/// so a subtree several frames deep needs several, and the root resumes in the
-/// pass that retires the last of it (a due root resumes mid-pass through
-/// `resume_due_counter_cost_root`; the cost-move drain admits it at
-/// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
-/// the loop ends.
 /// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
 /// instruction may resume at the common boundary; a cast or activation paused
 /// on an unrelated choice keeps its existing owner.
@@ -10266,6 +10280,19 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
     }
 }
 
+/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
+/// for every state except two. First, a parked counter-cost root whose
+/// replacement subtree is still live: `resume_resolution_frames` advances one
+/// top frame per pass, so a subtree several frames deep needs several, and the
+/// root resumes in the pass that retires the last of it (a due root resumes
+/// mid-pass through `resume_due_counter_cost_root`; the cost-move drain admits
+/// it at `PriorityBoundary`). Second (CR 117.2e + CR 614.6), a pass that leaves
+/// a copy owner or a post-replacement drain on top at priority: a substitute's
+/// retired drain or completed inner copy owner exposed it, and the work it
+/// belongs to is unfinished (for a copy owner, the ability whose creation was
+/// replaced is still resolving). That repeat follows the whole pass, so the
+/// pass's entry commits (CR 614.12a) land before the exposed owner completes.
+/// A repeat needs the position to strictly decrease, so the loop ends.
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -10274,8 +10301,20 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = SubtreePosition::at(&state.resolution_stack);
         resume_pending_continuation_pass(state, events)?;
         let after = SubtreePosition::at(&state.resolution_stack);
+        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
+        // leaves a copy owner or a post-replacement drain on top has exposed it (a
+        // substitute's drain retired, or an inner copy owner completed). The work
+        // that frame belongs to is unfinished (for a copy owner, the ability whose
+        // creation the substitute replaced is still resolving), so no player may
+        // receive priority: pass again. The repeat follows the whole pass, so that
+        // pass's entry commits land first (CR 614.12a).
+        let exposes_resolving_owner = matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+                && !exposes_resolving_owner)
             || !after.is_strictly_inside(&before)
         {
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
@@ -12788,7 +12827,7 @@ fn revoke_resolve_all_consent(
 /// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
 /// permission lingers on a successfully cast hit while it sits on the stack,
 /// so its mere presence is not proof the announcement is still running.
-fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+pub(super) fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
     if state.revealed_cards.is_empty() {
         return false;
     }
@@ -12877,46 +12916,206 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
         })
 }
 
+fn filter_operates_on_revealed_cards(state: &GameState, filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastRevealed
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => true,
+        TargetFilter::SpecificObject { id } => state.revealed_cards.contains(id),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| filter_operates_on_revealed_cards(state, f)),
+        TargetFilter::Not { filter } => filter_operates_on_revealed_cards(state, filter),
+        _ => false,
+    }
+}
+
+fn quantity_references_revealed(qty: &QuantityExpr) -> bool {
+    match qty {
+        QuantityExpr::Ref { qty } => matches!(
+            qty,
+            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+        ),
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => quantity_references_revealed(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_references_revealed),
+        _ => false,
+    }
+}
+
+fn condition_references_revealed(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::RevealedHasCardType { .. } => true,
+        AbilityCondition::ConditionInstead { inner } => condition_references_revealed(inner),
+        AbilityCondition::Not { condition } => condition_references_revealed(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_references_revealed)
+        }
+        _ => false,
+    }
+}
+
+fn effect_operates_on_revealed_cards(state: &GameState, effect: &Effect) -> bool {
+    if let Some(target) = effect.target_filter() {
+        if filter_operates_on_revealed_cards(state, target) {
+            return true;
+        }
+    }
+    match effect {
+        Effect::ChangeZoneAll { target, .. } => filter_operates_on_revealed_cards(state, target),
+        _ => false,
+    }
+}
+
+fn link_operates_on_revealed_cards(state: &GameState, link: &ResolvedAbility) -> bool {
+    if link.targets.iter().any(|t| match t {
+        TargetRef::Object(id) => state.revealed_cards.contains(id),
+        TargetRef::Player(_) => false,
+    }) {
+        return true;
+    }
+    if link
+        .condition
+        .as_ref()
+        .is_some_and(condition_references_revealed)
+    {
+        return true;
+    }
+    let mut quantity_found = false;
+    link.effect.for_each_quantity_expr(&mut |qty| {
+        if quantity_references_revealed(qty) {
+            quantity_found = true;
+        }
+    });
+    if quantity_found {
+        return true;
+    }
+    effect_operates_on_revealed_cards(state, &link.effect)
+}
+
+fn continuation_retains_revealed_cards(state: &GameState) -> bool {
+    state
+        .resolution_stack
+        .ability_continuations()
+        .any(|parked| {
+            super::triggers::any_reachable_link(&parked.chain, &|link| {
+                link_operates_on_revealed_cards(state, link)
+            })
+        })
+        || state.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) => {
+                batch
+                    .remaining
+                    .iter()
+                    .any(|id| state.revealed_cards.contains(id))
+                    || matches!(
+                        batch.completion,
+                        Some(BatchCompletion::RevealRestPile { .. })
+                    )
+                    || batch.library_reorder.is_some()
+            }
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().is_some_and(|p| {
+                p.remaining
+                    .iter()
+                    .any(|m| state.revealed_cards.contains(&m.object_id))
+            }),
+            _ => false,
+        })
+        || state.active_batch_delivery().is_some_and(|batch| {
+            batch
+                .remaining
+                .iter()
+                .any(|id| state.revealed_cards.contains(id))
+                || matches!(
+                    batch.completion,
+                    Some(BatchCompletion::RevealRestPile { .. })
+                )
+                || batch.library_reorder.is_some()
+        })
+}
+
+/// CR 701.20a: Whether the transient reveal set
+/// ([`GameState::revealed_cards`]) must survive the action now being applied
+/// because the pending prompt is a later step of the very instruction that
+/// revealed those cards. A revealed card "remains revealed for as long as
+/// necessary to complete the parts of the effect that card is relevant to", so
+/// the membership is kept while a prompt of that instruction is still open and
+/// dropped at the next boundary once none is.
+///
+/// The same list carries the reveal-"until" retirement paths (`zones.rs`
+/// `retire_reordered_library_reveals`): an owner-ordered placement must still
+/// find the pile it revealed when the owner's answer arrives (CR 701.20d).
+pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
+    // CR 701.20a: a reveal published while an instruction is resolving belongs
+    // to that resolution. It stays revealed while its own continuation frames
+    // still operate on the revealed cards (e.g. Charbelcher dealing damage and
+    // reordering library bottom across intervening Swans/Abundance choices).
+    // Bind reveal retention to the specific instruction that published it, not
+    // to any live resolution carrier, and clear it when that instruction completes.
+    if continuation_retains_revealed_cards(state) {
+        return true;
+    }
+    match &state.waiting_for {
+        WaitingFor::RevealChoice { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        // CR 701.20a + CR 608.2c: a reveal-dig's remainder split is a later
+        // pause in the SAME instruction — so its cards stay public across it
+        // exactly as they do across the keep selection above.
+        | WaitingFor::DigRestSplitChoice { .. }
+        // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through both
+        // the opponent's partition step and the controller's pile choice — the
+        // cards remain public while both players interact.
+        | WaitingFor::SeparatePilesChooseOpponent { .. }
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::SeparatePilesChoice { .. }
+        // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards stay
+        // in the library and remain public while the controller works through
+        // the same-named free-cast offers and the bottom-order step.
+        | WaitingFor::CastOffer {
+            kind: crate::types::game_state::CastOfferKind::Ripple { .. },
+            ..
+        }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::DigBottomOrder { .. } => true,
+        // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
+        // bottom of your library in any order" pauses for the pile's owner to
+        // arrange it, and the pile stays revealed until that arrangement is
+        // placed (Goblin Machinist, Erratic Mutation). Dropping the membership
+        // at this boundary would let the placement move a revealed card while
+        // the CR 701.20d retirement — which reads exactly this set — no longer
+        // finds it.
+        WaitingFor::EffectZoneChoice {
+            mass_library_order, ..
+        } => mass_library_order.is_some(),
+        // CR 800.4g: a substitute-arranger election is the same arrangement
+        // instruction's next prompt after the named arranger left (CR 608.2m),
+        // so it keeps the arrangement's reveal membership too.
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            purpose: crate::types::game_state::ZoneOpponentChooserPurpose::SubstituteArranger,
+            ..
+        } => state.pending_mass_library_order_choice.is_some(),
+        _ => false,
+    }
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
     action: GameAction,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
-    // Clear stale revealed_cards from the previous action.
-    // RevealTop reveals (e.g. Goblin Guide) are momentary — shown for one state update.
-    // RevealHand reveals (e.g. Thoughtseize) persist through the RevealChoice interaction.
-    // ManifestDread reveals persist through ManifestDreadChoice (cards come from WaitingFor).
-    // CR 701.20b: DigChoice reveals (reveal-dig, e.g. Satyr Wayfinder) persist through
-    // the selection — revealed cards remain public while the player chooses.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::RevealChoice { .. }
-            | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::DigChoice { .. }
-            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
-            // long as necessary to complete the parts of the effect that card
-            // is relevant to", and a reveal-dig's remainder split is a later
-            // pause in the SAME instruction — so its cards stay public across
-            // it exactly as they do across the keep selection above.
-            | WaitingFor::DigRestSplitChoice { .. }
-            // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
-            // both the opponent's partition step and the controller's pile
-            // choice — the cards remain public while both players interact.
-            | WaitingFor::SeparatePilesChooseOpponent { .. }
-            | WaitingFor::SeparatePilesPartition { .. }
-            | WaitingFor::SeparatePilesChoice { .. }
-            // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards
-            // stay in the library and remain public while the controller works
-            // through the same-named free-cast offers and the bottom-order step.
-            | WaitingFor::CastOffer {
-                kind: crate::types::game_state::CastOfferKind::Ripple { .. },
-                ..
-            }
-            | WaitingFor::RippleBottomOrder { .. }
-            | WaitingFor::RevealUntilBottomOrder { .. }
-            | WaitingFor::DigBottomOrder { .. }
-    ) && !ripple_resolution_cast_in_flight(state)
+    // Clear stale revealed_cards from the previous action, except while a
+    // pending prompt still owns the reveal (`transient_reveal_outlives_action_boundary`:
+    // RevealHand/Thoughtseize, reveal-digs, Fact or Fiction, Ripple, reveal-until
+    // bottom orders, owner-ordered library piles). RevealTop reveals (e.g.
+    // Goblin Guide) are momentary — shown for one state update.
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();
     }
@@ -14680,6 +14879,7 @@ fn apply_non_priority_pass_action(
                             *count,
                             choices,
                             &chosen,
+                            paid_cost.as_ref().map(|payment| payment.cost),
                             &mut events,
                         )?
                     }
@@ -14691,6 +14891,7 @@ fn apply_non_priority_pass_action(
                         *count,
                         choices,
                         &chosen,
+                        paid_cost.as_ref().map(|payment| payment.cost),
                         &mut events,
                     )?,
                     // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
@@ -15509,12 +15710,15 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::TributeChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_tribute_choice(
+            // CR 603.3b: the resumed entry carrier can emit its committed entry
+            // inside this handler. Run the shared post-action pipeline over those
+            // events even when the boundary has no parked entry left to realize.
+            engine_payment_choices::handle_tribute_choice(
                 state,
                 waiting_for.clone(),
                 accept,
                 &mut events,
-            );
+            )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
@@ -17342,6 +17546,7 @@ fn apply_non_priority_pass_action(
                 .unwrap_or_default();
             events.push(crate::types::events::GameEvent::CardsRevealed {
                 player: p,
+                occurrences: state.disclosed_occurrences(&[source]),
                 card_ids: vec![source],
                 card_names: vec![card_name],
             });
@@ -18833,6 +19038,17 @@ fn apply_retarget(
         *stack_ability_mut = mutated;
     }
 
+    complete_retarget(state, events, player, stack_entry_index)
+}
+
+/// CR 608.2c: finish the parked instruction and resume its owning continuation,
+/// including when a restored retarget has no remaining choice to make.
+fn complete_retarget(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    player: PlayerId,
+    stack_entry_index: usize,
+) -> Result<WaitingFor, EngineError> {
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChangeTargets,
         source_id: state
@@ -19155,6 +19371,13 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
+    // occurrence is not a response, including through the legacy pool fallback.
+    if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: single-target change must choose a different target".into(),
+        ));
+    }
     let identities = crate::game::ability_utils::retarget_final_identities(
         state,
         pre,
@@ -20326,13 +20549,15 @@ fn commit_land_play(
     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
         controller_override,
         performed_by,
+        ownership_actor,
         ..
     } = &mut proposed
     {
         *controller_override = Some(player);
         // CR 116.2a: the player performs the land play, which a format's
-        // entry-ownership axis may read as the land's new owner.
+        // entry-ownership axis reads as the land's new owner.
         *performed_by = Some(player);
+        *ownership_actor = crate::types::proposed_event::EntryOwnershipActor::Player(player);
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -30772,28 +30997,30 @@ mod resolving_carrier_settle_tests {
                     scenario
                         .add_creature(p2, name, 1, 1)
                         .with_replacement_definition(
-                            ReplacementDefinition::new(ReplacementEvent::Moved)
-                                .destination_zone(Zone::Graveyard)
-                                .execute(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::ChangeZone {
-                                        library_shuffle: Default::default(),
-                                        destination: Zone::Exile,
-                                        origin: None,
-                                        target: TargetFilter::SelfRef,
-                                        owner_library: false,
-                                        enter_transformed: false,
-                                        enters_under: None,
-                                        enter_tapped: EtbTapState::Unspecified,
-                                        enters_attacking: false,
-                                        up_to: false,
-                                        enter_with_counters: vec![],
-                                        conditional_enter_with_counters: vec![],
-                                        face_down_profile: None,
-                                        enters_modified_if: None,
-                                    },
-                                )),
-                        );
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .destination_zone(Zone::Graveyard)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
+                                    library_shuffle: Default::default(),
+                                    destination: Zone::Exile,
+                                    origin: None,
+                                    target: TargetFilter::SelfRef,
+                                    owner_library: false,
+                                    enter_transformed: false,
+                                    enters_under: None,
+                                    enter_tapped: EtbTapState::Unspecified,
+                                    enters_attacking: false,
+                                    up_to: false,
+                                    enter_with_counters: vec![],
+                                    conditional_enter_with_counters: vec![],
+                                    face_down_profile: None,
+                                    enters_modified_if: None,
+                                },
+                            )),
+                    );
                 }
             }
             let mut runner = scenario.build();
@@ -32109,7 +32336,7 @@ mod cost_move_drain_priority_boundary_tests {
             completion: PendingCostMoveCompletion::FinishPending,
         });
         state.push_counter_removals(PendingCounterRemovalQueue {
-            remaining: vec![removal],
+            remaining: std::collections::VecDeque::from([removal]),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(62),
             total: 1,

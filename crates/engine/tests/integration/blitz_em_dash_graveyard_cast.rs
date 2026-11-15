@@ -2065,6 +2065,7 @@ pub(crate) fn creature_permission(
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
         required_cast_keyword,
         pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
         cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,

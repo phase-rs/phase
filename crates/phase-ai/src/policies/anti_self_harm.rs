@@ -2501,6 +2501,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
@@ -2913,6 +2914,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -4723,6 +4725,7 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
     }
@@ -4733,6 +4736,7 @@ mod tests {
             counter_type: Some(CounterType::Minus1Minus1),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
     }
@@ -6194,6 +6198,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -6873,6 +6878,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -7098,6 +7104,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -7822,6 +7829,7 @@ mod tests {
         let decline = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
@@ -8199,6 +8207,7 @@ mod tests {
         obj.abilities = Arc::new(vec![AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,

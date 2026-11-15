@@ -751,7 +751,28 @@ fn effect_projection(effect: &Effect) -> Projection {
             // CR 122.1: removing counters consumes the counter resource (negative).
             Some(ct) => {
                 let class = CounterClass::from_counter_type(ct);
-                let (a, _) = count_seed(count);
+                let a = match count {
+                    // "Remove all [kind] counters" carries the `Fixed{-1}` sentinel,
+                    // not an amount: it removes however many are there, so it is
+                    // recorded as one unit of consumption. Negating the sentinel
+                    // would record it as production.
+                    QuantityExpr::Fixed { value: -1 } => 1,
+                    // A printed amount removes that many.
+                    QuantityExpr::Fixed { value } => i64::from(*value),
+                    // A dynamic amount is unknown statically: it is recorded as
+                    // one unit of consumption (a consumption marks no axis
+                    // magnitude).
+                    QuantityExpr::Ref { .. }
+                    | QuantityExpr::DivideRounded { .. }
+                    | QuantityExpr::Offset { .. }
+                    | QuantityExpr::ClampMin { .. }
+                    | QuantityExpr::Multiply { .. }
+                    | QuantityExpr::Sum { .. }
+                    | QuantityExpr::UpTo { .. }
+                    | QuantityExpr::Power { .. }
+                    | QuantityExpr::Difference { .. }
+                    | QuantityExpr::Max { .. } => 1,
+                };
                 b.add_counter(
                     class,
                     default_object_class(class),
@@ -954,6 +975,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         // — a multi-card or counted conjure produces that many ETBs, and a
         // variable/X count is marked Unbounded. Any other destination has no
         // repeatable axis ⇒ Unmodeled.
+        // CR 707.13: a card copy created from a name never enters the
+        // battlefield directly (it is created to be cast), so it has no modeled
+        // axis here.
+        Effect::CreateCardCopyByName { .. } => return Projection::Unmodeled,
         Effect::Conjure {
             cards, destination, ..
         } => {
@@ -1319,6 +1344,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::GotchaSaid
+        | TriggerMode::Touched
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted
@@ -2523,11 +2549,80 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: fixed(3),
             target: default_target_filter_any(),
+            scope: crate::types::ability::EffectScope::Single,
         };
         let Projection::Modeled { vector, .. } = effect_projection(&remove) else {
             panic!("modeled")
         };
         assert_eq!(vector.counters.get(&P1P1), Some(&-3));
+    }
+
+    /// CR 122.1: "remove all fate counters from all permanents" (Oblivion Stone)
+    /// consumes fate counters. The `Fixed{-1}` "remove all" sentinel is one unit
+    /// of consumption, never production; a finite mass removal keeps its own
+    /// negative amount, and a dynamic count stays one unit of consumption.
+    #[test]
+    fn remove_all_counters_sentinel_is_consumption() {
+        use crate::types::ability::EffectScope;
+        let fate = CounterType::Generic("fate".to_string());
+        let removal = |counter_type: CounterType, count: QuantityExpr, scope: EffectScope| {
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count,
+                target: default_target_filter_any(),
+                scope,
+            }
+        };
+        let fate_key = (
+            CounterClass::from_counter_type(&fate),
+            default_object_class(CounterClass::from_counter_type(&fate)),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            let Projection::Modeled {
+                vector, produces, ..
+            } = effect_projection(&removal(fate.clone(), fixed(-1), scope))
+            else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&fate_key), Some(&-1), "{scope:?}");
+            assert!(
+                !produces.contains(&AxisKey::Counter(fate_key.0, fate_key.1)),
+                "{scope:?}: removing every fate counter produces none: {produces:?}"
+            );
+        }
+
+        // "Remove two loyalty counters from each planeswalker" (Pestilent Haze).
+        let Projection::Modeled { vector, .. } =
+            effect_projection(&removal(CounterType::Loyalty, fixed(2), EffectScope::All))
+        else {
+            panic!("modeled")
+        };
+        let loyalty_key = (CounterClass::Loyalty, ObjectClass::Planeswalker);
+        assert_eq!(vector.counters.get(&loyalty_key), Some(&-2));
+
+        // A dynamic count stays one unit of consumption.
+        let dynamic = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::EventContextAmount,
+        };
+        for count in [
+            dynamic(),
+            QuantityExpr::UpTo {
+                max: Box::new(dynamic()),
+            },
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(dynamic()),
+            },
+        ] {
+            let Projection::Modeled { vector, .. } = effect_projection(&removal(
+                CounterType::Plus1Plus1,
+                count.clone(),
+                EffectScope::Single,
+            )) else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&P1P1), Some(&-1), "{count:?}");
+        }
     }
 
     #[test]
@@ -2933,6 +3028,7 @@ mod tests {
             count,
             target: TargetFilter::Player, // not Controller/SelfRef ⇒ OPPONENT
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {
@@ -2975,6 +3071,7 @@ mod tests {
     }
     fn change_zone(origin: Option<Zone>, destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,

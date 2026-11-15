@@ -14,7 +14,8 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
+use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::strip_reminder_text;
@@ -128,7 +129,7 @@ fn is_chapter_body_continuation(line: &str) -> bool {
 /// Return shape of [`parse_saga_chapters`]: source-line-tagged chapter triggers,
 /// the `(line, ETB replacement)` pair, and the set of consumed line indices.
 type SagaChaptersParse = (
-    Vec<(usize, TriggerDefinition)>,
+    Vec<(usize, Lowered<TriggerDefinition>)>,
     (usize, ReplacementIr),
     HashSet<usize>,
 );
@@ -179,37 +180,46 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             // parsing would mis-split the opener and leave the outcome clauses
             // Unimplemented. Try it first, mirroring the spell-line dispatch in
             // `oracle.rs`.
-            let mut execute =
-                match crate::parser::oracle_vote::parse_vote_block(effect_text, AbilityKind::Spell)
-                {
-                    Some(vote_def) => vote_def,
-                    // CR 700.2 + CR 700.2b: a chapter whose body is a modal
-                    // head followed by a bulleted option list ("Choose one —
-                    // • … • …", Life of Toshiro Umezawa I/II; "Choose one at
-                    // random —", Summon: Magus Sisters I/II/III) is a MODAL
-                    // triggered ability — a chapter ability is a triggered
-                    // ability (CR 714.2b), and its controller chooses the
-                    // mode(s) as it goes on the stack. The bullet lines were
-                    // space-joined into this body by the continuation branch
-                    // above, so the option list arrives inline; chain parsing
-                    // would execute every bullet sequentially instead of one
-                    // chosen mode. Try it before `parse_effect_chain`, mirroring
-                    // the vote dispatch directly above.
-                    //
-                    // CR 714.2 + CR 714.2b: the modes are a triggered ability's
-                    // body, so they parse in trigger context, as the trigger
-                    // modal path's modes do. The chapter head establishes no
-                    // self-reference host or event-object antecedent, so every
-                    // other context field stays at its default.
-                    None => crate::parser::oracle_modal::try_parse_inline_modal_ability(
-                        effect_text,
-                        &crate::parser::oracle_ir::context::ParseContext {
-                            in_trigger: true,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap_or_else(|| parse_effect_chain(effect_text, AbilityKind::Spell)),
-                };
+            let history;
+            let mut execute = match crate::parser::oracle_vote::parse_vote_block_with_provenance(
+                effect_text,
+                AbilityKind::Spell,
+            ) {
+                Some(lowered) => {
+                    history = lowered.history;
+                    lowered.value
+                }
+                // CR 700.2 + CR 700.2b: a chapter whose body is a modal
+                // head followed by a bulleted option list ("Choose one —
+                // • … • …", Life of Toshiro Umezawa I/II; "Choose one at
+                // random —", Summon: Magus Sisters I/II/III) is a MODAL
+                // triggered ability — a chapter ability is a triggered
+                // ability (CR 714.2b), and its controller chooses the
+                // mode(s) as it goes on the stack. The bullet lines were
+                // space-joined into this body by the continuation branch
+                // above, so the option list arrives inline; chain parsing
+                // would execute every bullet sequentially instead of one
+                // chosen mode. Try it before `parse_effect_chain`, mirroring
+                // the vote dispatch directly above.
+                //
+                // CR 714.2 + CR 714.2b: the modes are a triggered ability's
+                // body, so they parse in trigger context, as the trigger
+                // modal path's modes do. The chapter head establishes no
+                // self-reference host or event-object antecedent, so every
+                // other context field stays at its default.
+                None => {
+                    let lowered = crate::parser::oracle_modal::try_parse_inline_modal_ability_with_provenance(
+                    effect_text,
+                    &crate::parser::oracle_ir::context::ParseContext {
+                        in_trigger: true,
+                        ..Default::default()
+                    },
+                )
+                    .unwrap_or_else(|| parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell));
+                    history = lowered.history;
+                    lowered.value
+                }
+            };
             // CR 611.2a + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that
             // lasts until the end of the game. The general-purpose `try_parse_gain_quoted_ability`
@@ -242,7 +252,13 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             if optional {
                 trigger = trigger.optional();
             }
-            triggers.push((*line_idx, trigger));
+            triggers.push((
+                *line_idx,
+                Lowered {
+                    value: trigger,
+                    history,
+                },
+            ));
         }
     }
 
@@ -496,7 +512,7 @@ mod tests {
     ) {
         let (triggers, (_, etb), consumed) = parse_saga_chapters(lines, name);
         (
-            triggers.into_iter().map(|(_, t)| t).collect(),
+            triggers.into_iter().map(|(_, t)| t.value).collect(),
             etb.definition,
             consumed,
         )
