@@ -5670,6 +5670,9 @@ mod restored_card_db_requirements_tests {
         assert!(logs_text(game_one, "Game started") && logs_text(game_two, "Game started"));
         assert!(logs_text(game_one, "Game over") && !logs_text(game_two, "Game over"));
 
+        // Nothing between the games touched the seat's thread: only the game
+        // number keeps game 2's first decision from continuing it.
+        assert!(has_open_llm_thread(seat), "game 1's thread is still open");
         let next_game = build_llm_decision(seat, &log);
         assert_eq!(
             thread_of(&next_game),
@@ -5693,6 +5696,7 @@ mod restored_card_db_requirements_tests {
         open_a_thread_in_game_one(seat, &log);
         end_game_one(&mut log);
 
+        assert!(has_open_llm_thread(seat), "game 1's thread is open");
         let play_draw = build_llm_decision(seat, &log);
         assert_eq!(
             thread_of(&play_draw),
@@ -5700,6 +5704,10 @@ mod restored_card_db_requirements_tests {
             "{play_draw}"
         );
         assert!(play_draw["threadTurn"].is_null(), "{play_draw}");
+        assert!(
+            !has_open_llm_thread(seat),
+            "a decision between games ends the seat's thread"
+        );
         let chosen = resolve_llm_reply(seat, &play_draw, 200, &anthropic_reply("msg_2", 0));
         let proposal = &chosen["proposal"];
         let action: GameAction =
@@ -5958,16 +5966,15 @@ mod restored_card_db_requirements_tests {
         panic!("the game never reached the expected point");
     }
 
-    /// CR 723.1 + CR 723.5, on the printed card. In a three-player game P2
-    /// activates Mindslaver targeting P1, whose LLM seat has an open thread.
-    /// During P1's next turn P2 makes P1's decisions: the client asks them as
-    /// P2, the seat the engine authorizes to submit, and they go out as
-    /// today's request, so P2 neither reads nor adds to P1's conversation.
-    /// Once control ends with that turn, P1's own next decision creates a new
-    /// thread. Both AI seats use one endpoint, account and model, the case in
-    /// which their requests could otherwise land in one conversation.
-    #[test]
-    fn a_turn_mindslaver_controls_uses_no_thread_and_its_owner_then_creates_one() {
+    /// Play a three-player game, on the printed Mindslaver, up to the turn it
+    /// hands to P2. P1's LLM seat opens its thread (`msg_1`); P2 activates
+    /// Mindslaver targeting P1, and it resolves; P1's next decision before
+    /// that turn continues the thread (`msg_2`), so the thread is open when
+    /// control starts. The engine then sets `turn_decision_controller` to P2
+    /// itself, at P1's turn (CR 723.1). Both AI seats use one endpoint,
+    /// account and model, the case in which their requests could otherwise
+    /// land in one conversation.
+    fn reach_the_turn_mindslaver_controls(log: &mut Vec<engine::types::log::GameLogEntry>) {
         use engine::game::scenario::{GameScenario, P0, P1};
         use engine::types::ability::TargetRef;
         use engine::types::mana::ManaColor;
@@ -5978,7 +5985,7 @@ mod restored_card_db_requirements_tests {
         load_minimal_test_card_database();
         let mut scenario = GameScenario::new_n_player(3, 42);
         scenario.at_phase(Phase::PreCombatMain);
-        // Enough to draw through the turns the test plays.
+        // Enough to draw through the turns the tests play.
         for seat in [P0, P1, p2] {
             scenario.with_library_top(seat, &["Forest"; 10]);
         }
@@ -5993,12 +6000,11 @@ mod restored_card_db_requirements_tests {
             scenario.add_basic_land(p2, ManaColor::White);
         }
         install_game_state(Some(scenario.build().state().clone()));
-        let mut log = Vec::new();
 
         // P0 passes, and P1 opens its thread.
-        submit_logged(&mut log, authorized_seat(), GameAction::PassPriority);
+        submit_logged(log, authorized_seat(), GameAction::PassPriority);
         assert_eq!(authorized_seat(), P1);
-        let opened = build_llm_decision(P1, &log);
+        let opened = build_llm_decision(P1, log);
         assert_eq!(thread_of(&opened), serde_json::json!({ "type": "create" }));
         let answered = resolve_llm_reply(
             P1,
@@ -6007,12 +6013,12 @@ mod restored_card_db_requirements_tests {
             &anthropic_reply("msg_1", non_pass_choice(P1)),
         );
         assert!(answered["proposal"].is_object(), "{answered}");
-        submit_logged(&mut log, P1, GameAction::PassPriority);
+        submit_logged(log, P1, GameAction::PassPriority);
 
         // P2 activates Mindslaver targeting P1, and it resolves.
         assert_eq!(authorized_seat(), p2);
         submit_logged(
-            &mut log,
+            log,
             p2,
             GameAction::ActivateAbility {
                 source_id: mindslaver,
@@ -6021,13 +6027,13 @@ mod restored_card_db_requirements_tests {
             },
         );
         submit_logged(
-            &mut log,
+            log,
             p2,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Player(P1)],
             },
         );
-        pass_until(&mut log, |state| state.stack.is_empty());
+        pass_until(log, |state| state.stack.is_empty());
         let scheduled = with_state(|state| state.scheduled_turn_controls.clone())
             .expect("the game is installed");
         assert!(
@@ -6039,8 +6045,8 @@ mod restored_card_db_requirements_tests {
         );
 
         // Until then P1's thread is open: its next decision continues it.
-        pass_until(&mut log, |state| state.priority_player == P1);
-        let continued = build_llm_decision(P1, &log);
+        pass_until(log, |state| state.priority_player == P1);
+        let continued = build_llm_decision(P1, log);
         assert_eq!(
             thread_of(&continued),
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
@@ -6053,7 +6059,7 @@ mod restored_card_db_requirements_tests {
         );
 
         // P1's next turn, which the engine hands to P2 (CR 723.1).
-        pass_until(&mut log, |state| state.active_player == P1);
+        pass_until(log, |state| state.active_player == P1);
         let (controller, waiting_for) =
             with_state(|state| (state.turn_decision_controller, state.waiting_for.clone()))
                 .expect("the game is installed");
@@ -6062,6 +6068,25 @@ mod restored_card_db_requirements_tests {
             matches!(waiting_for, WaitingFor::Priority { player } if player == P1),
             "{waiting_for:?}"
         );
+        assert!(
+            has_open_llm_thread(P1),
+            "P1's thread is open as control starts"
+        );
+    }
+
+    /// CR 723.1 + CR 723.5, on the printed card. During the turn Mindslaver
+    /// hands to P2, P2 makes P1's decisions: the client asks them as P2, the
+    /// seat the engine authorizes to submit, and they go out as today's
+    /// request, so P2 neither reads nor adds to P1's conversation. That one
+    /// authorized build ends P1's thread, the semantic owner's, not P2's.
+    /// Once control ends with that turn, P1's own next decision creates a new
+    /// thread.
+    #[test]
+    fn a_turn_mindslaver_controls_uses_no_thread_and_its_owner_then_creates_one() {
+        use engine::game::scenario::P1;
+        let p2 = PlayerId(2);
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
 
         // The client asks P1's decision as P2, and it is today's request.
         assert_eq!(authorized_seat(), p2);
@@ -6072,9 +6097,10 @@ mod restored_card_db_requirements_tests {
             "{delegated}"
         );
         assert!(delegated["threadTurn"].is_null(), "{delegated}");
-        // Asked as P1's own seat instead, it is still P2's decision to make.
-        let as_owner = build_llm_decision(P1, &log);
-        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
+        assert!(
+            !has_open_llm_thread(P1),
+            "the authorized build ends the thread of the seat whose decision it is"
+        );
         // The reply binds to P1's decision, submitted by P2.
         let made = resolve_llm_reply(
             p2,
@@ -6096,6 +6122,23 @@ mod restored_card_db_requirements_tests {
         );
         let own = build_llm_decision(P1, &log);
         assert_eq!(thread_of(&own), serde_json::json!({ "type": "create" }));
+
+        clear_game_state();
+    }
+
+    /// A routing probe, apart from the hand-back sequence: during the turn
+    /// Mindslaver hands to P2, P1's decision asked as P1's own seat, which the
+    /// controller never does, is still P2's to make (CR 723.5) and goes out
+    /// with no thread.
+    #[test]
+    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_uses_no_thread() {
+        use engine::game::scenario::P1;
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
+
+        let as_owner = build_llm_decision(P1, &log);
+        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
+        assert!(as_owner["threadTurn"].is_null(), "{as_owner}");
 
         clear_game_state();
     }
