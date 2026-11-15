@@ -3885,7 +3885,7 @@ fn legacy_effect(x: &Effect) -> bool {
         // batch prompt this flag feeds is never consulted for it.
         Effect::EpicCopy { .. } => false,
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
-        Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
+        Effect::CreateDrawReplacement { replacement_effect } => legacy_definition(replacement_effect),
         Effect::RollDie { count, results, .. } => {
             legacy_quantity_expr(count) || results.iter().any(|r| legacy_definition(&r.effect))
         }
@@ -4757,6 +4757,7 @@ fn walk_ability(
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -4911,6 +4912,9 @@ fn walk_definition(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // read or write — creates no resolution-time dependency.
+        grant_chain: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -6460,11 +6464,7 @@ fn rw_effect(
                 .unwrap_or_else(RwProfile::empty),
             None,
         ),
-        Effect::CreateDrawReplacement { replacement_effect } => {
-            let (mut b, _) = rw_effect(replacement_effect, None, pscope, chain_move_owner);
-            b.drop_writes();
-            (b, None)
-        }
+        Effect::CreateDrawReplacement { replacement_effect } => (deferred(replacement_effect), None),
         Effect::PreventDamage {
             amount_dynamic,
             target: _,
@@ -6756,6 +6756,7 @@ fn rw_effect(
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut p = RwProfile::empty();
             if let Some(q) = count {
@@ -7443,10 +7444,11 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // read would spuriously pair against every event-object writer
         // (damage, counters).
         AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
-        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
-        // by this ability's own `(source_id, ability_index)` — the same read
-        // bucket for `Resolved` (`ability_resolutions_this_turn`) and
-        // `Activated` (`activated_abilities_this_turn`). Neither field selects a
+        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal: the
+        // `Resolved` tally reads `ability_resolutions_this_turn` keyed by
+        // `(source_id, ability_index)`, while the `Activated` tally reads
+        // `activated_abilities_this_turn` keyed by the per-acquisition
+        // `AbilityUsageKey` (CR 602.5c). Neither field selects a
         // different KIND or SCOPE of state, so the profile is unchanged by the
         // tally axis; both are destructured without `..` so a future field
         // forces re-classification.

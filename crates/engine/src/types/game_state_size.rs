@@ -125,6 +125,17 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,952 B when #10637's staged destroy and ChangeZone populations merged
+//! main through `51b7fe41d9`: the branch's `staged_population_parent`
+//! (`Option<StagedPopulationParent>`, 24 B) unioned with main's new fields
+//! since the merge base, among them `pending_player_scope_choice`
+//! (`Option<PendingPlayerScopeChoice>`, 56 B), `unsettled_entry_batch_events`,
+//! `instruction_boundary_marks` and the two departed-activation ledgers (small
+//! `Vec`s and heap-shared `im::HashMap`s). No single large
+//! rarely-populated field went inline, so the ceiling moves by the rule to
+//! 15,952.next_multiple_of(256) + 256 = 16,384.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -134,7 +145,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 15_872,
+        size_of::<crate::types::game_state::GameState>() <= 16_384,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

@@ -28427,7 +28427,16 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        // CR 701.3d: in "unattach it" the anaphor IS the attachment and no host
+        // is named, so the host stays `Any`; "unattach all Equipment from it"
+        // names the host by anaphor.
+        Effect::UnattachAll { attachment, target }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !matches!(
+                    attachment,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                ) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         // CR 122.1 + CR 701.10e + CR 608.2c: the counter-target anaphor family.
@@ -43830,7 +43839,7 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
     match effect {
         Effect::CreateDrawReplacement {
             replacement_effect: inner,
-        } => resolve_difference_anaphor_in_effect(inner, bound),
+        } => resolve_difference_anaphor_in_ability(inner, bound),
         // CR 603.7a: a delayed trigger carries a complete ability definition;
         // walk that definition so a comparison-derived binding reaches a
         // deferred "the difference" in its eventual effect body.
@@ -43941,10 +43950,12 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
             }
         }
         // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement
-        // nests its substitute `Effect` — bake the gate's count into it now,
-        // matching `resolve_difference_anaphor_in_effect`'s sibling rewrite.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        // nests its substitute — bake the gate's count into it now, matching
+        // `resolve_difference_anaphor_in_effect`'s sibling rewrite.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            rebind_event_context_amount_counts_in_ability(replacement_effect, gate_qty);
+        }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             rebind_event_context_amount_counts(replacement_effect, gate_qty);
         }
         // CR 603.7a: a delayed trigger's payload is fixed at creation time.

@@ -1549,7 +1549,9 @@
       "titleReveal": "Révéler depuis la main",
       "titleOpponentHand": "Main de l'adversaire",
       "subtitleReveal": "Choisissez une carte à révéler, ou refusez",
-      "subtitleChoose": "Choisissez une carte"
+      "subtitleChoose": "Choisissez une carte",
+      "subtitleRevealAnyNumber": "Choisissez un nombre quelconque de cartes à révéler",
+      "subtitleChooseCount": "Choisissez {{count}} cartes"
     },
     "search": {
       "title": "Chercher dans la bibliothèque",
@@ -2136,6 +2138,10 @@
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
   },
+  "costRecipient": {
+    "title": "Choisir un adversaire",
+    "subtitle": "Choisissez l'adversaire pour ce coût : {{cost}}."
+  },
   "entryController": {
     "title": "Choisir le contrôleur à l'arrivée",
     "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
@@ -2497,6 +2503,8 @@
       "zoneHand": "votre main",
       "discard": "Défaussez-vous de {{count}} {{cards}}",
       "exile": "Exilez {{count}} {{cards}} depuis {{zone}}",
+      "haveOpponentGainLife": "Faites gagner {{amount}} points de vie à un adversaire",
+      "haveEachOtherPlayerGainLife": "Faites gagner {{amount}} points de vie à chaque autre joueur",
       "reveal": "Révélez {{count}} {{cards}} de {{zone}}"
     }
   },

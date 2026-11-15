@@ -23,6 +23,7 @@ mod activated_self_reference_new_object;
 mod activation_cost_reduction_election;
 mod activation_cost_target_settlement;
 mod activation_manual_mana_payment;
+mod activation_tally_announced_carrier;
 mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
 mod added_untap_step_is_not_a_turn_start;

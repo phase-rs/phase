@@ -324,6 +324,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -1463,6 +1464,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1743,9 +1745,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
         Effect::CreateDrawReplacement { replacement_effect } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect, mode));
-            acc
+            ability_definition_axes(replacement_effect, mode)
         }
         Effect::LoseTheGame { target } => {
             let mut acc = Axes::NONE;
@@ -6137,6 +6137,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // dynamic board read — no resolution-time axis.
+        grant_chain: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
