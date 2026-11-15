@@ -6975,33 +6975,76 @@ pub enum AttackerBlockStatus {
     Unblocked,
 }
 
+/// CR 509.1g: which creature of a block pair a [`CombatRelation::BlockPairing`]
+/// requires to be the blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockPairDirection {
+    /// The subject is the blocker: "creatures blocked by this creature" (Wall of Nets).
+    SubjectIsBlocker,
+    /// The candidate is the blocker: "creatures that blocked this creature".
+    CandidateIsBlocker,
+    /// Either creature: "creatures blocking or blocked by it" (Abu Ja'far).
+    Either,
+}
+
 /// Combat relationship required by `FilterProp::CombatRelation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "CombatRelationWire")]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it —
-    /// the current block pairing, in either orientation. A subject that has left
-    /// the battlefield answers from the pairings it had immediately before it
-    /// left (CR 608.2h last known information), and only for a candidate still
-    /// in that combat role (CR 506.4).
-    BlockingOrBlockedBy,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature blocked by the
-    /// subject.
+    /// CR 509.1g + CR 400.7: the candidate and the subject form a block pair in
+    /// `direction`.
     ///
-    /// * `scope: None` — the current block pairing ("creatures blocked by this
-    ///   creature"): the same pairing authority as `BlockingOrBlockedBy`, in the
-    ///   one orientation where the subject is the blocker.
-    /// * `scope: Some(window)` — the subject was recorded as blocking the
-    ///   candidate within `window` ("creatures it blocked this turn"). This
-    ///   reads the block-history ledgers
+    /// * `scope: None` — the current block pairing (CR 509.1g). A subject that
+    ///   has left the battlefield answers from the pairings it had immediately
+    ///   before it left (CR 608.2h last known information), and only for a
+    ///   candidate still in that combat role (CR 506.4).
+    /// * `scope: Some(window)` — the pair was recorded within `window`
+    ///   (CR 608.2i). This reads the block-history ledgers
     ///   (`CombatState::creature_blocked_attackers_this_combat` /
     ///   `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
     ///   not prune. Each record pins both creatures' exact incarnations, so a
     ///   creature that left and returned matches none of its predecessor's
     ///   records.
-    BlockedBySubject {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<CombatHistoryScope>,
     },
+}
+
+/// Deserialization shape of [`CombatRelation`]. Writers emit only `BlockPairing`;
+/// the two retired variants stay readable so committed dumps, saved games and
+/// older card data keep loading.
+#[derive(Deserialize)]
+enum CombatRelationWire {
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+    BlockingOrBlockedBy,
+    BlockedBySubject {
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+}
+
+impl From<CombatRelationWire> for CombatRelation {
+    fn from(wire: CombatRelationWire) -> Self {
+        match wire {
+            CombatRelationWire::BlockPairing { direction, scope } => {
+                Self::BlockPairing { direction, scope }
+            }
+            CombatRelationWire::BlockingOrBlockedBy => Self::BlockPairing {
+                direction: BlockPairDirection::Either,
+                scope: None,
+            },
+            CombatRelationWire::BlockedBySubject { scope } => Self::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope,
+            },
+        }
+    }
 }
 
 /// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
@@ -7023,6 +7066,13 @@ pub enum CombatRelationSubject {
     Source,
     /// The first selected object target of the resolving spell or ability.
     ParentTarget,
+    /// CR 608.2c + CR 115.10a: a target an EARLIER instruction of the same spell
+    /// announced ("creatures that were blocked by that creature", Ride Down, Glyph
+    /// of Doom). Reads as `ParentTarget` does, the first object target by its
+    /// announced incarnation, and opens no target slot: the word "target" does not
+    /// identify it here. `ParentTarget` is the same-instruction form that does open
+    /// one (Trial).
+    AnaphoricTarget,
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
@@ -7339,10 +7389,12 @@ pub enum FilterProp {
     Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
-    /// from `Another`, which excludes the *ability source*. Used for intervening-if
-    /// count predicates like Valakut, the Molten Pinnacle's "if you control at
-    /// least five other Mountains" — here "other" means "other than the newly-
-    /// entered Mountain," not "other than Valakut." Resolves against
+    /// from `Another`, whose live-object matcher excludes a bound recipient, else
+    /// the *ability source*; see [`FilterProp::Another`].
+    /// Used for intervening-if count predicates like Valakut, the Molten
+    /// Pinnacle's "if you control at least five other Mountains" — here "other"
+    /// means "other than the newly-entered Mountain," not "other than Valakut."
+    /// Resolves against
     /// `FilterContext::triggering_object`, populated at trigger-condition
     /// evaluation from the current `GameEvent`.
     ///
@@ -7565,7 +7617,8 @@ pub enum FilterProp {
     /// `DistinctFrom { reference: ParentTarget }` with
     /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
     /// every color-sharer EXCEPT the already-damaged target. Distinct from
-    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::Another`] (whose live-object matcher excludes a bound
+    /// recipient, else the ability *source*) and
     /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
     DistinctFrom {
         reference: Box<TargetFilter>,
@@ -11105,26 +11158,42 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
                 // hit, Radiance's "each OTHER creature that shares a color with it")
                 // reads the parent's chosen target, so the enclosing effect must
                 // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| match prop {
-                    FilterProp::DistinctFrom { reference } => {
-                        filter_refs_parent_target(reference)
-                    }
-                    // CR 701.3a: a mass object set defined by attachment to the
-                    // parent referent ("destroy all Auras attached to that
-                    // creature") names the parent inside the host filter, so
-                    // propagation, delayed-trigger snapshotting and loop
-                    // rebinding must see it.
-                    FilterProp::AttachedTo {
-                        to: AttachmentReferent::Host { filter },
-                    } => filter_refs_parent_target(filter),
-                    _ => false,
-                })
+                || typed.properties.iter().any(filter_prop_refs_parent_target)
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
+        _ => false,
+    }
+}
+
+/// The property half of [`filter_refs_parent_target`]: whether `prop`, or a
+/// property its `Not`/`AnyOf` combinators nest, names the parent's target.
+fn filter_prop_refs_parent_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::DistinctFrom { reference } => filter_refs_parent_target(reference),
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent referent ("destroy all Auras attached to that
+        // creature") names the parent inside the host filter, so
+        // propagation, delayed-trigger snapshotting and loop
+        // rebinding must see it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_refs_parent_target(filter),
+        // CR 608.2c + CR 608.2i: a mass set defined by its history with
+        // an earlier instruction's target names that target inside a
+        // property, so propagation, delayed-trigger snapshotting and
+        // the mass-population validation arm must see it.
+        FilterProp::CombatRelation {
+            subject: CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => true,
+        // CR 608.2c: a negated or disjunctive property still reads the
+        // referent its inner property names.
+        FilterProp::Not { prop } => filter_prop_refs_parent_target(prop),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_refs_parent_target),
         _ => false,
     }
 }
@@ -11325,6 +11394,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             counter_type: _,
             count: _,
             target,
+            scope: _,
         }
         | Effect::SetTapState {
             target,
@@ -11782,6 +11852,13 @@ pub fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        // CR 122.1 + CR 115.10a: a mass counter removal's population is a
+        // resolution-time scan, the removal twin of `PutCounterAll`.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -11899,6 +11976,14 @@ pub enum EffectScope {
     /// Every permanent matching the filter — `target` is a non-targeting
     /// population filter (legacy `Effect::TapAll` / `Effect::UntapAll`).
     All,
+}
+
+impl EffectScope {
+    /// Serde `skip_serializing_if` helper: `Single` is the default scope, so a
+    /// field that defaults to it can be omitted from the payload.
+    pub fn is_single(&self) -> bool {
+        matches!(self, EffectScope::Single)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12602,7 +12687,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         // Inherently selected: the resolving ability's first object
         // target, with no parked equivalent.
         FilterProp::SameNameAsParentTarget => true,
-        // Both subjects read ability-carried records (selected target,
+        // Every subject reads ability-carried records (selected target,
         // ability capture) with no parked equivalent.
         FilterProp::CombatRelation { .. } => true,
         FilterProp::AttachedTo { to } => match to {
@@ -22988,8 +23073,24 @@ pub enum Effect {
         /// counters" (CR 107.1c, Rhys, the Evermore).
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 115.1: For `scope: Single`, the selectable target filter or a
+        /// context anaphor (`SelfRef`, `ParentTarget`, ...). For `scope: All`,
+        /// the non-targeting population filter.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a + CR 608.2h: `Single` removes counters from one
+        /// chosen or referenced object. `All` ("remove all counters from all
+        /// permanents", "remove a -1/-1 counter from each creature you
+        /// control") names no target: `target` is a population whose members
+        /// are fixed once, when the effect applies, and `target_filter()`
+        /// exposes no target slot for it. `count` keeps its per-object meaning
+        /// in both scopes. Omitted from serialized `Single` payloads so they
+        /// stay byte-identical to the pre-scope shape.
+        #[serde(
+            default = "default_effect_scope_single",
+            skip_serializing_if = "EffectScope::is_single"
+        )]
+        scope: EffectScope,
     },
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
@@ -23028,6 +23129,14 @@ pub enum Effect {
         /// top-of-library mechanics with a different destination.
         #[serde(default = "default_zone_graveyard")]
         destination: Zone,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards are taken
+        /// from. `Top` is the printed mill form — the only edge CR 701.17a
+        /// defines as milling, so only a top-edge move publishes `Milled`.
+        /// `Bottom` covers the printed "put the bottom card of your library into
+        /// your graveyard" class (Grenzo, Dungeon Warden; Cellar Door), which is
+        /// a plain library→zone move rather than a mill.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        position: LibraryPosition,
     },
     /// CR 701.22a: Scry N — look at the top N cards, then put any number on
     /// the bottom in any order and the rest on top in any order.
@@ -26671,6 +26780,13 @@ pub enum Effect {
 pub fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         Effect::PutCounterAll { target, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal ("remove all counters
+        // from all permanents") reads its population at resolution.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DestroyAll { target, .. }
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
@@ -27237,7 +27353,23 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             return None;
         }
     }
-    effect.target_filter().filter(|t| !t.is_context_ref())
+    // CR 608.2c + CR 115.1: resolution-local anaphors ("the card milled this
+    // way", "the revealed card") are filled from the event ledger
+    // (`last_zone_changed_ids` / `last_revealed_ids`) as the resolution
+    // proceeds. They are never announced as targets, and the ledger is empty at
+    // announcement time, so a slot built from one always finds zero legal
+    // candidates and drops the whole ability before it resolves (Grenzo,
+    // Dungeon Warden's moved-card rider). `is_context_ref` deliberately
+    // excludes these two because it also drives
+    // `ability_with_event_context_targets`; exclude them at this seam instead,
+    // mirroring `attach_host_filter_needs_target_slot`.
+    effect.target_filter().filter(|t| {
+        !t.is_context_ref()
+            && !matches!(
+                t,
+                TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
+            )
+    })
 }
 
 pub fn move_counter_stack_target_filters<'a>(
@@ -27817,6 +27949,11 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
             target,
             ..
         }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::PutCounterAll { target, .. } => {
             filter_references_parent_target_combat_relation(target)
         }
@@ -27824,6 +27961,8 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
     }
 }
 
+/// CR 115.10a: `ParentTarget` only. `AnaphoricTarget` reads a target an earlier
+/// instruction announced, so it must not open a second slot.
 fn filter_references_parent_target_combat_relation(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
@@ -27981,6 +28120,12 @@ pub fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivati
         // CR 701.27a + CR 115.10a: mass Transform's population filter is a
         // resolution-time scan, walked here like the other mass-`All` effects.
         | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 122.1 + CR 115.10a: mass counter removal's population filter.
+        | Effect::RemoveCounter {
             scope: EffectScope::All,
             target,
             ..
@@ -31485,7 +31630,6 @@ impl Effect {
             | Effect::Regenerate { target, .. }
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
-            | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -31772,6 +31916,21 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 122.1 + CR 115.10a: `RemoveCounter` exposes its target only for
+            // the single scope ("remove a counter from target creature", or an
+            // anaphor resolved by the context tiers). The `All` scope ("remove
+            // all counters from all permanents") names no target: its population
+            // filter is read when the effect applies and builds no slot.
+            Effect::RemoveCounter {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::RemoveCounter {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -32140,7 +32299,6 @@ impl Effect {
             | Effect::Regenerate { target, .. }
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
-            | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -32308,6 +32466,21 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 122.1 + CR 115.10a: `RemoveCounter` exposes its target only for
+            // the single scope ("remove a counter from target creature", or an
+            // anaphor resolved by the context tiers). The `All` scope ("remove
+            // all counters from all permanents") names no target: its population
+            // filter is read when the effect applies and builds no slot.
+            Effect::RemoveCounter {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::RemoveCounter {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -45730,7 +45903,20 @@ mod tests {
                 "combat relation against the selected target",
                 typed(vec![FilterProp::CombatRelation {
                     subject: CombatRelationSubject::ParentTarget,
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None,
+                    },
+                }]),
+            ),
+            (
+                "combat relation against an earlier instruction's target",
+                typed(vec![FilterProp::CombatRelation {
+                    subject: CombatRelationSubject::AnaphoricTarget,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
                 }]),
             ),
             (
@@ -49054,15 +49240,22 @@ mod tests {
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::ParentTarget,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: None },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::Source,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
@@ -50333,6 +50526,201 @@ mod tests {
             }),
         }
         .contains_unimplemented());
+    }
+
+    fn combat_relation_prop(relation: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "CombatRelation",
+            "relation": relation,
+            "subject": "Source",
+        })
+    }
+
+    fn block_pairing_prop(
+        direction: BlockPairDirection,
+        scope: Option<CombatHistoryScope>,
+    ) -> FilterProp {
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing { direction, scope },
+            subject: CombatRelationSubject::Source,
+        }
+    }
+
+    /// Each retired `CombatRelation` shape reads as its `BlockPairing`, through
+    /// the internally tagged `FilterProp` path that committed data takes.
+    /// `{"BlockedBySubject":{}}` is what writers produced for `scope: None`.
+    #[test]
+    fn legacy_combat_relation_shapes_read_as_block_pairing() {
+        for (legacy, direction, scope) in [
+            (
+                serde_json::json!("BlockingOrBlockedBy"),
+                BlockPairDirection::Either,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {}}),
+                BlockPairDirection::SubjectIsBlocker,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisCombat"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisCombat),
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisTurn"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisTurn),
+            ),
+        ] {
+            let read: FilterProp = serde_json::from_value(combat_relation_prop(legacy.clone()))
+                .unwrap_or_else(|error| panic!("{legacy} must read: {error}"));
+            assert_eq!(read, block_pairing_prop(direction, scope), "{legacy}");
+        }
+    }
+
+    /// Writers emit only `BlockPairing`, with `direction` always present and
+    /// `scope` absent exactly when `None`, for every combination, including the
+    /// ones no parser path produces yet.
+    #[test]
+    fn combat_relation_writes_only_block_pairing_and_round_trips() {
+        for direction in [
+            BlockPairDirection::SubjectIsBlocker,
+            BlockPairDirection::CandidateIsBlocker,
+            BlockPairDirection::Either,
+        ] {
+            for scope in [
+                None,
+                Some(CombatHistoryScope::ThisCombat),
+                Some(CombatHistoryScope::ThisTurn),
+            ] {
+                let prop = block_pairing_prop(direction, scope);
+                let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+                let relation = written["relation"]
+                    .as_object()
+                    .expect("the relation is written as a struct variant");
+                assert_eq!(relation.len(), 1, "{written}");
+                let pairing = relation["BlockPairing"]
+                    .as_object()
+                    .expect("the only key is BlockPairing");
+                assert_eq!(
+                    pairing.get("direction"),
+                    Some(&serde_json::to_value(direction).expect("a direction serializes")),
+                    "{written}"
+                );
+                assert_eq!(pairing.contains_key("scope"), scope.is_some(), "{written}");
+                let read: FilterProp =
+                    serde_json::from_value(written.clone()).expect("the written shape reads back");
+                assert_eq!(read, prop, "{written}");
+            }
+        }
+    }
+
+    /// CR 608.2c + CR 115.10a: `AnaphoricTarget` names an earlier instruction's
+    /// target. The parent-read walk sees it wherever it nests, no slot opens for
+    /// it, its mass filter stays off the inherited-target path, and the value
+    /// round-trips. `ParentTarget` is the reverse on the first two axes, and
+    /// `Source` reads no target at all.
+    #[test]
+    fn anaphoric_target_subject_reads_the_parent_and_opens_no_slot() {
+        let filter_of = |subject| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
+                    subject,
+                },
+            ]))
+        };
+        let destroy_all = |target| Effect::DestroyAll {
+            target,
+            cant_regenerate: false,
+        };
+
+        let anaphor = filter_of(CombatRelationSubject::AnaphoricTarget);
+        assert!(filter_refs_parent_target(&anaphor));
+        assert!(filter_refs_parent_target(&TargetFilter::Not {
+            filter: Box::new(anaphor.clone()),
+        }));
+        assert!(filter_refs_parent_target(&TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, anaphor.clone()],
+        }));
+        let TargetFilter::Typed(anaphor_typed) = &anaphor else {
+            unreachable!("filter_of builds a typed filter")
+        };
+        let relation = anaphor_typed.properties[0].clone();
+        let nested = |prop| TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]));
+        assert!(filter_refs_parent_target(&nested(FilterProp::Not {
+            prop: Box::new(relation.clone()),
+        })));
+        assert!(filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token, relation],
+        })));
+        assert!(!filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token],
+        })));
+        assert!(effect_refs_parent_target(&destroy_all(anaphor.clone())));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(anaphor.clone())
+        ));
+        assert!(!generic_effect_affected_uses_inherited_targets(&anaphor));
+
+        let parent_target = filter_of(CombatRelationSubject::ParentTarget);
+        assert!(!filter_refs_parent_target(&parent_target));
+        assert!(effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(parent_target)
+        ));
+        let source = filter_of(CombatRelationSubject::Source);
+        assert!(!filter_refs_parent_target(&source));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(source)
+        ));
+
+        let prop: FilterProp = serde_json::from_value(serde_json::json!({
+            "type": "CombatRelation",
+            "relation": {"BlockPairing": {"direction": "Either", "scope": "ThisTurn"}},
+            "subject": "AnaphoricTarget",
+        }))
+        .expect("the new subject reads");
+        assert_eq!(
+            prop,
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            }
+        );
+        let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+        assert_eq!(written["subject"], "AnaphoricTarget");
+        let read: FilterProp = serde_json::from_value(written).expect("the written shape reads");
+        assert_eq!(read, prop);
+    }
+
+    /// The wire shim reads what was once written and invents nothing: no default
+    /// direction, no catch-all, and no shape that never existed. The first read
+    /// is the reach guard: the same envelope with a real relation parses.
+    #[test]
+    fn combat_relation_wire_refuses_what_never_was_written() {
+        serde_json::from_value::<FilterProp>(combat_relation_prop(
+            serde_json::json!({"BlockPairing": {"direction": "Either"}}),
+        ))
+        .expect("reach guard: a written relation reads in this envelope");
+        for invented in [
+            serde_json::json!("BlockedBySubject"),
+            serde_json::json!({"BlockingOrBlockedBy": {"scope": "ThisTurn"}}),
+            serde_json::json!("BlockedBy"),
+            serde_json::json!({"BlockPairing": {"scope": "ThisTurn"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<FilterProp>(combat_relation_prop(invented.clone()))
+                    .is_err(),
+                "{invented} was never written and must not read"
+            );
+        }
     }
 }
 

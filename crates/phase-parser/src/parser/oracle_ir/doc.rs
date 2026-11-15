@@ -173,6 +173,9 @@ impl OracleUnitSource {
 /// One source-addressed parsed item.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct OracleItemIr {
+    /// Execute-root records for an already-lowered spell/activation payload.
+    #[serde(skip)]
+    pub(crate) ability_history: Vec<super::history_provenance::HistoryProvenance>,
     pub(crate) id: OracleItemId,
     pub(crate) source: OracleUnitSource,
     pub(crate) node: OracleNodeIr,
@@ -881,6 +884,7 @@ impl OracleDocBuilder {
         self.items.insert(
             key,
             OracleItemIr {
+                ability_history: Vec::new(),
                 id,
                 source: slot.source,
                 node,
@@ -936,6 +940,19 @@ impl OracleDocBuilder {
         // `spells_emitted` can never name an id absent from `items` — `emit` inserts
         // both together, and this is the only removal path.
         self.items.remove(&key)
+    }
+
+    /// Attach parser-only execute-root records to an already-emitted ability item.
+    pub(crate) fn set_ability_history(
+        &mut self,
+        id: OracleItemId,
+        history: Vec<super::history_provenance::HistoryProvenance>,
+    ) {
+        self.items
+            .values_mut()
+            .find(|item| item.id == id)
+            .expect("history is attached to an emitted item")
+            .ability_history = history;
     }
 
     /// Peek the most-recently-EMITTED spell node without removing it — insertion

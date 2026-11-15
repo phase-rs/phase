@@ -2317,6 +2317,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 614.1a + CR 611.2a: "<effect>, and if a card would be put into your
+    // graveyard from anywhere this turn, exile it instead" (Forgotten Cellar) —
+    // the conjunct is a replacement effect the resolution creates, its own
+    // instruction. Cut it off after its "and " so the chunk opens with its "if"
+    // antecedent and keeps that antecedent's comma.
+    if starts_windowed_graveyard_redirect_conjunct(&trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len + "and ".len()));
+    }
+
     // CR 205.2a + CR 205.3a + CR 608.2c: keep an "exile all/each A, all B, and
     // all C" union intact — a comma before a "[all|each] <type>" continuation is
     // a union delimiter, not a clause boundary (Everything Comes to Dust). Legs
@@ -2578,6 +2587,21 @@ fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
 /// Phrase shared by every "if {C} was spent to cast <it>" gate.
 const MANA_SPENT_TO_CAST: &str = "was spent to cast ";
 
+/// CR 614.1a + CR 611.2a: Does the lowercase text after a comma open an
+/// "and"-joined windowed graveyard redirect that runs to the end of its
+/// sentence? `parse_windowed_graveyard_redirect_install` is the single
+/// authority for that grammar.
+fn starts_windowed_graveyard_redirect_conjunct(remainder_lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("and ")
+        .parse(remainder_lower)
+        .is_ok_and(|(conjunct, _)| {
+            crate::parser::oracle_replacement::parse_windowed_graveyard_redirect_install(
+                before_sentence_boundary(conjunct),
+            )
+            .is_some()
+        })
+}
+
 /// The text up to the first sentence boundary (". "), or all of it when the text
 /// holds a single sentence.
 fn before_sentence_boundary(text: &str) -> &str {
@@ -2773,6 +2797,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // reaches `strip_temporal_prefix` instead of splitting at the comma
         // (Fortune, Loyal Steed: "at end of combat, exile it and …").
         tag("at end of combat"),
+        // CR 603.7a: "At this turn's next end of combat, …" (Gaze of the Gorgon). Keep the
+        // deferred body attached so it reaches `strip_temporal_prefix`.
+        tag("at this turn's next end of combat"),
         tag("for as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
@@ -3205,6 +3232,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("at the beginning of the next "),
         tag("at the beginning of your next "),
         tag("at the end of "),
+        // CR 603.7a: "At this turn's next end of combat, …" — the same prefix
+        // `starts_prefix_clause` keeps whole, so a bare "and" inside the deferred
+        // body stays with it (Triton Tactics: "… and it doesn't untap …").
+        tag("at this turn's next end of combat"),
     ))
     .parse(trimmed)
     .is_ok()
@@ -14068,6 +14099,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield tapped.",
@@ -14164,6 +14196,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may put an artifact, creature, or land card from among the milled cards into your hand.",
@@ -14201,6 +14234,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may return a permanent card from among them to your hand.",
@@ -14232,6 +14266,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return a card milled this way to your hand.",
@@ -14264,6 +14299,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 6 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return any number of creature cards milled this way to your hand.",
@@ -14672,6 +14708,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 6 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -14743,6 +14780,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -15274,6 +15312,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield face down.",
@@ -18434,6 +18473,7 @@ mod loyalty_symbol_clause_start_tests {
                     counter_type: Some(CounterType::Loyalty),
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 }
             ),
             "{def:#?}"
