@@ -167,6 +167,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         }
     }
 

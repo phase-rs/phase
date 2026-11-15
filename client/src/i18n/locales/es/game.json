@@ -2654,6 +2654,7 @@
   },
   "outsideGame": {
     "fromExile": "Desde el exilio",
+    "fromCompanion": "Desde el compañero",
     "fromSideboard": "Desde el banquillo",
     "fromBoosterPack": "De un sobre de {{setCode}}",
     "fromCubeBoosterPack": "De un sobre del cube"
