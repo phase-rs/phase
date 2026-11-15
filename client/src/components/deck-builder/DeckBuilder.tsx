@@ -12,6 +12,7 @@ import { hasSearchCriteria } from "./searchFilters";
 import { CardGrid } from "./CardGrid";
 import { DeckStack } from "./DeckStack";
 import { DeckList } from "./DeckList";
+import { ExportDeckControl } from "./ExportDeckControl";
 import { StatsPanel } from "./StatsPanel";
 import type { GameFormat } from "../../adapter/types";
 import { CommanderPanel } from "./CommanderPanel";
@@ -452,6 +453,10 @@ export function DeckBuilder({
                     </button>
                   ))}
                 </div>
+                <ExportDeckControl
+                  deck={currentDeck}
+                  triggerClassName={() => "rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"}
+                />
               </div>
             )}
           </div>

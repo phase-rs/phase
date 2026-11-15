@@ -27,8 +27,8 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, TargetChoiceTiming,
-    TargetFilter, TargetRef,
+    AbilityDefinition, ControllerRef, Effect, OpponentMayScope, TargetChoiceTiming, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -39,6 +39,7 @@ use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use engine::types::StaticDefinition;
 
@@ -517,15 +518,43 @@ fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
     }
 }
 
-/// CR 608.2c: in Temporal Distortion's "at the beginning of each player's
-/// upkeep, remove all hourglass counters from permanents that player
-/// controls", "that player" is the upkeep player, so the source controller's
-/// permanents keep their counters.
-///
-/// The filter currently becomes a stack-time target slot (a pre-existing
-/// defect, #9899), so the drive answers that prompt when it appears and checks
-/// only what the binding decides: whose permanents are offered and reached.
-/// "Every P1 permanent loses its counters" (CR 115.10a) is not asserted.
+/// Drives `upkeep_player`'s upkeep until that player's draw step is reached.
+/// Panics if Temporal Distortion's trigger ever asks for a target (#9899).
+fn drive_temporal_distortion_upkeep(runner: &mut GameRunner, upkeep_player: PlayerId) {
+    // Advance once: re-calling `advance_to_phase` during the upkeep restarts the
+    // step and fires the upkeep trigger again. Settle with `act` only.
+    runner.advance_to_phase(Phase::Draw);
+    for _ in 0..40 {
+        let state = runner.state();
+        if state.phase == Phase::Draw && state.active_player == upkeep_player {
+            return;
+        }
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => panic!(
+                "#9899: Temporal Distortion's mass removal must not ask for a target; \
+                 waiting_for={:?}",
+                state.waiting_for
+            ),
+            other => panic!("unexpected waiting_for during the upkeep: {other:?}"),
+        }
+    }
+    let state = runner.state();
+    panic!(
+        "the drive must reach the upkeep player's draw step; phase={:?} active={:?} \
+         waiting_for={:?}",
+        state.phase, state.active_player, state.waiting_for
+    );
+}
+
+/// CR 608.2c + CR 122.1 + CR 115.10a: in Temporal Distortion's "at the
+/// beginning of each player's upkeep, remove all hourglass counters from
+/// permanents that player controls", "that player" is the upkeep player and the
+/// bare plural names every one of that player's permanents, with no target. So
+/// each of the upkeep player's permanents (creatures and non-creatures alike)
+/// loses its hourglass counters, and the other player's permanents keep theirs.
 #[test]
 fn temporal_distortion_removes_counters_from_the_upkeep_players_permanents() {
     let hourglass = || CounterType::Generic("hourglass".to_string());
@@ -533,84 +562,84 @@ fn temporal_distortion_removes_counters_from_the_upkeep_players_permanents() {
     scenario.with_library_top(P0, &["P0 Top A", "P0 Top B", "P0 Top C"]);
     scenario.with_library_top(P1, &["P1 Top A", "P1 Top B", "P1 Top C"]);
     scenario.at_phase(Phase::End);
-    let td = scenario
-        .add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION)
-        .id();
+    scenario.add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION);
     let c0 = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
     let c1a = scenario.add_creature(P1, "P1 Bear A", 2, 2).id();
     let c1b = scenario.add_creature(P1, "P1 Bear B", 2, 2).id();
-    for creature in [c0, c1a, c1b] {
-        scenario.with_counter(creature, hourglass(), 1);
+    // A non-creature permanent: the population is "permanents", not creatures.
+    let a1 = scenario.add_artifact_from_oracle(P1, "P1 Relic", "").id();
+    for permanent in [c0, c1a, c1b, a1] {
+        scenario.with_counter(permanent, hourglass(), 1);
     }
     let mut runner = scenario.build();
-
-    // Advance once: re-calling `advance_to_phase` during P1's upkeep restarts
-    // the step and fires the upkeep trigger again. Settle with `act` only.
-    runner.advance_to_phase(Phase::Draw);
-    let mut offered: Vec<TargetRef> = Vec::new();
-    for _ in 0..40 {
-        let state = runner.state();
-        if state.phase == Phase::Draw && state.active_player == P1 {
-            break;
-        }
-        match state.waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection {
-                source_id: Some(source),
-                target_slots,
-                ..
-            } if source == td => {
-                let slot = target_slots
-                    .iter()
-                    .find(|slot| slot.effect_kind == EffectKind::RemoveCounter)
-                    .expect("Temporal Distortion's prompt has a RemoveCounter slot");
-                offered.extend(slot.legal_targets.iter().cloned());
-                let first = slot.legal_targets[0].clone();
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(first),
-                    })
-                    .expect("answer Temporal Distortion's target prompt");
-            }
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting_for during P1's upkeep: {other:?}"),
-        }
-    }
-
-    let state = runner.state();
-    // Reach guard: the drive got past P1's upkeep.
-    assert!(
-        state.phase == Phase::Draw && state.active_player == P1,
-        "the drive must reach P1's draw step; phase={:?} active={:?} waiting_for={:?}",
-        state.phase,
-        state.active_player,
-        state.waiting_for
-    );
-    let counters = |id| {
-        state.objects[&id]
+    let counters = |runner: &GameRunner, id| {
+        runner.state().objects[&id]
             .counters
             .get(&hourglass())
             .copied()
             .unwrap_or(0)
     };
+    // Reach guard: every permanent starts with its counter.
+    for permanent in [c0, c1a, c1b, a1] {
+        assert_eq!(counters(&runner, permanent), 1);
+    }
+
+    drive_temporal_distortion_upkeep(&mut runner, P1);
+
     assert_eq!(
-        counters(c0),
+        counters(&runner, c0),
         1,
         "the source controller's creature is not the upkeep player's"
     );
-    assert!(
-        counters(c1a) == 0 || counters(c1b) == 0,
-        "an upkeep player's creature loses its hourglass counter; (c1a, c1b) = ({}, {})",
-        counters(c1a),
-        counters(c1b)
-    );
-    assert!(
-        offered
-            .iter()
-            .all(|target| *target == TargetRef::Object(c1a) || *target == TargetRef::Object(c1b)),
-        "every offered target is the upkeep player's; offered={offered:?}"
-    );
+    for permanent in [c1a, c1b, a1] {
+        assert_eq!(
+            counters(&runner, permanent),
+            0,
+            "every permanent the upkeep player controls loses its hourglass counter"
+        );
+    }
+}
+
+/// The scoped player flips with the upkeep: on the source controller's own
+/// upkeep only that player's permanents lose their hourglass counters.
+#[test]
+fn temporal_distortion_on_its_controllers_upkeep_spares_the_opponent() {
+    let hourglass = || CounterType::Generic("hourglass".to_string());
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.with_library_top(P0, &["P0 Top A", "P0 Top B", "P0 Top C"]);
+    scenario.with_library_top(P1, &["P1 Top A", "P1 Top B", "P1 Top C"]);
+    scenario.at_phase(Phase::End);
+    scenario.add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION);
+    let c0 = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let l0 = scenario.add_basic_land(P0, ManaColor::Green);
+    let c1 = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    for permanent in [c0, l0, c1] {
+        scenario.with_counter(permanent, hourglass(), 1);
+    }
+    let mut runner = scenario.build();
+    // Start in P1's end step so the next upkeep is P0's.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let counters = |runner: &GameRunner, id| {
+        runner.state().objects[&id]
+            .counters
+            .get(&hourglass())
+            .copied()
+            .unwrap_or(0)
+    };
+    for permanent in [c0, l0, c1] {
+        assert_eq!(counters(&runner, permanent), 1, "reach guard");
+    }
+
+    drive_temporal_distortion_upkeep(&mut runner, P0);
+
+    assert_eq!(counters(&runner, c0), 0, "P0's creature loses its counter");
+    assert_eq!(counters(&runner, l0), 0, "P0's land loses its counter");
+    assert_eq!(counters(&runner, c1), 1, "P1's creature keeps its counter");
 }
 
 /// An opponent (P1) casts "Put a +1/+1 counter on target creature" at a
@@ -901,6 +930,211 @@ fn acidic_soil_counts_each_players_own_lands() {
 
     assert_eq!(outcome.life_delta(P1), -2, "P1's two lands");
     assert_eq!(outcome.life_delta(P0), -1, "P0's one land");
+}
+
+// ---------------------------------------------------------------------------
+// CR 107.3c: the per-player antecedent class, reached through a where-X clause.
+//
+// The rows above pin a controller anaphor sitting in a DIRECT amount — the
+// per-player class (Acidic Soil, Price of Progress) and the declared-target
+// class (Anathemancer). The row below is the per-player one's `", where X is …"`
+// sibling: the anaphor sits inside a count the where-clause DEFINES rather than
+// in the amount itself, so it reaches the binder down a separate lowering path
+// (`WhereXBinding`) that supplied no antecedents at all before issue #6508.
+//
+// SCOPE, stated honestly: the DECLARED-TARGET half of the where-X row is NOT
+// covered here. Measurement showed it splits further — a target declared by a
+// PRIOR clause (Curious Herd) and one declared by the clause's OWN subject
+// (Jovial Evil; the chained sibling of Pact of the Serpent) — and the latter is
+// resolved inside the ctx-free `oracle_nom::quantity` combinator layer, which
+// binds the anaphor to `You` with no antecedent reachable and discards it, so it
+// cannot be rebound downstream. Covering it means threading antecedents through
+// that pure-combinator layer; tracked separately, not attempted here. The
+// pronoun is NOT the discriminator in any of these — both halves print both
+// "they" and "that player" — so no hard-coded scope is right for the set.
+// ---------------------------------------------------------------------------
+
+const CITADEL_OF_PAIN: &str = "At the beginning of each player's end step, this enchantment deals X damage to that player, where X is the number of untapped lands they control.";
+const PSYCHIC_ALLERGY: &str = "As this enchantment enters, choose a color.\nAt the beginning of each opponent's upkeep, this enchantment deals X damage to that player, where X is the number of nontoken permanents of the chosen color they control.\nAt the beginning of your upkeep, destroy this enchantment unless you sacrifice two Islands.";
+
+/// CR 107.3 + CR 608.2c: Citadel of Pain's where-X count says "they control"
+/// of the player whose end step it is, so each player is dealt damage equal to
+/// THEIR OWN untapped lands. The per-player sibling of the Curious Herd row —
+/// same grammar, different antecedent.
+///
+/// The board gives the two players different untapped-land counts, so the
+/// opponent's end step separates the three readings: the correct one (the
+/// opponent takes their own count), a count bound to the enchantment's
+/// controller (the opponent takes the controller's count), and a trigger that
+/// fires only on the controller's own end step (the opponent takes nothing).
+#[test]
+fn citadel_of_pain_hits_each_player_for_their_own_untapped_lands() {
+    const CONTROLLER_LANDS: i32 = 5;
+    const OPPONENT_LANDS: i32 = 2;
+
+    let mut scenario = main_phase_scenario(2);
+    for &player in &[P0, P1] {
+        scenario.with_library_top(player, &["Lib A", "Lib B", "Lib C", "Lib D"]);
+    }
+    let citadel = scenario
+        .add_enchantment_from_oracle(P0, "Citadel of Pain", CITADEL_OF_PAIN)
+        .id();
+    for _ in 0..CONTROLLER_LANDS {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    for _ in 0..OPPONENT_LANDS {
+        scenario.add_basic_land(P1, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+
+    // CR 603.2: reach-guard — the end-step trigger must exist at all, so a
+    // "takes nothing" assertion below cannot pass by the card not parsing.
+    assert!(
+        runner.state().objects[&citadel]
+            .trigger_definitions
+            .iter_unchecked()
+            .any(|entry| {
+                entry.definition.mode == TriggerMode::Phase
+                    && entry.definition.phase == Some(Phase::End)
+            }),
+        "reach-guard: Citadel of Pain's Oracle text must provide its end-step trigger"
+    );
+    let (p0_start, p1_start) = (life(&runner, P0), life(&runner, P1));
+
+    runner.advance_to_end_step();
+    assert!(
+        runner.state().active_player == P0 && runner.state().phase == Phase::End,
+        "must reach P0's end step; stopped at {:?} of {:?}'s turn on {:?}",
+        runner.state().phase,
+        runner.state().active_player,
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        life(&runner, P0),
+        p0_start - CONTROLLER_LANDS,
+        "on P0's end step, P0 takes damage equal to the untapped lands P0 controls"
+    );
+    assert_eq!(
+        life(&runner, P1),
+        p1_start,
+        "P1 takes nothing on P0's end step"
+    );
+
+    pass_priority_into_end_step_of(&mut runner, P1);
+    // CR 603.2: it fires again on the opponent's end step. The ability is
+    // controlled by P0, but "that player" and "they" are the end-step player.
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == citadel && entry.controller == P0),
+        "Citadel's P0-controlled trigger must be on the stack at P1's end step; stack={:?}",
+        runner.state().stack
+    );
+    runner.advance_until_stack_empty();
+
+    // CR 120.3a: damage to a player causes that much life loss.
+    assert_eq!(
+        life(&runner, P1),
+        p1_start - OPPONENT_LANDS,
+        "on P1's end step, P1 takes damage equal to the untapped lands P1 controls \
+         ({OPPONENT_LANDS}), not the lands its controller controls ({CONTROLLER_LANDS})"
+    );
+    assert_eq!(
+        life(&runner, P0),
+        p0_start - CONTROLLER_LANDS,
+        "the controller takes nothing more on the opponent's end step"
+    );
+}
+
+/// A player's current life total.
+fn life(runner: &GameRunner, player: PlayerId) -> i32 {
+    runner.state().players[player.0 as usize].life
+}
+
+/// Pass priority on the real action path until `player`'s end step has begun.
+///
+/// `GameRunner::advance_to_phase` re-enters the turn interpreter for the step it
+/// is already in, which re-runs that step's beginning-of-step triggers when it
+/// is called with priority open. Walking with `PassPriority` is what a client
+/// does, so each end step fires Citadel of Pain exactly once.
+fn pass_priority_into_end_step_of(runner: &mut GameRunner, player: PlayerId) {
+    for _ in 0..60 {
+        let state = runner.state();
+        if state.active_player == player && state.phase == Phase::End {
+            return;
+        }
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while advancing: {:?}",
+            state.waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must be accepted");
+    }
+    panic!(
+        "did not reach {player:?}'s end step; stopped at {:?} of {:?}'s turn",
+        runner.state().phase,
+        runner.state().active_player
+    );
+}
+
+/// Coverage honesty (CR 107.3c): Psychic Allergy's where-X count is the same
+/// per-player anaphor as Citadel of Pain's, but its filter reads the colour
+/// chosen as the enchantment entered — which the engine cannot represent. The
+/// antecedent threading must NOT flip that count to falsely-supported; the
+/// clause stays an honest `where_x_binding` gap.
+///
+/// This is the row that keeps the fix from buying coverage it did not earn.
+#[test]
+fn psychic_allergy_where_x_chosen_colour_count_stays_an_honest_gap() {
+    let parsed = parse_oracle_text(
+        PSYCHIC_ALLERGY,
+        "Psychic Allergy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // Both of this card's triggers are `Phase::Upkeep` ("each opponent's" and
+    // "your"), so picking one by phase alone would be ambiguous. Assert over the
+    // whole parse instead: the damage clause must be absent and the gap present.
+    let upkeep_triggers: Vec<_> = parsed
+        .triggers
+        .iter()
+        .filter(|trigger| {
+            trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::Upkeep)
+        })
+        .collect();
+    assert_eq!(
+        upkeep_triggers.len(),
+        2,
+        "reach-guard: both upkeep triggers must parse, so the assertions below \
+         cannot pass by the card failing to parse at all: {parsed:?}"
+    );
+    let effects: Vec<&Effect> = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .map(|ability| ability.effect.as_ref())
+        .collect();
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented { name, .. } if name == "where_x_binding"
+        )),
+        "the chosen-colour count has no typed home, so the clause must stay an \
+         honest where_x_binding gap: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DealDamage { .. })),
+        "a lowered DealDamage here would mean the chosen-colour count was bound \
+         anyway and silently resolves to 0 while reading as supported: {effects:?}"
+    );
 }
 
 /// CR 109.4 + CR 608.2c: Alpha Brawl's "that player" is the controller of the

@@ -16,6 +16,7 @@ docs/superpowers/
 # MTG Comprehensive Rules — © Wizards of the Coast, not redistributed here.
 # Run ./scripts/fetch-comp-rules.sh to download a local copy for dev reference.
 docs/MagicCompRules.txt
+docs/MagicCompRules.txt.tmp.*
 
 # WASM output (generated — keep .d.ts for CI type-checking)
 client/src/wasm/*.js

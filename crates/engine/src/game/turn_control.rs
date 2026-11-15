@@ -218,7 +218,7 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     // CR 723.5 + CR 805.8: A turn controller makes decisions for the
     // controlled player; in shared team turns, controlling one affected player
     // controls that player's team.
-    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+    let controlled_seat = if super::topology::side_takes_shared_turn(state, state.active_player) {
         super::topology::team_members(state, state.active_player).contains(&semantic_player)
     } else {
         semantic_player == state.active_player

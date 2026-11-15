@@ -90,6 +90,10 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // CR 707.12a: under a "copy that card N times" loop the
+            // `repeat_for` driver owns the iterations; this resume is the rest
+            // of the CURRENT iteration and must not re-enter the loop.
+            resume.repeat_for = None;
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
@@ -138,6 +142,8 @@ pub fn resolve(
                 count: None,
             };
             resume.sub_ability = None;
+            // The rest of this iteration only (see the choice resume above).
+            resume.repeat_for = None;
             if index + 1 < source_ids.len() {
                 if source_positions.len() == source_ids.len() {
                     // The remaining sources are this ability's own target

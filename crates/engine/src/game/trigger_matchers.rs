@@ -87,6 +87,7 @@ fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
         TriggerMode::ChangesZone | TriggerMode::Evolve => silent_as_entry(match_changes_zone),
         TriggerMode::Evolved => silent(match_evolved),
         TriggerMode::GotchaSaid => silent(match_gotcha_said),
+        TriggerMode::Touched => silent(match_touched),
         TriggerMode::ChangesZoneAll => silent_as_entry(match_changes_zone_all),
         // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
         // dies; resolved through the `ExileLinkKind::Haunt` link.
@@ -641,6 +642,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // evolve ability's resolution actually put one or more +1/+1 counters on it.
     r.insert(TriggerMode::Evolved, match_evolved);
     r.insert(TriggerMode::GotchaSaid, match_gotcha_said);
+    r.insert(TriggerMode::Touched, match_touched);
 
     // CR 702.122e: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
@@ -1107,6 +1109,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::CreatureExerted { object_id, .. } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
+        GameEvent::ObjectTouched { object_id, .. } => count_one(*object_id),
         // Un-card events carry no object subject.
         GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
@@ -1208,6 +1211,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
@@ -1355,6 +1359,90 @@ fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint
     }
 }
 
+/// CR 603.6a + CR 603.10 + CR 603.10a: whether a zone-change half is an enters observer for a
+/// move from `from` to `to`: the destination is the battlefield, and the half either names no
+/// origin or names the battlefield as its destination. A half that names an origin without a
+/// named battlefield destination is a leaves-a-zone observer (CR 603.10a). The single authority
+/// for that split, read by the matcher (`zone_change_clause_matches`) and by the newcomer
+/// classifier (`zone_change_observed_after`).
+fn enters_observer_half(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    to == Zone::Battlefield
+        && (named_origin_zone(origin, from).is_none()
+            || destination_constraint_names(destination, destination_constraint, to))
+}
+
+/// CR 603.10a: whether a zone-change half that matches a move from `from` to `to` looks back in
+/// time: it is not an enters half (`enters_observer_half`) and it names a battlefield or graveyard
+/// origin ("leaves the battlefield", "leaves your graveyard"), or it names a hand or library
+/// destination for an object moved from a zone all players can see.
+fn zone_change_half_looks_back(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    if enters_observer_half(origin, destination, destination_constraint, from, to) {
+        return false;
+    }
+    let names_look_back_origin = matches!(
+        named_origin_zone(origin, from),
+        Some(Zone::Battlefield | Zone::Graveyard)
+    );
+    let names_visible_move_to_hidden_zone = matches!(to, Zone::Hand | Zone::Library)
+        && destination_constraint_names(destination, destination_constraint, to)
+        && from.is_some_and(super::triggers::zone_is_visible_to_all_players);
+    names_look_back_origin || names_visible_move_to_hidden_zone
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.10a: whether an observer that exists only immediately after a
+/// move from `from` to `to` (a newcomer of its own entry event) observes it through `trigger`:
+/// some zone-change half of the definition matches the move's zones and does not look back. The
+/// halves are read exactly as `match_changes_zone` reads them (the `zone_change_clauses` when
+/// non-empty, else the scalar half). Subject filters (`valid_card`) are not read: no printed
+/// definition has both an enters half and a look-back half that can match the same move, so the
+/// zone-level half match decides.
+///
+/// Not the single CR 603.10a classifier: `triggers::trigger_observation_time`, which feeds the
+/// logical-group latches, keys look-back on the event's origin zone instead of on the matching
+/// half, so it classifies an enters half over a graveyard-origin move (Soul Warden over Storm of
+/// Souls' return) as looking back where this classifier admits it (known divergence, unchanged).
+pub(super) fn zone_change_observed_after(
+    trigger: &TriggerDefinition,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    let observed_after = |origin: &OriginConstraint,
+                          destination: Option<&Zone>,
+                          destination_constraint: &DestinationConstraint| {
+        origin.matches_from(&from)
+            && destination.is_none_or(|dest| *dest == to)
+            && destination_matches_constraint(to, destination_constraint)
+            && !zone_change_half_looks_back(origin, destination, destination_constraint, from, to)
+    };
+    if trigger.zone_change_clauses.is_empty() {
+        observed_after(
+            &zone_change_origin(trigger, None),
+            trigger.destination.as_ref(),
+            &trigger.destination_constraint,
+        )
+    } else {
+        trigger.zone_change_clauses.iter().any(|clause| {
+            observed_after(
+                &clause.origin,
+                clause.destination.as_ref(),
+                &clause.destination_constraint,
+            )
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -1365,6 +1453,8 @@ fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint
 /// CR 603.10 + CR 611.3c: an enters observer's subject filter reads the entrant as it existed
 /// immediately after its entry event, continuous effects in force at that time applied
 /// (`filter::matches_target_filter_on_entry_observation`).
+/// A leaves-a-zone half (CR 603.10a) reads the subject's zone-change record, its appearance
+/// immediately before the event, whatever the destination.
 #[allow(clippy::too_many_arguments)]
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
@@ -1412,32 +1502,31 @@ fn zone_change_clause_matches(
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
         let departed = named_origin_zone(origin, record.from_zone);
-        // CR 603.6a + CR 603.10: an enters observer (destination battlefield, and either no named
-        // origin or a named battlefield destination) reads the entrant as it existed immediately
-        // after its entry event. A named-origin clause without a named battlefield destination is
-        // a leaves-a-zone observer (CR 603.10a) and keeps the departure reading.
-        let enters_observer = *to == Zone::Battlefield
-            && (departed.is_none()
-                || destination_constraint_names(destination, destination_constraint, *to));
-        let matches = match (enters_observer, departed) {
-            (true, _) => super::filter::matches_target_filter_on_entry_observation(
+        let enters_observer = enters_observer_half(
+            origin,
+            destination,
+            destination_constraint,
+            record.from_zone,
+            *to,
+        );
+        // CR 603.6a + CR 603.10: an enters half reads the entrant immediately after the event.
+        // The remaining cases here read the zone-change record. For a trigger that looks back
+        // under CR 603.10a, that record supplies the subject's pre-move appearance. An "is/has"
+        // effect applied with battlefield entry (CR 611.2e) is not part of that appearance.
+        // Syr Konrad, the Grim's "a creature card
+        // leaves your graveyard" sees Enduring Innocence ("It's an enchantment. (It's not a
+        // creature.)") leave as the enchantment creature card it was; Oglor, Devoted Assistant's
+        // granted "When this card leaves your graveyard" matches by `SelfRef` against the record's
+        // own pre-move identity, which only the entrant's pre-event card carries
+        // (`triggers::event_subject_observes`).
+        let matches = if enters_observer {
+            super::filter::matches_target_filter_on_entry_observation(
                 state, record, departed, filter, &ctx,
-            ),
-            (false, Some(from))
-                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) =>
-            {
-                super::filter::matches_target_filter_on_departure(
-                    state,
-                    record.object_id,
-                    from,
-                    filter,
-                    &ctx,
-                    Some(record),
-                )
-            }
-            (false, _) => super::filter::matches_target_filter_on_zone_change_record_licensed(
+            )
+        } else {
+            super::filter::matches_target_filter_on_zone_change_record_licensed(
                 state, record, departed, filter, &ctx,
-            ),
+            )
         };
         if !matches {
             return false;
@@ -1484,13 +1573,7 @@ pub(super) fn match_changes_zone(
         // source-zone set that takes precedence over single-zone `origin` when
         // non-empty. CR 111.1: `from = None` (token creation) cannot satisfy a
         // trigger that names any specific origin zone.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Any
-        };
+        let origin = zone_change_origin(trigger, None);
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
@@ -2008,13 +2091,14 @@ pub(super) fn match_spell_cast(
                 // spuriously.
                 return false;
             };
-            let ok = match constraint {
-                OriginConstraint::Any => unreachable!(),
-                OriginConstraint::Equals(z) => *z == origin,
-                OriginConstraint::NotEquals(z) => *z != origin,
-                OriginConstraint::OneOf(zs) => zs.contains(&origin),
-            };
-            if !ok {
+            // CR 601.2a + CR 707.13 + CR 400.11: a copy created outside the game
+            // is cast from no zone — the stamped `origin` is only its staging zone.
+            let origin = state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| !object.created_outside_game)
+                .then_some(origin);
+            if !constraint.matches_cast_origin(origin) {
                 return false;
             }
         }
@@ -2268,6 +2352,43 @@ fn attack_declaration_attacker_matches(
     } else {
         id == source_event_subject_id(source_context)
     }
+}
+
+/// CR 508.3a + CR 603.2: whether declaring `attacker` as attacking `target`
+/// would match `trigger`, an attack trigger on the functioning `source` — the
+/// per-attacker checks [`matching_attack_events`] applies to each declared
+/// attacker (its attacker-side filter, then its attack-target restriction such
+/// as "attacks a player"), for a caller weighing an attack before it is
+/// declared. A player-scope subject ("whenever you attack", CR 508.3d) or the
+/// "whenever [player] is attacked" shape — a `valid_target` with no
+/// attacker-side filter, CR 508.3b — answers once per declaration rather than
+/// per attacker, so such a trigger answers false. A `valid_target` beside an
+/// attacker-side filter ("whenever this creature attacks the player with the
+/// most life") is checked per attacker like any other.
+pub fn attack_trigger_matches_attack(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    trigger: &TriggerDefinition,
+    attacker: ObjectId,
+    target: crate::game::combat::AttackTarget,
+) -> bool {
+    if trigger
+        .valid_source
+        .as_ref()
+        .is_some_and(|filter| filter.is_player_scope())
+        || (trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none())
+    {
+        return false;
+    }
+    let Some(defending_player) = crate::game::combat::defending_player_for_target(state, target)
+    else {
+        return false;
+    };
+    let source_context = super::triggers::trigger_source_context_for_latch(state, source);
+    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+        && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
 /// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
@@ -2800,6 +2921,22 @@ pub(super) fn match_gotcha_said(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::GotchaSaid { source, .. } if source.reference == source_context.identity.reference)
+}
+
+/// Un-card touch (no CR entry): a player touched an object. `valid_card` names
+/// the touched object ("this creature" → `SelfRef`), `valid_target` the
+/// touching player ("a player").
+pub(super) fn match_touched(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let GameEvent::ObjectTouched { player, object_id } = event else {
+        return false;
+    };
+    valid_card_matches(trigger, state, *object_id, source_context)
+        && valid_player_matches(trigger, state, *player, source_context)
 }
 
 pub(super) fn match_counter_removed(
@@ -3479,12 +3616,13 @@ pub(super) fn match_mana_ability_produced(
 // Promoted Trigger Matchers
 // ---------------------------------------------------------------------------
 
-/// AttackerBlocked: fires when the source creature is among blocked attackers.
+/// CR 509.3c/509.3d: promoted attacker-blocked modes consume declaration or
+/// attacker-side effect events, preserving first-transition versus per-pair scope.
 pub(super) fn match_attacker_blocked(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::BlockersDeclared { assignments } = event {
@@ -3493,7 +3631,16 @@ pub(super) fn match_attacker_blocked(
             .iter()
             .any(|(_, attacker)| *attacker == source_id)
     } else {
-        false
+        // CR 509.3c/509.3d: use the same first-transition and creature-qualified
+        // authority as ordinary becomes-blocked triggers. Keep the established
+        // declared-blocker verdict above unchanged.
+        match event {
+            GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => {
+                !matching_becomes_blocked_events(event, trigger, source_context, state).is_empty()
+            }
+            _ => false,
+        }
     }
 }
 
@@ -3540,6 +3687,26 @@ pub(super) fn match_milled(
     }
 }
 
+/// CR 603.10a + CR 603.6c: The trigger's source-zone constraint, folding the
+/// disjunctive `origin_zones` over the scalar `origin`. `default_origin` is the
+/// zone the trigger's verb implies when neither field is set (leaves-the-
+/// battlefield defaults to Battlefield; the exiled/changes-zone family to any).
+/// Single authority for every zone-change matcher so the fold cannot drift.
+fn zone_change_origin(
+    trigger: &TriggerDefinition,
+    default_origin: Option<Zone>,
+) -> OriginConstraint {
+    if !trigger.origin_zones.is_empty() {
+        OriginConstraint::OneOf(trigger.origin_zones.clone())
+    } else if let Some(origin) = trigger.origin {
+        OriginConstraint::Equals(origin)
+    } else if let Some(default_origin) = default_origin {
+        OriginConstraint::Equals(default_origin)
+    } else {
+        OriginConstraint::Any
+    }
+}
+
 /// Exiled: fires when a card moves to Exile zone.
 pub(super) fn match_exiled(
     event: &GameEvent,
@@ -3549,6 +3716,7 @@ pub(super) fn match_exiled(
 ) -> bool {
     if let GameEvent::ZoneChanged {
         object_id,
+        from,
         to,
         record,
         ..
@@ -3556,6 +3724,11 @@ pub(super) fn match_exiled(
     {
         // CR 800.4a: an object that left the game with its owner was not exiled.
         if *to != Zone::Exile || record.departure.left_game() {
+            return false;
+        }
+        // CR 603.6c: "is exiled from [zone]" restricts the source zone; the
+        // unconstrained form keeps `OriginConstraint::Any`.
+        if !zone_change_origin(trigger, None).matches_from(from) {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {
@@ -4464,13 +4637,7 @@ pub(super) fn match_leaves_battlefield(
     {
         // CR 603.10a: LeavesBattlefield is a battlefield-origin zone change.
         // Default `origin = None` to Battlefield, matching the legacy matcher.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Equals(Zone::Battlefield)
-        };
+        let origin = zone_change_origin(trigger, Some(Zone::Battlefield));
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
@@ -4487,8 +4654,7 @@ pub(super) fn match_leaves_battlefield(
     }
 }
 
-/// BecomesBlocked: fires when the source creature is assigned at least one blocker.
-/// Reuses BlockersDeclared event — the attacker "becomes blocked" when blockers are declared.
+/// BecomesBlocked: fires on blocker declaration or an attacker-side effect event.
 pub(super) fn match_becomes_blocked(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -4505,15 +4671,20 @@ pub(super) fn matching_becomes_blocked_events(
     state: &GameState,
 ) -> Vec<GameEvent> {
     let source_id = source_event_subject_id(source_context);
+    let blocker_filter = combat_filter(trigger);
+    // CR 509.3d: the promoted ByCreature mode carries the per-creature
+    // qualifier in its mode even when no narrower valid_target filter exists.
+    let per_blocker =
+        blocker_filter.is_some() || matches!(trigger.mode, TriggerMode::AttackerBlockedByCreature);
     if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
-        // CR 509.3d: an effect-driven block is NOT "blocked by a creature" — the
-        // "becomes blocked by a creature" form (which carries a genuine blocker
-        // filter) must NOT fire. Only the bare "becomes blocked" form (CR 509.3c)
-        // fires, and only for the matching attacker. `combat_filter` excludes a
-        // spurious `TargetFilter::Player` surfaced by effect-text lowering (e.g.
+        // CR 509.3c/509.3d: this event carries only the first blocked transition,
+        // not a blocker identity. Only the bare form fires here; a real entering
+        // blocker supplies its own per-creature event separately.
+        // `combat_filter` excludes a spurious `TargetFilter::Player` surfaced
+        // by the effect-text lowering (e.g.
         // Goblin Cadets' "target opponent gains control"), which is not a real
         // CR 509 blocker filter and must not suppress this bare-form firing.
-        if combat_filter(trigger).is_some() {
+        if per_blocker {
             return Vec::new();
         }
         let attacker_matches = if trigger.valid_card.is_some() {
@@ -4527,6 +4698,28 @@ pub(super) fn matching_becomes_blocked_events(
             Vec::new()
         };
     }
+    if let GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } = event {
+        // CR 509.3d + CR 509.4: an entering blocker triggers only the qualified
+        // attacker-side form. The bare form consumes the first-transition event,
+        // and the entering creature never fires a blocker-side "blocks" trigger.
+        if !per_blocker {
+            return Vec::new();
+        }
+        let attacker_matches = if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *attacker, source_context)
+        } else {
+            *attacker == source_id
+        };
+        let blocker_matches = match blocker_filter {
+            Some(filter) => target_filter_matches_object(state, *blocker, filter, source_context),
+            None => true,
+        };
+        return if attacker_matches && blocker_matches {
+            vec![event.clone()]
+        } else {
+            Vec::new()
+        };
+    }
     if let GameEvent::BlockersDeclared { assignments } = event {
         // CR 509.3d: the "becomes blocked by a creature [with quality]" form
         // (carries a `valid_target` blocker filter) triggers once for each
@@ -4534,7 +4727,6 @@ pub(super) fn matching_becomes_blocked_events(
         // blocker qualifier, `valid_target: None`) triggers only once each combat
         // for the attacker, regardless of how many creatures block it — so the
         // matching assignments are collapsed to a single event per attacker.
-        let per_blocker = combat_filter(trigger).is_some();
         let mut emitted_attackers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
@@ -4547,7 +4739,7 @@ pub(super) fn matching_becomes_blocked_events(
                 if !attacker_matches {
                     return None;
                 }
-                let blocker_matches = match combat_filter(trigger) {
+                let blocker_matches = match blocker_filter {
                     Some(filter) => {
                         target_filter_matches_object(state, *blocker, filter, source_context)
                     }

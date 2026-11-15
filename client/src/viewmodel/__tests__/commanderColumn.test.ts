@@ -7,7 +7,11 @@ import {
   buildFormatConfig,
   buildGameState,
 } from "../../test/factories/gameStateFactory";
-import { commandZoneLeaders, commanderDamageEntriesFor } from "../commanderColumn";
+import {
+  commandZoneConspiracies,
+  commandZoneLeaders,
+  commanderDamageEntriesFor,
+} from "../commanderColumn";
 
 function obj(overrides: Partial<GameObject>): GameObject {
   return buildGameObject({
@@ -38,9 +42,21 @@ describe("commandZoneLeaders", () => {
       signature_spell: {},
       zone: "Command",
     });
-    const state = stateWith([mine, cast, opponent, nonCommander, signatureSpell], [1, 2, 3, 4, 5]);
+    const conspiracy = obj({
+      id: 6,
+      owner: 0,
+      is_commander: false,
+      is_conspiracy: true,
+      card_types: { core_types: [], supertypes: [], subtypes: [] },
+      zone: "Command",
+    });
+    const state = stateWith(
+      [mine, cast, opponent, nonCommander, signatureSpell, conspiracy],
+      [1, 2, 3, 4, 5, 6],
+    );
 
     expect(commandZoneLeaders(state, 0 as PlayerId).map((o) => o.id)).toEqual([1, 5]);
+    expect(commandZoneConspiracies(state, 0 as PlayerId).map((o) => o.id)).toEqual([6]);
   });
 
   it("is empty once the leader has left the command zone", () => {

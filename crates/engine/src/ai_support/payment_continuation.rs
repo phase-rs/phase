@@ -185,6 +185,10 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
+        }
+        | WaitingFor::RevealChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
         } => classify_pending_mana_ability(state, mana_ability),
         WaitingFor::ChooseManaColor {
             context: ManaChoiceContext::ManaAbility(mana_ability),
@@ -1030,6 +1034,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
@@ -1045,6 +1050,14 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
     }
 }
 
+/// Classify a parked `DeferredLifeCostResume` root.
+///
+/// A `Cast` root may be parked on a prompt answered by a non-payer (the
+/// recipient of a life-gain cost, CR 616.1). It is still `Affiliated` with the
+/// payer's root: the witness applies the non-payer's candidates as the current
+/// actor and accepts those that finalize the root. Unlike `ManaRoot`, no
+/// `PayerMismatch` is raised, because the non-payer's decision is part of
+/// completing the payer's cost. Pinned by `invigorate_alternative_cost::v9c_*`.
 fn classify_deferred_life_root(
     state: &GameState,
     deferred: &DeferredLifeCostResume,
@@ -1257,6 +1270,10 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
+        }
+        | WaitingFor::RevealChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
         } => pending_mana_contains_root(mana_ability, root),
         WaitingFor::ChooseManaColor {
             context: ManaChoiceContext::ManaAbility(mana_ability),
@@ -1312,6 +1329,7 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. })
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        | Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
@@ -1456,6 +1474,7 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![ObjectId(1)],
                 card_names: vec!["Hidden".to_string()],
+                occurrences: Vec::new(),
             }]
         ));
         let _ = rand::RngCore::next_u32(state.rng.draw(RandomDraw::Placement));

@@ -1047,6 +1047,40 @@ select.select-dark option {
   }
 }
 
+/* The pill's own-decision border marks the decision as the viewer's for as
+   long as it is. It is static by itself; the pulse modifier animates it and is
+   applied only while the Glow priority-alert preference is on. It sits on
+   ::before so the timed attention glow keeps ::after. */
+.priority-turn-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 2px solid rgba(110, 231, 183, 0.9);
+  pointer-events: none;
+}
+
+.priority-turn-border-pulse::before {
+  animation: priority-turn-border-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes priority-turn-border-pulse {
+  0%,
+  100% {
+    border-color: rgba(52, 211, 153, 0.45);
+  }
+
+  50% {
+    border-color: rgba(167, 243, 208, 1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .priority-turn-border-pulse::before {
+    animation: none;
+  }
+}
+
 /* Debug layout bounds — toggled via Ctrl+Shift+D */
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);

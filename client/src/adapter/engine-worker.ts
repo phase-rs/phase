@@ -9,6 +9,8 @@ import init, {
   take_last_panic_message,
   initialize_game,
   initialize_multiplayer_host_game,
+  initialize_draft_match_game,
+  initialize_draft_match_host_game,
   submit_action,
   drive_contest_js,
   request_takeback_js,
@@ -72,6 +74,7 @@ import {
   type AiActionProposal,
   type GameAction,
   type GameEvent,
+  type LlmClockReading,
 } from "./types";
 import type {
   InteractionPreviewRequest,
@@ -80,6 +83,7 @@ import type {
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
+import { StateCodecRuntime } from "./state-codec-runtime";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -95,6 +99,8 @@ type EngineRequest =
       matchConfig: unknown | null;
       playerCount?: number;
       firstPlayer?: number;
+      /** Present only for an accepted draft's match: selects the draft-match initializer. */
+      draftSessionMinDeckSize?: number;
     }
   | {
       type: "initializeMultiplayerHostGame";
@@ -105,6 +111,7 @@ type EngineRequest =
       matchConfig: unknown | null;
       playerCount?: number;
       firstPlayer?: number;
+      draftSessionMinDeckSize?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | {
@@ -145,15 +152,19 @@ type EngineRequest =
       playerId: number;
       endpointJson: string;
       historyJson: string;
+      settingsRevision: number;
+      clock: LlmClockReading;
     }
   | {
       type: "getAiActionProposalFromLlmResponse";
       id: number;
       playerId: number;
       fingerprint: string;
+      threadTurn: number | null;
       provider: string;
       status: number;
       responseBody: string;
+      clock: LlmClockReading;
     }
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
@@ -176,6 +187,9 @@ type EngineRequest =
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
+  | { type: "openStateCodec"; id: number }
+  | { type: "decodeStateCodec"; id: number; sessionId: number; frame: Uint8Array }
+  | { type: "closeStateCodec"; id: number; sessionId: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
@@ -201,6 +215,13 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+/** Set once the WASM module is instantiated by the `init` handler. */
+let wasmInitialized = false;
+/**
+ * Negotiated state-codec sessions for this worker's WASM instance. Decoder
+ * baselines live here, never on the main thread; see `state-codec-runtime.ts`.
+ */
+let stateCodecRuntime: StateCodecRuntime | null = null;
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -259,6 +280,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         } else {
           await init();
         }
+        wasmInitialized = true;
         result(msg.id, null);
         break;
       }
@@ -382,14 +404,26 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
-        const gameResult = initialize_game(
-          msg.deckData ?? null,
-          msg.seed,
-          msg.formatConfig ?? null,
-          msg.matchConfig ?? null,
-          msg.playerCount ?? undefined,
-          msg.firstPlayer ?? undefined,
-        );
+        // The draft session's minimum selects the distinct draft-match
+        // initializer; the generic one takes no minimum at all.
+        const gameResult = msg.draftSessionMinDeckSize === undefined
+          ? initialize_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+          )
+          : initialize_draft_match_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+            msg.draftSessionMinDeckSize,
+          );
         const failure = classifyInitFailure(gameResult);
         if (failure) {
           initFailureError(msg.id, failure);
@@ -413,14 +447,26 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // The host entry point refuses an engine that already holds a game and
         // claims the multiplayer flag alongside the install — both inside this
         // one synchronous handler, so no other posted message can interleave.
-        const gameResult = initialize_multiplayer_host_game(
-          msg.deckData ?? null,
-          msg.seed,
-          msg.formatConfig ?? null,
-          msg.matchConfig ?? null,
-          msg.playerCount ?? undefined,
-          msg.firstPlayer ?? undefined,
-        );
+        // The draft session's minimum selects the distinct draft-match
+        // initializer; the generic one takes no minimum at all.
+        const gameResult = msg.draftSessionMinDeckSize === undefined
+          ? initialize_multiplayer_host_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+          )
+          : initialize_draft_match_host_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+            msg.draftSessionMinDeckSize,
+          );
         const failure = classifyInitFailure(gameResult);
         if (failure) {
           initFailureError(msg.id, failure);
@@ -696,6 +742,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             msg.playerId,
             msg.endpointJson,
             msg.historyJson,
+            msg.settingsRevision,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;
@@ -707,9 +756,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           getAiActionProposalFromLlmResponse(
             msg.playerId,
             msg.fingerprint,
+            msg.threadTurn,
             msg.provider,
             msg.status,
             msg.responseBody,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;
@@ -780,6 +832,37 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "ping": {
         result(msg.id, ping());
+        break;
+      }
+
+      // ── Negotiated state-codec sessions ──────────────────────────────
+      // Decoder sessions are transport plumbing: they read frames and retain
+      // their own baselines. They never load card data, touch GAME_STATE, or
+      // expose game state on the main thread.
+
+      case "openStateCodec": {
+        if (!wasmInitialized) {
+          error(msg.id, "Engine is not initialized.");
+          break;
+        }
+        stateCodecRuntime ??= new StateCodecRuntime(engineWasm);
+        result(msg.id, stateCodecRuntime.open());
+        break;
+      }
+
+      case "decodeStateCodec": {
+        const runtime = stateCodecRuntime;
+        if (!runtime) {
+          error(msg.id, "State codec session was never opened.");
+          break;
+        }
+        result(msg.id, runtime.decode(msg.sessionId, msg.frame));
+        break;
+      }
+
+      case "closeStateCodec": {
+        stateCodecRuntime?.close(msg.sessionId);
+        result(msg.id, null);
         break;
       }
 
