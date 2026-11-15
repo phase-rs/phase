@@ -209,12 +209,12 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -229,7 +229,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -329,8 +329,11 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("first attempted rest card is outside the parked suffix");
-    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Hand);
-    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Hand);
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&parked_order[0]].zone,
+        Zone::Graveyard
+    );
 }
 
 /// CR 616.1: a held decision is asked only if it still stands when it is about
@@ -362,12 +365,12 @@ fn held_decisions_whose_replacements_are_gone_are_not_asked_when_selected() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
     let mut runner = scenario.build();
@@ -381,7 +384,7 @@ fn held_decisions_whose_replacements_are_gone_are_not_asked_when_selected() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -431,7 +434,7 @@ fn held_decisions_whose_replacements_are_gone_are_not_asked_when_selected() {
         selected.waiting_for
     );
     for rest in [rest_a, rest_b] {
-        assert_eq!(runner.state().objects[&rest].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&rest].zone, Zone::Graveyard);
     }
     assert!(runner.state().resolution_stack.is_empty());
 }
@@ -454,12 +457,12 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         scenario
             .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -474,7 +477,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             keep_count_expr: None,
             up_to: true,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -524,23 +527,18 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
     let redirected_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| {
-            matches!(
-                runner.state().objects[id].zone,
-                Zone::Graveyard | Zone::Exile
-            )
-        })
+        .find(|id| matches!(runner.state().objects[id].zone, Zone::Hand | Zone::Exile))
         .expect("one rest-pile card must take the configured redirect");
     let returned_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| runner.state().objects[id].zone == Zone::Hand)
-        .expect("the other rest-pile card must complete its hand placement");
+        .find(|id| runner.state().objects[id].zone == Zone::Graveyard)
+        .expect("the other rest-pile card must complete its graveyard placement");
     assert_ne!(redirected_rest, returned_rest);
     assert!(
         runner.state().players[P0.0 as usize]
-            .hand
+            .graveyard
             .contains(&returned_rest),
-        "the unredirected rest-pile card must be present in P0's hand"
+        "the unredirected rest-pile card must be present in P0's graveyard"
     );
 
     let tracked = runner
@@ -894,12 +892,12 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -914,7 +912,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
