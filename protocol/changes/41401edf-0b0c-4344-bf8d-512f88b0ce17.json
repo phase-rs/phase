@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add instruction_join (list-slot instruction identity) and ZoneChangeRecord.instruction_lead; an older peer resolves a list-form sentence as separate instructions"
+}
