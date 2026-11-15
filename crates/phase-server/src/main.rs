@@ -25735,9 +25735,10 @@ mod p2p_backup_delete_tests {
             .expect("stored backup");
         let stored: serde_json::Value =
             serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
-        let stored_deck = &stored["intergameCommands"][0]["launchPayload"]["deckPayload"];
-        assert!(stored_deck.get("booster_pack_pool").is_none());
-        assert_eq!(stored_deck["main_deck"], serde_json::json!(["Public card"]));
+        // The whole launch deck payload goes (decks are another seat's private
+        // contents), not only its booster pool.
+        let stored_launch = &stored["intergameCommands"][0]["launchPayload"];
+        assert!(stored_launch.get("deckPayload").is_none());
 
         let response = admin::p2p_backup_get(
             State(app_state),
@@ -25756,11 +25757,9 @@ mod p2p_backup_delete_tests {
         let public: serde_json::Value =
             serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
                 .expect("snapshot JSON");
-        assert!(
-            public["intergameCommands"][0]["launchPayload"]["deckPayload"]
-                .get("booster_pack_pool")
-                .is_none()
-        );
+        assert!(public["intergameCommands"][0]["launchPayload"]
+            .get("deckPayload")
+            .is_none());
     }
 
     #[tokio::test]
@@ -25798,9 +25797,8 @@ mod p2p_backup_delete_tests {
         let public: serde_json::Value =
             serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
                 .expect("snapshot JSON");
-        let deck = &public["intergameCommands"][0]["launchPayload"]["deckPayload"];
-        assert!(deck.get("booster_pack_pool").is_none());
-        assert_eq!(deck["main_deck"], serde_json::json!(["Public card"]));
+        let launch = &public["intergameCommands"][0]["launchPayload"];
+        assert!(launch.get("deckPayload").is_none());
     }
 
     #[tokio::test]
