@@ -3603,3 +3603,67 @@ fn clone_legion_doubled_batches_reuse_pre_entry_board() {
         eprintln!("{doublers} Parallel Lives: {count} tokens, {work:?}");
     }
 }
+
+/// CR 614.12: resident Humility removes the Ghoul's own enters-tapped
+/// replacement when checking how it would exist on the battlefield. Without
+/// Humility, each copy retains that replacement and enters tapped.
+#[test]
+fn clone_legion_doubled_liminal_batches_reuse_pre_entry_board() {
+    use engine::game::filter::{reset_token_entry_projection_work, token_entry_projection_work};
+
+    // Oracle text and printed P/T verified against MTGJSON AtomicCards.
+    const GHOUL: Donor = Donor {
+        name: "Diregraf Ghoul",
+        oracle: "This creature enters tapped.",
+        power: 2,
+        toughness: 2,
+    };
+
+    for humility in [false, true] {
+        for doublers in [1, 2, 3] {
+            let (runner, _) = clone_legion_carried(
+                &[GHOUL; 3],
+                |scenario| {
+                    for _ in 0..doublers {
+                        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+                    }
+                    if humility {
+                        scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+                    }
+                },
+                |_| reset_token_entry_projection_work(),
+                PauseCarry::Live,
+                &Script::default(),
+                |_, _| {},
+            );
+            assert_settled(&runner, "liminal projection work budget");
+            let tokens = battlefield_tokens(&runner, GHOUL.name);
+            let count = 3 * (1 << doublers);
+            assert_eq!(tokens.len(), count, "all doubled Ghoul copies were created");
+            for token in tokens {
+                assert_eq!(
+                    runner.state().objects[&token].tapped,
+                    !humility,
+                    "entry replacement for {token:?}, Humility={humility}, doublers={doublers}"
+                );
+            }
+            let work = token_entry_projection_work();
+            // Debug builds independently audit the indexed scan against the legacy
+            // scan, so each entrant has two projections. Assert the budget together:
+            // both rebuilding per token and withholding the supplied board must fail.
+            let projections_per_entrant = 1
+                + usize::from(cfg!(debug_assertions))
+                + usize::from(std::env::var_os("PHASE_REPLACEMENT_INDEX_AUDIT").is_some());
+            assert_eq!(
+                (
+                    work.pre_entry_boards,
+                    work.pre_entry_state_clones,
+                    work.projections,
+                    work.projection_state_clones,
+                ),
+                (3, 3, projections_per_entrant * count, projections_per_entrant * count),
+                "one liminal entry board per donor batch, Humility={humility}, doublers={doublers}: {work:?}"
+            );
+        }
+    }
+}

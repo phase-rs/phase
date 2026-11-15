@@ -1023,6 +1023,10 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             .any(|event| match event {
                 GameEvent::TokenCreated { object_id, .. }
                 | GameEvent::CounterAdded { object_id, .. } => !created_ids.contains(object_id),
+                // CR 614.12: recording an entry replacement on an absent co-entrant
+                // does not change the board before the entry event. Its modified body
+                // is refreshed below; any other event still invalidates the cache.
+                GameEvent::ReplacementApplied { source_id, .. } => !created_ids.contains(source_id),
                 GameEvent::ZoneChanged {
                     object_id,
                     from,
