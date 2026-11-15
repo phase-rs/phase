@@ -4629,6 +4629,100 @@ mod feldon_tokens {
         );
     }
 
+    const KOZILEK_BROKEN_REALITY: &str = "When you cast this spell, up to two target players each manifest two cards from their hands. For each card manifested this way, you draw a card. (To manifest a card, put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)\nOther colorless creatures you control get +3/+2.";
+
+    /// Kozilek, the Broken Reality's cast trigger in a two-player game under Imposing Sovereign
+    /// and an untapped Archelos, Lagoon Mystic (each opponent's entry has two tap-state
+    /// replacements to order): P0's card is manifested, then P1's entry pauses. Returns the
+    /// serialized held entry records of the paused state as P1, an unseated viewer and P0 see them, and
+    /// the name of the card P0 manifested.
+    fn kozilek_manifest_pause() -> (String, String, String, &'static str) {
+        const SECRET: &str = "Hidden Secret Elemental";
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in (0..2).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        scenario
+            .add_creature_from_oracle(P0, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN)
+            .with_subtypes(vec!["Human", "Noble"]);
+        scenario
+            .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+            .as_legendary()
+            .with_subtypes(vec!["Turtle", "Shaman"]);
+        scenario.add_creature_to_hand(P0, SECRET, 3, 3);
+        scenario.add_creature_to_hand(P1, "Grizzly Bears", 2, 2);
+        let kozilek = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Kozilek, the Broken Reality",
+                12,
+                12,
+                KOZILEK_BROKEN_REALITY,
+            )
+            .as_legendary()
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(kozilek).target_players(&[P0, P1]).commit();
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                    let cards = cards.clone();
+                    runner.act(GameAction::SelectCards { cards }).unwrap();
+                }
+                WaitingFor::ReplacementChoice { .. } => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "P1's manifest entry pauses on the tap-state replacements: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner.state().unsettled_entry_batch_events.len(),
+            1,
+            "P0's manifested card is a held entry at the pause"
+        );
+        let project = |viewer: Option<PlayerId>| {
+            let projected = match viewer {
+                Some(viewer) => engine::game::filter_state_for_viewer(runner.state(), viewer),
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            serde_json::to_string(&projected.unsettled_entry_batch_events).expect("projection")
+        };
+        (project(Some(P1)), project(None), project(Some(P0)), SECRET)
+    }
+
+    /// CR 708.5: a face-down permanent's card may be looked at by no one but its controller, so
+    /// the entry record the engine holds for a manifested card across a later entrant's
+    /// replacement prompt reaches an opponent and a spectator without the card's identity,
+    /// while its controller's projection keeps it. (The turn's zone-change ledgers keep their
+    /// own redaction rules, unchanged.)
+    #[test]
+    fn held_face_down_entries_do_not_disclose_their_card() {
+        let (opponent, spectator, controller, secret) = kozilek_manifest_pause();
+        assert!(
+            !opponent.contains(secret),
+            "the opponent's projection names the card"
+        );
+        assert!(
+            !spectator.contains(secret),
+            "the spectator's projection names the card"
+        );
+        assert!(
+            controller.contains(secret),
+            "the controller keeps its own view"
+        );
+    }
+
     const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
 
     /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."

@@ -1772,6 +1772,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => identity_projection_for_unseated_viewer(state),
     };
     let mut hidden_zone_change_ids = HashSet::new();
+    let mut face_down_observed_ids = HashSet::new();
     let mut hidden_library_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
         match projection {
@@ -1789,6 +1790,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
             IdentityProjection::FaceDownRedacted => {
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                    face_down_observed_ids.insert(obj_id);
                     redact_face_down_identity_from_observer(obj);
                     record_hidden_replacement_candidate_source(
                         replacement_candidate_source_ids.as_ref(),
@@ -1903,6 +1905,19 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         )
     {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+    }
+    // CR 708.5: an entry held across answers records the card under a face-down entrant, which
+    // no player but its controller may look at, so it is hidden from this viewer as the object is.
+    let held_entry_hidden_ids: HashSet<ObjectId> = hidden_zone_change_ids
+        .union(&face_down_observed_ids)
+        .copied()
+        .collect();
+    for event in filtered
+        .deferred_entry_events
+        .iter_mut()
+        .chain(filtered.unsettled_entry_batch_events.iter_mut())
+    {
+        redact_hidden_zone_change_event(event, &held_entry_hidden_ids);
     }
     for context in filtered.deferred_triggers.iter_mut().chain(
         filtered
