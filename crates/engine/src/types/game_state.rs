@@ -38245,6 +38245,9 @@ impl GameState {
     /// that fought, or through a carried zone-change record's departing identity; any other
     /// entry is spent history, not position.
     fn retain_observable_fighters(&mut self) {
+        if self.creatures_fought_this_turn.is_empty() {
+            return;
+        }
         let mut recorded = HashSet::new();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
