@@ -389,7 +389,7 @@ fn the_p1_token<'a>(runner: &'a GameRunner, subtype: &str) -> &'a GameObject {
     };
     assert!(token.is_token, "CR 111.1: the {subtype} is a token");
     assert_eq!(token.owner, P1, "CR 111.2: P1 created the {subtype}");
-    *token
+    token
 }
 
 fn gift_resolved(events: &[GameEvent]) -> usize {

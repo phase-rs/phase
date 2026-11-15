@@ -289,8 +289,8 @@ fn gift_card_draw_pauses_on_dredge_and_resumes() {
     // A no-op once the answer settled the spell.
     finish_resolving_stack(runner, events);
 
-    assert_eq!(gift_resolved(&events), 1, "the gift completes exactly once");
-    let gift = position(&events, "gift completion", |e| {
+    assert_eq!(gift_resolved(events), 1, "the gift completes exactly once");
+    let gift = position(events, "gift completion", |e| {
         matches!(
             e,
             GameEvent::EffectResolved {
@@ -300,12 +300,12 @@ fn gift_card_draw_pauses_on_dredge_and_resumes() {
         )
     });
     let drawn = position(
-        &events,
+        events,
         "the gift draw",
         |e| matches!(e, GameEvent::ZoneChanged { object_id, to: Zone::Hand, .. } if *object_id == drawn_card),
     );
     let returned = position(
-        &events,
+        events,
         "the return to the battlefield",
         |e| matches!(e, GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if *object_id == target),
     );
@@ -315,9 +315,9 @@ fn gift_card_draw_pauses_on_dredge_and_resumes() {
         "CR 702.174j: the gift completes before the spell's other effects"
     );
 
-    assert_eq!(object_zone(&runner, drawn_card), Zone::Hand);
+    assert_eq!(object_zone(runner, drawn_card), Zone::Hand);
     assert_eq!(
-        hand_count(&runner, P1),
+        hand_count(runner, P1),
         1,
         "declined Dredge must draw the card"
     );
