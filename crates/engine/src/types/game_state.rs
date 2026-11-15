@@ -39164,6 +39164,7 @@ impl GameState {
             log_player_names: _,
             last_created_token_ids: _,
             last_revealed_ids: _,
+            revealed_publications: _,
             last_parent_target_missing_reason: _,
             private_look_ids: _,
             private_look_player: _,
