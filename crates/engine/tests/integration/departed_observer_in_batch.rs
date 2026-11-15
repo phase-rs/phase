@@ -1251,7 +1251,7 @@ fn mass_bounce_with_a_departing_leaves_observer_collects_once() {
 /// PH (b) (CR 603.10a): Aether Snap exiles two creature tokens; the live
 /// Extractor Demon triggers once for each.
 #[test]
-#[ignore = "pre-existing double collection: the live Demon triggers twice per exiled token (4), also at 77a08dca9"]
+#[ignore = "pre-existing double collection: the live Demon triggers twice per exiled token (4); measured 4 at upstream main d7a224173 (follow-up C)"]
 fn mass_exile_of_tokens_with_a_live_leaves_observer_collects_once() {
     let Some(db) = shared_card_db() else {
         return;

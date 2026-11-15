@@ -23329,7 +23329,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         }
         // CR 603.2c: "you remove one or more ... counters" is one occurrence
         // per recipient per simultaneous batch; "you remove a ... counter" is
-        // one occurrence per counter removed.
+        // one occurrence per removal event (per-counter multiplicity: #10901).
         def.batched = matches!(quantity, CounterRemovalQuantity::OneOrMore);
         return Some((TriggerMode::CounterRemoved, def));
     }
@@ -23435,7 +23435,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 
 /// Grammatical quantifier of a counter-removal trigger, shared by both voices:
 /// "a [type] counter is removed" / "you remove a [type] counter" (one
-/// occurrence per counter removed), "one or more [type] counters are removed" /
+/// occurrence per removal event; per-counter multiplicity is #10901), "one or more [type] counters are removed" /
 /// "you remove one or more [type] counters" (one occurrence per recipient per
 /// simultaneous batch), and the passive-only "the last [type] counter is
 /// removed" (one occurrence, only on the removal that leaves none of that

@@ -223,7 +223,9 @@ pub struct DepartureWindowCounters {
     pub in_instruction_cuts: u64,
     /// Battlefield departures with no instruction lead: emitted outside any
     /// instruction scope, or read by the departure-window arm without one.
-    /// The departure-window arm does not observe them (fail-closed).
+    /// The departure-window arm does not observe them (fail-closed). Counts
+    /// observations, not departures: one departure is counted once at emission
+    /// and again by every collection pass that reads it unstamped.
     pub unstamped_departures: u64,
 }
 

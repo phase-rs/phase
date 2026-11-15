@@ -1,9 +1,15 @@
 //! CR 609.3 + CR 608.2c: a `ChangeZone` that moves nothing records "zero moved"
 //! (`last_effect_count = Some(0)`), so a following "this way" / "that many"
 //! step reads 0 instead of a count an earlier step of the chain left behind.
-//! Every row drives a printed card through `GameRunner` / `GameAction` and
-//! reaches one of the empty-target guards in `effects::change_zone::resolve`;
-//! each has a positive control that really moves something.
+//! Every row drives a printed card through `GameRunner` / `GameAction`. Each
+//! row but one reaches an empty-target guard in `effects::change_zone::resolve`
+//! and has a positive control that really moves something; the Vengeful
+//! Regrowth row is the production sibling-legality control (it keeps a legal
+//! target, so it reaches no empty-target guard). The zero-result branch with a
+//! legal sibling (`ParentTargetSlot`) has no printed card with a count
+//! follower: the printed `ParentTargetSlot` producers are Goblin Welder
+//! (Unimplemented step), Cloak and Dagger, Entwined, and Fiery Annihilation;
+//! none of them reads "that many" / "this way".
 //!
 //! Printed cards (Oracle text verbatim, data/card-data.json):
 //!   Myr Incubator — "{6}, {T}, Sacrifice this artifact: Search your library
@@ -241,7 +247,9 @@ fn vengeful_regrowth_returns_its_targets_and_creates_that_many_plants() {
 /// affected, while a sibling target that is still legal is. Both lands are
 /// declared through the production cast path; one leaves the graveyard while
 /// Vengeful Regrowth is on the stack, so one land returns and "that many"
-/// Plant Warriors is 1 (not the 2 targets declared).
+/// Plant Warriors is 1 (not the 2 targets declared). A sibling-legality
+/// control, not a zero-moved row: the target list stays non-empty, and the
+/// invalidation is a direct zone move, not a game action.
 #[test]
 fn vengeful_regrowth_with_one_target_invalidated_returns_the_legal_sibling_only() {
     let Some((mut runner, regrowth, lands)) = regrowth_board() else {

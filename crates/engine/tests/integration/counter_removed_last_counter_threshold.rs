@@ -440,8 +440,8 @@ fn stack_triggers_from(state: &GameState, source: ObjectId) -> usize {
 /// CR 603.2c + CR 122.1 (regression guard; passes at base and with the
 /// per-batch "the last counter" fold): Vampire Hexmage removes all three ore
 /// counters from Orcish Mine in ONE removal event, which removes "the last"
-/// ore counter once, so the Mine triggers exactly once — a per-counter split
-/// must never reach a threshold definition. Life alone is not a
+/// ore counter once, so the Mine triggers exactly once (the threshold fold, not
+/// the event's count, decides). Life alone is not a
 /// discriminator (later copies would find no enchanted land and deal nothing),
 /// so the stack count carries the assertion.
 #[test]

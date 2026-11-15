@@ -2058,8 +2058,7 @@ impl FiringGroup {
 /// or more" counter forms and the "the last [type] counter is removed" form),
 /// the whole-event received-damage fold, per-player-recipient damage,
 /// per-attacked-player attack batches ("one or more creatures attack
-/// <player>"), batched ("one or more") subjects, the per-occurrence fan-out
-/// (including the per-counter split of a singular counter-removal trigger),
+/// <player>"), batched ("one or more") subjects, the per-occurrence fan-out,
 /// the event-source force-block singleton fallback, and the single event. The
 /// first five read the whole batch, so a caller asks for them once per batch
 /// (`fires_once_per_batch`).

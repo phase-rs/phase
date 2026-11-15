@@ -847,7 +847,7 @@ fn search_for_tomorrow() -> serde_json::Value {
 /// CR 603.2c + CR 122.1: the four printed batched ("one or more counters are
 /// removed") and last-counter clauses lower to live `CounterRemoved` triggers,
 /// not `Unknown` gaps: the "one or more" forms are batched (one occurrence per
-/// removal event), and Orcish Mine's "the last ore counter" is a single
+/// recipient per simultaneous batch), and Orcish Mine's "the last ore counter" is a single
 /// threshold-0 occurrence. No face keeps a trigger gap.
 #[test]
 fn batched_and_last_counter_clauses_lower_to_live_counter_removed_triggers() {
@@ -901,10 +901,8 @@ fn batched_and_last_counter_clauses_lower_to_live_counter_removed_triggers() {
             face.triggers
         );
         assert!(
-            !card_face_gaps(&face)
-                .iter()
-                .any(|gap| gap.starts_with("Trigger:")),
-            "{name}: {:?}",
+            card_face_gaps(&face).is_empty(),
+            "{name}: gap_count 0 is the claimed parse impact: {:?}",
             card_face_gaps(&face)
         );
     }
