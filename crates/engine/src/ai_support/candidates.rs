@@ -4364,13 +4364,9 @@ fn retarget_proposals(
     };
 
     match scope {
-        // CR 115.7a: "each target can be changed only to another legal target."
-        // One proposal per member of the pool `apply_retarget` validates
-        // against. That pool normally still contains the current target — that
-        // member IS CR 115.7a's "the original target is unchanged" fallback, so
-        // it is offered rather than filtered out. An empty pool yields no
-        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
-        // state.
+        // CR 115.7a: one proposal per pool member; the reducer's shared
+        // changed-occurrence check removes unchanged picks, including for
+        // outer-empty legacy pools. No alternative means no response.
         //
         // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
         // because `apply_retarget`'s `Single` arm hard-requires exactly one
@@ -9129,6 +9125,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards,
             count: 20,
@@ -9146,6 +9143,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -10652,6 +10650,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,

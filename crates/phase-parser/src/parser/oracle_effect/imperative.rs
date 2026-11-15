@@ -1286,6 +1286,7 @@ fn parse_loyalty_symbol_effect(lower: &str) -> Option<ImperativeFamilyAst> {
                 counter_type: Some(crate::types::counter::CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: delta.abs() },
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
                 exact_selection: None,
                 multi_target: None,
             },
@@ -1345,6 +1346,7 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
             // CR 701.17a: "Mill" with no subject defaults to the controller.
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         },
     }
 }
@@ -2987,6 +2989,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
@@ -3021,6 +3024,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             up_to,
             multi_target: _,
         } => Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,
@@ -3062,6 +3066,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 _ => origin,
             };
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -4240,6 +4245,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner,
             quantifier: MultiZoneExileQuantifier::All,
         } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::default().controller(owner).properties(vec![
@@ -6235,6 +6241,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
     // CR 400.7 + CR 608.2c: exile EVERY chosen permanent (`ChangeZoneAll` over
     // the tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -6372,6 +6379,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
     // CR 608.2c: exile EVERY chosen card (`ChangeZoneAll` over the
     // tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Graveyard),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -9417,6 +9425,44 @@ pub(super) fn parse_put_ast(
         return Some(PutImperativeAst::PutTopCardsIntoHandMatchingExileCount);
     }
 
+    // CR 401.2 + CR 701.17a: "put the bottom card of <owner> library into
+    // <possessive> graveyard" names the bottommost card, not a chosen one. The
+    // generic zone-change fallback would read it as an interactive
+    // choose-any-card move, so bind the library edge explicitly (Grenzo, Dungeon
+    // Warden; Cellar Door).
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("put the bottom card of ").parse(lower) {
+        if let Some((tail, target)) = parse_library_owner_or_opponent_scope(after, ctx) {
+            let graveyard_destination = alt((
+                tag::<_, _, OracleError<'_>>("into your graveyard"),
+                tag("into their graveyard"),
+                tag("into its owner's graveyard"),
+            ))
+            .parse(tail.trim_start())
+            .is_ok();
+            if graveyard_destination {
+                // CR 401.1: "each player's library" / "each opponent's library"
+                // is a per-player fan-out that `Mill` does not expand; the
+                // top-edge branch below fails closed for the same owners. A
+                // `ScopedPlayer` owner bound by an enclosing "Each player ..."
+                // scope (Largepox) is already iterated by that scope, so it
+                // stays the supported singular form.
+                let literal_per_player = matches!(target, TargetFilter::ScopedPlayer)
+                    && ctx.relative_player_scope != Some(ControllerRef::ScopedPlayer);
+                if literal_per_player || matches!(target, TargetFilter::Opponent) {
+                    return Some(PutImperativeAst::Unimplemented {
+                        gap: "put_bottom_of_library_per_player",
+                        fragment: text.to_string(),
+                    });
+                }
+                return Some(PutImperativeAst::Mill {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target,
+                    position: LibraryPosition::Bottom,
+                });
+            }
+        }
+    }
+
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("put the top ").parse(lower) {
         // CR 404.1 + CR 404.2: "put the top card of <possessive> graveyard …"
         // takes its card FROM a graveyard. The graveyard-top selection has no
@@ -9456,6 +9502,7 @@ pub(super) fn parse_put_ast(
                 return Some(PutImperativeAst::Mill {
                     count,
                     target: owner,
+                    position: LibraryPosition::Top,
                 });
             }
         }
@@ -9758,11 +9805,16 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         // CR 404.1: no representation for "the top card of a graveyard" yet;
         // fail closed rather than mis-route it as a library mill.
         PutImperativeAst::Unimplemented { gap, fragment } => Effect::unimplemented(gap, fragment),
-        PutImperativeAst::Mill { count, target } => Effect::Mill {
+        PutImperativeAst::Mill {
             count,
-            // CR 701.17a: the library owner named by the clause is the milled player.
+            target,
+            position,
+        } => Effect::Mill {
+            count,
+            // The target names the player whose library supplies the cards.
             target,
             destination: Zone::Graveyard,
+            position,
         },
         PutImperativeAst::ZoneChangeAll {
             origin,
@@ -9793,6 +9845,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -9855,6 +9908,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     _ => origin.or(Some(Zone::Exile)),
                 };
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
                     // defaults to scanning Exile (cascade, impulse-draw, and the
                     // `ExiledBySource` class all leave their members in exile).
@@ -9881,6 +9935,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination,
@@ -9935,6 +9990,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             },
             target: TargetFilter::Controller,
             destination: Zone::Hand,
+            position: LibraryPosition::Top,
         },
         // CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
         // library onto the battlefield face down [under your control]" lowers 1:1
@@ -9962,6 +10018,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         // player ("that player") by `inject_subject_target` when the enclosing
         // subject-predicate clause carries a player subject.
         PutImperativeAst::HandToLibraryPosition { position } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Library,
             target: TargetFilter::Controller,
@@ -10651,6 +10708,26 @@ pub(super) fn parse_shuffle_ast(
     }) {
         let (target, _) = parse_target(&target_phrase);
         if !matches!(target, TargetFilter::Any) {
+            // CR 701.24c + CR 400.6: a leading "each"/"all" quantifier names a
+            // mass population, not one target object. Route it through the
+            // ChangeZoneAll lowering so every eligible object moves and the
+            // tracked prospective-owner terminal settles each owner's library.
+            let all = preceded(
+                tag::<_, _, OracleError<'_>>("shuffle "),
+                alt((tag("all "), tag("each "))),
+            )
+            .parse(lower)
+            .is_ok();
+            // CR 701.24c + CR 400.6: a quantified typed phrase may leave an
+            // unbound remainder ("each card not put onto the battlefield this
+            // way" — Guess Who it Is!) or span owners whose population is not
+            // yet bound (Teferi, Temporal Pilgrim -12). Do not widen it to a
+            // battlefield-wide ChangeZoneAll; park the clause as unsupported.
+            if all {
+                return Some(ShuffleImperativeAst::Unimplemented {
+                    text: text.to_string(),
+                });
+            }
             return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
                 owner_library,
@@ -10830,6 +10907,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 )
             {
                 return with_shuffle_sub_ability(Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: None,
                     destination: Zone::Library,
                     target,
@@ -10848,6 +10926,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // possessive classification. See the construction site for the
             // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Library,
@@ -10925,6 +11004,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // this way" quantity reads). The single-target form keeps `ChangeZone`.
             if all {
                 let effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10940,6 +11020,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 with_shuffle_sub_ability(effect)
             } else {
                 let effect = Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Library,
@@ -11062,6 +11143,7 @@ pub(super) fn lower_multi_filter_search_library(
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.
     let change_zone_effect = || Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination,
@@ -11211,6 +11293,20 @@ fn lower_target_referenced_search_library(
     clause
 }
 
+/// CR 400.3 + CR 701.24c: whether an owner-routed move's target set can name
+/// more than one owner. A bare parent-target anaphor, an untargeted any-filter,
+/// or a compound that explicitly includes the source/parent target spans owners;
+/// a pure `Or` of typed single-object alternatives (Cathartic Parting's
+/// "artifact or enchantment an opponent controls") is still one object with one
+/// owner.
+fn owner_move_spans_owners(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::Any | TargetFilter::And { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().any(owner_move_spans_owners),
+        _ => false,
+    }
+}
+
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
     let shuffle_target = match &effect {
@@ -11225,6 +11321,16 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             owner_library: true,
             ..
         } => TargetFilter::Owner,
+        // CR 608.2f + CR 701.24c: the single grouped self+target move spans the
+        // source's owner and the target's owner; settle both through the
+        // tracked-owner ScopedPlayer terminal.
+        Effect::ChangeZone {
+            owner_library: true,
+            target: TargetFilter::Or { filters },
+            ..
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) => {
+            TargetFilter::ScopedPlayer
+        }
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -11254,6 +11360,27 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
                     | ControllerRef::ScopedPlayer
             }
         ))
+    );
+    // CR 701.24c + CR 400.3: a typed single-object owner move has one exact
+    // owner (Chaos Warp/Oblation); the terminal ParentTargetOwner shuffle covers
+    // it. Parent-target cards, compound "source and target", and quantified
+    // wildcard filters can span owners; they use the tracked-owner population
+    // terminal. Quantified "each/all" moves are lowered to ChangeZoneAll above
+    // and use that class's tracked-owner path.
+    let scoped_owner_move = matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target: TargetFilter::Or { filters },
+            ..
+        } if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef))
+    ) || matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target,
+            ..
+        } if owner_move_spans_owners(target)
     );
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
@@ -11287,10 +11414,17 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             target: shuffle_target,
         },
     );
-    if tracks_owner_population {
+    if tracks_owner_population || scoped_owner_move {
         shuffle.player_scope = Some(owner_library_shuffle_scope());
     }
+    if scoped_owner_move {
+        shuffle.effect = Box::new(Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        });
+    }
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -11320,6 +11454,7 @@ pub(super) fn owner_library_shuffle_scope() -> PlayerFilter {
 
 fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(origin),
         destination: Zone::Library,
         target,
@@ -17324,6 +17459,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // the Grave, Reanimate — store Some(Graveyard); that is a different
             // phrase and not this card's.)
             let mut clause = parsed_clause(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -17403,9 +17539,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             counter_type,
             count,
             target,
+            scope,
             exact_selection: Some(selection_count),
             multi_target: None,
         }) => {
+            // "each of N" is a `Chosen` lead in `try_parse_remove_counter`, so a
+            // fixed exact selection is never a mass removal.
+            debug_assert_eq!(scope, EffectScope::Single);
             let removal = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::RemoveCounter {
@@ -17414,6 +17554,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     target: TargetFilter::TrackedSet {
                         id: crate::types::identifiers::TrackedSetId(0),
                     },
+                    scope: EffectScope::Single,
                 },
             );
             let mut clause = parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
@@ -17499,6 +17640,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             };
             let primary = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -17515,6 +17657,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 random_order: primary_random,
             };
             let complement = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: rest_destination,
                 target: rest_target,
@@ -17583,7 +17726,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             },
         ) => {
             let multi_target = match &ast {
-                ZoneCounterImperativeAst::RemoveCounter { multi_target, .. } => {
+                ZoneCounterImperativeAst::RemoveCounter {
+                    multi_target,
+                    scope,
+                    ..
+                } => {
+                    // "each of N target" is a `Chosen` lead, never a mass removal.
+                    debug_assert_eq!(*scope, EffectScope::Single);
                     multi_target.clone()
                 }
                 _ => None,
@@ -18959,10 +19108,12 @@ pub(super) fn parse_zone_counter_ast<'a>(
                     counter_type,
                     count,
                     target,
+                    scope,
                 }) => Some(Ok(ZoneCounterImperativeAst::RemoveCounter {
                     counter_type,
                     count,
                     target,
+                    scope,
                     exact_selection: remove_counter_exact_selection_count(lower),
                     multi_target: remove_counter_exact_target_multi_target(lower),
                 })),
@@ -19026,6 +19177,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 // a "with counters" clause (all five non-from-hand construction
                 // sites pass `vec![]`).
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Exile,
                     target,
@@ -19040,6 +19192,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Exile,
@@ -19158,12 +19311,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             target,
+            scope,
             exact_selection: _,
             multi_target: _,
         } => Effect::RemoveCounter {
             counter_type,
             count,
             target,
+            scope,
         },
         // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
         // target arrives via the parent `TargetOnly` chain, so this effect carries
@@ -23020,6 +23175,7 @@ mod tests {
         let effect = lower_targeted_action_ast(ast);
         match effect {
             Effect::ChangeZoneAll {
+                actor: _,
                 origin,
                 destination,
                 target: TargetFilter::Or { filters },
@@ -27795,6 +27951,34 @@ mod tests {
             }
         ));
         assert!(shuffle.sub_ability.is_none());
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle that card into its owner's library"
+    /// captures the parent target's owner before delivery and settles through
+    /// the tracked-owner terminal Shuffle.
+    #[test]
+    fn parse_shuffle_parent_target_into_owners_library_uses_owner_scope() {
+        let text = "shuffle that card into its owner's library";
+        let ast = parse_shuffle_ast(text, text, &mut ParseContext::default())
+            .expect("parent-target shuffle parses");
+        let clause = lower_shuffle_ast(ast);
+        match &clause.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            } => {}
+            other => panic!("expected terminal parent-target owner mass move, got {other:?}"),
+        }
+        let shuffle = clause.sub_ability.as_deref().expect("terminal shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ));
+        assert!(shuffle.player_scope.is_some());
     }
 
     /// CR 701.24c + CR 400.3: "shuffle ~ into its owner's library" — the
@@ -32716,6 +32900,7 @@ mod loyalty_symbol_effect_tests {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             } if *value == count
         )
     }

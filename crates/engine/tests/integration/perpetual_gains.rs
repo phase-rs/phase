@@ -1209,14 +1209,13 @@ fn last_created_rider_with_empty_created_set_hits_nothing() {
 ///
 /// Both origin routes fire the outer trigger (CR 603.1): Oglor's "from your
 /// library or hand" origin parses to the disjunctive `origin_zones` set. The
-/// graveyard departures target the battlefield and exile (scanned zones): the
-/// look-back scan only covers departures from the battlefield plus
-/// current-zone scans of battlefield/graveyard/exile/stack, so a graveyard ->
+/// graveyard departures target the battlefield and exile: a graveyard ->
+/// battlefield departure is read from the card's pre-event view in the entry's
+/// record (the own-entry arm, CR 603.10a), and a graveyard -> exile departure
+/// by the exile-zone scan, which reads the same record; a graveyard ->
 /// hand/library departure of the trigger's own source is invisible to
-/// collection (pre-existing look-back gap: CR 603.10a lists
-/// leaves-graveyard triggers among those that look back, but the scan only
-/// implements leaves-battlefield look-back; extending it is out of scope for
-/// this fix).
+/// collection (pre-existing look-back gap: no scan reads the record for those
+/// destinations; extending it is out of scope for this fix).
 ///
 /// Revert-failing: the structural-equality installer guard collapses the
 /// second grant, so the `base_trigger_definitions` count stays 1 and every
@@ -1255,9 +1254,9 @@ fn oglor_repeated_grants_retain_multiplicity_across_zone_cycles() {
         "reach-guard: the first Oglor resolution must grant one trigger"
     );
 
-    // Departure #1: one instance -> one Zombie. The battlefield is a scanned
-    // zone, so the granted trigger is found for the graveyard -> battlefield
-    // event; entry also runs the layer pipeline with one grant installed.
+    // Departure #1: one instance -> one Zombie. The granted trigger is read
+    // from the card's pre-event view in the entry's record (CR 603.10a);
+    // entry also runs the layer pipeline with one grant installed.
     move_zone_simulated(&mut runner, bears, Zone::Battlefield);
     settle_stack(&mut runner);
     assert_eq!(

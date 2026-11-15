@@ -10,6 +10,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import {
   type CommanderDamageEntry,
+  commandZoneBosses,
   commandZoneConspiracies,
   commandZoneLeaders,
   commanderDamageEntriesFor,
@@ -17,7 +18,7 @@ import {
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
-import { CommanderCardZone, ConspiracyCardZone } from "./CommanderCardZone.tsx";
+import { BossCardZone, CommanderCardZone, ConspiracyCardZone } from "./CommanderCardZone.tsx";
 import { CommandZone } from "./CommandZone.tsx";
 
 interface CommandDockProps {
@@ -65,6 +66,10 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
     () => (gameState ? commandZoneConspiracies(gameState, playerId) : []),
     [gameState, playerId],
   );
+  const bossesForPlayer = useMemo(
+    () => (gameState ? commandZoneBosses(gameState, playerId) : []),
+    [gameState, playerId],
+  );
   const damageEntries = useMemo(
     () => (gameState ? commanderDamageEntriesFor(gameState, playerId) : []),
     [gameState, playerId],
@@ -85,6 +90,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   const hasContent =
     commandZoneLeadersForPlayer.length > 0 ||
     conspiraciesForPlayer.length > 0 ||
+    bossesForPlayer.length > 0 ||
     emblemCount > 0 ||
     damageEntries.length > 0;
   if (!hasContent) return null;
@@ -97,6 +103,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
     <div className={split ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}>
       <CommanderCardZone playerId={playerId} splitOverview={split} />
       <ConspiracyCardZone playerId={playerId} splitOverview={split} />
+      <BossCardZone playerId={playerId} splitOverview={split} />
       <CommandZone playerId={playerId} />
       <CommanderDamage playerId={playerId} compact={split} />
     </div>
@@ -120,6 +127,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
       isMirrored={isMirrored}
       commanders={commandZoneLeadersForPlayer}
       conspiracies={conspiraciesForPlayer}
+      bosses={bossesForPlayer}
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}
@@ -135,6 +143,7 @@ interface CompactCommandDockProps {
   dockRole: "player" | "opponent";
   commanders: GameObject[];
   conspiracies?: GameObject[];
+  bosses?: GameObject[];
   emblemCount: number;
   damageEntries: CommanderDamageEntry[];
   label: string;
@@ -146,6 +155,7 @@ function CompactCommandDock({
   dockRole,
   commanders,
   conspiracies,
+  bosses,
   emblemCount,
   damageEntries,
   label,
@@ -156,7 +166,7 @@ function CompactCommandDock({
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
-  const firstCard = commanders[0] ?? conspiracies?.[0];
+  const firstCard = commanders[0] ?? conspiracies?.[0] ?? bosses?.[0];
   const displayName = useLocalizedCardName(firstCard?.name ?? null) ?? firstCard?.name ?? "";
   const imageProps = firstCard ? objectImageProps(firstCard) : null;
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
@@ -176,7 +186,7 @@ function CompactCommandDock({
     (sum, entry) => sum + entry.views.reduce((s, v) => s + v.damage, 0),
     0,
   );
-  const totalCards = commanders.length + (conspiracies?.length ?? 0);
+  const totalCards = commanders.length + (conspiracies?.length ?? 0) + (bosses?.length ?? 0);
 
   useEffect(() => {
     if (!open) return;

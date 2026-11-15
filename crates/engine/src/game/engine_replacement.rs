@@ -12,8 +12,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
-    WaitingFor,
+    PendingCounterPostAction, PendingEffectResolved, PendingReplacement, TokenEntryEventEmission,
+    UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -22,6 +22,7 @@ use crate::types::proposed_event::{
     AppliedReplacementKey, CounterPlacement, DrawEventStage, ProposedEvent,
 };
 use crate::types::replacements::ReplacementEvent;
+use crate::types::resolution::ChildStackDepth;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
@@ -2964,6 +2965,21 @@ pub(super) fn handle_copy_target_choice(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let waiting_for = apply_copy_target_choice(state, waiting_for, target, events)?;
+    state.waiting_for = waiting_for;
+    // CR 117.2e + CR 608.2c: every successful copy answer shares this boundary.
+    // A settled liminal batch can expose an enclosing copy owner or replacement
+    // drain; finish that resolution before priority, preserving any new prompt.
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+fn apply_copy_target_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    target: Option<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::CopyTargetChoice {
         player,
         source_id,
@@ -3303,6 +3319,7 @@ pub(super) fn handle_copy_target_choice(
         if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation.filter(|(_, _, _, _, remaining_count)| *remaining_count > 0)
         {
+            let copy_owner = state.active_copy_token().cloned();
             let initial_created_ids = state.last_created_token_ids.clone();
             let status =
                 super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
@@ -3321,6 +3338,11 @@ pub(super) fn handle_copy_target_choice(
                 }
                 super::effects::token_copy::CopyTokenApplyCompletion::Paused => {
                     state.last_created_token_ids = status.created_ids;
+                    super::effects::token::handoff_paused_liminal_copy_token_batch(
+                        state,
+                        copy_owner.as_ref(),
+                        events,
+                    );
                     return Ok(state.waiting_for.clone());
                 }
             }
@@ -3423,7 +3445,6 @@ pub(super) fn handle_copy_target_choice(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    super::engine::resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
 }
 
@@ -3574,6 +3595,82 @@ pub(crate) fn resume_copy_target_choice_entry(
     }
 }
 
+/// CR 614.12a + CR 608.2c: every entry-choice pause retains the caller's
+/// committed-entry emission and remaining batch until the answer settles.
+fn park_copy_entry_post_actions(
+    state: &mut GameState,
+    source_id: ObjectId,
+    post_actions: Vec<PendingCounterPostAction>,
+    child_stack_start: ChildStackDepth,
+) {
+    if post_actions.is_empty() {
+        return;
+    }
+    // A prior batch continuation can leave an empty carrier while its next
+    // entrant waits on the copy choice. Reuse that carrier, so it cannot hide
+    // the CopyToken owner when this entrant publishes its completed ledger.
+    let has_empty_carrier = state.resolution_stack.capture_child_boundary() == child_stack_start
+        && state.active_counter_additions().is_some_and(|queue| {
+            queue.remaining.is_empty()
+                && queue
+                    .completion
+                    .as_ref()
+                    .is_some_and(|completion| completion.is_noop())
+        });
+    if has_empty_carrier {
+        super::effects::counters::append_pending_counter_post_actions(state, post_actions);
+    } else {
+        // CR 608.2c + CR 614.12a: finish every continuation the entry
+        // choice raised before emitting the entry or continuing its batch.
+        super::effects::counters::park_pending_counter_completion_at_child_boundary(
+            state,
+            PendingEffectResolved::with_post_actions_without_effect(
+                EffectKind::CopyTokenOf,
+                source_id,
+                post_actions,
+            ),
+            child_stack_start,
+        );
+    }
+}
+
+/// CR 608.2c + CR 614.12a: an acquired entry choice and its continuation are
+/// children of the copy batch, not later instructions after that batch.
+fn surface_copy_entry_pause(
+    state: &mut GameState,
+    source_id: ObjectId,
+    post_actions: &[PendingCounterPostAction],
+    producer: impl FnOnce(&mut GameState) -> Option<WaitingFor>,
+) -> Option<WaitingFor> {
+    // An exhausted carrier has no remaining work. Retire it before producing
+    // the choice so the chain driver cannot mistake it for the choice's child.
+    super::effects::counters::retire_exhausted_counter_additions(state);
+    // The chain driver places a paused instruction's tail below its active
+    // child. This owner predates the instruction, so keep it outside that
+    // producer and restore it below the complete child stack afterwards.
+    let owner = state.active_copy_token().is_some().then(|| {
+        state
+            .take_active_copy_token()
+            .expect("the copy batch owns the active frame")
+            .expect("the checked copy owner exists")
+    });
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let waiting_for = producer(state);
+    if waiting_for.is_some() {
+        park_copy_entry_post_actions(state, source_id, post_actions.to_vec(), child_stack_start);
+    }
+    if let Some(owner) = owner {
+        if state.resolution_stack.capture_child_boundary() == child_stack_start {
+            state.push_copy_token(owner);
+        } else {
+            state
+                .insert_copy_token_parent_at_child_boundary(owner, child_stack_start)
+                .expect("the copy owner belongs below its entry-choice subtree");
+        }
+    }
+    waiting_for
+}
+
 fn finish_copy_target_choice_entry_after_counters(
     state: &mut GameState,
     source_id: ObjectId,
@@ -3586,47 +3683,33 @@ fn finish_copy_target_choice_entry_after_counters(
     if let Some(choice) =
         super::replacement::current_self_enter_replacement_choice(state, source_id)
     {
-        if let Some(waiting_for) = apply_post_replacement_effect(
-            state,
-            &choice,
-            // CR 109.5: a self-scoped "as this enters, choose …" replacement is
-            // text on the entering permanent itself, so its controller already
-            // IS the affected object's controller — no override needed.
-            ContinuationSubjects::affected_only(Some(source_id)),
-            None,
-            Some(&ReplacementEvent::Moved),
-            HashSet::new(),
-            events,
-        ) {
+        if let Some(waiting_for) =
+            surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
+                apply_post_replacement_effect(
+                    state,
+                    &choice,
+                    // CR 109.5: this self-scoped replacement belongs to the entrant.
+                    ContinuationSubjects::affected_only(Some(source_id)),
+                    None,
+                    Some(&ReplacementEvent::Moved),
+                    HashSet::new(),
+                    events,
+                )
+            })
+        {
             return Ok(Some(waiting_for));
         }
     }
-    // CR 614.12a + CR 707.2: surface a copied as-enters life payment (Clone
-    // entering as Minion of the Wastes) before replaying the entry — the
-    // payment sibling of the choice surface above. No card carries both a
-    // copied choice and a copied payment, so ordering between the two surfaces
-    // is unobservable; the named surface keeps its existing first slot.
+    // CR 614.12a + CR 707.2: copied entry payments retain the same child and
+    // batch custody as copied entry choices.
     if let Some(waiting_for) =
-        super::replacement::surface_copied_entry_payment(state, source_id, events)
+        surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
+            super::replacement::surface_copied_entry_payment(state, source_id, events)
+        })
     {
-        // CR 616.1 carrier for the payment pause — verbatim mirror of the aura-site
-        // stash below: `counter_pause_post_actions` holds the liminal copy-token
-        // caller's committed-entry emit and its remaining-batch continuation, and
-        // returning the prompt without parking them would drop both (the drain
-        // side is `complete_copy_surfaced_payment`, which resumes through
-        // `resume_pending_continuation_if_priority` when the payment is answered).
-        // Empty-guarded so the single-token path (which passes nothing) acquires
-        // no spurious pending-counter frame.
-        if !counter_pause_post_actions.is_empty() {
-            super::effects::counters::stash_pending_counter_post_actions(
-                state,
-                crate::types::ability::EffectKind::CopyTokenOf,
-                source_id,
-                counter_pause_post_actions,
-            );
-        }
         return Ok(Some(waiting_for));
     }
+
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
     // choice is answered — the first instant the token IS the thing that entered. Placed before
     // the replay/batch-drain/aura blocks so their pause returns cannot strand a parked entry.
@@ -3705,6 +3788,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // to carry its own enter-as-a-copy replacement, and none of those realize into
     // a multi-host Aura with a token continuation), but "no card does this today"
     // is not a property the engine should depend on.
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
     match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
         // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
         // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
@@ -3734,14 +3818,12 @@ fn finish_copy_target_choice_entry_after_counters(
             // in the list is idempotent (`flush_pending_token_battlefield_entry`
             // above already realized the parked entry), so re-running it after the
             // host choice is a no-op rather than a double emit.
-            if !counter_pause_post_actions.is_empty() {
-                super::effects::counters::stash_pending_counter_post_actions(
-                    state,
-                    crate::types::ability::EffectKind::CopyTokenOf,
-                    source_id,
-                    counter_pause_post_actions,
-                );
-            }
+            park_copy_entry_post_actions(
+                state,
+                source_id,
+                counter_pause_post_actions,
+                child_stack_start,
+            );
             state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                 player: controller,
                 source_id,
@@ -4171,6 +4253,9 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
         .effect
         .target_filter()
         .is_some_and(filter_uses_event_target)
+        // CR 608.2c: the replaced event's player as the move's performer.
+        || crate::game::effects::zone_move_actor_filter(&ability.effect)
+            .is_some_and(filter_uses_event_target)
         || ability
             .sub_ability
             .as_deref()
@@ -5651,6 +5736,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::SelfRef,
@@ -5974,6 +6060,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,
@@ -6252,16 +6339,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8089,6 +8179,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         );
         state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(template)));
@@ -8614,16 +8705,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8826,16 +8920,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8954,16 +9051,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -9422,16 +9522,19 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            with_entry_effect: None,
+            co_entrants: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };

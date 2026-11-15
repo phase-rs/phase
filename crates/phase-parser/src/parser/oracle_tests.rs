@@ -8,9 +8,10 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun,
-    CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter,
-    DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
+    CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
@@ -1981,7 +1982,10 @@ fn named_step_activation_cards_parse_without_gaps() {
         target,
         &TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }
         ])),
@@ -10451,19 +10455,14 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         "+1 grant must expire 'until your next turn'"
     );
 
-    // The inner static grants Flash to Sorcery spells the controller casts.
+    // The inner static lets the controller cast Sorcery spells as though they had flash.
     let inner = match &static_abilities[0].modifications[0] {
         ContinuousModification::GrantStaticAbility { definition } => definition,
         other => panic!("expected GrantStaticAbility, got {other:?}"),
     };
     assert!(
-        matches!(
-            &inner.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        ),
-        "inner static must be CastWithKeyword(Flash), got {:?}",
+        matches!(&inner.mode, StaticMode::CastWithFlash),
+        "inner static must be CastWithFlash, got {:?}",
         inner.mode
     );
     let Some(TargetFilter::Typed(tf)) = &inner.affected else {
@@ -10482,6 +10481,89 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         Some(ControllerRef::You),
         "inner affected filter must scope to spells you cast"
     );
+}
+
+/// `optional` of every ability in `r` (sub-abilities included) whose effect grants a
+/// `CastWithFlash` static.
+fn flash_grant_optionality(r: &ParsedAbilities) -> Vec<bool> {
+    let mut found = Vec::new();
+    for top in &r.abilities {
+        let mut def = Some(top);
+        while let Some(d) = def {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::GrantStaticAbility { definition }
+                            if definition.mode == StaticMode::CastWithFlash)
+                    })
+                }) {
+                    found.push(d.optional);
+                }
+            }
+            def = d.sub_ability.as_deref();
+        }
+    }
+    found
+}
+
+/// CR 601.3b + CR 608.2d: a resolved "you may cast ... spells ... as though they had flash" grant
+/// installs without a resolution choice; the "may" is the later cast.
+#[test]
+fn resolved_flash_timing_grants_are_not_resolution_choices() {
+    let cases: [(&str, &str, &[Keyword], &str); 5] = [
+        (
+            "Alchemist's Refuge",
+            "{T}: Add {C}.\n{G}{U}, {T}: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Emergence Zone",
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Winding Canyons",
+            "{T}: Add {C}.\n{2}, {T}: You may cast creature spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Borne Upon a Wind",
+            "You may cast spells this turn as though they had flash.\nDraw a card.",
+            &[],
+            "Instant",
+        ),
+        (
+            "Complete the Circuit",
+            "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nYou may cast sorcery spells this turn as though they had flash.\nWhen you next cast an instant or sorcery spell this turn, copy that spell twice. You may choose new targets for the copies.",
+            &[Keyword::Convoke],
+            "Instant",
+        ),
+    ];
+    for (name, text, keywords, card_type) in cases {
+        let r = parse(text, name, keywords, &[card_type], &[]);
+        assert_eq!(
+            flash_grant_optionality(&r),
+            vec![false],
+            "{name}: abilities {:?}",
+            r.abilities
+        );
+    }
+
+    // A "you may" clause that is not a permission grant stays a resolution choice.
+    let twiddle = parse(
+        "You may tap or untap target artifact, creature, or land.",
+        "Twiddle",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(twiddle.abilities[0].optional, "{:?}", twiddle.abilities);
 }
 
 /// Issue #2858: Archangel Elspeth's three loyalty abilities must parse as
@@ -35024,6 +35106,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {
@@ -35920,4 +36003,47 @@ fn corpus_oracle_text(name: &str) -> String {
         other => panic!("no corpus oracle text recorded for {other}"),
     }
     .to_string()
+}
+
+/// CR 607.2a + CR 608.2c: promoting a linked LTB return to the return of every
+/// card this object exiled keeps the move's performer. Synthetic actor: no
+/// printed linked return names a subject today.
+#[test]
+fn ltb_return_promotion_keeps_the_actor() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::identifiers::TrackedSetId;
+    let actor = LibraryInstructionActor::Player {
+        player: TargetFilter::ParentTargetController,
+    };
+    let unpromoted = Effect::ChangeZone {
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+        library_shuffle: Default::default(),
+    };
+    let promoted = ltb_return_of_exiled_by_source(&unpromoted).expect("promoted");
+    let Effect::ChangeZoneAll {
+        actor: promoted_actor,
+        target,
+        ..
+    } = &promoted
+    else {
+        panic!("expected ChangeZoneAll, got {promoted:?}");
+    };
+    assert_eq!(promoted_actor, &actor);
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }

@@ -5210,6 +5210,311 @@ mod restored_card_db_requirements_tests {
     }
 }
 
+/// Production-restore owner pin for the Smackdown ref repair (R8-F1): the
+/// engine test proves the shared decode chokepoint heals the ref, but it
+/// supplies its own rehydration closure and reads the projection directly —
+/// a production restore caller that skipped rehydration would still pass.
+/// This test feeds the legacy Turtle Team-Up save through the actual solo
+/// owner (`restore_game_state_inner`, the same body the `restore_game_state`
+/// shell runs) and asserts on the FIRST SERIALIZED viewer snapshot, exactly
+/// like the `exported_state_projects_ai_hand_identity_by_request`
+/// precedent: the installed state is read back, projected for the local
+/// seat, and asserted on the wire value.
+///
+/// Real card: Event: Leatherhead's Smackdown, TTMC #20. Verbatim Oracle
+/// text: "As a team, the heroes choose a creature with the greatest power
+/// among creatures they control. Destroy it. The bosses lose life equal to
+/// that creature's power." (preset f13c9091-91b6-51b4-91d5-214180ff03ee,
+/// oracle 4e7833c7-e9ff-4550-b2fd-36afe6087e0f). The old-save shape splices
+/// the ORIGINAL typo'd scryfall_id (444 for 4a44, no face_name) at the
+/// serialized boundary. The expectation is computed from the preset record
+/// the repair itself reads, plus a pinned-literal guard — never re-typed.
+///
+/// Discrimination: a production restore caller that skipped the card-DB
+/// rehydration — or a reverted ref repair — leaves the projected graveyard
+/// Event carrying the typo'd ref, so the corrected-ref equality on the
+/// serialized snapshot flips. Every concealment assertion pairs with a
+/// positive reach-guard (revealed + corrected pre-serialize; piles
+/// non-empty pre-serialize).
+#[cfg(test)]
+mod production_restore_owner_regression_tests {
+    use super::*;
+    use engine::game::deck_loading::{load_deck_into_state, load_horde_library, DeckPayload};
+    use engine::game::token_presets::known_token_preset_by_id;
+    use engine::types::format::ChallengeDeck;
+    use engine::types::phase::Phase;
+
+    #[test]
+    fn production_restore_owner_repairs_revealed_smackdown_ref_on_first_serialized_snapshot() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let saved_card_db = CARD_DB.with(|cell| cell.borrow().clone());
+        load_minimal_test_card_database();
+
+        // Two-seat Turtle Team-Up, mirroring `boss.rs::turtle_teamup_game`:
+        // emblem plus stage-1 deploy, then the 27-card event library
+        // (token-layout, so no card DB is needed for setup).
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        assert_eq!(horde, PlayerId(0), "the Horde occupies the local seat");
+        load_deck_into_state(&mut state, &DeckPayload::default());
+        load_horde_library(
+            &mut state,
+            &CardDatabase::default(),
+            horde,
+            ChallengeDeck::TurtleTeamUpHorde,
+        );
+        let hero = state
+            .players
+            .iter()
+            .map(|player| player.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        // The repair's own authority for the expectation: preset identity
+        // in, corrected ref out. The Smackdown preset carries its art ref,
+        // so this is exactly what the in-engine repair stamps.
+        let expected_smackdown_ref =
+            known_token_preset_by_id("f13c9091-91b6-51b4-91d5-214180ff03ee")
+                .expect("Smackdown preset resolves")
+                .token_image_ref
+                .clone()
+                .expect("Smackdown preset carries its art ref");
+        assert_eq!(
+            expected_smackdown_ref.scryfall_id, "fac36345-b2fb-4a44-a499-f68bbe87e736",
+            "the preset carries the corrected post-PR art ref"
+        );
+        assert_eq!(
+            expected_smackdown_ref.preset_id, "f13c9091-91b6-51b4-91d5-214180ff03ee",
+            "preset identity round-trips"
+        );
+
+        // Rig the Smackdown on top of the event deck (the established
+        // `boss.rs` reveal-driver pattern).
+        let library: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|player| player.id == horde)
+            .expect("horde seat")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let smackdown = library
+            .into_iter()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.name == "Event: Leatherhead's Smackdown")
+            })
+            .expect("the event deck must contain Leatherhead's Smackdown");
+        {
+            let seat = state
+                .players
+                .iter_mut()
+                .find(|player| player.id == horde)
+                .expect("horde seat");
+            seat.library.retain(|id| *id != smackdown);
+            seat.library.push_front(smackdown);
+        }
+
+        // Park priority with the survivor on the Horde's turn — the beat
+        // after the Horde's own pass. The survivor's production pass hands
+        // priority back to the Horde, and the pipeline's wave gate
+        // (`player == active_player`, empty stack, positive budget) fires
+        // the reveal on that same beat. This is the production action path
+        // (`submit_action_inner`, the same body the live shell runs), not a
+        // direct reveal call — engine-wasm cannot reach the `pub(crate)`
+        // reveal driver, which is exactly why the R7 engine test had to
+        // call it directly.
+        state.phase = Phase::PreCombatMain;
+        state.active_player = horde;
+        state.priority_player = hero;
+        state.waiting_for = WaitingFor::Priority { player: hero };
+        state.horde_wave_remaining = 1;
+        install_game_state(Some(state));
+        match submit_action_inner(hero, GameAction::PassPriority) {
+            Ok(SubmittedAction::Applied { .. }) => {}
+            Ok(SubmittedAction::Rejected { rejection }) => {
+                panic!("the survivor's pass must apply, got rejection {rejection:?}")
+            }
+            Err(error) => panic!("the survivor's pass must apply, got error {error:?}"),
+        }
+
+        // Positive reach-guards on the live installed state: the reveal
+        // settled synchronously with no parked prompt, the Event sits in
+        // the Boss graveyard carrying the corrected ref, and both hidden
+        // piles are non-empty — so no later assertion passes vacuously.
+        let (hidden_library, pile_boss) = with_installed_state(|state| {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "no prompt parks on the reveal beat"
+            );
+            assert!(
+                state
+                    .players
+                    .iter()
+                    .find(|player| player.id == horde)
+                    .expect("horde seat")
+                    .graveyard
+                    .contains(&smackdown),
+                "the revealed Smackdown must sit in the Boss graveyard pre-serialize"
+            );
+            assert_eq!(
+                state
+                    .objects
+                    .get(&smackdown)
+                    .expect("revealed Event")
+                    .token_image_ref,
+                Some(expected_smackdown_ref.clone()),
+                "precondition: the live reveal stamps the corrected ref"
+            );
+            (
+                *state
+                    .players
+                    .iter()
+                    .find(|player| player.id == horde)
+                    .expect("horde seat")
+                    .library
+                    .front()
+                    .expect("the event deck still holds cards after one reveal"),
+                *state
+                    .boss_deck
+                    .front()
+                    .expect("the Boss pile survives setup"),
+            )
+        })
+        .expect("a game is installed");
+
+        // Production envelope (`export_game_state_json` shape), then the
+        // pre-PR regression spliced in AT THE SERIALIZED BOUNDARY: every
+        // display route omitted, and every Smackdown ref rewritten to the
+        // historical typo'd printing (444 for 4a44, no face_name).
+        let json = export_game_state_json().expect("production export serializes");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse the envelope");
+        let objects = value
+            .get_mut("state")
+            .and_then(|envelope| envelope.get_mut("objects"))
+            .and_then(|objects| objects.as_object_mut())
+            .expect("the envelope carries the objects map");
+        for obj in objects.values_mut() {
+            obj.as_object_mut()
+                .expect("saved object")
+                .remove("display_source");
+        }
+        let mut rewrote = 0;
+        for obj in objects.values_mut() {
+            let is_smackdown = obj
+                .get("token_image_ref")
+                .and_then(|image_ref| image_ref.get("preset_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some("f13c9091-91b6-51b4-91d5-214180ff03ee");
+            if is_smackdown {
+                obj["token_image_ref"] = serde_json::json!({
+                    "scryfall_id": "fac36345-b2fb-444-a499-f68bbe87e736",
+                    "scryfall_oracle_id": "4e7833c7-e9ff-4550-b2fd-36afe6087e0f",
+                    "preset_id": "f13c9091-91b6-51b4-91d5-214180ff03ee",
+                });
+                rewrote += 1;
+            }
+        }
+        assert!(
+            rewrote >= 1,
+            "the boundary splice must regress at least the revealed Smackdown"
+        );
+        let stripped = serde_json::to_string(&value).expect("re-serialize the old save");
+        assert!(
+            !stripped.contains("display_source"),
+            "precondition: the old save omits every display route"
+        );
+
+        // Through THE ACTUAL OWNER: the solo restore caller with its own
+        // rehydrate wiring, not a test-supplied closure.
+        assert!(!is_multiplayer_mode(), "restore runs as the solo owner");
+        restore_game_state_inner(&stripped).expect("the production owner restores the old save");
+
+        // FIRST SERIALIZED viewer snapshot, exactly like the hand-disclosure
+        // precedent: installed state, local-seat (Horde-seat) projection,
+        // then assertions on the wire value.
+        let wire = with_installed_state(|state| {
+            serde_json::to_value(local_seat_client_state(state)).expect("client state serializes")
+        })
+        .expect("a game is installed");
+        let shown = &wire["state"]["objects"][smackdown.0.to_string()];
+        assert_eq!(
+            shown["name"].as_str(),
+            Some("Event: Leatherhead's Smackdown"),
+            "the graveyard Event keeps its name"
+        );
+        assert_eq!(
+            shown["display_visible_to_viewer"].as_bool(),
+            Some(true),
+            "the revealed Event is visible to the viewer"
+        );
+        assert_eq!(
+            shown["display_source"].as_str(),
+            Some("Token"),
+            "routing repaired through the production owner"
+        );
+        // THE discriminating assertion: a production restore caller that
+        // skipped rehydration leaves the typo'd ref here, so this flips.
+        assert_eq!(
+            shown["token_image_ref"]["scryfall_id"].as_str(),
+            Some(expected_smackdown_ref.scryfall_id.as_str()),
+            "the first serialized snapshot must show the corrected ref for the graveyard Event"
+        );
+        assert_eq!(
+            shown["token_image_ref"]["preset_id"].as_str(),
+            Some("f13c9091-91b6-51b4-91d5-214180ff03ee"),
+            "preset identity survives the owner restore"
+        );
+
+        // Both hidden piles stay concealed in the Horde-seat snapshot: the
+        // remaining event library and the face-down Boss pile.
+        for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
+            let hidden = &wire["state"]["objects"][id.0.to_string()];
+            assert_eq!(
+                hidden["name"].as_str(),
+                Some("Hidden Card"),
+                "{what} name concealed"
+            );
+            assert!(
+                !hidden["display_visible_to_viewer"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "{what} visibility concealed"
+            );
+            // `Card` is the skip-serialized default: the concealed routing
+            // rides the wire as an absent key (the same shape as the
+            // pre-PR omission, which deserializes back to `Card`).
+            assert!(
+                hidden.get("display_source").is_none(),
+                "{what} routing concealed"
+            );
+            assert!(
+                hidden.get("token_image_ref").is_none(),
+                "{what} art ref concealed"
+            );
+            assert!(
+                !hidden
+                    .get("is_horde_deck_token")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                "{what} Horde flag concealed"
+            );
+        }
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = saved_card_db);
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+}
+
 #[cfg(test)]
 mod combat_prompt_restore_tests {
     use super::*;
@@ -5352,6 +5657,701 @@ mod combat_prompt_restore_tests {
         .expect("restored state remains available")
         .expect("restored blocker choices reach the declaration reducer");
         clear_game_state();
+    }
+}
+
+#[cfg(test)]
+mod legacy_pending_cast_timing_restore_tests {
+    use std::io::Read;
+
+    use super::*;
+    use engine::game::scenario::{GameRunner, P0, P1};
+    use engine::types::ability::{AbilityCost, AdditionalCost};
+    use engine::types::actions::GameAction;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::{
+        CastPaymentMode, CastTimingRoute, SpellAlternativeCostElection,
+    };
+    use engine::types::mana::ManaCostShard;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    /// A save written by the released v0.124.0 engine; see `v0_124_0.provenance`.
+    macro_rules! v124 {
+        ($name:literal) => {
+            inflate(include_bytes!(concat!(
+                "../../engine/tests/fixtures/legacy_saves/v0_124_0/",
+                $name,
+                ".json.gz"
+            )))
+        };
+    }
+
+    fn inflate(bytes: &[u8]) -> String {
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_string(&mut json)
+            .expect("the fixture inflates");
+        json
+    }
+
+    fn raw(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("the fixture is JSON")
+    }
+
+    const LEGACY_ROUTE: &str = "\"cast_timing_permission\":\"AsThoughHadFlash\"";
+    const LEGACY_GRANT: &str = "{\"CastWithKeyword\":{\"keyword\":\"Flash\"}}";
+
+    fn restore(json: &str) -> GameState {
+        load_minimal_test_card_database();
+        decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the legacy save restores")
+            .state
+    }
+
+    /// Restores a save whose pending cast carries only the legacy timing value.
+    fn restore_legacy_cast(json: &str) -> GameState {
+        assert!(json.contains(LEGACY_ROUTE));
+        restore(json)
+    }
+
+    fn object_named(state: &GameState, name: &str) -> ObjectId {
+        let mut ids = state
+            .objects
+            .iter()
+            .filter(|(_, object)| object.name == name)
+            .map(|(id, _)| *id);
+        let id = ids.next().expect("the object is in the save");
+        assert!(ids.next().is_none(), "one {name}");
+        id
+    }
+
+    fn pending(state: &GameState) -> &engine::types::game_state::PendingCast {
+        state
+            .waiting_for
+            .pending_cast_ref()
+            .or(state.pending_cast.as_deref())
+            .expect("a cast is pending")
+    }
+
+    fn pending_route(state: &GameState) -> Option<CastTimingRoute> {
+        pending(state).cast_timing_permission
+    }
+
+    fn energy(state: &GameState) -> u32 {
+        state.players[P0.0 as usize].energy
+    }
+
+    fn pool(state: &GameState) -> usize {
+        state.players[P0.0 as usize].mana_pool.total()
+    }
+
+    fn hand(state: &GameState) -> usize {
+        state.players[P0.0 as usize].hand.len()
+    }
+
+    fn assert_restored_at_target_selection(state: &GameState, route: CastTimingRoute) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(pending_route(state), Some(route));
+    }
+
+    fn assert_kept_paying(restored: &GameState, spell: ObjectId) {
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        let pending = restored.pending_cast.as_deref().expect("the cast is kept");
+        assert_eq!(pending.object_id, spell);
+        assert_eq!(
+            pending.cast_timing_permission,
+            Some(CastTimingRoute::Permission)
+        );
+    }
+
+    fn assert_reversed(restored: &GameState, spell: ObjectId, pool_after: usize) {
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(restored.objects[&spell].zone, Zone::Hand);
+        assert!(restored.stack.is_empty());
+        assert!(restored.pending_cast.is_none());
+        assert_eq!(pool(restored), pool_after);
+    }
+
+    // CR 601.3d: only Timely Ward's own option is open, so that route is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_spells_own_flash_option() {
+        let restored = restore_legacy_cast(&v124!("ward_spell_option"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::SpellOption);
+    }
+
+    // CR 601.3: with Leyline's permission and the spell's own option both open, the permission a
+    // cast proposal records first is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_first_open_route() {
+        let restored = restore_legacy_cast(&v124!("ward_leyline"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+    }
+
+    // CR 601.2a: Azula's permission belongs to its caster, not to the exiled card's controller.
+    #[test]
+    fn legacy_pending_cast_recovers_the_casters_route() {
+        let restored = restore_legacy_cast(&v124!("azula_ward"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+        let ward = object_named(&restored, "Timely Ward");
+        assert_eq!(restored.objects[&ward].controller, P1);
+        assert_eq!(pending(&restored).ability.controller, P0);
+    }
+
+    // CR 601.3 + CR 733.1: with Leyline gone, nothing lets a bestowed Nimbus Naiad begin in the
+    // upkeep, so its open proposal is reversed.
+    #[test]
+    fn legacy_proposal_without_an_open_route_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("naiad_bestow_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Nimbus Naiad"), 5);
+    }
+
+    // CR 601.6: Wispmare's evoke cost is already being paid, so losing Leyline does not make the
+    // cast illegal.
+    #[test]
+    fn legacy_cast_paying_its_costs_keeps_going_without_an_open_route() {
+        let restored = restore_legacy_cast(&v124!("wispmare_evoke_without_leyline"));
+        assert_kept_paying(&restored, object_named(&restored, "Wispmare"));
+        assert_eq!(pool(&restored), 1);
+        assert_eq!(energy(&restored), 2);
+    }
+
+    // CR 304.1 + CR 601.6: Opt is an instant, so its cast never depended on Leyline.
+    #[test]
+    fn legacy_instant_paying_its_costs_keeps_going() {
+        let restored = restore_legacy_cast(&v124!("opt_paying_without_leyline"));
+        assert_kept_paying(&restored, object_named(&restored, "Opt"));
+        assert_eq!(pool(&restored), 1);
+    }
+
+    // CR 304.1: Shock's proposal stays open after Leyline leaves, because an instant may begin in
+    // the upkeep anyway.
+    #[test]
+    fn legacy_instant_proposal_keeps_going() {
+        let restored = restore_legacy_cast(&v124!("shock_targeting_without_leyline"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+    }
+
+    // CR 601.2d + CR 733.1: dividing Arc Lightning's damage is still part of its proposal, so
+    // with Leyline gone the sorcery's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_division_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("arc_lightning_division_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Arc Lightning"), 3);
+    }
+
+    // CR 601.2b + CR 733.1: announcing Blaze's X is part of its proposal, so with Leyline gone the
+    // sorcery's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_x_announcement_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("blaze_x_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Blaze"), 3);
+    }
+
+    // CR 601.2b + CR 733.1: Defiler of Vigor's optional life payment is announced in the
+    // proposal, so with Leyline gone the creature spell's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_defiler_payment_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("defiler_payment_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Grizzly Bears"), 4);
+        assert_eq!(restored.players[P0.0 as usize].life, 20);
+    }
+
+    fn assert_at_kicker(state: &GameState) {
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Kicker { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Kicks the restored Gnarlid Colony and finishes paying only the kicker's {2}{G}, asserting
+    /// no further cost prompt.
+    fn kick_and_finish(restored: GameState) -> GameState {
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let before = pool(&restored);
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("P0 kicks Gnarlid Colony");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes paying");
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&gnarlid].zone, Zone::Stack);
+        assert_eq!(pool(&state), before - 3);
+        state
+    }
+
+    /// Resolves the kicked Gnarlid Colony and asserts it entered with two +1/+1 counters.
+    fn assert_resolves_kicked(finished: GameState, gnarlid: ObjectId) {
+        let mut runner = GameRunner::from_state(finished);
+        runner.resolve_top();
+        let gnarlid = &runner.state().objects[&gnarlid];
+        assert_eq!(gnarlid.zone, Zone::Battlefield);
+        assert_eq!(gnarlid.counters.get(&CounterType::Plus1Plus1), Some(&2));
+    }
+
+    /// The release spent Primal Prayers' {E} at announcement, then offered it again.
+    fn assert_released_second_offer(json: &str) {
+        assert!(json.contains("\"alternative_cost_election\":\"Offered\""));
+        assert!(
+            json.contains(
+                "[{\"amount\":{\"type\":\"Fixed\",\"value\":1},\"type\":\"PayEnergy\"},\
+                 {\"cost\":{\"type\":\"NoCost\"},\"type\":\"Mana\"}],\"type\":\"Choice\""
+            ),
+            "the {{E}} is offered"
+        );
+        assert_eq!(raw(json)["state"]["players"][0]["energy"], 1);
+    }
+
+    fn assert_elected(state: &GameState, route: CastTimingRoute) {
+        assert_eq!(pending_route(state), Some(route));
+        assert_eq!(
+            pending(state).alternative_cost_election,
+            SpellAlternativeCostElection::Accepted
+        );
+    }
+
+    // CR 601.2b + CR 601.3c: the paid {E} spent P0's last energy, so it alone shows Primal
+    // Prayers' alternative cost was elected.
+    #[test]
+    fn legacy_cast_that_spent_its_last_energy_keeps_its_alternative_cost() {
+        let restored = restore_legacy_cast(&v124!("prayers_gnarlid_energy1"));
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let finished = kick_and_finish(restored);
+        assert_eq!(energy(&finished), 0);
+        assert!(matches!(
+            finished.objects[&gnarlid].cast_timing_permission,
+            Some((
+                engine::types::ability::CastTimingPermission::AsThoughHadFlash,
+                _
+            ))
+        ));
+        assert_resolves_kicked(finished, gnarlid);
+    }
+
+    // CR 118.9a + CR 601.2b: the release's second offer of Primal Prayers' paid {E} is retired, so
+    // Gnarlid Colony is kicked without a second {E}.
+    #[test]
+    fn legacy_cast_with_paid_alternative_cost_keeps_its_election() {
+        let json = v124!("prayers_gnarlid_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        assert_eq!(energy(&restored), 1);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+
+        let finished = kick_and_finish(restored);
+        assert_eq!(energy(&finished), 1);
+        assert_resolves_kicked(finished, gnarlid);
+    }
+
+    // CR 118.9d + CR 702.33a: the restored cast still owes only the kicker's {2}{G}, so exactly
+    // that much mana kicks it.
+    #[test]
+    fn legacy_cast_with_paid_alternative_cost_is_kicked_with_only_the_kicker_mana() {
+        let mut save = raw(&v124!("prayers_gnarlid_energy2"));
+        save["state"]["players"][0]["mana_pool"]["mana"]
+            .as_array_mut()
+            .expect("the save floats mana")
+            .truncate(3);
+        let restored = restore_legacy_cast(&save.to_string());
+        assert_eq!(pool(&restored), 3);
+        assert_at_kicker(&restored);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let finished = kick_and_finish(restored);
+        assert_eq!(pool(&finished), 0);
+        assert_eq!(energy(&finished), 1);
+        assert_resolves_kicked(finished, gnarlid);
+    }
+
+    // CR 601.2b + CR 601.3: with Leyline's permission also open, the paid {E} is still Primal
+    // Prayers' election.
+    #[test]
+    fn legacy_permission_cast_with_paid_alternative_cost_keeps_its_election() {
+        let json = v124!("leyline_prayers_gnarlid_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::Permission);
+        assert_eq!(energy(&restored), 1);
+        assert_eq!(energy(&kick_and_finish(restored)), 1);
+    }
+
+    // CR 601.2g: nothing is left to decide after Primal Prayers' {E}, so the Grizzly Bears cast
+    // waits at its mana-payment window and Beast Whisperer sees it cast there.
+    #[test]
+    fn legacy_cast_with_nothing_left_to_decide_finishes_in_the_pipeline() {
+        let json = v124!("prayers_bears_whisperer_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        assert_eq!(energy(&restored), 1);
+        let bears = object_named(&restored, "Grizzly Bears");
+        let whisperer = object_named(&restored, "Beast Whisperer");
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes the cast");
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&bears].zone, Zone::Stack);
+        assert_eq!(state.stack.len(), 2);
+        assert_eq!(
+            state.stack.last().map(|entry| entry.source_id),
+            Some(whisperer)
+        );
+        assert_eq!(energy(state), 1);
+        let before = hand(state);
+        runner.resolve_top();
+        assert_eq!(hand(runner.state()), before + 1);
+    }
+
+    // CR 118.9a + CR 601.2b: Fist of Suns' offer was never paid, so it stays to be answered.
+    #[test]
+    fn legacy_unpaid_alternative_cost_offer_stays_answerable() {
+        let json = v124!("leyline_fist_of_suns_offered");
+        let restored = restore_legacy_cast(&json);
+        let wubrg = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        let printed = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        match &restored.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                cost:
+                    AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+                ..
+            } => assert_eq!((alt, cost), (&wubrg, &printed)),
+            other => panic!("expected Fist of Suns' offer, got {other:?}"),
+        }
+        assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
+        assert_eq!(
+            pending(&restored).alternative_cost_election,
+            SpellAlternativeCostElection::Offered
+        );
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("P0 accepts Fist of Suns' cost");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(pending(runner.state()).cost, wubrg);
+    }
+
+    // CR 601.2b: Primal Prayers is unpayable without energy, so nothing elected it.
+    #[test]
+    fn legacy_cast_without_an_energy_payment_leaves_the_alternative_undecided() {
+        let restored = restore_legacy_cast(&v124!("leyline_prayers_gnarlid_energy0"));
+        assert_at_kicker(&restored);
+        assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
+        assert_eq!(
+            pending(&restored).alternative_cost_election,
+            SpellAlternativeCostElection::Undecided
+        );
+    }
+
+    // CR 601.2b: Defiler of Vigor's paid life is not Primal Prayers' {E}.
+    #[test]
+    fn legacy_cast_with_another_paid_cost_leaves_the_alternative_undecided() {
+        let restored = restore_legacy_cast(&v124!("leyline_prayers_defiler_life_paid"));
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
+        assert_eq!(restored.players[P0.0 as usize].life, 18);
+        let pending = pending(&restored);
+        assert_eq!(
+            pending.alternative_cost_election,
+            SpellAlternativeCostElection::Undecided
+        );
+        assert!(!pending.ability.context.alternative_mana_cost_paid);
+    }
+
+    // CR 601.3 + CR 733.1: no cost has been paid at Gnarlid Colony's kicker choice, so with
+    // Leyline gone its proposal is reversed.
+    #[test]
+    fn legacy_proposal_at_its_kicker_choice_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("gnarlid_kicker_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Gnarlid Colony"), 6);
+    }
+
+    /// Casts `spell` from the restored `state` and returns the state once it is on the stack.
+    fn cast_after_restore(state: GameState, spell: ObjectId) -> GameState {
+        let mut runner = GameRunner::from_state(state);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the cast is announced");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes paying");
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        runner.state().clone()
+    }
+
+    fn cast_with_flash(state: &GameState, spell: ObjectId) -> bool {
+        state.objects[&spell]
+            .cast_spell_keywords
+            .contains(&engine::types::keywords::Keyword::Flash)
+    }
+
+    /// Resolves the restored save's Borne Upon a Wind, asserting it asks nothing and draws a card.
+    fn resolve_borne_on_the_stack() -> GameState {
+        let json = v124!("borne_on_the_stack");
+        let ability = &raw(&json)["state"]["stack"][0]["kind"]["data"]["ability"];
+        assert_eq!(ability["optional"], true);
+        assert!(ability["effect"].to_string().contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let before = hand(&restored);
+        let mut runner = GameRunner::from_state(restored);
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert_eq!(hand(&state), before + 1);
+        state
+    }
+
+    // CR 601.3 + CR 608.2d + CR 609.4: a released Borne Upon a Wind still on the stack grants its
+    // permission without asking, and Grizzly Bears cast under it doesn't have flash.
+    #[test]
+    fn legacy_as_though_flash_grant_on_the_stack_does_not_give_flash() {
+        let state = resolve_borne_on_the_stack();
+        let bears = object_named(&state, "Grizzly Bears");
+        let state = cast_after_restore(state, bears);
+        assert!(!cast_with_flash(&state, bears));
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.phase, Phase::Upkeep);
+    }
+
+    // CR 702.8a: Ambush Viper's own flash survives the old grant, and Slitherwisp sees it.
+    #[test]
+    fn legacy_as_though_flash_grant_on_the_stack_keeps_printed_flash() {
+        let state = resolve_borne_on_the_stack();
+        let viper = object_named(&state, "Ambush Viper");
+        let state = cast_after_restore(state, viper);
+        assert!(cast_with_flash(&state, viper));
+        assert_eq!(state.stack.len(), 2);
+    }
+
+    // CR 608.2d: Crawling Barrens' "you may have it become a creature" is chosen while it
+    // resolves, so its saved choice stays.
+    #[test]
+    fn legacy_unrelated_optional_ability_keeps_its_choice() {
+        let json = v124!("crawling_barrens_on_the_stack");
+        assert!(json.contains("\"optional\":true"));
+        assert!(!json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let barrens = object_named(&restored, "Crawling Barrens");
+        let mut runner = GameRunner::from_state(restored);
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner.state().objects[&barrens]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&2)
+        );
+    }
+
+    // CR 609.4: a save paused at the release's resolution prompt restores there, and accepting it
+    // grants the permission without flash.
+    #[test]
+    fn legacy_as_though_flash_grant_prompt_stays_answerable() {
+        let json = v124!("borne_resolving_optional_prompt");
+        assert!(json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "{:?}",
+            restored.waiting_for
+        );
+        let before = hand(&restored);
+        let bears = object_named(&restored, "Grizzly Bears");
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("P0 accepts");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(hand(runner.state()), before + 1);
+        let state = cast_after_restore(runner.state().clone(), bears);
+        assert!(!cast_with_flash(&state, bears));
+    }
+
+    // CR 609.4 + CR 702.8a: an old save's resolved Borne Upon a Wind grant lets Grizzly Bears be
+    // cast as though it had flash, without giving the spell flash, so Slitherwisp does not
+    // trigger.
+    #[test]
+    fn legacy_as_though_flash_grant_does_not_give_flash() {
+        let restored = restore_legacy_cast(&v124!("borne_resolved_bears_paying"));
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
+        let bears = object_named(&restored, "Grizzly Bears");
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes paying");
+        let state = runner.state();
+        assert_eq!(state.objects[&bears].zone, Zone::Stack);
+        assert!(!cast_with_flash(state, bears));
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    // CR 702.8a: Chea's "Familiar spells you cast have flash" survives the old save.
+    #[test]
+    fn legacy_as_though_flash_grant_keeps_granted_flash() {
+        let json = v124!("borne_resolved_chea");
+        assert!(json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let lions = object_named(&restored, "Savannah Lions");
+        let state = cast_after_restore(restored, lions);
+        assert!(cast_with_flash(&state, lions));
+    }
+
+    // CR 107.3c: an old save paused at Nourishing Shoal's pitch takes X from the exiled card.
+    #[test]
+    fn legacy_shoal_pitch_prompt_binds_x_from_the_pitched_card() {
+        let restored = restore(&v124!("shoal_pitch_prompt"));
+        let courser = object_named(&restored, "Centaur Courser");
+        let life_before = restored.players[P0.0 as usize].life;
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![courser],
+            })
+            .expect("P0 pitches Centaur Courser");
+        let Some(engine::types::game_state::StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        }) = runner.state().stack.last().map(|entry| &entry.kind)
+        else {
+            panic!("expected Nourishing Shoal on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(3));
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[P0.0 as usize].life, life_before + 3);
+        assert_eq!(runner.state().objects[&courser].zone, Zone::Exile);
+    }
+
+    // CR 601.2b: a pitch prompt whose cast did not elect the alternative cost recovers no cost.
+    #[test]
+    fn legacy_pitch_prompt_without_an_elected_alternative_keeps_its_resume() {
+        let json = v124!("shoal_pitch_prompt");
+        let accepted = "\"alternative_cost_election\":\"Accepted\"";
+        assert_eq!(json.matches(accepted).count(), 1);
+        assert!(matches!(
+            restore(&json).waiting_for,
+            WaitingFor::PayCost {
+                resume: engine::types::game_state::CostResume::SpellCost { .. },
+                ..
+            }
+        ));
+        let restored =
+            restore(&json.replace(accepted, "\"alternative_cost_election\":\"Declined\""));
+        assert!(
+            matches!(
+                &restored.waiting_for,
+                WaitingFor::PayCost {
+                    resume: engine::types::game_state::CostResume::Spell { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            restored.waiting_for
+        );
     }
 }
 
