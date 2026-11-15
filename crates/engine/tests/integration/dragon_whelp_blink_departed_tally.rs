@@ -358,6 +358,64 @@ fn returned_whelp_has_independent_activation_history() {
     );
 }
 
+/// CR 400.7 + CR 608.2h: the announced incarnation selects the tally
+/// table. Four activations are announced, the Whelp blinks, and the returned
+/// Whelp activates once more under the same shared key. The new activation
+/// resolves first and reads live count 1 (no rider); each old activation
+/// then reads the departed incarnation's 4 (arming four delayed triggers) —
+/// the live hit must not override the announced incarnation's history.
+///
+/// Reverting the table selection makes the old resolutions read the live 1,
+/// so no delayed trigger is ever installed and the count assertion flips.
+#[test]
+fn interleaved_incarnations_read_their_own_tallies() {
+    let (mut runner, whelp, shifts) = whelp_board(5, 1);
+
+    for nth in 1..=4 {
+        announce(&mut runner, whelp, nth);
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        4,
+        "reach-guard: four activations sit on the stack"
+    );
+    blink(&mut runner, shifts[0], whelp);
+    assert_eq!(
+        live_turn_count(&runner, whelp),
+        0,
+        "reach-guard: the blink migrated the live journal"
+    );
+    assert_eq!(
+        departed_turn_count(&runner, whelp),
+        4,
+        "reach-guard: the departed incarnation holds count 4"
+    );
+
+    // The returned Whelp activates under the same shared key; its resolution
+    // reads the live table's 1.
+    activate(&mut runner, whelp, 5);
+    assert_eq!(
+        live_turn_count(&runner, whelp),
+        1,
+        "reach-guard: the successor's activation is live history"
+    );
+    resolve_top(&mut runner);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the returned Whelp's ability reads live count 1 — below threshold"
+    );
+
+    // Each pre-blink activation reads the departed 4, not the live 1.
+    for _ in 0..4 {
+        resolve_top(&mut runner);
+    }
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        4,
+        "each old activation reads four uses and arms its delayed sacrifice"
+    );
+}
+
 /// CR 400.7: the turn boundary clears departed per-turn tallies
 /// beside their live twins, while per-game entries persist on both sides.
 #[test]

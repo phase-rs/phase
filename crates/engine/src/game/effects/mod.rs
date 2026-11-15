@@ -30597,14 +30597,18 @@ pub(crate) fn evaluate_condition(
                     // capture; an unresolvable slot reads a missing entry
                     // as count 0.
                     //
-                    // CR 400.7 + CR 608.2h: when the source left its zone after announcing
-                    // (a blink above the resolving ability), the live journal
-                    // was migrated at the exit boundary, so a live miss falls
-                    // back to the departed turn tally tagged with the
-                    // announced incarnation. A live hit always wins (the Dress
-                    // Down case keeps its live entry), and a missing departed
-                    // entry reads 0 — the new incarnation's independent
-                    // history.
+                    // CR 400.7 + CR 608.2h: the announced incarnation selects
+                    // the table. When the source never left, the live journal
+                    // is authoritative (the Dress Down case keeps its live
+                    // entry). When the source left after announcing (a blink
+                    // above the resolving ability), the live journal was
+                    // migrated at the exit boundary and now holds the
+                    // successor's independent history — so the resolving
+                    // ability reads the departed turn tally tagged with its
+                    // announced incarnation, never the live entry. A reader
+                    // with no announcement capture (spell, copy, old save)
+                    // names only the live population. A missing entry reads
+                    // 0 either way.
                     AbilityUseTally::Activated => {
                         let key = ability.announced_usage_key.clone().or_else(|| {
                             crate::game::restrictions::ability_usage_key(
@@ -30615,20 +30619,32 @@ pub(crate) fn evaluate_condition(
                         });
                         match key {
                             None => 0,
-                            Some(key) => {
-                                match state.activated_abilities_this_turn.get(&key).copied() {
-                                    Some(count) => count,
-                                    None => ability
-                                        .announced_source_incarnation
-                                        .and_then(|incarnation| {
-                                            state
-                                                .departed_activated_abilities_this_turn
-                                                .get(&(key, incarnation))
-                                                .copied()
-                                        })
-                                        .unwrap_or(0),
+                            Some(key) => match ability.announced_source_incarnation {
+                                None => state
+                                    .activated_abilities_this_turn
+                                    .get(&key)
+                                    .copied()
+                                    .unwrap_or(0),
+                                Some(announced) => {
+                                    let current = state
+                                        .objects
+                                        .get(&ability.source_id)
+                                        .map(|obj| obj.incarnation);
+                                    if current == Some(announced) {
+                                        state
+                                            .activated_abilities_this_turn
+                                            .get(&key)
+                                            .copied()
+                                            .unwrap_or(0)
+                                    } else {
+                                        state
+                                            .departed_activated_abilities_this_turn
+                                            .get(&(key, announced))
+                                            .copied()
+                                            .unwrap_or(0)
+                                    }
                                 }
-                            }
+                            },
                         }
                     }
                 };
