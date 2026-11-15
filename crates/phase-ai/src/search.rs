@@ -3256,14 +3256,23 @@ fn priority_action_is_allowed_by_loop_guards(
             ability_index,
             ..
         } => {
+            // CR 602.2a + CR 602.5c: fold the per-acquisition budget; the
+            // pending guard compares the announcement-bound usage key, not
+            // `(source_id, ability_index)` — layer recomputes shift indices,
+            // so an index-keyed entry would suppress the innocent ability
+            // that shifted into the recorded slot. An unresolvable slot
+            // matches no pending key and reads a missing tally entry as
+            // count 0.
+            let usage =
+                engine::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            let pending_hit = usage
+                .as_ref()
+                .is_some_and(|key| state.pending_activations.contains(key));
             !state.cancelled_casts.contains(source_id)
-                && !state
-                    .pending_activations
-                    .contains(&(*source_id, *ability_index))
-                && state
-                    .activated_abilities_this_turn
-                    .get(&(*source_id, *ability_index))
-                    .copied()
+                && !pending_hit
+                && usage
+                    .as_ref()
+                    .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                     .unwrap_or(0)
                     < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
         }
@@ -4902,14 +4911,34 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::SelectCards { cards: top_cards });
     }
 
-    if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
-        let mut scored: Vec<_> = cards
-            .iter()
-            .map(|&id| (id, intrinsic_value(state, id)))
+    // CR 608.2d: rank the selections the engine issued for the prompt's
+    // cardinality rather than restating it — a locally built pick outside that
+    // domain is discarded by the final contract gate. The largest issued
+    // selection wins (a post-reveal pick over declining; every card for a
+    // CR 107.1c "any number" reveal such as Metalworker, whose mana scales with
+    // the cards revealed), then the highest-value cards. Stable sorting keeps
+    // the enumerator's `cmp_stable` order on ties.
+    if matches!(state.waiting_for, WaitingFor::RevealChoice { .. }) {
+        let mut scored: Vec<_> = issued_selections(actions)
+            .map(|selection| {
+                let value = selection
+                    .iter()
+                    .map(|id| intrinsic_value(state, *id))
+                    .sum::<f64>();
+                (selection, value)
+            })
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((best, _)) = scored.first() {
-            return Some(GameAction::SelectCards { cards: vec![*best] });
+        scored.sort_by(|(left_cards, left_value), (right_cards, right_value)| {
+            right_cards.len().cmp(&left_cards.len()).then_with(|| {
+                right_value
+                    .partial_cmp(left_value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        if let Some((chosen, _)) = scored.first() {
+            return Some(GameAction::SelectCards {
+                cards: chosen.to_vec(),
+            });
         }
     }
 
@@ -6659,6 +6688,100 @@ mod tests {
             runner.state().waiting_for
         );
         runner
+    }
+
+    /// CR 605.3b + CR 107.1c + CR 701.20a: Metalworker (verified Oracle text,
+    /// Scryfall: "{T}: Reveal any number of artifact cards in your hand. Add
+    /// {C}{C} for each card revealed this way.") with two artifacts in hand. The
+    /// AI must answer the any-number reveal prompt with an engine-issued
+    /// multi-card selection — a locally built singleton outside the issued
+    /// domain is discarded by the contract gate and leaves the AI with no
+    /// action — and that answer must complete the activation through the
+    /// public action path.
+    #[test]
+    fn ai_answers_the_two_artifact_metalworker_reveal_with_a_legal_multi_card_action() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let metalworker = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Metalworker",
+                1,
+                2,
+                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
+            )
+            .as_artifact()
+            .id();
+        let artifacts: Vec<ObjectId> = ["Ornithopter", "Memnite"]
+            .into_iter()
+            .map(|name| {
+                scenario
+                    .add_creature_to_hand(P0, name, 1, 1)
+                    .as_artifact()
+                    .id()
+            })
+            .collect();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: metalworker,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("Metalworker activation is legal");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::RevealChoice {
+                    cardinality: engine::types::ability::ObjectSelectionCardinality::AnyNumber,
+                    ..
+                }
+            ),
+            "premise: the activation opens the any-number reveal, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let contract = AiDecisionContract::issue(runner.state(), P0);
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(9497),
+        )
+        .expect("the AI must answer the reveal prompt");
+        let GameAction::SelectCards { cards } = &action else {
+            panic!("expected a SelectCards answer, got {action:?}");
+        };
+        let mut chosen = cards.clone();
+        chosen.sort();
+        let mut expected = artifacts.clone();
+        expected.sort();
+        assert_eq!(chosen, expected, "revealing both artifacts maximizes mana");
+        assert!(
+            contract
+                .candidates
+                .iter()
+                .any(|candidate| candidate.action == action),
+            "the answer must be inside the engine-issued domain"
+        );
+
+        runner.act(action).expect("the AI's answer is accepted");
+        let state = runner.state();
+        assert_eq!(
+            state.players[P0.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Colorless),
+            4,
+            "{{C}}{{C}} for each of the two revealed artifacts"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the activation completes to P0's priority, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.objects[&metalworker].tapped, "the {{T}} cost is paid");
     }
 
     /// CR 508.1j: the rollout driver (`deterministic_choice`) and the deadlock-safe
@@ -13207,11 +13330,29 @@ mod tests {
     fn score_candidates_filters_activation_pending_on_stack() {
         // CR 117.1b + pending_activations guard: when an activated ability's
         // prior activation is still on the stack, the AI filter rejects the
-        // same (source_id, ability_index) from the candidate list to prevent
-        // softmax re-pick loops.
+        // same usage key from the candidate list to prevent softmax re-pick
+        // loops. A bare `add_creature` object carries no abilities, so a real
+        // parsed ability is attached at slot 0 (mirroring the per-turn-cap
+        // test) and the pending entry is the announcement-bound key the
+        // placement path records.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
-        state.pending_activations.push((creature, 0));
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let pending = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
+        state.pending_activations.push(pending);
 
         // Construct a candidate for ActivateAbility on the pending pair.
         let blocked = CandidateAction {
@@ -13239,14 +13380,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13269,9 +13419,30 @@ mod tests {
         // source, further activations are rejected regardless of stack state.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
+        // CR 602.5c: the per-turn budget is keyed by the resolved acquisition
+        // (provenance stamp + rules text), and an unresolvable slot reads
+        // count 0 — so the bare `add_creature` object (no abilities) cannot
+        // carry a budget. Attach a real printed ability at slot 0 and derive
+        // the insert key with the same helper the filter reads, instead of
+        // hand-building the key and duplicating the helper's binding.
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let usage = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
         state
             .activated_abilities_this_turn
-            .insert((creature, 0), MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
+            .insert(usage, MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
 
         let blocked = CandidateAction {
             action: GameAction::ActivateAbility {
@@ -13290,14 +13461,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13309,6 +13489,128 @@ mod tests {
             gated.is_empty(),
             "activation at per-turn cap should be filtered"
         );
+    }
+
+    /// CR 602.2a: the real loop guard compares announcement-bound usage
+    /// keys, not slot indices. A recorded key still suppresses its own
+    /// activation, but an ability that shifted into the recorded slot after
+    /// a grant withdrawal carries a different key and stays offered.
+    /// Reverting the guard to index comparison suppresses the shifted
+    /// ability (RED).
+    #[test]
+    fn pending_key_guard_still_offers_ability_shifted_into_recorded_slot() {
+        fn parse_tap_mana(color: &str) -> Vec<engine::types::ability::AbilityDefinition> {
+            let text = format!("{{T}}: Add {color}.");
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                &text,
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            parsed.abilities
+        }
+
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        let mut green = parse_tap_mana("{G}");
+        let mut red = parse_tap_mana("{R}");
+        // Twins share the description so only the fingerprint tells the
+        // recorded key from the shifted ability apart.
+        for def in green.iter_mut().chain(red.iter_mut()) {
+            def.description = Some("Twin shift ability".to_string());
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(green);
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(red);
+
+        let recorded = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let shifted = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_ne!(
+            recorded, shifted,
+            "the twins must carry different keys for the shift to discriminate"
+        );
+        state.pending_activations.push(recorded);
+
+        let candidate = |index: usize| GameAction::ActivateAbility {
+            source_id: holder,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        // Paired guard: its own activation is still suppressed.
+        assert!(
+            !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the recorded activation must stay suppressed"
+        );
+
+        // The recompute shift: the slot-0 grant is withdrawn and the slot-1
+        // ability moves into the recorded slot.
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).remove(0);
+        let now_at_zero = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("the shifted ability resolves at slot 0");
+        assert_eq!(
+            now_at_zero, shifted,
+            "slot 0 must now carry the shifted ability"
+        );
+
+        // The next AI decision still offers it: the pending key names the
+        // withdrawn activation, not the survivor.
+        assert!(
+            priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the shifted ability must stay offered after moving into the recorded slot"
+        );
+    }
+
+    /// The F5 finding's "preserve separate identical printed entries"
+    /// sub-claim is REJECTED: identical printed natives share one key by
+    /// approved contract (the index is not in the key), so one pending entry
+    /// suppresses every identical slot.
+    #[test]
+    fn pending_key_suppresses_identical_twins_sharing_one_key() {
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        for _ in 0..2 {
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                "{T}: Add {G}.",
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities)
+                .extend(parsed.abilities);
+        }
+
+        let first = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let second = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_eq!(
+            first, second,
+            "identical printed bodies share one usage key by contract"
+        );
+        state.pending_activations.push(first);
+
+        for index in [0, 1] {
+            let action = GameAction::ActivateAbility {
+                source_id: holder,
+                ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
+            };
+            assert!(
+                !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &action),
+                "identical slot {index} must stay suppressed under the shared key"
+            );
+        }
     }
 
     #[test]
@@ -18179,6 +18481,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         });
         push("SearchChoice", &|state| WaitingFor::SearchChoice {
             player: PlayerId(0),
@@ -19237,6 +19541,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: Some(ability),
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,

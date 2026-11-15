@@ -5540,6 +5540,37 @@ thread_local! {
         const { core::cell::Cell::new(0) };
 }
 
+/// Test-support work counts for the CR 614.12 token projection seams only.
+/// Thread-local so parallel tests cannot charge one another's batches.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenEntryProjectionWork {
+    pub pre_entry_boards: usize,
+    pub pre_entry_state_clones: usize,
+    pub projection_state_clones: usize,
+    pub pre_entry_layer_passes: usize,
+    pub projections: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TOKEN_ENTRY_PROJECTION_WORK: core::cell::Cell<TokenEntryProjectionWork> =
+        const { core::cell::Cell::new(TokenEntryProjectionWork {
+            pre_entry_boards: 0, pre_entry_state_clones: 0, projection_state_clones: 0,
+            pre_entry_layer_passes: 0, projections: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn token_entry_projection_work() -> TokenEntryProjectionWork {
+    TOKEN_ENTRY_PROJECTION_WORK.with(core::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_token_entry_projection_work() {
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| work.set(TokenEntryProjectionWork::default()));
+}
+
 /// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
 /// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
 /// `enter_transformed` flag, converted once here (`EntryFace::from_enter_transformed`).
@@ -5826,6 +5857,96 @@ impl BattlefieldEntrantProjection {
         Some((scratch, origin))
     }
 
+    /// CR 614.12 + CR 111.1 + CR 111.2: a not-yet-committed liminal token entrant, placed on
+    /// the scratch battlefield exactly as its birth places it
+    /// (`token::place_liminal_token_on_battlefield`), under its creator's control, on the
+    /// board before its entry event: each of `co_entrants` (the tokens entering in the same
+    /// event) is absent. `None` for a card-backed liminal entrant (meld, transformed entry),
+    /// which keeps its own read.
+    pub(crate) fn for_liminal_token(
+        state: &GameState,
+        entrant: ObjectId,
+        co_entrants: &[ObjectId],
+    ) -> Option<Self> {
+        if !state
+            .liminal_entries
+            .get(&entrant)?
+            .object
+            .is_token_projection()
+        {
+            return None;
+        }
+        Self::token_on_pre_entry_board(
+            pre_entry_board(state, co_entrants),
+            state.liminal_entries.get(&entrant)?.object.projected(),
+        )
+    }
+
+    /// CR 614.12: use a caller-owned batch board, while reading the current liminal body.
+    pub(crate) fn liminal_token_on_board(
+        state: &GameState,
+        entrant: ObjectId,
+        pre_entry: &GameState,
+    ) -> Option<Self> {
+        let entry = state.liminal_entries.get(&entrant)?;
+        if !entry.object.is_token_projection() {
+            return None;
+        }
+        Self::token_on_pre_entry_board(Cow::Borrowed(pre_entry), entry.object.projected())
+    }
+
+    /// CR 614.12 + CR 707.9b: the placed copy body includes its immediate copy exceptions.
+    #[cfg(test)]
+    pub(crate) fn for_placed_token(
+        state: &GameState,
+        entrant: ObjectId,
+        body: &GameObject,
+        co_entrants: &[ObjectId],
+    ) -> Option<Self> {
+        let absent: Vec<ObjectId> = co_entrants
+            .iter()
+            .copied()
+            .chain(std::iter::once(entrant))
+            .collect();
+        Self::token_on_pre_entry_board(pre_entry_board(state, &absent), body)
+    }
+
+    /// CR 614.12: capture only the population condition rewrites, then consume an owned
+    /// board directly. No full pre-entry state is needed after capture. A borrowed batch
+    /// board needs one scratch clone; an already-owned board needs none.
+    pub(crate) fn token_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+    ) -> Option<Self> {
+        let mut placed = body.clone();
+        placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
+        if placed.zone != Zone::Battlefield {
+            return None;
+        }
+        let entrant = placed.id;
+        let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
+        #[cfg(any(test, feature = "test-support"))]
+        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.projections += 1;
+            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+            work.set(counts);
+        });
+        let mut scratch = pre_entry.into_owned();
+        scratch.liminal_entries.remove(&entrant);
+        if scratch.battlefield.contains(&entrant) {
+            scratch.objects.insert(entrant, placed);
+        } else {
+            crate::game::effects::token::place_liminal_token_on_battlefield(
+                &mut scratch,
+                entrant,
+                placed,
+            );
+        }
+        pins.apply(&mut scratch);
+        Some(Self::finish(scratch, None, entrant, None))
+    }
+
     /// Install the carried effect (if any) on the scratch entrant, pin the pre-entry
     /// population conditions (if the entrant was placed from `pre_entry`), and run the layer
     /// pass.
@@ -5861,6 +5982,164 @@ impl BattlefieldEntrantProjection {
     /// CR 614.12: whether the projected entrant matches `filter` under `ctx`.
     pub(crate) fn matches(&self, filter: &TargetFilter, ctx: &FilterContext<'_>) -> bool {
         matches_target_filter(&self.scratch, self.entrant, filter, ctx)
+    }
+
+    /// CR 614.12: the entrant as it would exist on the battlefield.
+    pub(crate) fn entrant(&self) -> Option<&GameObject> {
+        self.scratch.objects.get(&self.entrant)
+    }
+
+    /// CR 614.12 + CR 613.1f: whether the entrant, as it would exist on the battlefield,
+    /// still has its own replacement `def` (an ability-removing effect that would apply to
+    /// it strips it). Identity is structural, the identity the layer pass dedupes granted
+    /// replacements by. This only filters: it never adds a definition the entrant lacks.
+    pub(crate) fn retains_replacement(&self, def: &ReplacementDefinition) -> bool {
+        self.entrant().is_some_and(|entrant| {
+            entrant
+                .replacement_definitions
+                .iter_all()
+                .any(|held| held == def)
+        })
+    }
+}
+
+/// CR 614.12 + CR 702.26b: the board before an entry event: every `absent` object on the
+/// battlefield (a member of the same event) is phased out, so it is treated as though it
+/// does not exist, and the layers are re-derived without it. Borrowed when none is there.
+/// Only a scratch copy is written: no event, no timestamp. Also the board a copy-target
+/// answer reads its acquired entry abilities on (`replacement::copy_entry_board`).
+pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> Cow<'a, GameState> {
+    let present = |id: &ObjectId| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.is_phased_in_permanent())
+    };
+    if !absent.iter().any(present) {
+        return Cow::Borrowed(state);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts.pre_entry_boards += 1;
+        counts.pre_entry_state_clones += 1;
+        counts.pre_entry_layer_passes += 1;
+        work.set(counts);
+    });
+    let mut board = state.clone();
+    for id in absent.iter().filter(|id| present(id)) {
+        if let Some(obj) = board.objects.get_mut(id) {
+            obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        }
+    }
+    crate::game::layers::mark_layers_full(&mut board);
+    crate::game::layers::flush_layers(&mut board);
+    Cow::Owned(board)
+}
+
+/// A call-local token batch cache. The object-store snapshot is persistent/shared:
+/// it lets refresh skip co-entrants whose live object has not been written since
+/// the previous consult, without retaining another full game state.
+pub(crate) struct TokenEntryBatchBoard {
+    board: GameState,
+    source_objects: crate::types::object_map::ObjectMap,
+}
+
+impl TokenEntryBatchBoard {
+    pub(crate) fn new(state: &GameState, absent: &[ObjectId]) -> Self {
+        let board = pre_entry_board(state, absent);
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(board, Cow::Borrowed(_)) {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_boards += 1;
+                counts.pre_entry_state_clones += 1;
+                work.set(counts);
+            });
+        }
+        Self {
+            board: board.into_owned(),
+            source_objects: state.objects.clone(),
+        }
+    }
+
+    pub(crate) fn board(&self) -> &GameState {
+        &self.board
+    }
+
+    /// CR 614.12: extend a batch's pre-entry board with the live, phased-out co-entrants.
+    /// They are frozen by the layer engine, so copying these objects needs no layer pass.
+    /// Entry/counter histories and resolution referents still advance in the live engine;
+    /// keep those reads current, and conservatively flush when an existing static or a
+    /// transient could read the changed context. No whole-state clone is taken here.
+    pub(crate) fn refresh(&mut self, state: &GameState, absent: &[ObjectId]) {
+        let board = &mut self.board;
+        for id in absent {
+            if self.source_objects.shares_object_with(&state.objects, *id) {
+                continue;
+            }
+            let Some(live) = state.objects.get(id) else {
+                continue;
+            };
+            let mut object = live.clone();
+            if object.is_phased_in_permanent() {
+                object.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+            }
+            if !board.battlefield.contains(id) && object.zone == Zone::Battlefield {
+                crate::game::effects::token::place_liminal_token_on_battlefield(board, *id, object);
+            } else {
+                board.objects.insert(*id, object);
+            }
+        }
+        let mut context_changed = false;
+        macro_rules! refresh {
+        ($($field:ident),+ $(,)?) => { $(
+            if board.$field != state.$field {
+                board.$field.clone_from(&state.$field);
+                context_changed = true;
+            }
+        )+ };
+    }
+        refresh!(
+            created_tokens_this_turn,
+            players_who_created_token_this_turn,
+            counter_added_this_turn,
+            object_counter_placement_count_this_turn,
+            zone_changes_this_turn,
+            battlefield_entries_this_turn,
+            battlefield_entry_observations,
+            last_created_token_ids,
+            last_effect_amount,
+            last_effect_count,
+            last_effect_excess_amount,
+            last_effect_counts_by_player,
+            combat,
+            transient_continuous_effects,
+        );
+        // The current liminal body is supplied separately by the caller; other explicit
+        // object references must still see the same parked entries as the live board.
+        board.liminal_entries.clone_from(&state.liminal_entries);
+        if context_changed
+            && (!board.transient_continuous_effects.is_empty()
+                || board
+                    .objects
+                    .values()
+                    .any(|object| !object.static_definitions.is_empty()))
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_layer_passes += 1;
+                work.set(counts);
+            });
+            crate::game::layers::mark_layers_full(board);
+            crate::game::layers::flush_layers(board);
+        }
+        self.source_objects = state.objects.clone();
     }
 }
 
@@ -15217,6 +15496,278 @@ mod tests {
         );
     }
 
+    // ── CR 614.12 token entrants: F1–F5, F4b ────────────────────────────────
+
+    const VOICE_OF_ALL: &str = "Flying\nAs this creature enters, choose a color.\nThis creature has protection from the chosen color.";
+    const STOLEN_IDENTITY: &str = "Create a token that's a copy of target artifact or creature.\nCipher (Then you may exile this spell card encoded on a creature you control. Whenever that creature deals combat damage to a player, its controller may cast a copy of the encoded card without paying its mana cost.)";
+    const HUMILITY: &str =
+        "All creatures lose all abilities and have base power and toughness 1/1.";
+    const MARGLE: &str =
+        "Other creatures you control lose all abilities, can't gain abilities, and get +2/+2.";
+    const APPLIED_GEOMETRY: &str = "Create a token that's a copy of target non-Aura permanent you control, except it's a 0/0 Fractal creature in addition to its other types. Put six +1/+1 counters on it.";
+    const GEMSTONE_MINE: &str = "This land enters with three mining counters on it.\n{T}, Remove a mining counter from this land: Add one mana of any color. If there are no mining counters on this land, sacrifice it.";
+
+    /// A card held in its owner's hand at setup, put onto the battlefield once the copy has
+    /// paused, so it is a resident effect as the projection runs.
+    #[derive(Clone, Copy)]
+    enum HeldRemover {
+        Humility(PlayerId),
+        Margle(PlayerId),
+    }
+
+    /// A Stolen Identity copy of P0's Voice of All, paused at its as-enters choice: the token
+    /// is a liminal entry. `own` is its copied "as enters, choose a color" definition.
+    struct PausedVoiceCopy {
+        state: GameState,
+        entrant: ObjectId,
+        own: ReplacementDefinition,
+        held: Vec<ObjectId>,
+    }
+
+    fn paused_voice_copy(held: &[HeldRemover]) -> PausedVoiceCopy {
+        use crate::game::scenario::GameScenario;
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let held: Vec<ObjectId> = held
+            .iter()
+            .map(|card| match *card {
+                HeldRemover::Humility(owner) => scenario
+                    .add_spell_to_hand(owner, "Humility", false)
+                    .as_enchantment()
+                    .from_oracle_text(HUMILITY)
+                    .id(),
+                HeldRemover::Margle(owner) => scenario
+                    .add_creature_to_hand_from_oracle(
+                        owner,
+                        "Margle, Cousin of Yargle",
+                        5,
+                        2,
+                        MARGLE,
+                    )
+                    .id(),
+            })
+            .collect();
+        let voice = scenario
+            .add_creature_from_oracle(PlayerId(0), "Voice of All", 2, 2, VOICE_OF_ALL)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Stolen Identity", false, STOLEN_IDENTITY)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(voice).commit();
+        while matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ) && !runner.state().stack.is_empty()
+        {
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::NamedChoice { .. }
+            ),
+            "REACH-GUARD: the copy paused at its as-enters choice"
+        );
+        let state = runner.state().clone();
+        let (&entrant, entry) = state
+            .liminal_entries
+            .iter()
+            .next()
+            .expect("REACH-GUARD: the copy is a liminal entry");
+        let defs = entry.object.projected().replacement_definitions.as_slice();
+        assert_eq!(defs.len(), 1, "REACH-GUARD: the copied as-enters choice");
+        let own = defs[0].clone();
+        PausedVoiceCopy {
+            state,
+            entrant,
+            own,
+            held,
+        }
+    }
+
+    /// Puts a held card onto the battlefield and realizes its continuous effects.
+    fn make_resident(state: &mut GameState, card: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, card, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&card].zone, Zone::Battlefield);
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+    }
+
+    fn liminal_retains(paused: &PausedVoiceCopy, co_entrants: &[ObjectId]) -> bool {
+        BattlefieldEntrantProjection::for_liminal_token(&paused.state, paused.entrant, co_entrants)
+            .expect("a liminal token is projectable")
+            .retains_replacement(&paused.own)
+    }
+
+    /// F1 — CR 614.12 + CR 613.1f: a resident Humility strips the liminal Voice copy's own
+    /// as-enters choice as it would exist on the battlefield; without it the definition is
+    /// retained (structural identity, positive control).
+    #[test]
+    fn liminal_token_projection_reads_a_resident_ability_remover() {
+        let paused = paused_voice_copy(&[]);
+        assert!(liminal_retains(&paused, &[]), "no remover: retained");
+
+        let mut paused = paused_voice_copy(&[HeldRemover::Humility(PlayerId(0))]);
+        assert!(
+            liminal_retains(&paused, &[]),
+            "control: Humility still in hand"
+        );
+        let humility = paused.held[0];
+        make_resident(&mut paused.state, humility);
+        assert!(!liminal_retains(&paused, &[]), "Humility strips it");
+        let projection =
+            BattlefieldEntrantProjection::for_liminal_token(&paused.state, paused.entrant, &[])
+                .expect("projectable");
+        let entrant = projection.entrant().expect("the projected entrant");
+        assert_eq!(entrant.zone, Zone::Battlefield);
+        assert_eq!(entrant.controller, PlayerId(0), "CR 111.2: its creator");
+        assert!(
+            paused.state.liminal_entries.contains_key(&paused.entrant),
+            "the live liminal entry is untouched"
+        );
+    }
+
+    /// F2 — CR 614.12 + CR 111.2: a Margle-shaped "other creatures you control" remover
+    /// strips the copy only under the token's creator.
+    #[test]
+    fn liminal_token_projection_reads_the_remover_under_the_tokens_controller() {
+        for (controller, retained) in [(PlayerId(1), true), (PlayerId(0), false)] {
+            let mut paused = paused_voice_copy(&[HeldRemover::Margle(controller)]);
+            let margle = paused.held[0];
+            make_resident(&mut paused.state, margle);
+            assert_eq!(
+                liminal_retains(&paused, &[]),
+                retained,
+                "Margle under {controller:?}"
+            );
+        }
+    }
+
+    /// F3 — CR 614.12 + CR 702.26b (Clone Legion ruling 2015-02-25): a remover entering in
+    /// the same event is absent from the pre-entry board, so the definition is retained; the
+    /// same remover not listed as a co-entrant strips it.
+    #[test]
+    fn liminal_token_projection_excludes_co_entrants() {
+        let mut paused = paused_voice_copy(&[HeldRemover::Margle(PlayerId(0))]);
+        let margle = paused.held[0];
+        make_resident(&mut paused.state, margle);
+        assert!(liminal_retains(&paused, &[margle]), "co-entrant: absent");
+        assert!(!liminal_retains(&paused, &[]), "resident: strips it");
+        assert!(
+            paused.state.objects[&margle].is_phased_in_permanent(),
+            "the live co-entrant is untouched"
+        );
+    }
+
+    /// F4 — CR 614.12: the placed-token projection of the same (exception-free) body
+    /// answers as the liminal one, with and without a resident remover.
+    #[test]
+    fn placed_token_projection_agrees_with_the_liminal_projection() {
+        for humility in [false, true] {
+            let held: &[HeldRemover] = if humility {
+                &[HeldRemover::Humility(PlayerId(0))]
+            } else {
+                &[]
+            };
+            let mut paused = paused_voice_copy(held);
+            if humility {
+                let card = paused.held[0];
+                make_resident(&mut paused.state, card);
+            }
+            let placed = create_object(
+                &mut paused.state,
+                CardId(0),
+                PlayerId(0),
+                "Voice of All".to_string(),
+                Zone::Battlefield,
+            );
+            let mut body = paused.state.liminal_entries[&paused.entrant]
+                .object
+                .projected()
+                .clone();
+            body.id = placed;
+            paused.state.objects.insert(placed, body.clone());
+            #[cfg(feature = "test-support")]
+            let copies_before = crate::game::perf_counters::take_cost_snapshot().state_copies;
+            let placed_retains =
+                BattlefieldEntrantProjection::for_placed_token(&paused.state, placed, &body, &[])
+                    .expect("a placed token is projectable")
+                    .retains_replacement(&paused.own);
+            #[cfg(feature = "test-support")]
+            assert_eq!(
+                crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
+                1,
+                "an owned pre-entry board is consumed without another whole-state clone",
+            );
+            assert_eq!(
+                placed_retains,
+                liminal_retains(&paused, &[]),
+                "humility={humility}"
+            );
+            assert_eq!(placed_retains, !humility, "humility={humility}");
+        }
+    }
+
+    /// F4b — CR 614.12 + CR 707.9b: the placed projection reads the body it is given. An
+    /// "except it's a 0/0 Fractal creature in addition to its other types" land copy is a
+    /// creature only with the exception folded in, so Humility strips its copied "enters
+    /// with three mining counters" from the folded body and not from the stored one.
+    #[test]
+    fn placed_token_projection_reads_the_exception_folded_body() {
+        use crate::game::scenario::GameScenario;
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.add_enchantment_from_oracle(PlayerId(0), "Humility", HUMILITY);
+        let mine = scenario
+            .add_land_from_oracle(PlayerId(0), "Gemstone Mine", GEMSTONE_MINE)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Applied Geometry", false, APPLIED_GEOMETRY)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut().clone();
+        let modifications = state.objects[&spell]
+            .abilities
+            .iter()
+            .find_map(|ability| match &*ability.effect {
+                crate::types::ability::Effect::CopyTokenOf {
+                    additional_modifications,
+                    ..
+                } => Some(additional_modifications.clone()),
+                _ => None,
+            })
+            .expect("REACH-GUARD: Applied Geometry's copy effect");
+        let stored = state.objects[&mine].clone();
+        let (own, _, _) = crate::game::printed_cards::self_etb_counter_replacement_entries(
+            &stored.base_replacement_definitions,
+        )
+        .next()
+        .expect("REACH-GUARD: the mining-counter replacement");
+        let own = own.clone();
+        let mut folded = stored.clone();
+        crate::game::effects::token_copy::apply_immediate_copy_token_modifications_to_object(
+            &mut folded,
+            &modifications,
+            &state.all_creature_types,
+        );
+        assert!(
+            folded.card_types.core_types.contains(&CoreType::Creature)
+                && !stored.card_types.core_types.contains(&CoreType::Creature),
+            "REACH-GUARD: only the folded body is a creature"
+        );
+        let retains = |body: &GameObject| {
+            BattlefieldEntrantProjection::for_placed_token(&state, mine, body, &[])
+                .expect("projectable")
+                .retains_replacement(&own)
+        };
+        assert!(retains(&stored), "the land body: Humility doesn't apply");
+        assert!(!retains(&folded), "the creature body: Humility strips it");
+    }
+
     /// Explicit-controller variant used by tests that exercise stack-resolving
     /// paths where the source has left play.
     #[allow(dead_code)]
@@ -17229,7 +17780,12 @@ mod tests {
         });
         std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
             .push(ability);
-        state.pending_activations.push((source, 0));
+        // CR 602.2a: the pending entry is the announcement-bound usage key,
+        // not a `(source, index)` pair — the unbound read below must ignore
+        // it either way.
+        let pending = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the pushed ability resolves at slot 0");
+        state.pending_activations.push(pending);
 
         let filter = TargetFilter::And {
             filters: vec![

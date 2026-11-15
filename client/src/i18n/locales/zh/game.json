@@ -837,7 +837,9 @@
     },
     "reveal": {
       "subtitleChoose": "选择一张牌",
+      "subtitleChooseCount": "选择{{count}}张牌",
       "subtitleReveal": "选择一张牌展示，或拒绝",
+      "subtitleRevealAnyNumber": "选择任意数量的牌展示",
       "titleOpponentHand": "对手的手牌",
       "titleReveal": "从手牌展示"
     },
@@ -1222,6 +1224,10 @@
       "LethalDamage": "此循环造成致命伤害。",
       "PoisonLoss": "此循环会造成致命的中毒指示物。"
     }
+  },
+  "costRecipient": {
+    "subtitle": "选择此费用的对手：{{cost}}",
+    "title": "选择对手"
   },
   "costReductionOrder": {
     "announcedHybrids": "已宣告的混血法术力支付",
@@ -2453,6 +2459,8 @@
       "exile": "从{{zone}}放逐{{count}}张{{cards}}",
       "filteredCard": "{{types}}牌",
       "filteredCards": "{{types}}牌",
+      "haveOpponentGainLife": "让一位对手获得{{amount}}点生命",
+      "haveEachOtherPlayerGainLife": "让其他每位玩家获得{{amount}}点生命",
       "nonType": "非{{type}}",
       "orSeparator": " 或 ",
       "reveal": "从{{zone}}展示{{count}}张{{cards}}",

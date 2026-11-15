@@ -7,18 +7,18 @@ use crate::types::ability::{
     cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
     AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
     ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DoubleTarget, Effect,
-    ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode,
-    TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    ManaProduction, ObjectSelectionCardinality, QuantityExpr, QuantityRef, ResolvedAbility,
+    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastPaymentMode, CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
-    ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
-    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
-    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
-    WaitingFor,
+    CastPaymentMode, CostResume, GameState, ManaAbilityActivationStage, ManaAbilityCostCursor,
+    ManaAbilityCostParent, ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode,
+    ManaAbilityResume, ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    ManaColorChoiceResume, ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind,
+    PayableResource, PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility,
+    ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPipId, ManaPool, ManaType, PaymentContext};
@@ -541,6 +541,12 @@ pub(super) fn resolve_mana_ability_excluding(
         rules_execution_node,
         ability_snapshot: Some(ability_def.clone()),
         announced_source_incarnation,
+        // CR 602.2a + CR 602.5c: same announcement capture as the manual
+        // path above — the resolved def is live here, before any cost.
+        announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+            source_id,
+            ability_def,
+        )),
         color_override,
         // The direct resolver normally leaves its caller's waiting root
         // untouched.  Its ordinary completion must therefore return to
@@ -597,6 +603,161 @@ pub(super) fn resolve_mana_ability_excluding(
         state.waiting_for = waiting_for;
     }
     Ok(())
+}
+
+/// Find the `Effect::Mana` node within an ability's root or sub_ability chain.
+/// CR 608.2c: `ability` with the instructions before its production already
+/// performed — rooted at that `Effect::Mana` link, keeping the activation's cost
+/// and restrictions.
+pub(super) fn ability_from_mana_production(ability: &AbilityDefinition) -> AbilityDefinition {
+    let Some(production) = crate::types::ability::inline_mana_preamble(ability) else {
+        return ability.clone();
+    };
+    let mut remaining = ability.clone();
+    remaining.effect = production.effect.clone();
+    remaining.sub_ability = production.sub_ability.clone();
+    remaining
+}
+
+/// CR 608.2c: the instructions of a mana ability that precede its production,
+/// in written order — the chain cut just before its first `Effect::Mana` link.
+/// `None` when the production is the root (nothing precedes it).
+fn resolved_before_mana(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
+    if matches!(ability.effect, Effect::Mana { .. }) {
+        return None;
+    }
+    let mut head = ability.clone();
+    head.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(resolved_before_mana)
+        .map(Box::new);
+    Some(head)
+}
+
+/// CR 605.3b + CR 608.2c: perform the instructions that precede a mana
+/// ability's production (Empowered Autogenerator's counter), in written order,
+/// as part of the ability's immediate resolution. The single authority shared
+/// by live activation and by capacity projection.
+fn resolve_inline_mana_preamble(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(preamble) = resolved_before_mana(resolved) {
+        run_inline_mana_subresolution(state, |state| {
+            let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
+        });
+    }
+}
+
+/// CR 601.2g + CR 605.3b + CR 608.2c: the states a mana ability with an inline
+/// preamble could leave behind once that preamble has resolved, for sizing the
+/// mana it will add (an amount that reads the source's counters, Empowered
+/// Autogenerator). Each is a scratch clone; `state` is never mutated.
+///
+/// CR 616.1: replacement effects apply to the preamble exactly as they do live
+/// (Doubling Season doubles the counter). When competing replacements ask the
+/// controller to order them, every ordering is a reachable outcome, so one
+/// state is returned per ordering and the caller takes the one it needs (the
+/// maximum, for an announcement ceiling).
+pub(super) fn inline_preamble_outcomes(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+) -> Vec<GameState> {
+    let mut scratch = state.clone();
+    // The projection answers its own ordering prompts. Detach the enclosing cast
+    // so answering one cannot resume that cast (whose X announcement is what
+    // asked for this projection) and re-enter the projection.
+    scratch.pending_cast = None;
+    let mut events = Vec::new();
+    with_bound_mana_activation(
+        &mut scratch,
+        source_id,
+        player,
+        ability_def,
+        None,
+        None,
+        None,
+        None,
+        |scratch, resolved| resolve_inline_mana_preamble(scratch, resolved, &mut events),
+    );
+    settle_projected_replacements(scratch)
+}
+
+/// The part of a parked ordering prompt that decides what the rest of the
+/// chain can produce: the proposed event as modified so far (without which
+/// replacements already applied) and the multiset of replacements still to
+/// apply, by definition rather than by source object.
+fn replacement_prompt_signature(state: &GameState) -> Option<(String, Vec<String>)> {
+    let pending = state.pending_replacement.as_ref()?;
+    let mut event = pending.proposed.clone();
+    event.applied_set_mut().clear();
+    let mut remaining: Vec<String> = pending
+        .candidates
+        .iter()
+        .map(|rid| {
+            state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .map_or_else(|| format!("{rid:?}"), |def| format!("{def:?}"))
+        })
+        .collect();
+    remaining.sort_unstable();
+    Some((format!("{event:?}"), remaining))
+}
+
+/// CR 616.1f: answer every ordering prompt a projection parked on, branching per
+/// option, until no replacement is left to apply. CR 614.5: a replacement
+/// applies to an event at most once, so every answer consumes a candidate and
+/// the chain is bounded by the number of applicable replacements — there is no
+/// fixed prompt limit. Iterative (a worklist, not recursion) because a
+/// projection runs deep inside the casting flow's stack.
+///
+/// The orderings of n interchangeable replacements (five Winding Constrictors)
+/// are n! paths but only O(n) distinct futures: two branches whose proposed
+/// event and remaining-replacement multiset agree continue identically, so each
+/// such prompt is expanded once.
+fn settle_projected_replacements(state: GameState) -> Vec<GameState> {
+    let mut settled = Vec::new();
+    let mut expanded = HashSet::new();
+    let mut work = vec![Box::new(state)];
+    while let Some(state) = work.pop() {
+        let Some(pending) = state.pending_replacement.as_ref() else {
+            settled.push(*state);
+            continue;
+        };
+        if let Some(signature) = replacement_prompt_signature(&state) {
+            if !expanded.insert(signature) {
+                continue;
+            }
+        }
+        let options = super::replacement::pending_replacement_option_count(&state, pending);
+        for index in 0..options {
+            let mut branch = state.clone();
+            let mut events = Vec::new();
+            if super::engine_replacement::handle_replacement_choice(&mut branch, index, &mut events)
+                .is_ok()
+            {
+                work.push(branch);
+            }
+        }
+    }
+    settled
+}
+
+fn find_mana_effect(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let mut curr = Some(ability);
+    while let Some(node) = curr {
+        if matches!(node.effect, Effect::Mana { .. }) {
+            return Some(node);
+        }
+        curr = node.sub_ability.as_deref();
+    }
+    None
 }
 
 /// Produce mana from a resolved mana ability without paying costs.
@@ -738,24 +899,33 @@ fn produce_mana_from_bound_ability(
 
         // CR 106.6: Resolve spend-restriction templates, grants, and expiry so
         // they attach to each produced `ManaUnit`.
+        let mana_node = find_mana_effect(&scoped);
         let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
-            match &scoped.effect {
-                Effect::Mana {
-                    produced,
-                    restrictions,
-                    grants,
-                    expiry,
-                    target: None,
-                } => {
+            match (&scoped.effect, mana_node.map(|n| (&n.effect, n))) {
+                (
+                    _,
+                    Some((
+                        Effect::Mana {
+                            produced,
+                            restrictions,
+                            grants,
+                            expiry,
+                            target: None,
+                        },
+                        mana_resolved,
+                    )),
+                ) => {
                     let mana = match color_override.clone() {
                         // `Combination` is pre-chosen — skip `resolve_mana_types`
                         // so the exact sequence lands in the pool (CR 605.3b).
                         Some(ProductionOverride::Combination(types)) => types,
                         Some(ProductionOverride::SingleColor(color)) => {
-                            resolve_single_color_override(state, produced, &scoped, color)
+                            resolve_single_color_override(state, produced, mana_resolved, color)
                         }
                         None => super::effects::mana::resolve_mana_types_for_ability(
-                            produced, state, &scoped,
+                            produced,
+                            state,
+                            mana_resolved,
                         ),
                     };
                     let concrete = resolve_restrictions(restrictions, state, source_id);
@@ -776,10 +946,13 @@ fn produce_mana_from_bound_ability(
                 // read now, after its cost was paid (CR 601.2h). Added mana carries
                 // no restriction (Doubling Cube ruling), so no restriction/grant/
                 // expiry templates apply.
-                Effect::Double {
-                    target_kind: DoubleTarget::ManaPool { color },
-                    ..
-                } => {
+                (
+                    Effect::Double {
+                        target_kind: DoubleTarget::ManaPool { color },
+                        ..
+                    },
+                    _,
+                ) => {
                     // CR 605.3b: the doubling read every unit in the pool, so a
                     // land refund (`UntapLandForMana`) could no longer reverse all
                     // coupled mana — the recipient's undo window closes here.
@@ -1114,6 +1287,14 @@ pub fn activate_mana_ability_with_payment_mode(
             rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
             announced_source_incarnation,
+            // CR 602.2a + CR 602.5c: capture the usage key at this same
+            // announcement — the resolved def is live here, before any cost
+            // is paid. A self-sacrifice cost can make the slot unresolvable
+            // by completion time; the inline completion consumes this.
+            announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+                source_id,
+                ability_def,
+            )),
             color_override,
             resume,
             cost_move_resume: None,
@@ -1139,6 +1320,7 @@ fn complete_mana_ability_activation(
     state: &mut GameState,
     source_id: ObjectId,
     ability_index: Option<usize>,
+    announced_key: Option<crate::types::game_state::AbilityUsageKey>,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
@@ -1147,8 +1329,13 @@ fn complete_mana_ability_activation(
     };
     // CR 602.2 + CR 605.3a: counted like every activation, but not journaled:
     // the turn journal holds non-mana activations only (see
-    // `GameState::abilities_activated_this_turn_by_player`).
-    super::restrictions::record_ability_activation(state, source_id, ability_index, None);
+    // `GameState::abilities_activated_this_turn_by_player`). The key is the
+    // announcement's own — never re-derived here, so a self-sacrifice cost
+    // cannot unresolve the slot; a missing key skips exactly like today's
+    // missing-entry semantics.
+    if let Some(key) = announced_key {
+        super::restrictions::record_ability_activation(state, key, None);
+    }
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
@@ -1519,6 +1706,7 @@ pub fn handle_choose_mana_color(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
@@ -1545,6 +1733,73 @@ pub fn handle_choose_mana_color(
     }
 
     resume_mana_ability_root(state, pending.player, pending.resume.clone(), events)
+}
+
+/// CR 605.3b + CR 701.20a: Complete an activated mana ability that paused for an interactive
+/// reveal choice (e.g. Metalworker).
+pub(crate) fn handle_reveal_choice_for_mana_ability(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    eligible_cards: &[ObjectId],
+    cardinality: ObjectSelectionCardinality,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::effects::reveal_hand::validate_reveal_selection(eligible_cards, cardinality, &chosen)?;
+    super::effects::reveal_hand::reveal_selected_hand_cards(state, pending.player, &chosen, events);
+
+    // Each independent activation of a mana ability owns a fresh tracked set:
+    // publish it outside any enclosing resolution chain so it never unions into
+    // that chain's population, and hand the enclosing chain back afterwards.
+    let enclosing_chain = state.chain_tracked_set_id.take();
+    super::effects::publish_tracked_set(state, chosen);
+
+    let ability_def = mana_ability_definition(state, &pending)?;
+
+    let node = pending
+        .rules_execution_node
+        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    let choice_action_start = events.len();
+    state.with_rules_execution_node(node, |state| {
+        produce_mana_from_ability(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            events,
+            pending.color_override.clone(),
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+        );
+        complete_mana_ability_activation(
+            state,
+            pending.source_id,
+            pending.ability_index,
+            pending.announced_usage_key.clone(),
+            pending.player,
+            events,
+        );
+    });
+
+    state.chain_tracked_set_id = enclosing_chain;
+
+    if let Some(pause) = collect_completed_mana_frame_events(
+        state,
+        Vec::new(),
+        events,
+        choice_action_start,
+        ManaTriggerFixedPointResume::Root {
+            player: pending.player,
+            resume: Box::new(pending.resume.clone()),
+        },
+    ) {
+        return Ok(pause);
+    }
+
+    let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
+    Ok(super::triggers::preserve_order_triggers_resume(state, resume.clone()).unwrap_or(resume))
 }
 
 /// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
@@ -2905,6 +3160,7 @@ fn mana_ability_cost_cursor(
     excluded_sources.sort_unstable_by_key(|source_id| source_id.0);
     ManaAbilityCostCursor {
         remaining,
+        activation: ManaAbilityActivationStage::Unpublished,
         remaining_life_payments: Vec::new(),
         resolution_mode,
         excluded_sources,
@@ -3735,23 +3991,58 @@ fn finish_mana_ability_cost_payment(
     // criterion (Millikin's library-moving cost) can still be driven through
     // it; it is then an ordinary activation, and "that isn't a mana ability"
     // triggers must see it as one.
-    let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
-    // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
-    // activation began, before any cost; never `mana_ability_definition`'s
-    // post-payment live fallback (a pending without its snapshot is `Unknown`).
-    let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
-    let activation_event = super::casting_targets::emit_ability_activated(
-        state,
-        pending.player,
-        pending.source_id,
-        activation_kind,
-        activation_cost,
-        None,
-        ability_def.activation_zone.unwrap_or(Zone::Battlefield),
-        events,
-    );
-    super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
-        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    // CR 605.3b: it resolves immediately after activation, so the publication
+    // precedes the inline preamble below; a preamble paused on a replacement
+    // choice resumes past this boundary (`Published`) and never re-emits.
+    if cursor.activation == ManaAbilityActivationStage::Unpublished {
+        let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+        // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
+        // activation began, before any cost; never `mana_ability_definition`'s
+        // post-payment live fallback (a pending without its snapshot is `Unknown`).
+        let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
+        let activation_event = super::casting_targets::emit_ability_activated(
+            state,
+            pending.player,
+            pending.source_id,
+            activation_kind,
+            activation_cost,
+            None,
+            ability_def.activation_zone.unwrap_or(Zone::Battlefield),
+            events,
+        );
+        super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        cursor.activation = ManaAbilityActivationStage::Published;
+    }
+    // CR 605.3b + CR 608.2c: a mana ability whose production follows other
+    // instructions (Empowered Autogenerator's counter) performs them now, in
+    // written order, once its costs are paid — before the colour prompt and
+    // production read the state they change.
+    if crate::types::ability::inline_mana_preamble(&ability_def).is_some() {
+        with_bound_mana_activation(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+            |state, resolved| resolve_inline_mana_preamble(state, resolved, events),
+        );
+        // CR 616.1 + CR 608.2c: an instruction of the chain paused on a
+        // replacement choice (competing counter replacements). Park the
+        // activation exactly like a paused cost payment — its snapshot narrowed
+        // to the part still owed, the mana production — so, once the choice
+        // settles, the same typed resume continues it exactly once through the
+        // colour prompt, production and the payment it interrupted.
+        if state.pending_replacement.is_some() {
+            pending.ability_snapshot = Some(ability_from_mana_production(&ability_def));
+            cursor.parent = parent;
+            pause_mana_ability_cost_payment(state, None, pending, cursor, events, cost_event_start);
+            return Ok(state.waiting_for.clone());
+        }
+    }
     if !resolves_automatically && pending.color_override.is_none() {
         // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
         // and gated by this activation's own paid count, under the same binding
@@ -3768,18 +4059,23 @@ fn finish_mana_ability_cost_payment(
             pending.announced_source_incarnation,
             pending.cost_removed_counters,
             |state, resolved_for_prompt| {
+                // The production node — the root for a plain mana ability, a
+                // later link when instructions precede the mana.
+                let production =
+                    find_mana_effect(resolved_for_prompt).unwrap_or(resolved_for_prompt);
                 mana_choice_prompt(
-                    &resolved_for_prompt.effect,
+                    &production.effect,
                     state,
                     source_id,
-                    Some(resolved_for_prompt),
-                    Some(resolved_for_prompt),
+                    Some(production),
+                    Some(production),
                 )
             },
         );
         if let Some(choice) = prompt {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
                 && cost_resolves_without_choice(&ability_def.cost)
+                && crate::types::ability::inline_mana_preamble(&ability_def).is_none()
             {
                 pending.batch_siblings =
                     batch_eligible_siblings(state, pending.player, pending.source_id, &ability_def);
@@ -3825,6 +4121,76 @@ fn finish_mana_ability_cost_payment(
         }
     }
 
+    let mut enclosing_reveal_chain = None;
+    // CR 605.3b + CR 107.1c + CR 701.20a: a mana ability that reveals "any
+    // number of [filter] cards in your hand" (Metalworker) asks for that
+    // selection while it resolves; production resumes from the choice.
+    if let Effect::RevealHand {
+        card_filter,
+        cardinality: cardinality @ ObjectSelectionCardinality::AnyNumber,
+        ..
+    } = &*ability_def.effect
+    {
+        // The filter is evaluated from the activated ability's source, as
+        // the resolver evaluates it from the resolving ability.
+        // CR 601.2a: a spell mid-cast is not a card in hand (shared exclusion).
+        let eligible = super::mana_sources::reveal_eligible_hand_cards(
+            state,
+            pending.source_id,
+            pending.player,
+            card_filter,
+            super::mana_sources::spell_being_cast(state, pending.player),
+        );
+        // CR 400.2: hand size is public but which cards are eligible is not,
+        // so the prompt's existence must not depend on eligibility — any
+        // non-empty hand gets the prompt (with only the empty selection legal
+        // when nothing matches). Only an empty hand skips it.
+        // The synchronous auto-resolver (`AutoResolved`) has no prompt to
+        // surface — its caller restores its own `waiting_for` — so it takes
+        // the always-legal CR 107.1c choice of zero cards rather than
+        // parking a selection nobody would answer.
+        let hand_is_empty = state.players[pending.player.0 as usize].hand.is_empty();
+        if !hand_is_empty && !resolves_automatically {
+            let resume = WaitingFor::RevealChoice {
+                player: pending.player,
+                cards: eligible,
+                filter: card_filter.clone(),
+                optional: false,
+                decline_runs_continuation: false,
+                cardinality: *cardinality,
+                pending_mana_ability: Some(Box::new(pending.clone())),
+            };
+            if settles_completed_frame {
+                debug_assert!(cursor.parent.is_none());
+                if let Some(pause) = collect_completed_mana_frame_events(
+                    state,
+                    cursor.deferred_cost_events,
+                    events,
+                    cost_event_start,
+                    ManaTriggerFixedPointResume::Root {
+                        player: pending.player,
+                        resume: Box::new(pending.resume.clone()),
+                    },
+                ) {
+                    return Ok(pause);
+                }
+                if let Some(order_wf) =
+                    super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                {
+                    return Ok(order_wf);
+                }
+            }
+            return Ok(resume);
+        } else {
+            // CR 107.1c: zero cards revealed. Publish this activation's own
+            // empty set outside any enclosing chain so production counts
+            // it — not an earlier activation's set — and restore the
+            // enclosing chain once production has read it.
+            enclosing_reveal_chain = Some(state.chain_tracked_set_id.take());
+            super::effects::publish_tracked_set(state, Vec::new());
+        }
+    }
+
     let production_events_start = events.len();
     produce_mana_from_ability(
         state,
@@ -3838,11 +4204,15 @@ fn finish_mana_ability_cost_payment(
         pending.announced_source_incarnation,
         pending.cost_removed_counters,
     );
+    if let Some(enclosing_chain) = enclosing_reveal_chain {
+        state.chain_tracked_set_id = enclosing_chain;
+    }
     if !resolves_automatically {
         complete_mana_ability_activation(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
@@ -4588,11 +4958,17 @@ pub(crate) fn resume_mana_ability_cost_move(
     continue_mana_ability_cost_payment(state, *pending, cursor, events, 0)
 }
 
-/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
-/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
-/// 1 damage to you.") resolve atomically with the mana production. Walks the
-/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
-/// controller, GainLife, etc.) route through the standard effect handlers.
+/// CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+/// effect chain (e.g. painlands' "This land deals 1 damage to you.")
+/// resolves that chain inline — mana abilities don't use the stack, so
+/// the sub-ability runs as part of the same atomic resolution.
+///
+/// When the root ability is `Effect::Mana`, root production consumed only the root,
+/// so its `sub_ability` (which may contain conditional `Effect::Mana` additions like
+/// Urza's Tower or Ugin's Labyrinth) must execute. When the root is a non-Mana effect
+/// (e.g. `Effect::RevealHand` for Metalworker), `produce_mana_from_ability` already
+/// consumed the `Effect::Mana` sub-node, so we skip only that consumed node and resolve
+/// any remaining sub-ability tail.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -4600,6 +4976,20 @@ fn resolve_mana_ability_sub_chain(
 ) {
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
+    };
+    // A non-Mana root (Metalworker's `RevealHand`) has already had its
+    // `Effect::Mana` sub-node consumed by `produce_mana_from_ability`; only the
+    // tail after that node remains to resolve.
+    let sub = if matches!(ability.effect, Effect::Mana { .. }) {
+        sub
+    } else {
+        match find_mana_effect(ability) {
+            Some(production) => match production.sub_ability.as_deref() {
+                Some(tail) => tail,
+                None => return,
+            },
+            None => sub,
+        }
     };
     // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
     // whose prelude resets `last_effect_amount`; carry the head's cost-removed
@@ -12872,6 +13262,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -12976,6 +13367,7 @@ mod tests {
             source_id: source,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -13193,6 +13585,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
@@ -13430,6 +13823,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -13540,6 +13934,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -14682,6 +15077,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15609,6 +16005,7 @@ mod tests {
             source_id: land,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -16062,6 +16459,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16631,6 +17029,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16708,6 +17107,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16843,6 +17243,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16913,6 +17314,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -17075,6 +17477,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,

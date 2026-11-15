@@ -84,6 +84,7 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
     GameLogEntry {
         seq,
+        game_number: 1,
         turn: 1,
         phase: Phase::PreCombatMain,
         category: LogCategory::Stack,
@@ -9335,6 +9336,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9786,6 +9788,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],

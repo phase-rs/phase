@@ -1864,6 +1864,10 @@ export type ChooseFromZoneConstraint =
 // Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
 export type SharedQualityRelation = "Shares" | "DoesNotShare";
 
+// Mirrors Rust `ObjectSelectionCardinality` (CR 608.2d resolution-time choice
+// cardinality). Omitted on the wire when it is the single-card default.
+export type ObjectSelectionCardinality = "AnyNumber" | { Exactly: { count: number } };
+
 export type SearchSelectionConstraint =
   | { type: "None" }
   | { type: "SharesQualities"; qualities: string[]; relation: SharedQualityRelation }
@@ -2757,6 +2761,15 @@ export type AdditionalCost =
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
 export type SerializedAbilityCost = { type: string; [key: string]: unknown };
 
+/**
+ * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in
+ * `ChooseGiftRecipient` — engine-provided purpose; absent = Gift (serde default).
+ * `EffectCost` carries the spell cost being paid for the chosen opponent.
+ */
+export type CastOpponentChoicePurpose =
+  | { type: "Gift" }
+  | { type: "EffectCost"; cost: SerializedAbilityCost };
+
 export type ResolutionOptionalPaymentChoice =
   | { type: "Decline" }
   | { type: "Pay"; data: { index: number } };
@@ -3130,7 +3143,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "DigRestSplitChoice"; data: { player: PlayerId; library_owner: PlayerId; cards: ObjectId[]; top_count: number; bottom_count: number; scope: DigRestSplitScope; source_id?: ObjectId | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
+  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean; decline_runs_continuation?: boolean; cardinality?: ObjectSelectionCardinality; pending_mana_ability?: unknown } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
@@ -3291,7 +3304,7 @@ export type WaitingFor =
   // picks WHICH opponent makes the choice before the zone choice is presented.
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
-  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; purpose?: CastOpponentChoicePurpose; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
   // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
   // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
@@ -3554,6 +3567,12 @@ export type LogSegment =
 
 export interface GameLogEntry {
   seq: number;
+  /**
+   * The game of the match the engine logged this entry in. Absent on the first
+   * game's entries and on entries the client writes itself; the engine reads an
+   * absent one as the first game.
+   */
+  game_number?: number;
   turn: number;
   phase: Phase;
   category: LogCategory;
@@ -5862,6 +5881,13 @@ export interface AiLlmProposalResult {
   reasoning?: string | null;
   error?: string;
   /**
+   * The engine's typed refusal (`phase_llm::LlmError`), when it carries one.
+   * `threadUnavailable` means the provider would not continue the seat's
+   * message thread: the engine has dropped it, and the same decision may be
+   * asked once more as a fresh request.
+   */
+  errorKind?: { kind: string };
+  /**
    * Provider-reported token usage (`phase_llm::wire::TokenUsage`), present on
    * success and refusal alike. Diagnostic only.
    */
@@ -5869,6 +5895,7 @@ export interface AiLlmProposalResult {
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedInputTokens?: number | null;
+    cacheCreationInputTokens?: number | null;
   } | null;
 }
 
@@ -5886,12 +5913,36 @@ export interface LlmDecisionRequestResult {
   reasoning?: string;
   fingerprint?: string;
   optionCount?: number;
-  /** Characters of prompt the request carries (system + user). */
+  /**
+   * Characters of prompt the request carries: system and user for a full
+   * request, the one update message for a message-thread continue.
+   */
   promptChars?: number;
   request?: LlmHttpRequestSpec;
+  /**
+   * The message-thread turn this request is, or `null` for a self-contained
+   * request. Handed back with the reply, so the engine records the reply
+   * against the request that produced it and no other.
+   */
+  threadTurn?: number | null;
   error?: string;
   /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
   errorKind?: { kind: string };
+}
+
+/**
+ * Both platform clocks, read together, to time a seat's message thread by
+ * (`phase_llm::ClockReading`). A thread expires five idle minutes after its
+ * last request, in real time, and neither clock measures that alone:
+ * `Date.now()` counts a sleep, but a clock correction can step it, and
+ * `performance.now()` never steps, but can stop while the machine sleeps. The
+ * engine counts an idle time only where the two agree on it.
+ */
+export interface LlmClockReading {
+  /** `Date.now()`. */
+  wallMs: number;
+  /** `performance.now()`. */
+  monotonicMs: number;
 }
 
 /** Result of submitting an opaque AI proposal to its issuing authority. */
@@ -5987,21 +6038,35 @@ export interface EngineAdapter {
    * Optional capability: an adapter that omits it simply has no LLM seats, and
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
-   * rendering.
+   * rendering. `settingsRevision` numbers the seat's own provider settings: the
+   * controller advances it at every change the player makes to them, and the
+   * engine keeps a seat's message thread only under the revision it was
+   * opened under. `clock` is both clocks as the request is built; the request
+   * goes out no earlier, and a message thread's idle expiry runs from its last
+   * request.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
-  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  /**
+   * Binds an LLM response to an engine-issued proposal, or reports why it could
+   * not. `threadTurn` is the built request's `threadTurn`. `clock` is both
+   * clocks as the reply arrived: the engine judges a message thread the reply
+   * reports lost by how long it had idled by then.
+   */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
   llmProviderCatalog?(): Promise<unknown>;
