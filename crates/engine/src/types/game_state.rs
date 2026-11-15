@@ -54,7 +54,7 @@ pub use super::game_state_kinds::{
     TargetSelectionConstraint,
 };
 use super::identifiers::{
-    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId, ExtraPhaseId,
+    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, EpicEffectId, ExtraPhaseId, ExtraTurnId,
     LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
     ReplacementContinuationId, ResolutionCastOfferId, TrackedSetId, TriggerFiring,
 };
@@ -11061,6 +11061,17 @@ impl GameState {
             .checked_add(1)
             .expect("resolution-cast offer allocator exhausted");
         ResolutionCastOfferId(id)
+    }
+
+    /// CR 500.7: mint the nonzero identity of one granted extra turn. The
+    /// allocator is persisted, so an id minted after a reload never repeats one
+    /// already on a queued turn or bound trigger.
+    pub(crate) fn mint_extra_turn_id(&mut self) -> ExtraTurnId {
+        let id = self.next_extra_turn_id.max(1);
+        self.next_extra_turn_id = id
+            .checked_add(1)
+            .expect("extra-turn id allocator exhausted");
+        ExtraTurnId(id)
     }
 
     /// CR 500.8: mint the nonzero identity of one scheduled extra phase or
@@ -26616,6 +26627,26 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) last_added_phase_ids: Vec<ExtraPhaseId>,
 
+    /// CR 500.7: allocator for [`ExtraTurnId`]. [`GameState::new`] sets it to 1,
+    /// [`GameState::mint_extra_turn_id`] advances it, and the loop-detection
+    /// clone made by `normalize_for_loop` zeroes it. `#[serde(default)]`: a
+    /// state saved before ids existed reads 0, and minting still starts at 1.
+    #[serde(default)]
+    pub(crate) next_extra_turn_id: u64,
+
+    /// CR 603.7a + CR 608.2c: the identities of the extra turns the most recent
+    /// `Effect::ExtraTurn` instruction of this resolution granted. "At the
+    /// beginning of that turn's end step" binds to it when its delayed trigger
+    /// is created. Resolution-scoped, like `last_added_phase_ids`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) last_granted_extra_turn_ids: Vec<ExtraTurnId>,
+
+    /// CR 500.7: the identity of the granted extra turn in progress, set when it
+    /// begins (`turns::start_next_turn`) and cleared when it ends. `None` during
+    /// a natural turn, and for a granted turn saved before ids existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) current_extra_turn: Option<ExtraTurnId>,
+
     /// CR 103.1: The current turn-order direction. Durable — persists across
     /// turns until an effect reverses it again. Default `Normal` is the game's
     /// clockwise turn order (CR 103.1). `#[serde(default)]` for save compat.
@@ -32219,25 +32250,36 @@ pub struct ExtraTurn {
     /// When the extra-turn queue drains, natural order resumes at
     /// `next_turn_representative(anchor)`.
     pub anchor: PlayerId,
+    /// CR 603.7a: the identity of this granted turn, minted by
+    /// `turns::enqueue_extra_turn`. `#[serde(default)]`: an entry saved before
+    /// ids existed reads the default, which names no minted turn.
+    #[serde(default)]
+    pub id: ExtraTurnId,
 }
 
-/// Private serde shim: new saves emit `{ player, anchor }`; legacy saves stored
-/// a bare `PlayerId`. Mid-game saves that lost the OOS anchor recover as
+/// Private serde shim: new saves emit `{ player, anchor, id }`; older saves
+/// emitted `{ player, anchor }`, and legacy saves stored a bare `PlayerId`. Mid-game saves that lost the OOS anchor recover as
 /// `anchor == player` (in-sequence behavior).
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ExtraTurnCompat {
-    Full { player: PlayerId, anchor: PlayerId },
+    Full {
+        player: PlayerId,
+        anchor: PlayerId,
+        #[serde(default)]
+        id: ExtraTurnId,
+    },
     Legacy(PlayerId),
 }
 
 impl From<ExtraTurnCompat> for ExtraTurn {
     fn from(c: ExtraTurnCompat) -> Self {
         match c {
-            ExtraTurnCompat::Full { player, anchor } => Self { player, anchor },
+            ExtraTurnCompat::Full { player, anchor, id } => Self { player, anchor, id },
             ExtraTurnCompat::Legacy(player) => Self {
                 player,
                 anchor: player,
+                id: ExtraTurnId::default(),
             },
         }
     }
@@ -36314,6 +36356,9 @@ impl GameState {
             extra_phase_resume: Vec::new(),
             next_extra_phase_id: 1,
             last_added_phase_ids: Vec::new(),
+            next_extra_turn_id: 1,
+            last_granted_extra_turn_ids: Vec::new(),
+            current_extra_turn: None,
             turn_direction: TurnDirection::Normal,
             current_combat_attacker_restriction: None,
             current_combat_attacker_restriction_source: None,
@@ -37871,6 +37916,41 @@ impl GameState {
             } = &mut trigger.condition
             {
                 *entry = canonical(*entry);
+            }
+        }
+        // CR 104.4b + CR 500.7: a granted extra turn's identity is monotonic
+        // provenance, but which queued or in-progress turn a bound "that turn's
+        // end step" trigger names is not (CR 603.7a). Renumber by first
+        // occurrence across the queue and the turn in progress, following each
+        // bound trigger; an id naming neither can never be matched again (ids
+        // are never reminted), so it canonicalizes to the unminted default.
+        clone.next_extra_turn_id = 0;
+        clone.last_granted_extra_turn_ids.clear();
+        let live_turns: Vec<ExtraTurnId> = clone
+            .extra_turns
+            .iter()
+            .map(|turn| turn.id)
+            .chain(clone.current_extra_turn)
+            .filter(|id| *id != ExtraTurnId::default())
+            .collect();
+        let canonical_turn = |id: ExtraTurnId| {
+            live_turns
+                .iter()
+                .position(|live_id| *live_id == id)
+                .map_or(ExtraTurnId::default(), |index| {
+                    ExtraTurnId(index as u64 + 1)
+                })
+        };
+        for turn in clone.extra_turns.iter_mut() {
+            turn.id = canonical_turn(turn.id);
+        }
+        clone.current_extra_turn = clone.current_extra_turn.map(canonical_turn);
+        for trigger in clone.delayed_triggers.iter_mut() {
+            if let DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                turn: Some(turn), ..
+            } = &mut trigger.condition
+            {
+                *turn = canonical_turn(*turn);
             }
         }
         // CR 104.4b: the journal coordinate is monotonic provenance, while the
@@ -40034,6 +40114,9 @@ impl GameState {
             extra_phase_resume: _,
             next_extra_phase_id: _,
             last_added_phase_ids: _,
+            next_extra_turn_id: _,
+            last_granted_extra_turn_ids: _,
+            current_extra_turn: _,
             turn_direction: _,
             current_combat_attacker_restriction: _,
             current_combat_attacker_restriction_source: _,
@@ -41897,6 +41980,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         extra_phase_resume: _,
         next_extra_phase_id: _,
         last_added_phase_ids: _,
+        next_extra_turn_id: _,
+        last_granted_extra_turn_ids: _,
+        current_extra_turn: _,
         turn_direction: _,
         current_combat_attacker_restriction: _,
         current_combat_attacker_restriction_source: _,
@@ -42601,6 +42687,9 @@ impl PartialEq for GameState {
             && self.extra_phase_resume == other.extra_phase_resume
             && self.next_extra_phase_id == other.next_extra_phase_id
             && self.last_added_phase_ids == other.last_added_phase_ids
+            && self.next_extra_turn_id == other.next_extra_turn_id
+            && self.last_granted_extra_turn_ids == other.last_granted_extra_turn_ids
+            && self.current_extra_turn == other.current_extra_turn
             && self.turn_direction == other.turn_direction
             && self.current_combat_attacker_restriction
                 == other.current_combat_attacker_restriction
@@ -59861,6 +59950,81 @@ mod tests {
         );
     }
 
+    /// CR 104.4b + CR 603.7a: a "that turn's end step" trigger's bound id follows
+    /// its queued extra turn through loop canonicalization. Which queued turn it
+    /// names is position content; when the ids were minted is not.
+    ///
+    /// DISCRIMINATION: leaving the ids or the allocator unnormalized fails the
+    /// first assertion; renumbering the queue without rewriting the trigger (or
+    /// the reverse) fails the second.
+    #[test]
+    fn normalize_for_loop_keeps_which_granted_turn_a_trigger_names() {
+        let two_turns = |ids: [u64; 2], bound: u64, next: u64| {
+            let mut state = GameState::new_two_player(7);
+            for id in ids {
+                state.extra_turns.push(ExtraTurn {
+                    player: PlayerId(0),
+                    anchor: PlayerId(0),
+                    id: ExtraTurnId(id),
+                });
+            }
+            state.next_extra_turn_id = next;
+            state.delayed_triggers.push(DelayedTrigger::new(
+                DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                    phase: Phase::End,
+                    turn: Some(ExtraTurnId(bound)),
+                },
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(90_001),
+                    PlayerId(0),
+                )),
+                PlayerId(0),
+                ObjectId(90_001),
+                true,
+            ));
+            state
+        };
+        let early = two_turns([1, 2], 1, 3);
+        let late = two_turns([7, 8], 7, 9);
+        assert!(
+            loop_states_equal(&early.normalize_for_loop(), &late.normalize_for_loop()),
+            "positions differing only in minted turn ids confirm as a repeat"
+        );
+        let other_turn = two_turns([1, 2], 2, 3);
+        assert!(
+            !loop_states_equal(
+                &early.normalize_for_loop(),
+                &other_turn.normalize_for_loop()
+            ),
+            "a trigger naming the other queued turn is a different position"
+        );
+    }
+
+    /// CR 500.7: a queued turn saved before ids existed (`{ player, anchor }`)
+    /// decodes with the unminted default id, which names no minted turn; a
+    /// current save round-trips its id.
+    #[test]
+    fn extra_turn_decodes_saves_without_an_id_and_round_trips_one() {
+        let old: ExtraTurn =
+            serde_json::from_value(serde_json::json!({ "player": 1, "anchor": 0 }))
+                .expect("pre-id record decodes");
+        assert_eq!(old.id, ExtraTurnId::default());
+        let current = ExtraTurn {
+            player: PlayerId(1),
+            anchor: PlayerId(0),
+            id: ExtraTurnId(5),
+        };
+        let round_trip: ExtraTurn =
+            serde_json::from_value(serde_json::to_value(&current).expect("serialize"))
+                .expect("current record decodes");
+        assert_eq!(round_trip, current);
+    }
+
     /// CR 104.4b + CR 603.7a: a "that combat" trigger's bound id follows its
     /// scheduled entry through loop canonicalization. Which entry it names is
     /// position content; when its ids were minted is not.
@@ -64225,6 +64389,7 @@ mod tests {
             vec![ExtraTurn {
                 player: PlayerId(0),
                 anchor: PlayerId(0),
+                id: ExtraTurnId::default(),
             }],
             "legacy saves recover in-sequence behavior via anchor == player"
         );

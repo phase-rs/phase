@@ -284,6 +284,7 @@ pub fn resolve(
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. }
         | DelayedTriggerCondition::WhenDies { .. }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
@@ -395,6 +396,24 @@ pub fn resolve(
             return Ok(());
         };
         *entry = Some(*added);
+    }
+
+    // CR 603.7a + CR 500.7: "that turn" names the extra turn the preceding
+    // instruction of this resolution granted (`last_granted_extra_turn_ids`).
+    // When none was granted (no recipient, a count of zero) no such turn exists
+    // and no delayed trigger is created. The anaphor is singular, so several
+    // granted turns are not a reading of the text either, and also create
+    // nothing.
+    if let DelayedTriggerCondition::AtBeginningOfGrantedTurn { turn, .. } = &mut condition {
+        let [granted] = state.last_granted_extra_turn_ids.as_slice() else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CreateDelayedTrigger,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        };
+        *turn = Some(*granted);
     }
 
     // CR 608.2h + CR 603.7a: Freeze this instruction's replacement-settled
@@ -1085,7 +1104,8 @@ fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) 
     match condition {
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
-        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. } => true,
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. } => true,
         DelayedTriggerCondition::WhenLeavesPlay { .. }
         | DelayedTriggerCondition::WhenDies { .. }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
@@ -1259,6 +1279,7 @@ fn condition_filter_groups(condition: &mut DelayedTriggerCondition) -> Vec<Vec<&
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => Vec::new(),
     }
 }
@@ -2187,7 +2208,8 @@ fn condition_names_referent_zone_change(condition: &DelayedTriggerCondition) -> 
         // Phase-based: the referent is expected wherever it was at creation.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
-        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. } => false,
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. } => false,
 
         // The condition IS the referent's zone change when it is filtered on the
         // referent; filtered on `SelfRef` it is the SOURCE's zone change.

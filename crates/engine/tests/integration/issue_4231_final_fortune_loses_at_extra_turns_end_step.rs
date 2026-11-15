@@ -5,8 +5,15 @@
 //! grants, so the delayed loss must wait for that turn's end step. Before the
 //! fix it fired at the end step of the turn Final Fortune was cast in, so the
 //! caster lost before the extra turn was ever taken.
+//!
+//! The loss is bound to the SPECIFIC granted turn (`ExtraTurnId`): a skipped
+//! grant retires it (CR 614.10a, both live skip paths), a LIFO-reordered queue
+//! fires it at its own turn (CR 500.7), and a grant to another player fires at
+//! that player's turn. "That turn" in an unrelated chain (Oracle en-Vec) is not
+//! rewritten to the extra-turn rule.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -142,4 +149,188 @@ fn final_fortune_cast_on_an_opponents_turn_loses_at_the_extra_turns_end_step() {
 
     pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 1);
     assert_caster_lost(&runner);
+}
+
+const TIME_WARP: &str = "Target player takes an extra turn after this one.";
+const MEDITATE: &str = "Draw four cards. You skip your next turn.";
+const TROUBLE_IN_PAIRS: &str = "If an opponent would begin an extra turn, that player skips that turn instead.\nWhenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.";
+/// Synthetic: Final Fortune's loss clause behind a Time Warp-style grant to
+/// another player (nearest printed analogues: Final Fortune, Time Warp).
+const GRANT_TO_OPPONENT_THEN_LOSE: &str = "Target player takes an extra turn after this one. At the beginning of that turn's end step, you lose the game.";
+/// Synthetic: two grants, so "that turn" has no single antecedent (nearest
+/// printed analogue: Final Fortune; Time Stretch grants two turns).
+const TWO_GRANTS_THEN_LOSE: &str = "Take two extra turns after this one. At the beginning of that turn's end step, you lose the game.";
+const ORACLE_EN_VEC: &str = "{T}: Target opponent chooses any number of creatures they control. During that player's next turn, the chosen creatures attack if able, and other creatures can't attack. At the beginning of that turn's end step, destroy each of the chosen creatures that didn't attack this turn. Activate only during your turn.";
+
+fn library(scenario: &mut GameScenario) {
+    scenario.with_library_top(
+        P0,
+        &["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10"],
+    );
+    scenario.with_library_top(
+        P1,
+        &["O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10"],
+    );
+}
+
+/// CR 614.10a + CR 603.7a: Meditate's "you skip your next turn" (the
+/// `turns_to_skip` counter path) skips the granted extra turn, so its end step
+/// never occurs and the loss is retired; P0 survives the later natural turns.
+#[test]
+fn final_fortune_loss_is_retired_when_the_granted_turn_is_skipped_by_a_turn_skip() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    library(&mut scenario);
+    let ff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Fortune", true, FINAL_FORTUNE)
+        .id();
+    let meditate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Meditate", true, MEDITATE)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(8, ManaType::Red));
+    let mut runner = scenario.build();
+    let cast_turn = runner.state().turn_number;
+    runner.cast(ff).resolve();
+    runner.cast(meditate).resolve();
+    assert_eq!(runner.state().turns_to_skip[0], 1, "Meditate arms the skip");
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    // Through the skipped extra turn, P1's turn, and P0's next natural turn.
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 2);
+    assert_still_in_game(&runner, "after the granted turn was skipped");
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the delayed loss bound to the skipped turn must be retired"
+    );
+    assert_eq!(runner.state().turns_to_skip[0], 0);
+}
+
+/// CR 614.10 + CR 614.10a: Trouble in Pairs's replacement (the `BeginTurn`
+/// replacement path) skips the granted extra turn the same way.
+#[test]
+fn final_fortune_loss_is_retired_when_the_granted_turn_is_skipped_by_a_replacement() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    library(&mut scenario);
+    scenario.add_enchantment_from_oracle(P1, "Trouble in Pairs", TROUBLE_IN_PAIRS);
+    let ff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Fortune", true, FINAL_FORTUNE)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(4, ManaType::Red));
+    let mut runner = scenario.build();
+    let cast_turn = runner.state().turn_number;
+    runner.cast(ff).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 2);
+    assert_still_in_game(&runner, "after the replacement skipped the granted turn");
+    assert!(runner.state().delayed_triggers.is_empty());
+}
+
+/// CR 500.7: a later grant is taken first (LIFO). Final Fortune's loss belongs
+/// to ITS turn, which is taken second, not to the Time Warp turn taken first.
+#[test]
+fn final_fortune_loss_fires_at_its_own_turn_when_a_later_grant_is_taken_first() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    library(&mut scenario);
+    let ff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Fortune", true, FINAL_FORTUNE)
+        .id();
+    let warp = scenario
+        .add_spell_to_hand_from_oracle(P0, "Time Warp", true, TIME_WARP)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(8, ManaType::Red));
+    let mut runner = scenario.build();
+    let cast_turn = runner.state().turn_number;
+    runner.cast(ff).resolve();
+    runner.cast(warp).target_player(P0).resolve();
+    assert_eq!(runner.state().extra_turns.len(), 2);
+
+    // Turn T+1 is the Time Warp turn: its end step must not lose the game.
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 1);
+    assert_still_in_game(&runner, "after the later (Time Warp) grant's turn");
+    // Turn T+2 is Final Fortune's own turn.
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 2);
+    assert_caster_lost(&runner);
+}
+
+/// CR 500.7 + CR 603.7a: "that turn" is the granted turn whoever takes it. The
+/// caster ("you") loses at the end step of the opponent's extra turn.
+#[test]
+fn delayed_loss_fires_at_a_turn_granted_to_another_player() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    library(&mut scenario);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Granting Fortune", true, GRANT_TO_OPPONENT_THEN_LOSE)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(4, ManaType::Red));
+    let mut runner = scenario.build();
+    let cast_turn = runner.state().turn_number;
+    runner.cast(spell).target_player(P1).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn);
+    assert_still_in_game(&runner, "after the turn it was cast in");
+    assert_eq!(runner.state().active_player, P1, "the extra turn is P1's");
+    pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 1);
+    assert_caster_lost(&runner);
+}
+
+/// CR 608.2c: two grants leave "that turn" without a single antecedent, so no
+/// delayed trigger is created (the same rule as one added phase for "that
+/// combat").
+#[test]
+fn no_delayed_loss_is_created_when_the_antecedent_grants_two_turns() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    library(&mut scenario);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Double Fortune", true, TWO_GRANTS_THEN_LOSE)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(4, ManaType::Red));
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().extra_turns.len(), 2);
+    assert!(runner.state().delayed_triggers.is_empty());
+}
+
+/// Oracle en-Vec's "that turn" is "that player's next turn", not a granted
+/// extra turn: the extra-turn reading must not apply to it.
+#[test]
+fn that_turns_end_step_without_a_granted_turn_is_not_rewritten_to_the_extra_turn_rule() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let en_vec = scenario
+        .add_creature_from_oracle(P0, "Oracle en-Vec", 1, 1, ORACLE_EN_VEC)
+        .id();
+    let runner = scenario.build();
+    let object = &runner.state().objects[&en_vec];
+    let mut delayed = 0;
+    let mut unsupported_that_turn = 0;
+    for ability in object.abilities.iter() {
+        let mut next = Some(ability);
+        while let Some(def) = next {
+            match &*def.effect {
+                Effect::CreateDelayedTrigger { .. } => delayed += 1,
+                Effect::Unimplemented { description, .. }
+                    if description.as_deref().is_some_and(|text| {
+                        text.starts_with("At the beginning of that turn's end step")
+                    }) =>
+                {
+                    unsupported_that_turn += 1
+                }
+                _ => {}
+            }
+            next = def.sub_ability.as_deref();
+        }
+    }
+    // The referent ("that player's next turn") is not proven, so the clause is
+    // kept as an honest unsupported form instead of a guessed delayed trigger.
+    assert_eq!(
+        delayed, 0,
+        "no delayed trigger may be guessed for \"that turn\""
+    );
+    assert_eq!(unsupported_that_turn, 1);
 }
