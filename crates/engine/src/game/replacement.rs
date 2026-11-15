@@ -14410,12 +14410,13 @@ pub fn replace_event(
 /// substitute's counters or mill), parks the pass — `pass` keeps every leg's
 /// progress, every unstarted event and the tally so far — and the caller parks
 /// the batch around it (`combat_damage::CombatDamageBatch::Paused`). CR 510.2
-/// rules out a priority window here, not these choices. Every event is first
-/// advanced through its choice-free steps (CR 616.2: a redirect can hand it to
-/// another seat), so each leg's actual chooser is known before any prompt is
-/// published. When several legs owe a choice the prompts then follow CR 101.4
-/// APNAP order of the actual chooser, and a parked leg is reconciled against
-/// the live game (CR 616.1f + CR 800.4a) before it is surfaced or answered.
+/// rules out a priority window here, not these choices. When several legs owe
+/// a choice the prompts follow CR 101.4 APNAP order of the player who actually
+/// owes each one: an unstarted leg is ranked by the first chooser its event
+/// reaches after any redirect (CR 616.2), so a leg that a redirect handed to an
+/// earlier seat is started before a later seat's outstanding choice is
+/// published. A parked leg is reconciled against the live game (CR 616.1f +
+/// CR 800.4a) before it is surfaced or answered.
 ///
 /// When the pass completes, `pass.resolved` is aligned 1:1 with the batch's
 /// events: `Some(event)` is a survivor post-replacement `Damage` event for
@@ -14551,26 +14552,12 @@ pub(crate) fn replace_combat_damage_batch(
             step = Some((leg, reconciled));
             continue;
         }
-        // CR 616.2: a replacement can become applicable to an event as the
-        // result of another replacement that modifies it, so who owes an
-        // unstarted event's first choice is known only once the event has been
-        // advanced through its choice-free steps (a redirect hands it to another
-        // seat). Every unstarted event is therefore advanced to its first
-        // choice, or to its settlement, by the shared replacement pipeline
-        // before any outstanding prompt is surfaced.
-        if let Some(event) = pass.unstarted.pop_front() {
-            let leg = pass.resolved.len();
-            pass.resolved.push(PendingCombatLegProgress::Settled(None));
-            prepare_replacement_index_for_pipeline(state);
-            let result = pipeline_loop(state, event, 0, replacement_registry(), events);
-            clear_replacement_index_pipeline(state);
-            step = Some((leg, settle_combat_damage_replacement(state, result, events)));
-            continue;
-        }
         // CR 616.1 + CR 101.4: simultaneous replacement choices are made in
-        // APNAP order of the player who actually owes each one: the earliest
-        // ranked chooser among the parked legs. A tie goes to the earlier leg,
-        // which keeps a seat's own legs in assignment order.
+        // APNAP order of the player who actually owes each one. The next prompt
+        // is the earliest-ranked chooser among every outstanding choice: a
+        // parked leg's next choice (whoever now owns it after a redirect) and an
+        // unstarted leg's first choice. A parked leg wins a tie, which keeps a
+        // seat's own legs in assignment order.
         let apnap = super::players::apnap_order(state);
         let rank = |player: PlayerId| apnap.iter().position(|seat| *seat == player);
         let waiting_leg = pass
@@ -14585,6 +14572,34 @@ pub(crate) fn replace_combat_damage_batch(
                 _ => None,
             })
             .min();
+        // CR 616.2: a replacement can become applicable to an event as the
+        // result of another replacement that modifies it, so who owes an
+        // unstarted event's first choice is known only once the event has been
+        // advanced through its choice-free steps (a redirect hands it to another
+        // seat). The event is therefore started when its first chooser outranks
+        // every parked leg's; until then nothing of it is applied, so a
+        // replacement that leaves the game meanwhile never reaches it.
+        let start_unstarted = match (waiting_leg, pass.unstarted.front()) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some((waiting_rank, _)), Some(event)) => {
+                let chooser = first_chooser_of_unstarted_combat_leg(state, event);
+                chooser.and_then(rank).unwrap_or(usize::MAX) < waiting_rank
+            }
+        };
+        if start_unstarted {
+            let event = pass
+                .unstarted
+                .pop_front()
+                .expect("an unstarted leg was ranked");
+            let leg = pass.resolved.len();
+            pass.resolved.push(PendingCombatLegProgress::Settled(None));
+            prepare_replacement_index_for_pipeline(state);
+            let result = pipeline_loop(state, event, 0, replacement_registry(), events);
+            clear_replacement_index_pipeline(state);
+            step = Some((leg, settle_combat_damage_replacement(state, result, events)));
+            continue;
+        }
         let Some((_, leg)) = waiting_leg else {
             break CombatDamageReplacementOutcome::Complete;
         };
@@ -14652,6 +14667,35 @@ fn reconcile_parked_combat_leg(
         return Some((leg, repropose_combat_damage_leg(state, *parked, events)));
     }
     None
+}
+
+/// CR 616.2 + CR 616.1: the player who owes an unstarted combat-damage event's
+/// first replacement choice. A replacement can become applicable only after
+/// another one modified the event (a redirect), so the event is advanced through
+/// the shared replacement pipeline on a copy of the game, which discovers the
+/// chooser exactly as the real run will without applying anything to the game.
+/// An event that settles without a choice has no chooser to rank, and falls back
+/// to the seat it damages.
+fn first_chooser_of_unstarted_combat_leg(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<PlayerId> {
+    let mut probe = state.clone();
+    let mut scratch = Vec::new();
+    prepare_replacement_index_for_pipeline(&mut probe);
+    let result = pipeline_loop(
+        &mut probe,
+        event.clone(),
+        0,
+        replacement_registry(),
+        &mut scratch,
+    );
+    match result {
+        ReplacementResult::NeedsChoice(chooser) => Some(chooser),
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+            super::combat_damage::combat_damage_affected_seat(state, event)
+        }
+    }
 }
 
 /// CR 800.4a + CR 800.4e: whether a combat-damage event's recipient is gone: a
