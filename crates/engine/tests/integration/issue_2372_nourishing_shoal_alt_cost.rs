@@ -154,7 +154,7 @@ fn nourishing_shoal_pitch_exile_binds_x_and_gains_life() {
     );
 }
 
-/// CR 107.3a + CR 118.9d: under Thalia, Guardian of Thraben the pitch cast also pays {1}, and X
+/// CR 107.3c + CR 118.9d: under Thalia, Guardian of Thraben the pitch cast also pays {1}, and X
 /// is still the exiled card's mana value.
 #[test]
 fn nourishing_shoal_pitch_under_a_cost_increase_binds_x_and_pays_it() {

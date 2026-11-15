@@ -6591,7 +6591,7 @@ fn finish_exile_selection_for_cost(
     );
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
-            // CR 107.3a: X comes from a pitched card only when the paid cost's own filter defines X.
+            // CR 107.3c: X comes from a pitched card only when the paid cost's own filter defines X.
             if pending.ability.chosen_x.is_none()
                 && paid_filter
                     .is_some_and(super::cost_payability::target_filter_has_x_mana_value_constraint)

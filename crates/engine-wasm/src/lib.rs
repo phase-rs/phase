@@ -5996,7 +5996,7 @@ mod legacy_pending_cast_timing_restore_tests {
         assert!(cast_with_flash(&state, lions));
     }
 
-    // CR 107.3a: an old save paused at Nourishing Shoal's pitch takes X from the exiled card.
+    // CR 107.3c: an old save paused at Nourishing Shoal's pitch takes X from the exiled card.
     #[test]
     fn legacy_shoal_pitch_prompt_binds_x_from_the_pitched_card() {
         let restored = restore(&v124!("shoal_pitch_prompt"));
@@ -6019,6 +6019,34 @@ mod legacy_pending_cast_timing_restore_tests {
         runner.advance_until_stack_empty();
         assert_eq!(runner.state().players[P0.0 as usize].life, life_before + 3);
         assert_eq!(runner.state().objects[&courser].zone, Zone::Exile);
+    }
+
+    // CR 601.2b: a pitch prompt whose cast did not elect the alternative cost recovers no cost.
+    #[test]
+    fn legacy_pitch_prompt_without_an_elected_alternative_keeps_its_resume() {
+        let json = v124!("shoal_pitch_prompt");
+        let accepted = "\"alternative_cost_election\":\"Accepted\"";
+        assert_eq!(json.matches(accepted).count(), 1);
+        assert!(matches!(
+            restore(&json).waiting_for,
+            WaitingFor::PayCost {
+                resume: engine::types::game_state::CostResume::SpellCost { .. },
+                ..
+            }
+        ));
+        let restored =
+            restore(&json.replace(accepted, "\"alternative_cost_election\":\"Declined\""));
+        assert!(
+            matches!(
+                &restored.waiting_for,
+                WaitingFor::PayCost {
+                    resume: engine::types::game_state::CostResume::Spell { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            restored.waiting_for
+        );
     }
 }
 

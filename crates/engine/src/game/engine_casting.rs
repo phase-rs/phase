@@ -1702,44 +1702,64 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     Ok(())
 }
 
-/// CR 107.3a + CR 601.2b: an old save's pitch prompt recorded no paid cost, so the elected
-/// alternative cost (a permission's, else the spell's own) is recovered for the exile handler
-/// that reads X from it.
+/// CR 107.3c + CR 601.2b: an old save's pitch prompt recorded no paid cost, so the exile leg of
+/// the elected alternative cost (a permission's, else the spell's own accepted one) is recovered
+/// for the exile handler that reads X from it.
 pub(crate) fn restore_legacy_pitch_cost_resume(state: &mut GameState) {
+    use crate::types::game_state::{
+        CostResume, PayCostKind, SpellAlternativeCostElection, SpellCostSource,
+    };
     let WaitingFor::PayCost {
-        kind: crate::types::game_state::PayCostKind::ExileFromZone { .. },
-        resume: crate::types::game_state::CostResume::Spell { spell },
+        kind: PayCostKind::ExileFromZone { zone },
+        resume: CostResume::Spell { spell },
         ..
     } = &state.waiting_for
     else {
         return;
     };
-    let Some(cost) = casting_costs::elected_cast_alternative_ability_cost(
+    // An announced X is never read from the paid cost, and a fresh prompt stores the leg
+    // unconcretized only while X is unannounced.
+    if spell.activation_ability_index.is_some() || spell.ability.chosen_x.is_some() {
+        return;
+    }
+    let player = spell.ability.controller;
+    let elected = casting_costs::elected_cast_alternative_ability_cost(
         state,
-        spell.ability.controller,
+        player,
         spell.object_id,
         spell.casting_variant,
         spell.casting_permission_index,
     )
     .or_else(|| {
+        if spell.alternative_cost_election != SpellAlternativeCostElection::Accepted {
+            return None;
+        }
         casting_costs::payable_spell_alternative_cost_details_at_index(
             state,
-            spell.ability.controller,
+            player,
             spell.object_id,
             spell.casting_permission_index,
         )
         .map(|alternative| alternative.cost)
-    }) else {
+    });
+    let Some(leg) = elected
+        .as_ref()
+        .and_then(casting::find_non_self_exile)
+        .filter(|(_, leg_zone, _)| ExileCostSourceZone::try_from_zone(*leg_zone) == Some(*zone))
+        .map(|(count, leg_zone, filter)| AbilityCost::Exile {
+            count,
+            zone: Some(leg_zone),
+            filter: filter.cloned(),
+        })
+    else {
         return;
     };
+    let spell = spell.clone();
     if let WaitingFor::PayCost { resume, .. } = &mut state.waiting_for {
-        let crate::types::game_state::CostResume::Spell { spell } = resume else {
-            return;
-        };
-        *resume = crate::types::game_state::CostResume::SpellCost {
-            spell: spell.clone(),
-            cost: Box::new(cost),
-            source: crate::types::game_state::SpellCostSource::Other,
+        *resume = CostResume::SpellCost {
+            spell,
+            cost: Box::new(leg),
+            source: SpellCostSource::Other,
         };
     }
 }
