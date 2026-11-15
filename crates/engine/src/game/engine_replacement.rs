@@ -528,7 +528,7 @@ fn finish_abandoned_replacement(
             parked_affected_object_id: boundary.affected_object_id(),
             pending_phase_drain_life_loser: None,
             action_event_start: events.len(),
-            drain_parked_batch: false,
+            boundary: ReplacementEpilogueBoundary::Departure,
         },
         events,
     )
@@ -670,6 +670,17 @@ pub(crate) fn resume_paused_player_scope_sacrifice(
     }
 }
 
+/// What settles a replacement-execute epilogue (CR 800.4a + CR 616.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplacementEpilogueBoundary {
+    /// A player answered the replacement: every parked drain stage runs.
+    Answer,
+    /// A departure cancelled the leaver's replacement: the surviving players' shared legacy
+    /// batch tail stays on its owner for the action's ordinary drain, while a staged
+    /// population is settled by the departure itself.
+    Departure,
+}
+
 struct ReplacementExecuteEpilogue {
     zone_change_object_id: Option<ObjectId>,
     enters_battlefield: bool,
@@ -677,10 +688,9 @@ struct ReplacementExecuteEpilogue {
     parked_affected_object_id: Option<ObjectId>,
     pending_phase_drain_life_loser: Option<PlayerId>,
     action_event_start: usize,
-    /// CR 800.4a + CR 616.1: whether the parked batch tail is drained here. A departure
-    /// cancels only the leaver's own paused member; the surviving players' tail stays on its
-    /// shared owner for the action's ordinary drain, exactly as before the departure.
-    drain_parked_batch: bool,
+    /// CR 800.4a + CR 616.1: what settles this epilogue: an answered replacement, or the
+    /// cancellation of a leaver's replacement by a departure.
+    boundary: ReplacementEpilogueBoundary,
 }
 
 /// CR 616.1 + CR 608.2c: settle a delivered replacement or a whole staged batch
@@ -697,7 +707,7 @@ fn finish_replacement_execute_epilogue(
         parked_affected_object_id,
         pending_phase_drain_life_loser,
         action_event_start: replacement_action_event_start,
-        drain_parked_batch,
+        boundary,
     } = epilogue;
     let mut waiting_for = WaitingFor::Priority {
         player: state.active_player,
@@ -882,7 +892,7 @@ fn finish_replacement_execute_epilogue(
     // CR 800.4a + CR 616.1: a departure leaves a shared legacy batch's surviving tail on its
     // owner for the action's ordinary drain; a staged population is settled by the departure
     // itself (its leaver's decisions are retired and the rest are consulted again).
-    let leaves_shared_tail = !drain_parked_batch
+    let leaves_shared_tail = boundary == ReplacementEpilogueBoundary::Departure
         && state
             .active_batch_delivery()
             .is_some_and(|pending| pending.staged.is_none());
@@ -1459,7 +1469,7 @@ fn handle_replacement_choice_inner(
                                         parked_affected_object_id,
                                         pending_phase_drain_life_loser,
                                         action_event_start: replacement_action_event_start,
-                                        drain_parked_batch: true,
+                                        boundary: ReplacementEpilogueBoundary::Answer,
                                     },
                                     events,
                                 )
@@ -2148,7 +2158,7 @@ fn handle_replacement_choice_inner(
                                         parked_affected_object_id,
                                         pending_phase_drain_life_loser,
                                         action_event_start: replacement_action_event_start,
-                                        drain_parked_batch: true,
+                                        boundary: ReplacementEpilogueBoundary::Answer,
                                     },
                                     events,
                                 )
@@ -2273,7 +2283,7 @@ fn handle_replacement_choice_inner(
                     parked_affected_object_id,
                     pending_phase_drain_life_loser,
                     action_event_start: replacement_action_event_start,
-                    drain_parked_batch: true,
+                    boundary: ReplacementEpilogueBoundary::Answer,
                 },
                 events,
             )
@@ -2380,7 +2390,7 @@ fn handle_replacement_choice_inner(
                                     parked_affected_object_id,
                                     pending_phase_drain_life_loser,
                                     action_event_start: replacement_action_event_start,
-                                    drain_parked_batch: true,
+                                    boundary: ReplacementEpilogueBoundary::Answer,
                                 },
                                 events,
                             )
@@ -2429,7 +2439,7 @@ fn handle_replacement_choice_inner(
                                 parked_affected_object_id,
                                 pending_phase_drain_life_loser,
                                 action_event_start: replacement_action_event_start,
-                                drain_parked_batch: true,
+                                boundary: ReplacementEpilogueBoundary::Answer,
                             },
                             events,
                         )
