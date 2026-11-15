@@ -3488,6 +3488,20 @@ fn collect_matching_triggers_inner(
         if !collection.admits_observation(trig_def, event) {
             continue;
         }
+        // The exemption of the dying source's after-read covers only a trigger that
+        // fires for that creature alone; a "from anywhere" trigger that watches
+        // other creatures too is still a dying-caused trigger and is suppressed.
+        if after_read_of_dying_source
+            && trig_def.valid_card != Some(TargetFilter::SelfRef)
+            && event_is_suppressed_by_static_triggers_cached(
+                state,
+                event,
+                Some(&source_context),
+                active_suppress_triggers,
+            )
+        {
+            continue;
+        }
         if let LogicalZoneTriggerCollection::Settlement(group) = collection {
             let (_, suppressors) = match trigger_observation_time(trig_def, event) {
                 TriggerObservationTime::ImmediatelyBefore => group
