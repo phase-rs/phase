@@ -11823,7 +11823,7 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
     }
 }
 
-/// CR 113.2c + CR 201.5a + CR 614.1c + CR 611.2c + CR 602.5c: Tier-2-only
+/// CR 113.2c + CR 201.5a + CR 613.1f + CR 611.2c + CR 602.5c: Tier-2-only
 /// `GrantAbility` dedup. Collapse iff FULL derived `AbilityDefinition ==`
 /// (head `granting_object` stamp PARTICIPATING plus `grant_chain` re-donation
 /// lineage, plus sub-symbol stamps and injected `cap` restrictions) with an
