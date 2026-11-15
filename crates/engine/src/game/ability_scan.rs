@@ -669,7 +669,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         // CR 732.2a is the OPERATIVE rule for this arm, and the mode split is the one
         // `Effect::Token` and `Effect::Mana` already ship: under `Conservative` this stays
-        // the byte-identical blanket every non-firewall consumer already sees; under
+        // the blanket every non-firewall consumer already sees on every axis except
+        // `source_counters`, which the pump's own fields decide; under
         // `LoopFirewall` it DESCENDS, because CR 732.2a admits a proposal only on "the
         // predictable results of the sequence of choices" and bars "conditional actions,
         // where the outcome of a game event determines the next action a player takes".
