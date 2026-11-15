@@ -6481,6 +6481,7 @@ impl MovedObjectsSource {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6964,6 +6965,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7235,6 +7237,7 @@ fn node_with_entry_modifications(
         | Effect::CombineHost { .. }
         | Effect::CompletePlayerAction { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Connive { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::CopySpell { .. }
