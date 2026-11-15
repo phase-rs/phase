@@ -1527,6 +1527,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_copy: bool,
 
+    /// CR 707.13 + CR 400.11: this object was created OUTSIDE the game (the copy
+    /// Garth One-Eye creates "of the card with the chosen name"). Outside the game
+    /// is not a zone, but every object carries a `zone`, so such a copy is staged
+    /// in one (see `create_card_copy_by_name::STAGING_ZONE`); this marker is what
+    /// tells every cast-origin reader that a cast of it (CR 601.2a) is NOT a cast
+    /// from that staging zone. Read through [`GameObject::cast_origin_zone`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub created_outside_game: bool,
+
     /// Image-lookup routing hint for the display layer. See `DisplaySource`
     /// for the rationale. Independent of `is_token` — a token-copy of a
     /// real card carries `is_token = true` AND `DisplaySource::Card`.
@@ -1760,6 +1769,19 @@ pub struct GameObject {
     /// it remains a spell on the stack. Cleared on every Stack exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
+
+    /// CR 614.1d + CR 607.1c + CR 707.10: the "if you cast a spell this way,
+    /// that artifact enters tapped" rider of the graveyard permission this
+    /// spell was cast through (Edgar, Master Machinist), written at
+    /// finalization from the announced permission's latch. Offered as a
+    /// CR 616.1 replacement candidate when this spell resolves onto the
+    /// battlefield. Stack-scoped like `cast_occurrence`: cleared on every
+    /// Stack exit and on a copy (a copy of a spell isn't cast).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::zones::EtbTapState::is_unspecified"
+    )]
+    pub cast_permission_enter_tapped: crate::types::zones::EtbTapState,
 
     /// CR 601.2a + CR 400.7: this spell's identity while it is announced and on
     /// the stack (`GameState::mint_spell_announcement`). Survives the
@@ -2061,6 +2083,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         linked_ability_source: _,
         is_token: _,
         is_copy: _,
+        created_outside_game: _,
         display_source: _,
         modal: _,
         additional_cost: _,
@@ -2101,6 +2124,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_occurrence: _,
         // COMPARED: which spell on the stack this object is (CR 601.2a).
         spell_announcement: _,
+        // COMPARED: the cast-this-way enters-tapped rider changes how this
+        // spell's entry resolves (CR 614.1d) while it is on the stack.
+        cast_permission_enter_tapped: _,
         cast_controller: _,
         cast_spell_keywords: _,
         cast_casualty_grant_sources: _,
@@ -3151,6 +3177,7 @@ impl GameObject {
             // (`combat::live_block_pairs_of`); the object alone cannot answer it.
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
@@ -3406,6 +3433,7 @@ impl GameObject {
             linked_ability_source: None,
             is_token: false,
             is_copy: false,
+            created_outside_game: false,
             display_source: DisplaySource::Card,
             modal: None,
             additional_cost: None,
@@ -3441,6 +3469,7 @@ impl GameObject {
             cast_from_zone: None,
             copied_from_zone: None,
             cast_occurrence: None,
+            cast_permission_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             spell_announcement: None,
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
@@ -4478,6 +4507,22 @@ impl GameObject {
     /// card" (Cipher's encode-on-resolution, CR 702.99a) gate on this.
     pub fn is_represented_by_a_card(&self) -> bool {
         !self.is_token && !self.is_copy
+    }
+
+    /// CR 601.2a + CR 707.13: the ZONE this object was cast from, `None` when it
+    /// was not cast OR was cast from outside the game (CR 400.11: not a zone).
+    /// Every "cast from [zone]" predicate compares through this, never through
+    /// the raw `cast_from_zone` stamp, which for an outside-the-game cast holds
+    /// only the staging zone.
+    pub fn cast_origin_zone(&self) -> Option<Zone> {
+        self.cast_from_zone.filter(|_| !self.created_outside_game)
+    }
+
+    /// CR 707.13 + CR 400.11: whether this object was created outside the game (Garth
+    /// One-Eye's copy). It is staged in a zone for the casting pipeline's bookkeeping,
+    /// but outside the game is not a zone, so no zone's public listing may show it.
+    pub fn is_outside_game(&self) -> bool {
+        self.created_outside_game
     }
 
     /// CR 108.2 + CR 109.1: Whether this object belongs to the population of

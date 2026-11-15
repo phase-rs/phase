@@ -647,6 +647,11 @@ pub(crate) fn anticipated_zone_change_delivery(
     face_down_in_exile: crate::types::ability::ExileConcealment,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
+    // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+    // they construct no zone-change proposal.
+    if object.zone == Zone::Library && destination == Zone::Library {
+        return None;
+    }
     let mut expected_event =
         ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
     if let ProposedEvent::ZoneChange {
@@ -673,6 +678,16 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
+fn target_filter_contains_self_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_self_ref)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -695,6 +710,22 @@ pub(super) fn publish_finalized_owner_library_subjects(
             if let Some(player) = change_zone_all_player_scope(state, ability, target) {
                 participants.push(player);
             }
+        }
+    }
+    // CR 701.24c + CR 400.3: a compound "this creature and target …" move can
+    // resolve after the source has left. The source object is then absent from
+    // the moved set, but its owner is still an affected owner and must be
+    // captured for the terminal shuffle.
+    if matches!(
+        &ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target,
+            ..
+        } if target_filter_contains_self_ref(target)
+    ) {
+        if let Some(owner) = super::source_owner(state, ability) {
+            participants.push(owner);
         }
     }
     participants.sort_unstable();
@@ -758,9 +789,6 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
-/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
-/// effect's origin, or for an event referent the zone the trigger event put it
-/// in.
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -784,7 +812,7 @@ fn expected_move_origin(
 
 /// The objects a move acts on: the resolver's subject binding plus, for a
 /// returned merged permanent, its component cards.
-fn bound_move_members(
+pub(crate) fn bound_move_members(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -831,9 +859,16 @@ fn zone_move_member_cannot_move(
         return true;
     };
     // CR 114.5: Emblems cannot be moved between zones.
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
+    // so a zone-change effect cannot move it. The phasing effect itself uses
+    // `PhaseOut`/`PhaseIn`, never this boundary. Without this guard Fblthp,
+    // Impossibly Lost's "owner shuffles him into their library" would move a
+    // phased-out Fblthp off the battlefield even though it cannot be affected.
     // CR 400.7 + CR 603.7c: If an origin zone is specified and the object is
     // no longer in that zone, the zone change is impossible — skip silently.
-    object.is_emblem || expected_origin.is_some_and(|zone| object.zone != zone)
+    object.is_emblem
+        || object.is_phased_out_permanent()
+        || expected_origin.is_some_and(|zone| object.zone != zone)
 }
 
 /// The bound members of an untargeted context-referent move and the zone each
@@ -992,6 +1027,10 @@ pub fn resolve(
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
+    // CR 611.2e + CR 614.12: derived once here, at the instruction's resolver entry, and
+    // carried by every route this instruction delivers through (single picks, the
+    // `EffectZoneChoice` round-trip, the iteration ctx and its pauses).
+    let with_entry_effect = crate::game::effects::with_entry_effect(state, ability);
     let library_placement = member_library_placement(dest_zone, None, library_shuffle);
 
     let completed_result = |count| {
@@ -1155,10 +1194,14 @@ pub fn resolve(
         enters_modified_if: effect_enters_modified_if.as_ref(),
     };
 
-    if !targeted_objects.is_empty() {
-        // CR 701.24c-e + CR 400.3: freeze the prospective owner population
-        // after target legality is known and before any replacement can redirect
-        // a member away from the library.
+    // CR 701.24c-e + CR 400.3: freeze the prospective owner population after
+    // target legality is known and before any replacement can redirect a member
+    // away from the library. A stale SelfRef still names a known owner (the
+    // source's live-or-LKI owner) even when it contributes no movable objects,
+    // so the owner's shuffle survives a source that left in response.
+    let stale_self_ref_owner = matches!(target_filter, TargetFilter::SelfRef)
+        && super::source_owner(state, ability).is_some();
+    if !targeted_objects.is_empty() || stale_self_ref_owner {
         publish_finalized_owner_library_subjects(state, ability, &targeted_objects);
     }
 
@@ -1376,6 +1419,7 @@ pub fn resolve(
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
+                with_entry_effect.as_deref(),
                 track_exiled_by_source,
                 library_placement.clone(),
                 library_shuffle,
@@ -1463,6 +1507,7 @@ pub fn resolve(
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
+                with_entry_effect.as_deref(),
                 track_exiled_by_source,
                 library_placement.clone(),
                 library_shuffle,
@@ -1545,6 +1590,9 @@ pub fn resolve(
             // down" selection resumes face down (not face up) when the player
             // resolves the choice.
             face_down_profile: face_down_profile.clone(),
+            // CR 611.2e + CR 614.12: carry the with-entry effect derived at resolver
+            // entry across the round-trip; the resume never re-derives it.
+            with_entry_effect: with_entry_effect.clone(),
             enter_with_counters: effect_enter_with_counters.clone(),
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
@@ -1582,6 +1630,7 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
+        with_entry_effect,
         library_placement,
         library_shuffle,
         enter_attached_to: forward_result_search_attach_host(state, ability),
@@ -1658,7 +1707,13 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(state, &ctx, member, events) {
+        match process_one_zone_move_with_terminal(
+            state,
+            &ctx,
+            member,
+            logical_zone_change_group.announced_members(),
+            events,
+        ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
@@ -1679,6 +1734,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -1705,6 +1761,7 @@ pub fn resolve(
                         // the resumed members of a paused face-down return still
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
+                        with_entry_effect: ctx.with_entry_effect.clone(),
                         library_placement: ctx.library_placement,
                         library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
@@ -1727,6 +1784,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: Some(
@@ -1759,6 +1817,7 @@ pub fn resolve(
                         // the resumed members of a paused face-down return still
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
+                        with_entry_effect: ctx.with_entry_effect.clone(),
                         library_placement: ctx.library_placement,
                         library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
@@ -1794,10 +1853,21 @@ pub fn resolve(
     // drain, which owns the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
-    crate::game::triggers::complete_logical_zone_trigger_collection(
+    // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
+    // still apply with this entry and no later instruction acts on a moved object after the entry,
+    // its triggers are checked once that effect exists; otherwise the owner checks them now.
+    // CR 603.2c: the hand-off covers the whole group, so a member that ends outside the
+    // battlefield keeps every occurrence with the owner.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability))
+        .for_group(
+            &logical_zone_change_group,
+            &events[logical_group_event_start..],
+        );
+    crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
         &mut events[logical_group_event_start..],
+        collector,
     )
     .expect("completed ChangeZone owns every terminal member outcome");
 
@@ -2086,6 +2156,12 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// the battlefield with these characteristics ("return it face down ... It's
     /// a Forest land" — Yedora). `None` = normal face-up entry.
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 611.2e + CR 614.12: the same-resolution "is/has" effect that applies
+    /// simultaneously with the entry ([`WithEntryEffect`]). Derived once at the
+    /// instruction's resolver entry; mirrors `face_down_profile`.
+    ///
+    /// [`WithEntryEffect`]: crate::types::proposed_event::WithEntryEffect
+    pub with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
     /// CR 401.4 + CR 701.24a: When `Some`, suppresses auto-shuffle and places
     /// each object at the specified library position.
     pub library_placement: Option<LibraryPosition>,
@@ -2140,13 +2216,17 @@ pub(crate) fn process_one_zone_move(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    process_one_zone_move_with_terminal(state, ctx, member, events).into_zone_move_result()
+    // A single-object move belongs to no multi-member entry event.
+    process_one_zone_move_with_terminal(state, ctx, member, &[], events).into_zone_move_result()
 }
 
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    // CR 614.4 + CR 614.12: the announced members of the entry event this member belongs to
+    // (`LogicalZoneChangeGroup::announced_members`).
+    event_members: &[ObjectIncarnationRef],
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
@@ -2189,6 +2269,10 @@ pub(crate) fn process_one_zone_move_with_terminal(
         &member.enter_with_counters,
         ctx.face_down_profile.as_ref(),
         ctx.face_down_in_exile,
+        // CR 611.2e + CR 614.12: the with-entry effect derived at the instruction's
+        // resolver entry.
+        ctx.with_entry_effect.as_deref(),
+        event_members,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.library_shuffle,
@@ -2261,6 +2345,8 @@ fn mass_library_order_effect_zone_choice(
         track_exiled_by_source,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        // CR 401.4: library placement, no battlefield entry.
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -3130,6 +3216,9 @@ pub fn resolve_all(
         } => face_down_profile.clone(),
         _ => None,
     };
+    // CR 611.2e + CR 614.12: derived once at the instruction's resolver entry and carried by
+    // every member's move and its pauses.
+    let with_entry_effect = crate::game::effects::with_entry_effect(state, ability);
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -3311,6 +3400,12 @@ pub fn resolve_all(
         use rand::seq::SliceRandom;
         matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
+    // CR 701.20d: the members are delivered one at a time, but the instruction
+    // reorders the library once; settle reveal retirement for the whole set.
+    // A CR 616.1 pause inside the loop hands the operation to the resume
+    // carrier, so the drain that completes the instruction settles it.
+    let mut library_reorder = (dest_zone == Zone::Library)
+        .then(|| crate::game::zones::LibraryReorderOperation::begin(state, &matching));
 
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
@@ -3332,13 +3427,20 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause = anticipated_zone_change_delivery(
-            state,
-            obj_id,
-            dest_zone,
-            ability.source_id,
-            ability.context.face_down_in_exile,
-        );
+        // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+        // classify same-library placement before anticipated capture.
+        let is_same_library = per_object_origin == Zone::Library && dest_zone == Zone::Library;
+        let anticipated_pause = if is_same_library {
+            None
+        } else {
+            anticipated_zone_change_delivery(
+                state,
+                obj_id,
+                dest_zone,
+                ability.source_id,
+                ability.context.face_down_in_exile,
+            )
+        };
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
@@ -3355,6 +3457,8 @@ pub fn resolve_all(
             &enter_with_counters,
             face_down_profile.as_ref(),
             ability.context.face_down_in_exile,
+            with_entry_effect.as_deref(),
+            logical_zone_change_group.announced_members(),
             track_exiled_by_source,
             member_library_placement.clone(),
             library_shuffle,
@@ -3414,6 +3518,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
@@ -3452,6 +3560,7 @@ pub fn resolve_all(
                         face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: member_library_placement.clone(),
                         library_shuffle,
                         enter_attached_to: None,
@@ -3484,6 +3593,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -3519,6 +3632,7 @@ pub fn resolve_all(
                         // resumed members of a paused face-down mass return enter
                         // face down.
                         face_down_profile: face_down_profile.clone(),
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: member_library_placement.clone(),
                         library_shuffle,
                         enter_attached_to: None,
@@ -3528,6 +3642,9 @@ pub fn resolve_all(
                 return Ok(());
             }
         }
+    }
+    if let Some(library_reorder) = library_reorder {
+        library_reorder.finish(state);
     }
     // CR 614.13a: the whole co-entry event completed without pausing — clear the
     // pre-entry Devour snapshot (its lifetime = this one ChangeZone-to-battlefield
@@ -3549,10 +3666,21 @@ pub fn resolve_all(
     // then draw that many cards."
     state.last_effect_count = Some(moved_count);
 
-    crate::game::triggers::complete_logical_zone_trigger_collection(
+    // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
+    // still apply with this entry and no later instruction acts on a moved object after the entry,
+    // its triggers are checked once that effect exists; otherwise the owner checks them now.
+    // CR 603.2c: the hand-off covers the whole group, so a member that ends outside the
+    // battlefield keeps every occurrence with the owner.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability))
+        .for_group(
+            &logical_zone_change_group,
+            &events[logical_group_event_start..],
+        );
+    crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
         &mut events[logical_group_event_start..],
+        collector,
     )
     .expect("completed ChangeZoneAll owns every terminal member outcome");
 
@@ -4143,6 +4271,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: Default::default(),
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -4154,7 +4283,7 @@ mod tests {
             enters_attacking: false,
         };
         let result =
-            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &mut Vec::new());
+            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &[], &mut Vec::new());
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
@@ -10086,6 +10215,17 @@ mod tests {
         assert_eq!(state.priority_player, PlayerId(1));
         assert_eq!(put_at_library_position_resolutions(&conceded.events), 0);
 
+        // CR 701.20a + CR 401.4: the reveal membership of an owner-ordered pile
+        // must survive the elections standing between the reveal and the
+        // placement, or the CR 701.20d retirement never finds the cards.
+        let seeded: Vec<(ObjectId, u64)> = [p1_a, p1_b, p2_a, p2_b]
+            .into_iter()
+            .map(|card| {
+                state.revealed_cards.insert(card);
+                (card, state.objects[&card].incarnation)
+            })
+            .collect();
+
         // (3) P2 is elected and arranges P1's batch.
         apply_as_current(
             &mut state,
@@ -10099,6 +10239,12 @@ mod tests {
             (PlayerId(2), PlayerId(1), Some(PlayerId(2)))
         );
         assert_eq!(state.priority_player, PlayerId(2));
+        assert!(
+            seeded
+                .iter()
+                .all(|(card, _)| state.revealed_cards.contains(card)),
+            "the election answer keeps the arrangement's reveal membership"
+        );
 
         // (4) REVERT-FAILING: the queued batch still names the departed P0, so
         // it is elected too, by P1 again.
@@ -10149,6 +10295,19 @@ mod tests {
         assert_eq!(library_ids(&state, PlayerId(2)), vec![p2_b, p2_a, p2_deep]);
         assert_eq!(put_at_library_position_resolutions(&completed.events), 1);
         assert!(state.pending_mass_library_order_choice.is_none());
+        // CR 701.20d: the one simultaneous arrangement reorders both piles, so
+        // every revealed member retires and becomes a new object.
+        for (card, incarnation) in seeded {
+            assert_eq!(
+                state.objects[&card].incarnation,
+                incarnation + 1,
+                "{card:?} is a new object after the arrangement"
+            );
+        }
+        assert!(
+            state.revealed_cards.is_empty(),
+            "no arranged card is still revealed"
+        );
     }
 
     /// CR 608.2m + CR 800.4g + CR 800.4h: a departed controller's resolution
@@ -10614,6 +10773,7 @@ mod tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -10643,6 +10803,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -14967,6 +15128,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -15174,6 +15336,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(100),

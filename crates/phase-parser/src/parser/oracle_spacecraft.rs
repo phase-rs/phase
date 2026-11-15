@@ -27,9 +27,10 @@ use nom::Parser;
 
 use super::oracle::{find_activated_colon, has_unimplemented, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
@@ -69,7 +70,7 @@ pub fn max_spacecraft_threshold(lines: &[&str]) -> Option<u32> {
 type SpacecraftThresholdParse = (
     Vec<(usize, StaticIr)>,
     Vec<(usize, TriggerDefinition)>,
-    Vec<(usize, AbilityDefinition)>,
+    Vec<(usize, Lowered<AbilityDefinition>)>,
     Vec<usize>,
 );
 
@@ -166,7 +167,7 @@ struct ThresholdParser<'a> {
 struct ThresholdOutput<'a> {
     statics: &'a mut Vec<(usize, StaticIr)>,
     triggers: &'a mut Vec<(usize, TriggerDefinition)>,
-    abilities: &'a mut Vec<(usize, AbilityDefinition)>,
+    abilities: &'a mut Vec<(usize, Lowered<AbilityDefinition>)>,
 }
 
 impl ThresholdParser<'_> {
@@ -225,31 +226,38 @@ impl ThresholdParser<'_> {
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, self.card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
-            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
-            if has_unimplemented(&def) {
+            let mut lowered =
+                parse_effect_chain_with_provenance(&effect_text, AbilityKind::Activated);
+            if has_unimplemented(&lowered.value) {
                 let normalized_effect =
                     normalize_self_refs_for_static(&effect_text, self.card_name);
                 if normalized_effect != effect_text {
-                    let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
-                    if !has_unimplemented(&alt) {
-                        def = alt;
+                    let alt = parse_effect_chain_with_provenance(
+                        &normalized_effect,
+                        AbilityKind::Activated,
+                    );
+                    if !has_unimplemented(&alt.value) {
+                        drop(lowered); // The rejected trial definition and its records are replaced together.
+                        lowered = alt;
+                    } else {
+                        drop(alt); // The rejected alternative and its records are never emitted.
                     }
                 }
             }
-            def.cost = Some(cost);
-            def.description = Some(description.to_string());
+            lowered.value.cost = Some(cost);
+            lowered.value.description = Some(description.to_string());
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::CounterThreshold {
                 counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),
                 minimum: self.threshold,
                 maximum: None,
             });
-            def.activation_restrictions = restrictions;
+            lowered.value.activation_restrictions = restrictions;
             crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
-                &mut def,
+                &mut lowered.value,
                 description,
             );
-            output.abilities.push((line_idx, def));
+            output.abilities.push((line_idx, lowered));
             return true;
         }
 
@@ -375,7 +383,7 @@ mod tests {
         (
             statics.into_iter().map(|(_, s)| s.definition).collect(),
             triggers.into_iter().map(|(_, t)| t).collect(),
-            abilities.into_iter().map(|(_, a)| a).collect(),
+            abilities.into_iter().map(|(_, a)| a.value).collect(),
             consumed,
         )
     }

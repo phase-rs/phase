@@ -57,8 +57,10 @@ import {
 import i18n from "i18next";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
+import { sameFullSessionKey } from "../services/fullSessionKey";
 import {
   commitFullTerminalDelivery,
+  isValidFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
 import {
@@ -128,6 +130,26 @@ async function terminalSocketRequest(
   });
 }
 
+/**
+ * The delivery a terminal reply carries, total over JSON input: `null` when the
+ * server reports none, and an error when one is present but malformed (an
+ * absent result would otherwise send the caller to an ordinary reconnect).
+ */
+function terminalReplyDelivery(data: unknown): FullTerminalDelivery | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("Malformed terminal reply");
+  }
+  const record = data as Record<string, unknown>;
+  if (!("delivery" in record) || record.delivery === undefined) {
+    return null;
+  }
+  const delivery = record.delivery;
+  if (!isValidFullTerminalDelivery(delivery)) {
+    throw new Error("Malformed terminal delivery");
+  }
+  return delivery;
+}
+
 export async function bootstrapFullTerminalDelivery(
   serverUrl: string,
   key: FullSessionKey,
@@ -152,7 +174,13 @@ export async function bootstrapFullTerminalDelivery(
   if (response.type !== "TerminalBootstrapResult") {
     throw new Error("Unexpected terminal bootstrap response");
   }
-  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+  const delivery = terminalReplyDelivery(response.data);
+  // The reply is bound to the seat it was asked for: a delivery for another
+  // game or generation is a misrouted reply, never this seat's result.
+  if (delivery && !sameFullSessionKey(delivery.key, key)) {
+    throw new Error("Mismatched terminal bootstrap key");
+  }
+  return delivery;
 }
 
 export async function readFullTerminalResult(
@@ -168,7 +196,13 @@ export async function readFullTerminalResult(
   if (response.type !== "TerminalResult") {
     throw new Error("Unexpected terminal result response");
   }
-  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+  const delivery = terminalReplyDelivery(response.data);
+  // The server reads by credential, so a delivery carrying another credential
+  // answers a different request.
+  if (delivery && delivery.credential !== credential) {
+    throw new Error("Mismatched terminal delivery read");
+  }
+  return delivery;
 }
 
 export async function acknowledgeFullTerminalDelivery(
@@ -182,7 +216,12 @@ export async function acknowledgeFullTerminalDelivery(
     { type: "AckTerminalDelivery", data: { delivery_id: deliveryId, credential } },
     socketFactory,
   );
-  return response.type === "TerminalDeliveryAcknowledged";
+  if (response.type !== "TerminalDeliveryAcknowledged") return false;
+  // Only an acknowledgement naming this delivery releases it.
+  const data = response.data;
+  return typeof data === "object"
+    && data !== null
+    && (data as { delivery_id?: unknown }).delivery_id === deliveryId;
 }
 
 /** AI seat configuration for the private native-engine host path. */
@@ -1860,11 +1899,6 @@ interface SessionIdentityRules {
   readonly token: "optional" | "required";
 }
 
-/** Whether two Full keys name the same generation of the same game. */
-function sameFullSessionKey(a: FullSessionKey, b: FullSessionKey): boolean {
-  return a.game_code === b.game_code && a.generation === b.generation;
-}
-
 /**
  * The single authority for comparing a reply's identity with the expected one:
  * the first mismatch's message, or null when the reply matches. Checked in a
@@ -2682,7 +2716,9 @@ export class WebSocketAdapter implements EngineAdapter {
       socket.ws.onerror = () => {
         // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
         if (this.disposed || this.ws !== socket.ws) return;
-        if (this.sessionIdentityRejected) return;
+        // After a terminal result the game is over: a late bridge error is
+        // teardown, not a session failure.
+        if (this.sessionIdentityRejected || this.gameEnded) return;
         // While a reconnect interval is open this socket is the incumbent, and
         // the initialization it may still hold belongs to the candidate's
         // episode (see `frameDecidesEpisode`): its transport error settles
@@ -3398,7 +3434,9 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.gameEnded && !this.terminalCleanupPending) {
       this.emit({ type: "sessionChanged", session: null });
     }
-    this.listeners = [];
+    if (!this.terminalCleanupPending) {
+      this.listeners = [];
+    }
   }
 
   /** Attempt reconnection using stored session data. */
@@ -4713,15 +4751,32 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TerminalResult": {
-        const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
-        if (!delivery) break;
+        const data = msg.data;
+        if (!data || typeof data !== "object") break;
+        const delivery = (data as { delivery?: unknown }).delivery;
+        // Only a well-formed delivery for this attachment's exact Full identity
+        // ends the game. Anything else is ignored before it can claim terminal
+        // ownership, so the live session keeps its error and reconnect paths.
+        if (!this.acceptsTerminalDelivery(delivery)) break;
+        // Claim terminal ownership at frame acceptance, before any await. A
+        // transport error or close that lands while the delivery is being
+        // persisted must not surface as a session failure (whose consumers
+        // dispose this adapter and its listeners before the result is
+        // published) or start a reconnect.
+        this.gameEnded = true;
+        this.emit({ type: "actionPendingChanged", pending: false });
         if (this.options.nativePregame?.callerManagedTerminalDelivery) {
-          this.gameEnded = true;
-          this.emit({ type: "actionPendingChanged", pending: false });
           this.emit({ type: "sessionChanged", session: null });
           this.emit({ type: "terminalDelivery", delivery });
           break;
         }
+        // The resumable session is kept until the delivery is durably committed
+        // and acknowledged: `dispose()` leaves it alone while cleanup is pending.
+        // On retention failure nothing is acknowledged and the session is never
+        // cleared, so the server-side result is not discarded; the failure is
+        // surfaced as `terminalUnavailable`.
+        this.terminalCleanupPending = true;
+        const terminalSession = this.currentSession();
         void (async () => {
           if (!(await commitFullTerminalDelivery(delivery))) {
             this.emit({
@@ -4730,10 +4785,6 @@ export class WebSocketAdapter implements EngineAdapter {
             });
             return;
           }
-          this.gameEnded = true;
-          this.emit({ type: "actionPendingChanged", pending: false });
-          const terminalSession = this.currentSession();
-          this.terminalCleanupPending = true;
           if (terminalSession) {
             this.emit({ type: "sessionChanged", session: { ...terminalSession, terminalOnly: true } });
           }
@@ -4742,9 +4793,13 @@ export class WebSocketAdapter implements EngineAdapter {
             this.serverUrl,
             delivery.deliveryId,
             delivery.credential,
+            this.nativeSocketOptions()?.socketFactory,
           )) {
             this.terminalCleanupPending = false;
             this.emit({ type: "sessionChanged", session: null });
+            if (this.disposed) {
+              this.listeners = [];
+            }
           }
         })().catch((error: unknown) => {
           this.emit({
@@ -4924,6 +4979,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     return {
       gameCode: this._gameCode,
+      ...(this._playerId !== null ? { playerId: this._playerId } : {}),
       playerToken: this.playerToken,
       fullKey: this.fullSessionKey,
       serverUrl: this.serverUrl,
@@ -4957,6 +5013,18 @@ export class WebSocketAdapter implements EngineAdapter {
       return new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
     }
     return null;
+  }
+
+  /**
+   * A terminal delivery is accepted only once this attachment holds an exact
+   * Full identity and the delivery names that same game and generation.
+   * Unlike `acceptFullSessionKey`, a mismatch does not latch a session
+   * rejection: the foreign frame is dropped and the live session is untouched.
+   */
+  private acceptsTerminalDelivery(delivery: unknown): delivery is FullTerminalDelivery {
+    return isValidFullTerminalDelivery(delivery)
+      && this.fullSessionKey !== null
+      && sameFullSessionKey(this.fullSessionKey, delivery.key);
   }
 
   /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */

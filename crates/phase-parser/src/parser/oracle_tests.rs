@@ -8,11 +8,13 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun,
-    CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter,
-    DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
+    CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::CompanionCondition;
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -1981,7 +1983,10 @@ fn named_step_activation_cards_parse_without_gaps() {
         target,
         &TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }
         ])),
@@ -10451,19 +10456,14 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         "+1 grant must expire 'until your next turn'"
     );
 
-    // The inner static grants Flash to Sorcery spells the controller casts.
+    // The inner static lets the controller cast Sorcery spells as though they had flash.
     let inner = match &static_abilities[0].modifications[0] {
         ContinuousModification::GrantStaticAbility { definition } => definition,
         other => panic!("expected GrantStaticAbility, got {other:?}"),
     };
     assert!(
-        matches!(
-            &inner.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        ),
-        "inner static must be CastWithKeyword(Flash), got {:?}",
+        matches!(&inner.mode, StaticMode::CastWithFlash),
+        "inner static must be CastWithFlash, got {:?}",
         inner.mode
     );
     let Some(TargetFilter::Typed(tf)) = &inner.affected else {
@@ -10482,6 +10482,89 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         Some(ControllerRef::You),
         "inner affected filter must scope to spells you cast"
     );
+}
+
+/// `optional` of every ability in `r` (sub-abilities included) whose effect grants a
+/// `CastWithFlash` static.
+fn flash_grant_optionality(r: &ParsedAbilities) -> Vec<bool> {
+    let mut found = Vec::new();
+    for top in &r.abilities {
+        let mut def = Some(top);
+        while let Some(d) = def {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::GrantStaticAbility { definition }
+                            if definition.mode == StaticMode::CastWithFlash)
+                    })
+                }) {
+                    found.push(d.optional);
+                }
+            }
+            def = d.sub_ability.as_deref();
+        }
+    }
+    found
+}
+
+/// CR 601.3b + CR 608.2d: a resolved "you may cast ... spells ... as though they had flash" grant
+/// installs without a resolution choice; the "may" is the later cast.
+#[test]
+fn resolved_flash_timing_grants_are_not_resolution_choices() {
+    let cases: [(&str, &str, &[Keyword], &str); 5] = [
+        (
+            "Alchemist's Refuge",
+            "{T}: Add {C}.\n{G}{U}, {T}: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Emergence Zone",
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Winding Canyons",
+            "{T}: Add {C}.\n{2}, {T}: You may cast creature spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Borne Upon a Wind",
+            "You may cast spells this turn as though they had flash.\nDraw a card.",
+            &[],
+            "Instant",
+        ),
+        (
+            "Complete the Circuit",
+            "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nYou may cast sorcery spells this turn as though they had flash.\nWhen you next cast an instant or sorcery spell this turn, copy that spell twice. You may choose new targets for the copies.",
+            &[Keyword::Convoke],
+            "Instant",
+        ),
+    ];
+    for (name, text, keywords, card_type) in cases {
+        let r = parse(text, name, keywords, &[card_type], &[]);
+        assert_eq!(
+            flash_grant_optionality(&r),
+            vec![false],
+            "{name}: abilities {:?}",
+            r.abilities
+        );
+    }
+
+    // A "you may" clause that is not a permission grant stays a resolution choice.
+    let twiddle = parse(
+        "You may tap or untap target artifact, creature, or land.",
+        "Twiddle",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(twiddle.abilities[0].optional, "{:?}", twiddle.abilities);
 }
 
 /// Issue #2858: Archangel Elspeth's three loyalty abilities must parse as
@@ -14525,7 +14608,7 @@ fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -25409,7 +25492,7 @@ fn petrified_hamlet_full_parse() {
         matches!(
             *trig_exec.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 persist: true,
                 ..
             }
@@ -35707,6 +35790,100 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
             link = def.sub_ability.as_deref();
         }
     }
+}
+
+/// CR 702.139a + CR 702.139b: Yorion, Sky Nomad's companion condition (printed Oracle text
+/// verified against Scryfall) is a surplus over the format's minimum deck size, not a fixed
+/// card count. It used to fall through to `SharedCardType`, so deck validation accepted
+/// Yorion with forty Plains.
+#[test]
+fn companion_deck_size_condition_parses_to_min_deck_size_over() {
+    const YORION: &str = "Companion — Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
+    let parsed = parse_oracle_text(
+        YORION,
+        "Yorion, Sky Nomad",
+        &["Companion".into(), "Flying".into()],
+        &["Creature".into()],
+        &["Bird".into(), "Serpent".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::MinDeckSizeOver(20)]);
+
+    // The surplus is read from the text, digits or words, not assumed.
+    for (fragment, surplus) in [
+        ("companion:— your starting deck contains at least 10 cards more than the minimum deck size.", 10),
+        ("companion:your starting deck contains at least five cards more than the minimum deck size", 5),
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::MinDeckSizeOver(surplus)),
+            "{fragment}"
+        );
+    }
+
+    // Paired control: another companion's condition (Gyruda's printed Oracle
+    // text, verified against Scryfall) still takes its own arm.
+    const GYRUDA_LINE: &str = "Companion — Your starting deck contains only cards with even mana values. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
+    let gyruda = parse_oracle_text(
+        GYRUDA_LINE,
+        "Gyruda, Doom of Depths",
+        &["Companion".into()],
+        &["Creature".into()],
+        &["Demon".into(), "Kraken".into()],
+    );
+    assert!(gyruda
+        .extracted_keywords
+        .contains(&Keyword::Companion(CompanionCondition::EvenManaValues)));
+}
+
+/// CR 702.139a: Lutri's printed condition (verified against Scryfall) is the singleton
+/// condition over NONLAND cards. It used to fall through to the `SharedCardType`
+/// fallback, so deck validation accepted repeated nonland names.
+#[test]
+fn companion_different_name_condition_parses_to_singleton() {
+    const LUTRI: &str = "Companion — Each nonland card in your starting deck has a different name. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlash\nWhen Lutri enters, if you cast it, copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+    let parsed = parse_oracle_text(
+        LUTRI,
+        "Lutri, the Spellchaser",
+        &["Companion".into(), "Flash".into()],
+        &["Creature".into()],
+        &["Elemental".into(), "Otter".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::Singleton]);
+
+    // The separator spelling and the older phrasing do not change the condition, and a
+    // condition this grammar does not name still takes its own arm.
+    for fragment in [
+        "companion:- each nonland card in your starting deck has a different name.",
+        "companion:no two nonland cards in your starting deck have the same name",
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::Singleton),
+            "{fragment}"
+        );
+    }
+    assert_eq!(
+        "companion:each nonland card in your starting deck shares a card type"
+            .parse::<Keyword>()
+            .unwrap(),
+        Keyword::Companion(CompanionCondition::SharedCardType)
+    );
 }
 
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach

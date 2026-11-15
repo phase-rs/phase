@@ -26,6 +26,9 @@ use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
+    /// Lowering-only clause ownership; never part of the AST trace or gameplay data.
+    #[serde(skip)]
+    pub(crate) history: Vec<super::history_provenance::PendingHistory>,
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
@@ -74,6 +77,13 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 608.2c: the text the head instruction owns, when a compound split separated it
+    /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
+    /// `sub_ability` checked against its own text there. `None` when the clause's text is
+    /// the head's alone. Parser bookkeeping for the block-history guard
+    /// (`instruction_drops_block_partner`); never lowered.
+    #[serde(skip)]
+    pub(crate) head_text: Option<String>,
     /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
     /// permanent an earlier instruction of the same resolution put onto the battlefield.
     /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
@@ -1926,9 +1936,13 @@ pub(crate) enum ChooseImperativeAst {
 pub(crate) enum PutImperativeAst {
     /// CR 701.17a: "put the top <count> cards of <owner> library into <owner>
     /// graveyard" — a mill whose owner and count are carried, never assumed.
+    /// CR 401.2: `position` names the library edge the clause reads, so the
+    /// "bottom card of <owner> library" class (Grenzo, Dungeon Warden; Cellar
+    /// Door) takes the bottommost card instead of a chosen one.
     Mill {
         count: QuantityExpr,
         target: TargetFilter,
+        position: LibraryPosition,
     },
     /// A put clause the engine cannot yet model (e.g. CR 404.1 "put the top
     /// card of <possessive> graveyard …", a graveyard-sourced move it cannot
@@ -2248,6 +2262,11 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a: `All` for a mass removal ("from all
+        /// permanents", "from each creature you control"); see
+        /// `Effect::RemoveCounter::scope`. Always `Single` when
+        /// `exact_selection` or `multi_target` is set.
+        scope: EffectScope,
         /// CR 115.1d + CR 122.1: A fixed `each of N <permanents>` phrase is
         /// an untargeted resolution-time selection, not N target slots.
         exact_selection: Option<u32>,
@@ -2374,6 +2393,8 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         effect,
         duration: None,
@@ -3445,6 +3466,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
