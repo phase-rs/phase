@@ -29,8 +29,8 @@ crates/engine/src/game/effects/attach.rs	deliver_attach	consumer	1
 crates/engine/src/game/effects/draw.rs	draw_through_replacement_with_applied	consumer	1
 crates/engine/src/game/effects/life.rs	drain_substitution_continuation	consumer	1
 crates/engine/src/game/effects/mod.rs	dispatch_resident_post_replacement_work	consumer	1
-crates/engine/src/game/effects/mod.rs	frame_may_apply_with_entry	resolved	1
-crates/engine/src/game/effects/mod.rs	frame_may_apply_with_entry	template	1
+crates/engine/src/game/effects/mod.rs	frame_matches	resolved	1
+crates/engine/src/game/effects/mod.rs	frame_matches	template	1
 crates/engine/src/game/effects/scry.rs	resolve	consumer	1
 crates/engine/src/game/effects/token_copy.rs	apply_copy_token_after_replacement_with_created_ids	consumer	1
 crates/engine/src/game/engine.rs	commit_land_play	consumer	1

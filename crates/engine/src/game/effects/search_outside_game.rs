@@ -193,6 +193,7 @@ pub(crate) fn put_face_up_exile_into(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
+        with_entry_effect: None,
         library_placement: None,
         library_shuffle: LibraryShuffleMode::PerObject,
         enter_attached_to: None,
