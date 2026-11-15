@@ -307,6 +307,12 @@ fn population_side(filter: &TargetFilter, actor: BoonTargetSide) -> Option<BoonT
 
 pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
     match effect {
+        // CR 115.1c: a draw replacement's target slot is its substitute head's
+        // slot (Words of War's "deals 2 damage to any target"), so the slot's
+        // polarity is the substitute's.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            effect_polarity(&replacement_effect.effect)
+        }
         // Pump: beneficial only if both modifiers are non-negative. The sign
         // lives in the value (see `pt_value_is_non_negative`), so a `-X/-X`
         // shrink must not be read as a buff just because it is variable.
@@ -544,7 +550,6 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::NoteNumber { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDelayedTrigger { .. }
-        | Effect::CreateDrawReplacement { .. }
         | Effect::CreateEmblem { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::CreateTokenCopyFromPool { .. }
@@ -690,6 +695,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
 /// Extract the target filter from an effect, if present.
 pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
+        // CR 115.1c: a draw replacement's substitute names a target only when
+        // its head surfaces the creating ability's slot (Words of War). The
+        // engine's slot authority decides; an untargeted "each player returns a
+        // permanent they control" substitute (Words of
+        // Wind) declares none.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            engine::types::ability::extract_target_filter_from_effect(&replacement_effect.effect)
+        }
         // Beneficial effects
         Effect::Pump { target, .. }
         | Effect::PutCounter { target, .. }
@@ -3588,6 +3601,57 @@ mod grant_trigger_polarity_tests {
             face_down_profile: None,
             enters_modified_if: None,
         }
+    }
+
+    #[test]
+    fn draw_replacement_polarity_is_its_substitutes() {
+        // CR 115.1c: Words of War's any-target slot is the substitute's slot,
+        // so its polarity must read the substitute (harmful damage), not a
+        // neutral carrier that lets the AI aim the damage at itself.
+        let wrap = |effect: Effect| Effect::CreateDrawReplacement {
+            replacement_effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+        };
+        let damage = wrap(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        });
+        assert_eq!(effect_polarity(&damage), EffectPolarity::Harmful);
+        assert_eq!(extract_target_filter(&damage), Some(&TargetFilter::Any));
+        let pump = wrap(Effect::Pump {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        });
+        assert_eq!(effect_polarity(&pump), EffectPolarity::Beneficial);
+        assert_eq!(
+            extract_target_filter(&pump),
+            Some(&TargetFilter::Typed(TypedFilter::creature()))
+        );
+        assert_eq!(extract_target_filter(&wrap(Effect::NoOp)), None);
+        // Words of Wind: an untargeted per-player return names no target, even
+        // though the bounce carries a resolution-time filter.
+        let wind = wrap(Effect::Bounce {
+            target: TargetFilter::Typed(engine::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: Some(ControllerRef::ScopedPlayer),
+                properties: vec![],
+            }),
+            destination: None,
+            selection: engine::types::ability::BounceSelection::AtResolution,
+        });
+        assert_eq!(extract_target_filter(&wind), None);
+        // Reach-guard: a Bounce that does say "target" keeps its slot.
+        let targeted_bounce = wrap(Effect::Bounce {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            destination: None,
+            selection: engine::types::ability::BounceSelection::Targeted,
+        });
+        assert_eq!(
+            extract_target_filter(&targeted_bounce),
+            Some(&TargetFilter::Typed(TypedFilter::creature()))
+        );
     }
 
     #[test]
