@@ -533,6 +533,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CollectEvidence { .. }
         | Effect::CombineHost { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::CopySpell { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
@@ -701,7 +702,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // Harmful effects
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
-        | Effect::RemoveCounter { target, .. }
         // Removal / disruption
         | Effect::Bounce { target, .. }
         | Effect::Counter { target, .. }
@@ -745,6 +745,15 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             ..
         }
         | Effect::Unsuspect {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => Some(target),
+        // CR 122.1 + CR 115.10a: only a single-scope counter removal exposes a
+        // selectable target. The mass (`All`) scope ("remove all counters from
+        // all permanents") is a non-targeting population effect (mirrors
+        // `SetTapState`'s `Single`/`All` split).
+        Effect::RemoveCounter {
             scope: EffectScope::Single,
             target,
             ..
@@ -2863,6 +2872,24 @@ mod suspect_scope_tests {
             "mass Unsuspect{{All}} (Absolving Lammasu) is a population effect, not target-filtered"
         );
     }
+
+    #[test]
+    fn extract_target_filter_only_for_single_scope_remove_counter() {
+        let remove = |scope| Effect::RemoveCounter {
+            counter_type: None,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            scope,
+        };
+        assert!(
+            extract_target_filter(&remove(EffectScope::Single)).is_some(),
+            "single-scope RemoveCounter must expose a selectable target"
+        );
+        assert!(
+            extract_target_filter(&remove(EffectScope::All)).is_none(),
+            "mass RemoveCounter{{All}} (Aether Snap) is a population effect, not target-filtered"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3544,6 +3571,7 @@ mod grant_trigger_polarity_tests {
     /// "When this dies, return it to the battlefield" — the Undying Malice grant.
     fn return_to_battlefield() -> Effect {
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
@@ -5932,6 +5960,7 @@ mod counter_polarity_tests {
                 counter_type: Some(CounterType::Shield),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
+                scope: engine::types::ability::EffectScope::Single,
             }),
             EffectPolarity::Harmful
         );

@@ -1644,6 +1644,7 @@ fn revealed_conspiracies(
                 player,
                 card_ids,
                 card_names,
+                ..
             } => Some((player, card_ids, card_names)),
             _ => None,
         })

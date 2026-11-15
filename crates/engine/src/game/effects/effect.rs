@@ -1240,7 +1240,11 @@ fn latch_chosen_text_words(
         .collect()
 }
 
-fn snapshot_transient_modifications(
+/// CR 608.2h + CR 611.2d: the modifications a resolution-created transient effect
+/// installs, with resolution-time values fixed. The single authority shared by
+/// `register_transient_effect` and the CR 611.2e with-entry carrier
+/// (`effects::with_entry_effect`).
+pub(crate) fn snapshot_transient_modifications(
     state: &GameState,
     ability: &ResolvedAbility,
     modifications: &[ContinuousModification],
@@ -2266,6 +2270,103 @@ mod tests {
         assert_eq!(
             state.transient_continuous_effects[0].affected,
             TargetFilter::SpecificObject { id: paid }
+        );
+    }
+
+    /// CR 611.2c + CR 109.5 + CR 608.2k: a top-level `Or` affected union is SPLIT and each
+    /// member is recursed as its own transient effect, so the set the effect applies to is
+    /// fixed member by member when it begins. This executes the `bind_transient_effect` split
+    /// the recipient-read gate is built on: the player member ("you", CR 109.5) binds to the
+    /// controller, and the `EventTarget` member resolves against the trigger event's damage
+    /// recipient (CR 608.2k).
+    ///
+    /// SYNTHETIC FIXTURE: no printed card grants one keyword to "you and that creature". The
+    /// nearest printed text is Shalai, Voice of Plenty's "You, planeswalkers you control, and
+    /// other creatures you control have hexproof.", whose separate "You ... have hexproof"
+    /// member is the player half (CR 702.11c) and whose permanent members are the object
+    /// half (CR 702.11b). The fixture keeps that keyword and replaces the object members with
+    /// the event recipient, which isolates the one thing under test: the split binds BOTH
+    /// members instead of dropping either.
+    #[test]
+    fn transient_effect_split_binds_each_union_member_including_event_target() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Union Source".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Union Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        for _ in 0..3 {
+            state.objects.get_mut(&source).unwrap().bump_incarnation();
+        }
+        let source_epoch = state.objects[&source].incarnation;
+        let recipient_epoch = state.objects[&recipient].incarnation;
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_incarnation: Some(source_epoch),
+            target: TargetRef::Object(recipient),
+            target_incarnation: Some(recipient_epoch),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(recipient),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: Some(source_epoch),
+        });
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Or {
+                filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+            })
+            // CR 702.11b + CR 702.11c: hexproof is a keyword both a player and a permanent
+            // can have, so one payload is meaningful for both members of the union.
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let affected: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect();
+        assert!(
+            affected.contains(&TargetFilter::SpecificPlayer { id: PlayerId(0) }),
+            "the controller member binds through its player arm: {affected:?}"
+        );
+        assert!(
+            affected.contains(&TargetFilter::SpecificObject { id: recipient }),
+            "the event-recipient member binds through the split to the damage recipient: \
+             {affected:?}"
         );
     }
 

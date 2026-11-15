@@ -8,11 +8,13 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun,
-    CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter,
-    DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
+    CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::CompanionCondition;
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -1981,7 +1983,10 @@ fn named_step_activation_cards_parse_without_gaps() {
         target,
         &TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }
         ])),
@@ -10115,6 +10120,115 @@ fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
     );
 }
 
+// CR 118.9: Invigorate prints the swapped clause order "rather than pay this spell's
+// mana cost, you may [cost]". Verbatim Oracle text (local Scryfall-derived dataset).
+// The life gain is the alternative COST, never part of the spell's effect.
+#[test]
+fn spell_casting_option_parses_invigorate_swapped_order_alternative_cost() {
+    const PUMP_LINE: &str = "Target creature gets +4/+4 until end of turn.";
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.\nTarget creature gets +4/+4 until end of turn.",
+        "Invigorate",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    // Positive reach-guard for the negatives below: the first line became the option.
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(
+        r.casting_options[0].kind,
+        crate::types::ability::SpellCastingOptionKind::AlternativeCost
+    );
+    assert!(r.casting_options[0].condition.is_some());
+    assert_eq!(
+        r.casting_options[0].cost,
+        Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(crate::types::ability::ControllerRef::Opponent)
+                ),
+            }),
+        })
+    );
+
+    // The spell ability is only the pump.
+    assert_eq!(r.abilities.len(), 1);
+    assert_eq!(
+        r.abilities[0].effect,
+        parse_effect_chain(PUMP_LINE, crate::types::ability::AbilityKind::Spell).effect
+    );
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
+    let mut link = Some(&r.abilities[0]);
+    while let Some(def) = link {
+        assert!(
+            !matches!(*def.effect, Effect::GainLife { .. }),
+            "life gain must not leak into the spell effect: {:?}",
+            r.abilities[0]
+        );
+        assert!(
+            !def.effect
+                .unimplemented_description()
+                .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+            "alt-cost must not leak as an unimplemented gap: {:?}",
+            r.abilities[0]
+        );
+        link = def.sub_ability.as_deref();
+    }
+}
+
+// CR 118.9 + CR 119.3: Reverent Silence prints the same swapped clause order with an
+// "each other player" recipient. The life gain is the alternative COST, recognized
+// by the cost payer's recipient view; the spell ability is only the destroy.
+#[test]
+fn spell_casting_option_parses_reverent_silence_each_other_player_alternative_cost() {
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.
+Destroy all enchantments.",
+        "Reverent Silence",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    let cost = r.casting_options[0]
+        .cost
+        .as_ref()
+        .expect("alternative cost");
+    match cost.player_recipient_cost() {
+        Some(crate::types::ability::PlayerRecipientCost::GainLife {
+            amount, selection, ..
+        }) => {
+            assert_eq!(
+                amount,
+                &crate::types::ability::QuantityExpr::Fixed { value: 6 }
+            );
+            assert_eq!(
+                selection,
+                crate::types::ability::CostRecipientSelection::Each
+            );
+        }
+        None => panic!("expected a recipient life-gain cost, got {cost:?}"),
+    }
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        matches!(*r.abilities[0].effect, Effect::DestroyAll { .. }),
+        "{:?}",
+        r.abilities[0].effect
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_composite_alternative_cost() {
     let r = parse(
@@ -10451,19 +10565,14 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         "+1 grant must expire 'until your next turn'"
     );
 
-    // The inner static grants Flash to Sorcery spells the controller casts.
+    // The inner static lets the controller cast Sorcery spells as though they had flash.
     let inner = match &static_abilities[0].modifications[0] {
         ContinuousModification::GrantStaticAbility { definition } => definition,
         other => panic!("expected GrantStaticAbility, got {other:?}"),
     };
     assert!(
-        matches!(
-            &inner.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        ),
-        "inner static must be CastWithKeyword(Flash), got {:?}",
+        matches!(&inner.mode, StaticMode::CastWithFlash),
+        "inner static must be CastWithFlash, got {:?}",
         inner.mode
     );
     let Some(TargetFilter::Typed(tf)) = &inner.affected else {
@@ -10482,6 +10591,89 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         Some(ControllerRef::You),
         "inner affected filter must scope to spells you cast"
     );
+}
+
+/// `optional` of every ability in `r` (sub-abilities included) whose effect grants a
+/// `CastWithFlash` static.
+fn flash_grant_optionality(r: &ParsedAbilities) -> Vec<bool> {
+    let mut found = Vec::new();
+    for top in &r.abilities {
+        let mut def = Some(top);
+        while let Some(d) = def {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::GrantStaticAbility { definition }
+                            if definition.mode == StaticMode::CastWithFlash)
+                    })
+                }) {
+                    found.push(d.optional);
+                }
+            }
+            def = d.sub_ability.as_deref();
+        }
+    }
+    found
+}
+
+/// CR 601.3b + CR 608.2d: a resolved "you may cast ... spells ... as though they had flash" grant
+/// installs without a resolution choice; the "may" is the later cast.
+#[test]
+fn resolved_flash_timing_grants_are_not_resolution_choices() {
+    let cases: [(&str, &str, &[Keyword], &str); 5] = [
+        (
+            "Alchemist's Refuge",
+            "{T}: Add {C}.\n{G}{U}, {T}: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Emergence Zone",
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Winding Canyons",
+            "{T}: Add {C}.\n{2}, {T}: You may cast creature spells this turn as though they had flash.",
+            &[],
+            "Land",
+        ),
+        (
+            "Borne Upon a Wind",
+            "You may cast spells this turn as though they had flash.\nDraw a card.",
+            &[],
+            "Instant",
+        ),
+        (
+            "Complete the Circuit",
+            "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nYou may cast sorcery spells this turn as though they had flash.\nWhen you next cast an instant or sorcery spell this turn, copy that spell twice. You may choose new targets for the copies.",
+            &[Keyword::Convoke],
+            "Instant",
+        ),
+    ];
+    for (name, text, keywords, card_type) in cases {
+        let r = parse(text, name, keywords, &[card_type], &[]);
+        assert_eq!(
+            flash_grant_optionality(&r),
+            vec![false],
+            "{name}: abilities {:?}",
+            r.abilities
+        );
+    }
+
+    // A "you may" clause that is not a permission grant stays a resolution choice.
+    let twiddle = parse(
+        "You may tap or untap target artifact, creature, or land.",
+        "Twiddle",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(twiddle.abilities[0].optional, "{:?}", twiddle.abilities);
 }
 
 /// Issue #2858: Archangel Elspeth's three loyalty abilities must parse as
@@ -14525,7 +14717,7 @@ fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -25409,7 +25601,7 @@ fn petrified_hamlet_full_parse() {
         matches!(
             *trig_exec.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 persist: true,
                 ..
             }
@@ -35024,6 +35216,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {
@@ -35071,14 +35264,24 @@ fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
     assert!(
         defs.iter().any(|d| matches!(
             &*d.effect,
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                owner_library: true,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         )),
-        "expected an owner-library move, got {defs:?}"
+        "expected an owner-library population move, got {defs:?}"
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        )),
+        "expected the terminal owner-scoped shuffle, got {defs:?}"
     );
     assert!(
         !defs
@@ -35434,6 +35637,97 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
 
+#[test]
+fn metalworker_reveal_any_number_and_add_mana() {
+    let oracle = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Metalworker",
+        &[],
+        &["Artifact".into(), "Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.cost, Some(AbilityCost::Tap));
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(ref tf),
+                cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
+                choice_optional: false,
+                ..
+            } if tf.type_filters.contains(&TypeFilter::Artifact)
+        ),
+        "expected an any-number artifact RevealHand, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("has sub_ability for mana addition");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: ref inner_expr,
+                    }
+                },
+                ..
+            } if matches!(**inner_expr, QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { .. } })
+        ),
+        "expected Effect::Mana producing {{C}}{{C}} for each revealed card, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 107.1c + CR 701.20a: an any-number hand reveal whose card type phrase the
+/// parser cannot read must surface as an unimplemented gap, never as an
+/// any-number `RevealHand` with an empty filter (a reveal that can select
+/// nothing, reported as supported). Sacellum Godspeaker and Rosheen, Roaring
+/// Prophet — verified Oracle text (Scryfall).
+#[test]
+fn unreadable_any_number_reveal_filter_is_an_unimplemented_gap() {
+    for (name, oracle, types) in [
+        (
+            "Sacellum Godspeaker",
+            "{T}: Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+            vec!["Creature".to_string()],
+        ),
+        (
+            "Rosheen, Roaring Prophet",
+            "{T}: Reveal any number of cards with {X} in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain {X}.",
+            vec!["Legendary".to_string(), "Creature".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(crate::parser::oracle::has_unimplemented),
+            "{name}: the unreadable reveal filter must be an unimplemented gap, got {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !parsed.abilities.iter().any(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::RevealHand {
+                    card_filter: TargetFilter::None,
+                    ..
+                }
+            )),
+            "{name}: no filterless RevealHand may survive, got {:?}",
+            parsed.abilities
+        );
+    }
+}
+
 /// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
 /// unsupported residual as the production pipeline.
 #[test]
@@ -35698,6 +35992,100 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
     }
 }
 
+/// CR 702.139a + CR 702.139b: Yorion, Sky Nomad's companion condition (printed Oracle text
+/// verified against Scryfall) is a surplus over the format's minimum deck size, not a fixed
+/// card count. It used to fall through to `SharedCardType`, so deck validation accepted
+/// Yorion with forty Plains.
+#[test]
+fn companion_deck_size_condition_parses_to_min_deck_size_over() {
+    const YORION: &str = "Companion — Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
+    let parsed = parse_oracle_text(
+        YORION,
+        "Yorion, Sky Nomad",
+        &["Companion".into(), "Flying".into()],
+        &["Creature".into()],
+        &["Bird".into(), "Serpent".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::MinDeckSizeOver(20)]);
+
+    // The surplus is read from the text, digits or words, not assumed.
+    for (fragment, surplus) in [
+        ("companion:— your starting deck contains at least 10 cards more than the minimum deck size.", 10),
+        ("companion:your starting deck contains at least five cards more than the minimum deck size", 5),
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::MinDeckSizeOver(surplus)),
+            "{fragment}"
+        );
+    }
+
+    // Paired control: another companion's condition (Gyruda's printed Oracle
+    // text, verified against Scryfall) still takes its own arm.
+    const GYRUDA_LINE: &str = "Companion — Your starting deck contains only cards with even mana values. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
+    let gyruda = parse_oracle_text(
+        GYRUDA_LINE,
+        "Gyruda, Doom of Depths",
+        &["Companion".into()],
+        &["Creature".into()],
+        &["Demon".into(), "Kraken".into()],
+    );
+    assert!(gyruda
+        .extracted_keywords
+        .contains(&Keyword::Companion(CompanionCondition::EvenManaValues)));
+}
+
+/// CR 702.139a: Lutri's printed condition (verified against Scryfall) is the singleton
+/// condition over NONLAND cards. It used to fall through to the `SharedCardType`
+/// fallback, so deck validation accepted repeated nonland names.
+#[test]
+fn companion_different_name_condition_parses_to_singleton() {
+    const LUTRI: &str = "Companion — Each nonland card in your starting deck has a different name. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlash\nWhen Lutri enters, if you cast it, copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+    let parsed = parse_oracle_text(
+        LUTRI,
+        "Lutri, the Spellchaser",
+        &["Companion".into(), "Flash".into()],
+        &["Creature".into()],
+        &["Elemental".into(), "Otter".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::Singleton]);
+
+    // The separator spelling and the older phrasing do not change the condition, and a
+    // condition this grammar does not name still takes its own arm.
+    for fragment in [
+        "companion:- each nonland card in your starting deck has a different name.",
+        "companion:no two nonland cards in your starting deck have the same name",
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::Singleton),
+            "{fragment}"
+        );
+    }
+    assert_eq!(
+        "companion:each nonland card in your starting deck shares a card type"
+            .parse::<Keyword>()
+            .unwrap(),
+        Keyword::Companion(CompanionCondition::SharedCardType)
+    );
+}
+
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach
 /// every call site the corpus exercises, and must stay away from the two
 /// printed shapes that only LOOK like it.
@@ -35910,4 +36298,47 @@ fn corpus_oracle_text(name: &str) -> String {
         other => panic!("no corpus oracle text recorded for {other}"),
     }
     .to_string()
+}
+
+/// CR 607.2a + CR 608.2c: promoting a linked LTB return to the return of every
+/// card this object exiled keeps the move's performer. Synthetic actor: no
+/// printed linked return names a subject today.
+#[test]
+fn ltb_return_promotion_keeps_the_actor() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::identifiers::TrackedSetId;
+    let actor = LibraryInstructionActor::Player {
+        player: TargetFilter::ParentTargetController,
+    };
+    let unpromoted = Effect::ChangeZone {
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+        library_shuffle: Default::default(),
+    };
+    let promoted = ltb_return_of_exiled_by_source(&unpromoted).expect("promoted");
+    let Effect::ChangeZoneAll {
+        actor: promoted_actor,
+        target,
+        ..
+    } = &promoted
+    else {
+        panic!("expected ChangeZoneAll, got {promoted:?}");
+    };
+    assert_eq!(promoted_actor, &actor);
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }

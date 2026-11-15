@@ -304,6 +304,7 @@ pub(crate) fn resolve_explore_effect(
         .unwrap_or_default();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&[top_card_id]),
         card_ids: vec![top_card_id],
         card_names: vec![revealed_name],
     });
@@ -328,7 +329,9 @@ pub(crate) fn resolve_explore_effect(
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
             )
-            .performed_by(controller)],
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                controller,
+            ))],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );

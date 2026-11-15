@@ -829,6 +829,7 @@ mod tests {
                     .join_with_reservation(deck, choice, "human".to_string(), None)
                     .unwrap();
                 session.start_game(&app.db).unwrap();
+                crate::socket_test_hooks::elect_contest_winner_to_play(session);
                 session.ai_seats.insert(PlayerId(0));
                 session.ai_configs.insert(
                     PlayerId(0),
@@ -980,6 +981,7 @@ mod tests {
                 )
                 .unwrap();
             session.start_game(&db).unwrap();
+            crate::socket_test_hooks::elect_contest_winner_to_play(session);
             for &player in roster {
                 session.ai_seats.insert(player);
                 session.ai_configs.insert(
@@ -1242,6 +1244,7 @@ mod tests {
                 (1..=count)
                     .map(|seq| GameLogEntry {
                         seq,
+                        game_number: 1,
                         turn: 1,
                         phase: Phase::PreCombatMain,
                         category: LogCategory::Game,

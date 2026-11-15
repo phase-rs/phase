@@ -580,6 +580,7 @@ pub fn resolve(
         // size for safety; the branch above handles the mandatory-all case.
         let choice_count = count.min(eligible.len());
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: chooser,
             cards: eligible,
             count: choice_count,
@@ -598,10 +599,12 @@ pub fn resolve(
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

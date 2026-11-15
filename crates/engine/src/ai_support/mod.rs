@@ -330,7 +330,11 @@ pub(crate) fn structurally_valid_named_choice_answer(
     // CR 201.4 + CR 107.1a/b: card names (CR 201.4) and free-entry numbers
     // (CR 107.1a/b) are supplied by the player and validated by rule rather than
     // by option membership, so they stay on the simulation.
-    if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
+    // A closed card-name domain (Garth One-Eye) publishes its options and is
+    // validated by membership like any enumerated choice.
+    if matches!(choice_type, ChoiceType::CardName { options, .. } if options.is_empty())
+        || choice_type.free_entry().is_some()
+    {
         return false;
     }
 
@@ -659,6 +663,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut exile_dup = false;
             let mut pack_slots_seen: HashSet<usize> = HashSet::new();
             let mut pack_slot_dup = false;
+            let mut companion_selections = 0usize;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -674,8 +679,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                             pack_slot_dup = true;
                         }
                     }
+                    OutsideGameSelection::Companion => companion_selections += 1,
                 }
             }
+            let bad_companion = companion_selections > 1
+                || (companion_selections == 1
+                    && !choices.iter().any(|choice| {
+                        matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                    }));
             let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
                 choices
                     .iter()
@@ -701,7 +712,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
                 ))
             });
-            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
+            !valid_count
+                || exile_dup
+                || pack_slot_dup
+                || bad_sideboard
+                || bad_exile
+                || bad_pack_slot
+                || bad_companion
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -731,6 +748,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         )
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
+        | (WaitingFor::ChooseStartingPlayer { .. }, GameAction::ChooseStartingPlayer { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
         | (
@@ -822,6 +840,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 optional,
+                cardinality,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
@@ -830,7 +849,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             if *optional && chosen.is_empty() {
                 false
             } else {
-                selection_mismatch(chosen, cards, Some(1))
+                // CR 608.2d: the published cardinality bounds the selection —
+                // exactly `count` cards, or (CR 107.1c) any subset for "any number".
+                let exact_count = match cardinality {
+                    crate::types::ability::ObjectSelectionCardinality::Exactly { count } => {
+                        Some(*count as usize)
+                    }
+                    crate::types::ability::ObjectSelectionCardinality::AnyNumber => None,
+                };
+                selection_mismatch(chosen, cards, exact_count)
             }
         }
         (
@@ -1541,6 +1568,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }
@@ -2155,7 +2183,8 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
 ///   own spells resolve without pausing), unless resolving it can remove a
-///   mana source the player can activate now
+///   mana source the player can activate now, or it is their own activated
+///   ability and would waste an untap on its own untapped mana source
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
@@ -2217,8 +2246,9 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // meaningful-action hold below, including the issue #4388 opponent-turn
     // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
     // that can move one of the player's activatable mana sources off the
-    // battlefield holds instead — the rungs below never count a mana activation
-    // as meaningful, so falling through would still pass that window.
+    // battlefield holds instead, and so does an own activated ability that
+    // would waste an untap on its own source — the rungs below never count a mana
+    // activation as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
         StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,
@@ -2373,6 +2403,12 @@ pub fn auto_pass_recommended_for_viewer(
 ) -> bool {
     crate::game::turn_control::is_authorized_submitter(state, viewer)
         && auto_pass_recommended(state, actions)
+}
+
+/// CR 702.24a: whether the open unless-payment prompt continues a repeated
+/// payment already begun, so paying is its only answer.
+pub fn unless_payment_only_continues(state: &GameState) -> bool {
+    crate::game::engine_payment_choices::awaits_payment_continuation(state)
 }
 
 /// Returns the legal actions for the current game state.
@@ -3180,6 +3216,14 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
 
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
+        // CR 605.3a: an unless payment of draws asks for no mana, at its offer
+        // and at its continuation; `refuse_mana_at_draw_only_payment` refuses
+        // the same actions.
+        WaitingFor::UnlessPayment { .. }
+            if crate::game::engine_payment_choices::unless_prompt_asks_for_no_mana(state) =>
+        {
+            None
+        }
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
         | WaitingFor::ManaAbilityManaPayment { player, .. }
@@ -4367,6 +4411,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
                 false,
             ),
@@ -6528,6 +6573,7 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            repeat: None,
         };
 
         // Reach-guard: the waiting state is genuinely non-`Priority`.

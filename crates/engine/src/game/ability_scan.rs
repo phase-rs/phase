@@ -324,6 +324,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -817,6 +818,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             target,
             counter_type: _,
+            scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -860,6 +862,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             target,
             destination: _,
+            position: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -919,6 +922,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         // CR 732.2a: which object moves is the proposal's choice; the scan reads what the
         // move's own fields read. The three entry riders stay unscanned: prover incomplete here.
         Effect::ChangeZone {
+            actor,
             target,
             enters_under,
             enter_with_counters,
@@ -944,6 +948,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(target, target_ctx, mode);
+                // CR 608.2c: the performer reads what its player filter reads.
+                acc = acc.or(scan_library_instruction_actor(actor, target_ctx, mode));
                 if let Some(controller) = enters_under {
                     acc = acc.or(scan_controller_ref(controller));
                 }
@@ -1458,6 +1464,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -2270,6 +2277,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::Conjure { .. } => Axes::CONSERVATIVE,
+        // CR 707.13: a copy created from a NAME reads no object in the game, so
+        // there is no axis to scan — same verdict as `Conjure` above.
+        Effect::CreateCardCopyByName { .. } => Axes::CONSERVATIVE,
         Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -2785,9 +2795,9 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::TrackedSetSize => Axes::NONE,
-        // CR 608.2c: with a cause, the set is what one zone change or keyword action produced
-        // "this way", so its size scales only through that producer, whose own arm carries any
-        // population read.
+        // CR 608.2c: with a cause, the set is what one zone change, keyword action or control
+        // change produced "this way", so its size scales only through that producer, whose own
+        // arm carries any population read.
         QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
             let ctx = match (mode, caused_by) {
                 (ScanMode::LoopFirewall, Some(_)) => FilterReadContext::SnapshotOrEvent,
@@ -5187,17 +5197,16 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         // CR 122.1: reads `counter_added_this_turn`, cleared by
         // `project_out_resources` — PROVEN projected.
         FilterProp::CountersPutOnThisTurn { .. } => Axes::CONSERVATIVE,
-        // CR 120: runtime eval reads `state.damage_dealt_this_turn` (NOT the object's
-        // `damage_marked` — the variant doc is stale), which `project_out_resources`
-        // clears and `object_resource_axes_match` does NOT strict-compare (it compares
-        // only `damage_marked` + `counters`). A creature dealt damage then regenerated
-        // has `damage_marked == 0` yet a persistent journal record, so gate (1) cannot
-        // backstop this read — PROVEN projected, fail closed.
+        // CR 120: runtime eval reads `state.damage_dealt_this_turn`, not
+        // `damage_marked`. Projection discards full history, retaining only
+        // recipient-identity witnesses for pending damage events. Those do not
+        // preserve this historical predicate; `object_resource_axes_match`
+        // compares only damage/counters. Regeneration can erase marked damage
+        // while the historical read still matters — PROVEN projected, fail closed.
         FilterProp::WasDealtDamageThisTurn => Axes::CONSERVATIVE,
-        // CR 120.1: reads `state.damage_dealt_this_turn`, the same append-only
-        // per-turn journal a loop pumps and `project_out_resources` clears — a
-        // projected-resource read, PROVEN projected, fail closed (mirrors the
-        // passive `WasDealtDamageThisTurn` arm above).
+        // CR 120.1: the same full per-turn damage history is not preserved by
+        // projection's minimal recipient witnesses. This remains a projected
+        // resource read, fail closed, like `WasDealtDamageThisTurn` above.
         FilterProp::DealtDamageThisTurn { .. } => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
@@ -5591,7 +5600,8 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
 }
 
 /// CR 608.2c: the reads of the player who performs a library instruction
-/// (`Effect::ExileTop.actor`). The resolver (`effects/exile_top.rs`) reads the
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`). The resolver
+/// (`effects/exile_top.rs`, `effects/change_zone.rs`) reads the
 /// named subject through the same context the instruction's own `player`
 /// selector uses, so `ctx` is the effect's target context.
 fn scan_library_instruction_actor(
@@ -5703,6 +5713,309 @@ pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility) -> bool {
 /// Siegemaster exclusion.)
 pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
     resolved_ability_axes(ability, ScanMode::Conservative).sibling
+}
+
+/// CR 608.2k + CR 400.7: can this ability chain hand an EXACT `TargetFilter::EventTarget`
+/// to `targeting::resolve_event_referent_permanents`, which reads the damage journal's
+/// recipient stamp (`DamageRecord::target_incarnation`) to tell whether "that creature" is
+/// still the object that was damaged? The resource projection asks this of the ability that
+/// OWNS a retained damage event, to decide whether that event's recipient key needs a witness.
+///
+/// What is classified is the effect positions whose resolver calls that function with the
+/// raw field (set-tap-state, become prepared / unprepared, prevent damage, and a
+/// `GenericEffect` whose target or affected filter names the recipient); not
+/// `Effect::target_filter()`, which answers `None` for the `All` scope those effects still
+/// read. Sacrifice is not one of them: its resolver filters by the captured target pin,
+/// which loop normalization ranks, and never reads the journal.
+///
+/// Scope: the stamp has other readers that are not an ability's own effect position and
+/// are not classified here (`quantity.rs`, `replacement.rs` and two sites in
+/// `triggers.rs`). A nested `EventTarget` (inside `Or` / `And` / `Typed` / a quantity) is
+/// evaluated by the generic matcher.
+pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
+    fn node_reads(node: &Effect) -> bool {
+        match node {
+            Effect::SetTapState { target, .. }
+            | Effect::BecomePrepared { target, .. }
+            | Effect::BecomeUnprepared { target, .. }
+            | Effect::PreventDamage { target, .. } => *target == TargetFilter::EventTarget,
+            Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } => {
+                // `bind_transient_effect` SPLITS a top-level `Or` union and recurses
+                // with each member as the application filter, so a member `EventTarget`
+                // reaches the same exact-match arm as a whole-filter one. Use the
+                // recursive event-subject test here (a superset) so such a member cannot
+                // slip past the gate.
+                let names_recipient = |filter: &TargetFilter| {
+                    crate::types::ability::filter_refs_event_subject(
+                        filter,
+                        &TargetFilter::EventTarget,
+                    )
+                };
+                target.as_ref().is_some_and(names_recipient)
+                    || static_abilities
+                        .iter()
+                        .any(|d| d.affected.as_ref().is_some_and(names_recipient))
+            }
+            // Exhaustive on purpose: a new variant must state whether it can hand an exact
+            // `EventTarget` to the runtime reader, so a future reader cannot default to
+            // `false` and silently elide the witness.
+            Effect::StartYourEngines { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::DealDamage { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::Draw { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Token { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::Mill { .. }
+            | Effect::Scry { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Dig { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Surveil { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch { .. }
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::ExileTopCardContest { .. }
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::CombineHost { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::PutCounter { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::Cleanup { .. }
+            | Effect::Mana { .. }
+            | Effect::Discard { .. }
+            | Effect::Shuffle { .. }
+            | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::OpenBoosterPack { .. }
+            | Effect::RevealHand { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealChosenNumbers { .. }
+            | Effect::RevealTop { .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::Suspect { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::SolveCase
+            | Effect::BecomeSaddled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
+            | Effect::NoteNumber { .. }
+            | Effect::PayCost { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::WinTheGame { .. }
+            | Effect::RollDie { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::ArrangePlanarDeckTop { .. }
+            | Effect::Planeswalk
+            | Effect::AbandonScheme
+            | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
+            | Effect::RedistributeLifeTotals
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::CrankContraptions { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ProcessRadCounters
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
+            | Effect::NoteManaSpent
+            | Effect::ForEachCategory { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::Exploit { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::ModifyAnnouncedX { .. }
+            | Effect::Double { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Incubate { .. }
+            | Effect::Amass { .. }
+            | Effect::EmpowerJace { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::HordePlayCard { .. }
+            | Effect::Specialize
+            | Effect::Renown { .. }
+            | Effect::Bolster { .. }
+            | Effect::Adapt { .. }
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Seek { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::Unimplemented { .. } => false,
+        }
+    }
+    let mut reads = false;
+    let _ = crate::types::ability_visit::visit_effect(&ability.effect, &mut |node: &Effect| {
+        reads |= node_reads(node);
+        std::ops::ControlFlow::Continue(())
+    });
+    for (_, child) in ability.child_links() {
+        reads |= ability_reads_event_target(child);
+    }
+    for def in &ability.mode_abilities {
+        let _ = crate::types::ability_visit::visit_ability_def(def, &mut |node: &Effect| {
+            reads |= node_reads(node);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+    // Conservative: an unless-pay cost effect is not paired by the child walk.
+    reads || ability.unless_pay.is_some()
 }
 
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
@@ -5826,6 +6139,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // dynamic board read — no resolution-time axis.
+        grant_chain: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -7172,6 +7488,14 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // single announced/anaphoric target (a2), relaxed in the single-object group
         // below. Exhaustive over EffectScope = {Single, All}.
         | Effect::Transform { scope: EffectScope::All, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal ("remove all counters from all
+        // permanents", scope:All) is a non-targeting battlefield-population read
+        // (`target_filter()`==None; `counters::counter_removal_targets` enumerates the
+        // phased-in battlefield through `resolved_battlefield_population_ids`) ⇒ census,
+        // the removal twin of PutCounterAll. scope:Single is a single announced or
+        // anaphoric target, relaxed in the single-object group below. Exhaustive over
+        // EffectScope = {Single, All}.
+        | Effect::RemoveCounter { scope: EffectScope::All, .. }
         // ── DUAL-MODE MASS-BATTLEFIELD RESOLVERS: each has a resolver mode that, when
         // the ability carries NO explicit object target, enumerates the battlefield (or
         // all phased-in/-out permanents) and applies the effect to EVERY matching
@@ -7272,7 +7596,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
-        | Effect::RemoveCounter { .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            ..
+        }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -7465,6 +7792,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7612,6 +7940,13 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Transform {
             scope: EffectScope::All,
             ..
+        }
+        // CR 122.1 + CR 115.10a: mass counter removal (scope:All) enumerates the
+        // phased-in battlefield population; parity with the effect_target_ctx
+        // LiveBoardCensus member. scope:Single relaxes below.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            ..
         } => CensusRole::Census,
 
         // -- SetTapState (scope-DESTRUCTURED, exhaustive over EffectScope): scope:All is
@@ -7667,6 +8002,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
@@ -7701,7 +8037,10 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
-        | Effect::RemoveCounter { .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            ..
+        }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -7894,6 +8233,70 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// The `EventTarget` gate is a closed classification: every variant whose runtime
+    /// resolver reads the recipient journal answers `true`, and the `GenericEffect` union
+    /// member is caught recursively. A new variant breaks compilation of the match rather
+    /// than silently answering `false`.
+    #[test]
+    fn event_target_read_classification_matches_the_runtime_readers() {
+        use crate::types::ability::{
+            Effect, EffectScope, PreventionAmount, PreventionScope, QuantityExpr, ResolvedAbility,
+            TapStateChange, TargetFilter,
+        };
+
+        let reads = |effect: Effect| {
+            ability_reads_event_target(&ResolvedAbility::new(
+                effect,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ))
+        };
+        assert!(reads(Effect::SetTapState {
+            target: TargetFilter::EventTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }));
+        assert!(
+            reads(Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic: None,
+                target: TargetFilter::EventTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            }),
+            "the prevention reader reads the recipient"
+        );
+        assert!(
+            reads(Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: Some(TargetFilter::Or {
+                    filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+                }),
+                end_cost: None,
+            }),
+            "the transient split reaches a union member"
+        );
+        assert!(
+            !reads(Effect::Sacrifice {
+                target: TargetFilter::EventTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            }),
+            "the sacrifice resolver reads the captured pin, never the journal"
+        );
+        assert!(!reads(Effect::Investigate));
+        assert!(!reads(Effect::GenericEffect {
+            static_abilities: vec![],
+            duration: None,
+            target: Some(TargetFilter::Controller),
+            end_cost: None,
+        }));
+    }
 
     /// U-a. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event,
     /// like `TriggeringPlayer`; the controller's own attacks read no event.
@@ -8374,6 +8777,38 @@ mod tests {
                 "{mode:?}: the targeted opponent keeps the Typed event read"
             );
         }
+    }
+
+    /// CR 608.2c: a zone move's performer is read through its own filter in
+    /// LoopFirewall mode, as `ExileTop`'s is: the controller adds no axis, a
+    /// triggering-player subject ("that player exiles a card from their hand")
+    /// is an event read.
+    /// Revert-probe: bind `actor: _` in the `ChangeZone` arm ⇒ the
+    /// triggering-player row equals the controller row.
+    #[test]
+    fn change_zone_actor_is_read_as_its_player_filter() {
+        let pick = |actor| Effect::ChangeZone {
+            actor,
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let event = |actor| scan_effect(&pick(actor), ScanMode::LoopFirewall).event;
+        assert!(!event(LibraryInstructionActor::Controller));
+        assert!(event(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        }));
     }
 
     /// The actor read survives nesting — a subject filter composed inside
@@ -9452,6 +9887,12 @@ mod tests {
             "GoadAll",
             "PumpAll",
             "PutCounterAll",
+            // CR 122.1 + CR 115.10a: mass counter removal (scope:All) enumerates the
+            // battlefield population (`counters::counter_removal_targets` via
+            // `resolved_battlefield_population_ids`). Scope-gated on `EffectScope::All`
+            // in the census `|`-chain; the scope:Single arm sits past the census
+            // terminator in the relax group and is NOT scanned here.
+            "RemoveCounter",
             // CR 722.3a/b + CR 115.10a: BecomePrepared/BecomeUnprepared scope:All ("each
             // creature you control becomes prepared") enumerate the battlefield population
             // (`prepare.rs` via `resolved_battlefield_population_ids`). Scope-gated on
@@ -9492,7 +9933,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 34, "exactly 34 mass-population census tags");
+        assert_eq!(got.len(), 35, "exactly 35 mass-population census tags");
     }
 
     /// With `SnapshotOrEvent` the DEFAULT, the obligation-(ii)-PROVEN census-role
@@ -9688,7 +10129,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 34, "exactly 34 census members");
+        assert_eq!(ecr_census.len(), 35, "exactly 35 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -9798,6 +10239,16 @@ mod tests {
             },
             false,
         );
+        // CR 122.1 + CR 115.10a: mass counter removal is a battlefield census in BOTH
+        // oracles; the single scope relaxes in both.
+        let removal = |scope| Effect::RemoveCounter {
+            counter_type: None,
+            count: QuantityExpr::Fixed { value: -1 },
+            target: f(),
+            scope,
+        };
+        census(&removal(EffectScope::All), true);
+        census(&removal(EffectScope::Single), false);
         assert_eq!(
             effect_census_role(&Effect::Transform {
                 target: f(),
@@ -11805,6 +12256,7 @@ mod tests {
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
         let mut effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,

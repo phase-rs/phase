@@ -293,6 +293,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 }
             }
             GameEvent::TokenCreated { object_id, .. }
+            | GameEvent::CardCopyCreated { object_id, .. }
             | GameEvent::ObjectConjured { object_id, .. } => {
                 // Mana-aware: a creature token (Scute storm) does NOT raise the
                 // mana signal, so the board-wide auto-tap sweep is skipped; a
@@ -562,6 +563,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::UnTellPerformed { .. }
             | GameEvent::PhraseSaid { .. }
             | GameEvent::GotchaSaid { .. }
+            | GameEvent::ObjectTouched { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -852,6 +854,7 @@ mod tests {
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
         state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             enters_modified_if: None,
             player: PlayerId(0),
             cards: vec![ObjectId(5), ObjectId(11)],
@@ -870,10 +873,12 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             duration: None,

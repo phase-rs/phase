@@ -111,6 +111,7 @@ import {
   type P2PTerminalResult,
 } from "../services/p2pTerminalResult";
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
+import { minimumDeckSizeOf } from "../services/draftFormatConfig";
 import i18n from "i18next";
 
 /**
@@ -1356,6 +1357,7 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       singleton: false,
       command_zone: false,
       commander_damage_threshold: null,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       sideboard_policy: { type: "Limited", data: 15 },
@@ -3021,6 +3023,10 @@ export class P2PHostAdapter implements EngineAdapter {
           // and `[]` identically, so this is a contract-vocabulary choice, not
           // a rules one.)
           draft_set_codes: (this.hostDeckData as DeckListPayload).draft_set_codes,
+          // CR 100.2b + CR 702.139b: the room's own minimum deck size (a draft
+          // match carries its Cube's), which a "minimum deck size" companion
+          // condition reads. Absent for a fixed-size rule.
+          min_deck_size: minimumDeckSizeOf(this.formatConfig),
           selected_format: this.formatConfig!.format,
         }) as { compatible: boolean; reasons: string[] };
 

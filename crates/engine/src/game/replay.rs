@@ -23,7 +23,8 @@ use crate::types::replay::{
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
 use super::engine::{
     apply, apply_verified_ai_priority_pass, resolve_all_ready_access, resolve_all_ready_prefix,
-    start_game, start_game_with_starting_player, ResolveAllReadyAccess,
+    start_game, start_game_winner_plays_first, start_game_with_starting_player,
+    ResolveAllReadyAccess,
 };
 
 /// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
@@ -38,7 +39,9 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
-    #[error("unsupported replay format version {version}; this engine supports versions 2 and 3")]
+    #[error(
+        "unsupported replay format version {version}; this engine supports versions 2 through 4"
+    )]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
@@ -70,9 +73,21 @@ pub enum ReplayError {
 /// it isn't accepted silently. `db: None` is only valid when
 /// `header.deck_data` is also `None` (a format that genuinely starts with
 /// empty libraries).
+///
+/// Reconstructs a current-format (`REPLAY_FORMAT_VERSION`) header.
 pub fn reconstruct_initial_state(
     header: &ReplayHeader,
     db: Option<&std::sync::Arc<CardDatabase>>,
+) -> Result<GameState, ReplayError> {
+    reconstruct_initial_state_for_version(header, db, REPLAY_FORMAT_VERSION)
+}
+
+/// `reconstruct_initial_state` for a recording made in `format_version`, which
+/// selects how a contest-started (`first_player: None`) game begins.
+fn reconstruct_initial_state_for_version(
+    header: &ReplayHeader,
+    db: Option<&std::sync::Arc<CardDatabase>>,
+    format_version: u32,
 ) -> Result<GameState, ReplayError> {
     let mut state = GameState::new(
         header.format_config.clone(),
@@ -114,9 +129,12 @@ pub fn reconstruct_initial_state(
         (None, _) => {}
     }
 
-    match header.first_player {
-        Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
-        Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
+    match (header.first_player, format_version) {
+        (Some(0), _) => start_game_with_starting_player(&mut state, PlayerId(0)),
+        (Some(1), _) => start_game_with_starting_player(&mut state, PlayerId(1)),
+        // CR 103.1: recordings before version 4 have no recorded choice; the
+        // contest winner took the first turn.
+        (_, 2 | 3) => start_game_winner_plays_first(&mut state),
         _ => start_game(&mut state),
     };
     Ok(state)
@@ -144,13 +162,13 @@ impl ReplayPlayer {
         log: ReplayLog,
         db: Option<&std::sync::Arc<CardDatabase>>,
     ) -> Result<Self, ReplayError> {
-        match log.format_version {
-            Some(2 | REPLAY_FORMAT_VERSION) => {}
+        let version = match log.format_version {
+            Some(version @ (2 | 3 | REPLAY_FORMAT_VERSION)) => version,
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
-        }
+        };
         validate_resolve_all_boundaries(&log)?;
-        let initial = reconstruct_initial_state(&log.header, db)?;
+        let initial = reconstruct_initial_state_for_version(&log.header, db, version)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
         Ok(Self {
@@ -307,6 +325,7 @@ mod tests {
     };
     use crate::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, StackResolutionPolicy,
@@ -481,6 +500,131 @@ mod tests {
             error,
             ReplayError::Desync { message, .. }
                 if message == "version 2 replay cannot contain Resolve All boundaries"
+        ));
+    }
+
+    /// A header for a game started by the engine's own d20 contest.
+    fn contest_header(format_config: FormatConfig, player_count: u8, seed: u64) -> ReplayHeader {
+        ReplayHeader {
+            format_config,
+            match_config: MatchConfig::default(),
+            player_count,
+            first_player: None,
+            seed,
+            deck_data: None,
+        }
+    }
+
+    /// The first seed whose contest winner satisfies `wanted`, with that winner.
+    fn seed_whose_winner(
+        format_config: &FormatConfig,
+        player_count: u8,
+        wanted: impl Fn(PlayerId) -> bool,
+    ) -> (u64, PlayerId) {
+        (0..256u64)
+            .find_map(|seed| {
+                let mut probe = GameState::new(format_config.clone(), player_count, seed);
+                start_game(&mut probe)
+                    .events
+                    .iter()
+                    .find_map(|event| match event {
+                        GameEvent::StartingPlayerContest { winner, .. } => Some(*winner),
+                        _ => None,
+                    })
+                    .filter(|&winner| wanted(winner))
+                    .map(|winner| (seed, winner))
+            })
+            .expect("a seed with the wanted contest winner within 256 seeds")
+    }
+
+    fn load_at_version(header: &ReplayHeader, format_version: u32) -> ReplayPlayer {
+        let mut log = ReplayLog::new(header.clone());
+        log.format_version = Some(format_version);
+        ReplayPlayer::load(log, None).expect("a supported version loads")
+    }
+
+    /// CR 103.1: a version-4 recording starts at the prompt and replays the
+    /// recorded choice.
+    #[test]
+    fn recorded_choice_replays_from_the_prompt() -> Result<(), ReplayError> {
+        let header = contest_header(FormatConfig::standard(), 2, 42);
+        let mut live = reconstruct_initial_state(&header, None)?;
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = live.waiting_for else {
+            panic!("a current-format contest header reconstructs to the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let answer = GameAction::ChooseStartingPlayer { player: starter };
+        apply(&mut live, winner, answer.clone()).expect("the chooser names the other seat");
+        let mut log = ReplayLog::new(header);
+        log.push_action(winner, answer);
+
+        let mut player = ReplayPlayer::load(log, None)?;
+        assert_eq!(player.len(), 1, "the choice is the one recorded action");
+        assert!(matches!(
+            player.seek(0)?.waiting_for,
+            WaitingFor::ChooseStartingPlayer { player: chooser, .. } if chooser == winner
+        ));
+        let replayed = player.seek(1)?;
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(
+            replayed.current_starting_player,
+            live.current_starting_player
+        );
+        assert_eq!(replayed.turn_number, live.turn_number);
+        Ok(())
+    }
+
+    /// CR 103.1: versions 2 and 3 predate the recorded choice, so their
+    /// contest winner takes the first turn; the version, not the header,
+    /// selects the route.
+    #[test]
+    fn pre_choice_recordings_start_with_the_roll_winner() {
+        let format_config = FormatConfig::standard();
+        let (seed, winner) = seed_whose_winner(&format_config, 2, |winner| winner == PlayerId(1));
+        let header = contest_header(format_config, 2, seed);
+
+        for version in [3, 2] {
+            let mut player = load_at_version(&header, version);
+            let start = player.seek(0).expect("the start reconstructs");
+            assert_eq!(start.turn_number, 1, "version {version}");
+            assert_eq!(start.current_starting_player, winner, "version {version}");
+            assert!(
+                !matches!(start.waiting_for, WaitingFor::ChooseStartingPlayer { .. }),
+                "version {version} has no recorded choice to wait for"
+            );
+        }
+
+        let mut current = load_at_version(&header, REPLAY_FORMAT_VERSION);
+        assert!(matches!(
+            current.seek(0).expect("the start reconstructs").waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+        ));
+    }
+
+    /// CR 103.1a: a version-3 Two-Headed Giant recording was started by its raw
+    /// roll winner, even a team's second seat, so it replays that start.
+    #[test]
+    fn pre_choice_two_headed_giant_recording_starts_the_raw_winner() {
+        let format_config = FormatConfig::two_headed_giant();
+        let (seed, winner) = seed_whose_winner(&format_config, 4, |winner| {
+            winner == PlayerId(1) || winner == PlayerId(3)
+        });
+        let header = contest_header(format_config, 4, seed);
+
+        let mut legacy = load_at_version(&header, 3);
+        let start = legacy.seek(0).expect("the start reconstructs");
+        assert_eq!(start.current_starting_player, winner);
+        assert_eq!(start.seat_order[0], winner);
+
+        let representative = if winner == PlayerId(1) {
+            PlayerId(0)
+        } else {
+            PlayerId(2)
+        };
+        let mut current = load_at_version(&header, REPLAY_FORMAT_VERSION);
+        assert!(matches!(
+            current.seek(0).expect("the start reconstructs").waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == representative
         ));
     }
 

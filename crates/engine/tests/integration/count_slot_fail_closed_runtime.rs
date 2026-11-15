@@ -215,7 +215,9 @@ fn taster_at_reveal(p1_hand: usize) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>
 
 /// CR 701.20a + CR 608.2h: Taster of Wares makes the target opponent reveal
 /// exactly X cards (X = Goblins its controller controls, Taster included), and
-/// the exiled card is one of them.
+/// the exiled card is one of them. CR 608.2c: "That player exiles it" names the
+/// revealing opponent across the controller's intervening choice, so P1 is
+/// recorded as the exiling player.
 #[test]
 fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
     let (mut runner, p1_cards, p0_cards) = taster_at_reveal(5);
@@ -266,6 +268,11 @@ fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
     runner.advance_until_stack_empty();
     assert_eq!(zone(&runner, chosen), Zone::Exile);
     assert_eq!(hand_len(&runner, P1), 4);
+    assert_eq!(
+        runner.state().objects[&chosen].exiled_by,
+        Some(P1),
+        "the revealing opponent exiles the chosen card, not Taster's controller"
+    );
 
     // X greater than the hand reveals the whole (one-card) hand.
     let (runner, p1_cards, _) = taster_at_reveal(1);
