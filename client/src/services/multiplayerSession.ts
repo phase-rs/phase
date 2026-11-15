@@ -1,4 +1,5 @@
 import type { FormatConfig, MatchType, PlayerId } from "../adapter/types";
+import { notifyActiveGameChange } from "./activeGameChange";
 import { sameFullSessionKey } from "./fullSessionKey";
 
 export const WS_SESSION_STORAGE_KEY = "phase-ws-session";
@@ -74,23 +75,29 @@ export function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
     && current.playerToken === expected.playerToken;
 }
 
+// The online session decides what the resume list offers for an online game
+// (resume, retained result, or nothing), so every landed write notifies it.
 export function saveWsSession(session: WsSessionData, expected?: WsSessionIdentity): void {
+  if (expected && !matchesStoredWsSession(expected)) return;
   try {
-    if (expected && !matchesStoredWsSession(expected)) return;
     localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
     pageSession = null;
   } catch {
     // A blocked/quota-limited store keeps the session for this page only.
     pageSession = session;
   }
+  notifyActiveGameChange();
 }
 
 export function clearWsSession(expected?: WsSessionIdentity): void {
   if (expected && !matchesStoredWsSession(expected)) return;
+  let held = pageSession !== null;
   pageSession = null;
   try {
+    held ||= localStorage.getItem(WS_SESSION_STORAGE_KEY) !== null;
     localStorage.removeItem(WS_SESSION_STORAGE_KEY);
   } catch {
     // Nothing else can be done if the browser refuses storage access.
   }
+  if (held) notifyActiveGameChange();
 }

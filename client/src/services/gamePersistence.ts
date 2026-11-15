@@ -18,6 +18,7 @@ import {
   type WsSessionIdentity,
 } from "./multiplayerSession";
 import { sameFullSessionKey } from "./fullSessionKey";
+import { ACTIVE_GAME_CHANGED_EVENT, notifyActiveGameChange } from "./activeGameChange";
 import type { P2PSessionKey } from "./p2pSession";
 import { isValidP2PTerminalResult, type P2PTerminalResult } from "./p2pTerminalResult";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
@@ -583,18 +584,7 @@ export async function loadCheckpoints(gameId: string): Promise<PersistedGameStat
 
 // ── Active Game Meta (localStorage — tiny, synchronous) ─────────────────
 
-export const ACTIVE_GAME_CHANGED_EVENT = "phase:active-game-changed";
-
-export function notifyActiveGameChange(): void {
-  if (typeof window !== "undefined") {
-    try {
-      window.dispatchEvent(new Event("storage"));
-      window.dispatchEvent(new CustomEvent(ACTIVE_GAME_CHANGED_EVENT));
-    } catch {
-      /* ignore */
-    }
-  }
-}
+export { ACTIVE_GAME_CHANGED_EVENT, notifyActiveGameChange };
 
 export function saveActiveGame(meta: ActiveGameMeta): void {
   try {

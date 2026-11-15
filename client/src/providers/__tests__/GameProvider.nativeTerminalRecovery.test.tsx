@@ -307,6 +307,53 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     }
   });
 
+  it("a mounted Menu learns of a result retained after navigation and loses it once a reopened ACK lands", async () => {
+    // Hold the result's IndexedDB commit so retention finishes after Return to Menu.
+    const idb = await import("idb-keyval");
+    const actualSet = (await vi.importActual<typeof import("idb-keyval")>("idb-keyval")).set;
+    let releaseRetention!: () => void;
+    const retentionHeld = new Promise<void>((resolve) => { releaseRetention = resolve; });
+    vi.mocked(idb.set).mockImplementation(async (key, value, store) => {
+      if ((value as Partial<FullTerminalDelivery> | undefined)?.deliveryId === delivery.deliveryId) {
+        await retentionHeld;
+      }
+      return actualSet(key, value, store);
+    });
+    ackOutcome = "reject";
+
+    // The Menu stays mounted for the whole sequence: it is never remounted.
+    const menuConsumer = renderHook(
+      () => ({ resumables: useResumables(), location: useLocation() }),
+      { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+    );
+    await waitFor(() => expect(menuConsumer.result.current.resumables.match?.id).toBe(GAME_ID));
+
+    const { live, unmount } = await resumeLiveGame();
+    await act(async () => { live.receive({ type: "TerminalResult", data: { delivery } }); });
+    expect(vi.mocked(idb.set)).toHaveBeenCalledWith(expect.anything(), delivery, expect.anything());
+    unmount();
+    expect(pointer()?.nativeSession).toEqual(session);
+    expect(menuConsumer.result.current.resumables.match?.id).toBe(GAME_ID);
+
+    await act(async () => { releaseRetention(); });
+    await waitFor(() => expect(requests.map(({ type }) => type)).toContain("AckTerminalDelivery"));
+    expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+    expect(pointer()?.nativeSession).toEqual({ ...session, terminalOnly: true });
+
+    await waitFor(() => expect(menuConsumer.result.current.resumables.retainedResult?.id).toBe(GAME_ID));
+    expect(menuConsumer.result.current.resumables.match).toBeNull();
+    act(() => menuConsumer.result.current.resumables.viewRetainedResult());
+    expect(menuConsumer.result.current.location.pathname).toBe(`/game/${GAME_ID}`);
+
+    ackOutcome = "success";
+    const reopened = await reopen();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
+    await waitFor(() => expect(pointer()).toBeNull());
+    expect(reopened.after()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
+    await waitFor(() => expect(menuConsumer.result.current.resumables.retainedResult).toBeNull());
+    expect(menuConsumer.result.current.resumables.match).toBeNull();
+  });
+
   it("preserves failed ACKs in storage and through the real resume consumer", async () => {
     ackOutcome = "pending";
     const { live, events, unmount, displayCleared } = await resumeLiveGame();

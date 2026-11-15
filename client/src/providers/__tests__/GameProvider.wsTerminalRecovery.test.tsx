@@ -1,7 +1,9 @@
 import "fake-indexeddb/auto";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameProvider } from "../GameProvider";
+import { useResumables } from "../../hooks/useResumables";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../../adapter/ws-adapter";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
 import { useGameStore } from "../../stores/gameStore";
@@ -20,7 +22,7 @@ import {
 // and IndexedDB. The fake server only controls wire replies/transport failures.
 vi.mock("idb-keyval", async (original) => {
   const actual = await original<typeof import("idb-keyval")>();
-  return { ...actual, get: vi.fn(actual.get) };
+  return { ...actual, get: vi.fn(actual.get), set: vi.fn(actual.set) };
 });
 const controller = vi.hoisted(() => vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), dispose: vi.fn() })));
 vi.mock("../../game/controllers/gameLoopController", () => ({ createGameLoopController: controller }));
@@ -126,9 +128,9 @@ beforeEach(async () => {
   localStorage.clear();
   useGameStore.getState().reset();
   vi.clearAllMocks();
-  vi.mocked((await import("idb-keyval")).get).mockImplementation(
-    (await vi.importActual<typeof import("idb-keyval")>("idb-keyval")).get,
-  );
+  const actualIdb = await vi.importActual<typeof import("idb-keyval")>("idb-keyval");
+  vi.mocked((await import("idb-keyval")).get).mockImplementation(actualIdb.get);
+  vi.mocked((await import("idb-keyval")).set).mockImplementation(actualIdb.set);
   sockets = [];
   requests = [];
   pendingAcks = [];
@@ -359,6 +361,92 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     }));
     await waitFor(() => expect(loadActiveGame()).toBeNull());
     expect(loadWsSession()).toBeNull();
+  });
+
+  it.each([
+    ["the completed game's pointer", false],
+    ["a replacement session for another game", true],
+  ])("a mounted Home learns of a result retained after navigation, and a reopened matching ACK releases %s", async (_case, replace) => {
+    const finished = { id: "ws-terminal-recovery", mode: "online" as const, difficulty: "" };
+    saveActiveGame(finished);
+    saveWsSession(session);
+    // Hold the result's IndexedDB commit so retention finishes after Back to Home.
+    const idb = await import("idb-keyval");
+    const actualSet = (await vi.importActual<typeof import("idb-keyval")>("idb-keyval")).set;
+    let releaseRetention!: () => void;
+    const retentionHeld = new Promise<void>((resolve) => { releaseRetention = resolve; });
+    vi.mocked(idb.set).mockImplementation(async (key, value, store) => {
+      if ((value as Partial<FullTerminalDelivery> | undefined)?.deliveryId === delivery.deliveryId) {
+        await retentionHeld;
+      }
+      return actualSet(key, value, store);
+    });
+    ackOutcome = "reject";
+
+    // Home stays mounted for the whole sequence: it is never remounted.
+    const home = renderHook(
+      () => ({ resumables: useResumables(), location: useLocation() }),
+      { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+    );
+    await waitFor(() => expect(home.result.current.resumables.match?.id).toBe(finished.id));
+
+    const game = mountProvider();
+    await waitFor(() => expect(game.events).toHaveBeenCalledWith(expect.objectContaining({ type: "reconnected" })));
+    await act(async () => { sockets[sockets.length - 1]!.receive({ type: "TerminalResult", data: { delivery } }); });
+    expect(vi.mocked(idb.set)).toHaveBeenCalledWith(expect.anything(), delivery, expect.anything());
+
+    // Back to Home before retention lands: the session still looks playable.
+    game.unmount();
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, playerToken: session.playerToken });
+    expect(loadWsSession()?.terminalOnly).toBeUndefined();
+    expect(home.result.current.resumables.match?.id).toBe(finished.id);
+    expect(home.result.current.resumables.retainedResult).toBeNull();
+
+    // Retention lands and the ACK fails.
+    await act(async () => { releaseRetention(); });
+    await waitFor(() => expect(requests.some(({ message }) => message.type === "AckTerminalDelivery")).toBe(true));
+    expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+    expect(loadActiveGame()).toEqual(finished);
+    expect(successfulAckResponses).toBe(0);
+
+    // The mounted Home swaps Resume for View Result.
+    await waitFor(() => expect(home.result.current.resumables.retainedResult?.id).toBe(finished.id));
+    expect(home.result.current.resumables.match).toBeNull();
+    act(() => home.result.current.resumables.viewRetainedResult());
+    expect(home.result.current.location.pathname).toBe(`/game/${finished.id}`);
+    expect(home.result.current.location.search).toBe("?mode=host");
+
+    // Reopening re-displays the result without gameplay and retries the ACK.
+    ackOutcome = "pending";
+    const controllerCount = controller.mock.calls.length;
+    const reopened = mountProvider();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
+    await waitFor(() => expect(pendingAcks).toHaveLength(1));
+    expect(controller.mock.calls.length).toBe(controllerCount);
+
+    const rematch = { id: "rematch", mode: "online" as const, difficulty: "" };
+    const rematchSession: WsSessionData = {
+      ...session, gameCode: "NEXT", fullKey: { game_code: "NEXT", generation: 1 }, playerToken: "next-token",
+    };
+    if (replace) {
+      saveActiveGame(rematch);
+      saveWsSession(rematchSession);
+    }
+    await act(async () => {
+      pendingAcks[0]!.receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
+
+    if (replace) {
+      expect(loadActiveGame()).toEqual(rematch);
+      expect(loadWsSession()).toEqual(rematchSession);
+      await waitFor(() => expect(home.result.current.resumables.match?.id).toBe(rematch.id));
+    } else {
+      await waitFor(() => expect(loadActiveGame()).toBeNull());
+      expect(loadWsSession()).toBeNull();
+      await waitFor(() => expect(home.result.current.resumables.match).toBeNull());
+    }
+    expect(home.result.current.resumables.retainedResult).toBeNull();
   });
 
   it.each([
