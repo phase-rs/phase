@@ -1,6 +1,6 @@
 //! F3: the announced activation tally survives the source's zone exit.
 //!
-//! CR 400.7 + CR 608.2c: `apply_zone_exit_cleanup` migrates the erased live
+//! CR 400.7 + CR 608.2h: `apply_zone_exit_cleanup` migrates the erased live
 //! journal entries into the departed-side tables tagged with the departing
 //! incarnation, and the `Activated` tally arm of `evaluate_condition` falls
 //! back to the departed turn tally on a live miss. A resolving ability
@@ -150,7 +150,7 @@ fn cross_to_resolved_end_step(runner: &mut GameRunner) {
     );
 }
 
-/// CR 400.7 + CR 608.2c: three activations resolve below threshold, the
+/// CR 400.7 + CR 608.2h: three activations resolve below threshold, the
 /// fourth is announced, the Whelp blinks, and the fourth resolves against
 /// the departed tally — creating exactly one delayed sacrifice (the earlier
 /// three resolved pre-blink at counts 1–3 and armed nothing).
@@ -224,7 +224,7 @@ fn four_pre_blink_activations_arm_the_delayed_sacrifice() {
     );
 }
 
-/// CR 608.2c: three activations plus a blink arm nothing. The departed table
+/// CR 608.2h: three activations plus a blink arm nothing. The departed table
 /// holds the true sub-threshold count (migration preserves it), and the
 /// threshold — not the blink — is what gates the rider.
 #[test]
@@ -358,7 +358,7 @@ fn returned_whelp_has_independent_activation_history() {
     );
 }
 
-/// CR 400.7 + CR 603.4: the turn boundary clears departed per-turn tallies
+/// CR 400.7: the turn boundary clears departed per-turn tallies
 /// beside their live twins, while per-game entries persist on both sides.
 #[test]
 fn turn_boundary_clears_departed_per_turn_tallies() {

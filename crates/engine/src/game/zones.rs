@@ -257,7 +257,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.
     //
-    // CR 400.7 + CR 608.2c: the erased entries migrate (not copied) into the
+    // CR 400.7 + CR 608.2h: the erased entries migrate (not copied) into the
     // departed-side tables tagged with the departing incarnation
     // (`occurrence`, captured pre-move above): an ability the old object
     // announced keeps reading its count through the announced carrier, while

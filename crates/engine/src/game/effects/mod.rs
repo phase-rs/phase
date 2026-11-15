@@ -28794,7 +28794,7 @@ pub(crate) fn evaluate_condition(
                     // capture; an unresolvable slot reads a missing entry
                     // as count 0.
                     //
-                    // CR 400.7: when the source left its zone after announcing
+                    // CR 400.7 + CR 608.2h: when the source left its zone after announcing
                     // (a blink above the resolving ability), the live journal
                     // was migrated at the exit boundary, so a live miss falls
                     // back to the departed turn tally tagged with the

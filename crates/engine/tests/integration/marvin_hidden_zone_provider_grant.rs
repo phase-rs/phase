@@ -230,7 +230,7 @@ fn kraj_graveyard_counter_bearer_donates_nothing() {
 
 /// CR 613.1f residual, documented not desired: a face-down battlefield
 /// creature still matches `InZone { Battlefield }`, so its abilities are
-/// donated. Face-down permanents have no abilities under CR 708.5 — the pin
+/// donated. Face-down permanents have no abilities under CR 708.2 — the pin
 /// is a zone gate, not a face gate — and the viewer-projection redaction is
 /// what keeps such lineage from disclosing hidden identities.
 #[test]

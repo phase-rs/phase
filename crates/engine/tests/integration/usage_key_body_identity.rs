@@ -230,10 +230,14 @@ fn granted_equip_pair_activates_independently() {
     );
 }
 
-/// Boundary (CR 602.5b): two IDENTICAL granted `Equip {1}` instances share
-/// one budget — the fingerprint splits only distinguishable bodies.
+/// Boundary (CR 602.5b): two byte-identical granted `Equip {1}` twins — repeat
+/// emissions of ONE static grant (one provider, one stamp) — share one budget;
+/// the fingerprint splits only distinguishable bodies. Scope: this pins the
+/// same-grant repeat-emission class only. Separately resolved gains (e.g. two
+/// Quicksilver Elemental resolutions) are independent acquisitions with their
+/// own uses under CR 113.2c + CR 602.5c and are not asserted here.
 #[test]
-fn identical_granted_equip_pair_shares_one_budget() {
+fn same_static_grant_twins_share_one_budget() {
     let Some(db) = shared_card_db() else { return };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

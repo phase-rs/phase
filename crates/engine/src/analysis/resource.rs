@@ -9388,6 +9388,37 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
         .collect();
     s.activated_abilities_this_game
         .retain(|key, _| keep_game.contains(key));
+    // CR 400.7 + CR 608.2h: the departed-incarnation tallies are the same
+    // ledger class as the live journals, so project them symmetrically: retain
+    // a departed key exactly when its live twin would be retained (a per-turn
+    // or per-game gate, or an own-activation-count reader), and clear the
+    // rest. Without this a loop that parks history in a departed incarnation
+    // (a sacrifice outlet that dies mid-cycle) compares unequal against its
+    // own earlier frames and is never certified; retaining the gated and
+    // count-reading keys keeps the fail-closed discrimination for loops whose
+    // repetition the departed count actually governs. Like the live twins, a
+    // key whose definition no longer resolves in the projected frame is
+    // cleared: the live rule (`is_some_and`) treats unresolvable keys the same
+    // way, so the two populations stay symmetric.
+    let keep_departed_turn: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_turn
+        .keys()
+        .filter(|(key, _)| {
+            ability_has_per_turn_activation_gate(&s, key)
+                || ability_reads_own_activation_count(&s, key)
+        })
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_turn
+        .retain(|key, _| keep_departed_turn.contains(key));
+    let keep_departed_game: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_game
+        .keys()
+        .filter(|(key, _)| ability_has_per_game_activation_gate(&s, key))
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_game
+        .retain(|key, _| keep_departed_game.contains(key));
     // CR 608.2c: AbilityUseCountThisTurn{n} is a one-shot branch SELECTOR (an effect
     // branch fires when the per-ability resolution count == n), NOT a repetition-
     // blocking legality gate. Clearing it is sound: a board-divergent Nth branch is

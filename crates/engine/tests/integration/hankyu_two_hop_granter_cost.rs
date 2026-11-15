@@ -6,16 +6,18 @@
 //! removes the counters from Hankyu — the first-bound granter — and never
 //! from the intermediate carrier. Damage equals the counters removed from
 //! Hankyu (`PreviousEffectAmount`); the carrier's own counters are untouched.
-//! A zero-counter Hankyu refuses the counter leg (CR 118.3 / CR 601.2h partial
-//! payments) with the tap leg already consumed (pre-existing tap-first pipeline
-//! behavior — composite legs pay sequentially in listed order, no rollback).
+//! A zero-counter Hankyu still pays in full: ALL is a variable
+//! remove-counter count (payable with nothing to take), the engine removes
+//! zero for the bound payer, and the activation resolves — zero damage is
+//! then not dealt at all (CR 120.8).
 
 use engine::game::effects::attach::attach_to;
 use engine::game::layers::evaluate_layers;
+use engine::game::restrictions::ability_usage_key;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::TargetRef;
@@ -157,13 +159,17 @@ fn marvin_redonated_hankyu_damage_pays_from_hankyu() {
     assert_eq!(st.players[1].life, p1_life - 2);
 }
 
-/// CR 118.3 + CR 601.2h: with no aim counters on Hankyu the counter leg fails
-/// closed — no counters move anywhere and no damage is dealt. The tap leg is
-/// consumed first (pre-existing tap-first pipeline behavior, identical
-/// single-hop: the source taps, the activation then fizzles with an empty
-/// stack), so this asserts the payer fail-closed property, not atomicity.
+/// CR 601.2h + CR 602.2b + CR 120.8: with no aim counters on Hankyu the
+/// remove-ALL leg still pays — a variable remove-counter count is payable
+/// with nothing to take, the engine removes zero for the bound payer, and the
+/// activation resolves. Zero damage is then not dealt at all, so life is
+/// unchanged. Every assertion below is resolution evidence an
+/// abandon-after-tap defect cannot satisfy: the activation must reach target
+/// selection (CR 601.2c — a reversed payment per CR 602.2b + CR 733.1 never
+/// gets there), sit on the stack as Marvin's ability (CR 602.2a), and record
+/// its turn tally before the stack drains.
 #[test]
-fn marvin_redonated_hankyu_damage_refused_without_counters() {
+fn marvin_redonated_hankyu_damage_resolves_with_zero_counters() {
     let mut b = board();
 
     // Reach-guards: the ability is present and Hankyu is counter-free.
@@ -176,21 +182,70 @@ fn marvin_redonated_hankyu_damage_refused_without_counters() {
         None
     );
 
-    // The engine announces before checking the counter leg, so drive the full
-    // flow: the counter leg must then fail closed with no counters moved and
-    // no damage dealt.
+    // Announcement + payment complete: the composite cost ({T} plus remove
+    // zero) pays, so the engine asks for the damage target. A payment failure
+    // would reverse the whole action (CR 602.2b + CR 733.1) and return to
+    // Priority with no target prompt.
     let marvin = b.marvin;
-    activate(&mut b, marvin, burn);
+    b.runner
+        .act(GameAction::ActivateAbility {
+            source_id: marvin,
+            ability_index: burn,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            b.runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "the zero-counter cost pays; the activation awaits its target: {:?}",
+        b.runner.state().waiting_for
+    );
 
+    // Placement evidence: answering the target puts Marvin's activation on the
+    // stack (CR 602.2a) — an abandoned activation never sits there.
+    b.runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .unwrap();
+    {
+        let st = b.runner.state();
+        assert_eq!(st.stack.len(), 1, "one paid activation is on the stack");
+        assert!(
+            st.stack.back().is_some_and(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::ActivatedAbility { source_id, ability }
+                    if *source_id == marvin && ability.ability_index == Some(burn)
+            )),
+            "the stacked entry is Marvin's damage activation"
+        );
+    }
+    b.runner.advance_until_stack_empty();
+
+    // Resolution evidence: the announced activation consumed its own usage key
+    // (written at placement, never on a reversed action), the stack drained,
+    // and the tap leg stayed paid.
     let st = b.runner.state();
+    let burn = described(&b.runner, marvin, "Remove all aim counters from Hankyu")
+        .expect("reach: the damage ability survives its own resolution");
+    let key = ability_usage_key(st, marvin, burn)
+        .expect("the tested slot resolves through the activation lookup");
+    assert_eq!(
+        st.activated_abilities_this_turn.get(&key),
+        Some(&1),
+        "the resolved activation recorded its turn tally"
+    );
+    assert!(st.stack.is_empty());
     assert!(
         !matches!(st.waiting_for, WaitingFor::PayCost { .. }),
         "{:?}",
         st.waiting_for
     );
-    assert!(st.stack.is_empty());
-    // Tap-first pipeline: the tap leg is paid before the counter leg fails.
-    assert!(st.objects[&b.marvin].tapped);
+    assert!(st.objects[&marvin].tapped);
+    // Zero removed from Hankyu (the bound granter), nothing from the carrier,
+    // and no damage: a source that would deal 0 damage deals none (CR 120.8).
     assert_eq!(st.objects[&b.hankyu].counters.get(&counter("aim")), None);
     assert_eq!(st.objects[&b.host].counters.get(&counter("aim")), Some(&1));
     assert_eq!(st.players[1].life, 20);

@@ -9123,8 +9123,15 @@ fn expand_granted_activated_abilities(
                 // the re-donated copy stays distinct from a direct grant;
                 // the restriction on an acquired ability applies only to
                 // that ability as acquired from that object). Repeat
-                // expansion from the same provider re-emits a byte-identical
-                // def, which Tier-2 dedup still collapses.
+                // emission of the same static grant (the same provider
+                // incarnation re-expanding the same reference) re-emits a
+                // byte-identical def, which Tier-2 dedup still collapses.
+                // Scope: that collapse covers the same-grant repeat-emission
+                // class only. Separately resolved gains — e.g. two
+                // Quicksilver Elemental resolutions — are independent
+                // acquisitions under CR 113.2c + CR 602.5c and sit outside
+                // this guarantee; how the layer pass treats them is
+                // pre-existing behavior this change does not alter.
                 let provider_stamp = ObjectIncarnationRef::from_object(provider);
                 if let Some(prior) = donated.granting_object.replace(provider_stamp) {
                     if !donated.grant_chain.contains(&prior) {
@@ -11653,8 +11660,11 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
 /// lineage, plus sub-symbol stamps and injected `cap` restrictions) with an
 /// already-pushed grant at index `>= base_end`. A printed base ability and a stamped grant of the same body are
 /// distinct instances (CR 113.2c + CR 602.5c "other, identically worded
-/// abilities") and coexist; only a byte-identical re-expansion from the same
-/// provider incarnation (same stamp, same body) collapses. The `[..base_end]`
+/// abilities") and coexist; only a byte-identical repeat emission of the same
+/// static grant (same provider incarnation, same stamp, same body) collapses.
+/// Separately resolved gains are independent acquisitions under CR 113.2c +
+/// CR 602.5c and sit outside this guarantee — the layer pass's treatment of
+/// them predates this change and is not altered here. The `[..base_end]`
 /// range is never consulted, so no cross-tier comparison can occur.
 fn grant_ability_is_duplicate(
     obj: &crate::game::game_object::GameObject,
