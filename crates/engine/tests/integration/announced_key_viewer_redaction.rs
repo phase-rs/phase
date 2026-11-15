@@ -25,13 +25,14 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::TargetRef;
+use engine::types::ability::{ContinuousModification, Effect};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
     CastPaymentMode, ManaChoice, ManaChoiceContext, ManaChoicePrompt, PendingCast, StackEntryKind,
     WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -577,5 +578,153 @@ fn projection_clears_departed_activation_tallies() {
         round_tripped.departed_activated_abilities_this_turn.len(),
         1,
         "save/restore must retain the departed turn table"
+    );
+}
+
+/// CR 400.2 + CR 613.1f: transient continuous effects project no hidden
+/// provider lineage.
+///
+/// Board: Kraj gains the counter-bearing Mystic's `{G}` (stamped). Quicksilver
+/// targets Kraj and resolves, snapshotting the stamped donation verbatim into
+/// a transient `GrantAbility` clone. The Mystic then moves to hand — hidden
+/// from every viewer but its owner — while the layer pass is stale. Opponent
+/// and unseated projections must carry no transient modification or
+/// effect-level stamp naming the hidden id, while authoritative state keeps
+/// the clone intact (projection never feeds legality).
+///
+/// Revert detector: skipping the transient walk makes the projection scan
+/// fail; dropping the authoritative clone fails the trusted-state assertion.
+#[test]
+fn projection_blanks_hidden_provider_lineage_in_transient_effects() {
+    const QUICKSILVER: &str =
+        "{U}: This creature gains all activated abilities of target creature until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kraj = scenario
+        .add_creature_from_oracle(P0, "Experiment Kraj", 4, 6, KRAJ)
+        .id();
+    let mystic = scenario
+        .add_creature_from_oracle(P0, "Elvish Mystic", 1, 1, MYSTIC)
+        .id();
+    let quicksilver = scenario
+        .add_creature_from_oracle(P0, "Quicksilver Elemental", 2, 2, QUICKSILVER)
+        .id();
+    scenario.with_counter(mystic, engine::types::counter::CounterType::Plus1Plus1, 1);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    relayer(runner.state_mut());
+
+    // Reach-guards: Kraj holds the stamped donation.
+    let mystic_stamp = stamp_of(runner.state(), mystic);
+    let kraj_mana = mana_donations(runner.state(), kraj);
+    assert_eq!(
+        kraj_mana.len(),
+        1,
+        "Kraj holds exactly the Mystic's donated mana ability"
+    );
+    assert_eq!(
+        kraj_mana[0].granting_object,
+        Some(mystic_stamp),
+        "the live donation stamps the Mystic"
+    );
+
+    // Quicksilver snapshots Kraj's abilities into a transient effect.
+    let gain = runner.state().objects[&quicksilver]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                *ability.effect,
+                Effect::GainActivatedAbilitiesOfTarget { .. }
+            )
+        })
+        .expect("Quicksilver's {U} ability");
+    runner
+        .activate(quicksilver, gain)
+        .target_object(kraj)
+        .resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .flat_map(|effect| effect.modifications.iter())
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if definition.granting_object == Some(mystic_stamp)
+            )),
+        "reach-guard: the snapshot cloned the stamped donation verbatim"
+    );
+
+    // The Mystic moves to hand (hidden) while the layer pass is stale.
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), mystic, Zone::Hand, &mut events);
+    assert_eq!(
+        runner.state().objects[&mystic].zone,
+        Zone::Hand,
+        "reach-guard: the provider is hidden from the opponent"
+    );
+
+    for viewer in [P1, unseated()] {
+        let filtered = filter_state_for_viewer(runner.state(), viewer);
+        assert!(
+            !filtered.transient_continuous_effects.is_empty(),
+            "{viewer:?} still sees the transient effect itself"
+        );
+        for effect in filtered.transient_continuous_effects.iter() {
+            assert!(
+                effect
+                    .granting_object
+                    .is_none_or(|stamp| stamp.object_id != mystic),
+                "{viewer:?} sees an effect stamp naming the hidden Mystic"
+            );
+            for modification in effect.modifications.iter() {
+                let heads = match modification {
+                    ContinuousModification::GrantAbility { definition } => {
+                        let mut heads = vec![definition.granting_object];
+                        heads.extend(definition.grant_chain.iter().copied().map(Some));
+                        heads
+                    }
+                    ContinuousModification::GrantTrigger { trigger } => {
+                        vec![trigger.granting_object]
+                    }
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        vec![definition.granting_object]
+                    }
+                    ContinuousModification::GrantReplacement { replacement } => {
+                        vec![replacement.granting_object]
+                    }
+                    _ => vec![],
+                };
+                assert!(
+                    !heads
+                        .into_iter()
+                        .flatten()
+                        .any(|stamp| stamp.object_id == mystic),
+                    "{viewer:?} sees a transient clone naming the hidden Mystic"
+                );
+            }
+        }
+    }
+
+    // Authoritative state keeps the stamped clone (projection never feeds
+    // legality).
+    assert!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .flat_map(|effect| effect.modifications.iter())
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if definition.granting_object == Some(mystic_stamp)
+            )),
+        "authoritative state retains the stamped transient clone"
     );
 }

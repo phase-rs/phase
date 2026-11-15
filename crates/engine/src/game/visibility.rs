@@ -4668,6 +4668,64 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// views over a hidden-id record; rules decisions read authoritative state. This follows
 /// the accepted `zone_changes_this_turn` / `redact_zone_change_record` precedent.
 ///
+/// CR 400.2 + CR 613.1f: blank the hidden lineage stamps on one definition
+/// node. Ability nodes carry the head stamp plus the re-donation chain;
+/// trigger, static, and replacement nodes carry a head stamp only. Shared by
+/// the object-ability walk and the transient-effect walk below.
+fn redact_granter_lineage_node(node: DefinitionNodeMut<'_>, hidden_ids: &HashSet<ObjectId>) {
+    let stamp_names_hidden = |stamp: Option<ObjectIncarnationRef>| {
+        stamp.is_some_and(|s| hidden_ids.contains(&s.object_id))
+    };
+    match node {
+        DefinitionNodeMut::Ability(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+            def.grant_chain
+                .retain(|stamp| !hidden_ids.contains(&stamp.object_id));
+        }
+        DefinitionNodeMut::Trigger(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+        DefinitionNodeMut::Static(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+        DefinitionNodeMut::Replacement(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+    }
+}
+
+/// CR 400.2 + CR 613.1f: whether one definition node names a hidden id in its
+/// lineage stamps. The pre-pass twin of [`redact_granter_lineage_node`].
+fn lineage_node_names_hidden(node: DefinitionNode<'_>, hidden_ids: &HashSet<ObjectId>) -> bool {
+    match node {
+        DefinitionNode::Ability(def) => {
+            def.granting_object
+                .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+                || def
+                    .grant_chain
+                    .iter()
+                    .any(|stamp| hidden_ids.contains(&stamp.object_id))
+        }
+        DefinitionNode::Trigger(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+        DefinitionNode::Static(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+        DefinitionNode::Replacement(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+    }
+}
+
 /// Projection only: authoritative state keeps the full records the engine reads for
 /// look-back (CR 608.2h, CR 603.10a).
 fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
@@ -4699,33 +4757,67 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
             if abilities.iter().any(|def| {
                 let mut names_hidden = false;
                 granter_symbols::each_node(DefinitionNode::Ability(def), &mut |node| {
-                    if let DefinitionNode::Ability(node_def) = node {
-                        names_hidden |= node_def
-                            .granting_object
-                            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
-                            || node_def
-                                .grant_chain
-                                .iter()
-                                .any(|stamp| hidden_ids.contains(&stamp.object_id));
-                    }
+                    names_hidden |= lineage_node_names_hidden(node, hidden_ids);
                 });
                 names_hidden
             }) {
                 for def in Arc::make_mut(abilities) {
                     granter_symbols_mut::each_node(DefinitionNodeMut::Ability(def), &mut |node| {
-                        if let DefinitionNodeMut::Ability(node_def) = node {
-                            if node_def
-                                .granting_object
-                                .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
-                            {
-                                node_def.granting_object = None;
-                            }
-                            node_def
-                                .grant_chain
-                                .retain(|stamp| !hidden_ids.contains(&stamp.object_id));
-                        }
+                        redact_granter_lineage_node(node, hidden_ids);
                     });
                 }
+            }
+        }
+    }
+    // CR 400.2 + CR 613.1f: transient continuous effects snapshot donor
+    // abilities verbatim (`snapshot_granted_modifications`), so a TCE holds a
+    // stamped clone after the object walk blanked the live donor. Walk the
+    // same node axis over every grant payload, and blank the effect's own
+    // `granting_object` when it names a hidden id. Projection only.
+    for effect in state.transient_continuous_effects.iter_mut() {
+        if effect
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+        {
+            effect.granting_object = None;
+        }
+        for modification in effect.modifications.iter_mut() {
+            match modification {
+                crate::types::ability::ContinuousModification::GrantAbility { definition } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Ability(definition),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Trigger(trigger),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantStaticAbility {
+                    definition,
+                } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Static(definition),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantReplacement { replacement } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Replacement(replacement),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                _ => {}
             }
         }
     }
