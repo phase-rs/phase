@@ -8523,6 +8523,25 @@ fn per_opponent_fanout_legal_object_targets(
     )
 }
 
+/// CR 115.1 + CR 115.7d: the flat retarget pool for a per-opponent fanout —
+/// the union of each opponent's OWN legal object set.
+///
+/// A fanout slot is legal only for the opponent its header names, so the
+/// `You`/unbound controller in the printed filter must not be read against the
+/// retargeting spell's `pool_controller` (that offers the caster's own
+/// permanents). The pool is necessarily flat — the addressing layer marks every
+/// fanout position non-exact (`declared_position_addresses`) — so this is a
+/// UI/AI superset whose per-position legality the assignment seam still owns.
+pub(crate) fn per_opponent_fanout_retarget_options(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    per_opponent_fanout_players(state, ability.controller)
+        .into_iter()
+        .flat_map(|opponent| per_opponent_fanout_legal_object_targets(state, ability, opponent))
+        .collect()
+}
+
 fn collect_per_opponent_target_fanout_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -24300,10 +24319,13 @@ mod tests {
             "opponent two's pick must survive opponent one's board changing"
         );
 
-        // (b) The controller declines opponent one's optional object slot
-        // through the production walk. Only the chosen occurrences are stored,
-        // so the vector is the two headers plus opponent two's pick — which
-        // must still be judged against opponent two.
+        // (b) The controller declines opponent one's optional object slot.
+        // This is the STORED shape such a walk produces when both headers were
+        // announced and only opponent two's pick was chosen (the production
+        // decline path itself is covered by the Barn integration test and by
+        // `per_opponent_binder_autofill`); the vector is the two headers plus
+        // opponent two's pick, which must still be judged against opponent
+        // two.
         let mut declined_optional = repeated_per_opponent_object_choice(
             TargetFilter::Typed(TypedFilter::permanent()),
             TargetChoiceTiming::Stack,
@@ -24322,6 +24344,38 @@ mod tests {
             ],
             "declining one opponent's up-to-one slot must not consume another opponent's pick"
         );
+    }
+
+    /// CR 115.1 + CR 115.7d: the flat retarget pool of a per-opponent fanout is
+    /// the union of each opponent's OWN permanents. Reading the printed
+    /// `You`/unbound controller against the retargeting spell's controller
+    /// offers the caster's permanents, which no fanout slot can legally take.
+    #[test]
+    fn per_opponent_fanout_retarget_pool_never_offers_the_casters_permanents() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller_creature =
+            create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        for filter in [
+            TargetFilter::Typed(TypedFilter::permanent()),
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        ] {
+            let ability = repeated_per_opponent_object_choice(filter, TargetChoiceTiming::Stack);
+            assert_eq!(
+                per_opponent_fanout_retarget_options(&state, &ability),
+                vec![
+                    TargetRef::Object(opp_one_creature),
+                    TargetRef::Object(opp_two_creature),
+                ],
+                "the pool is each opponent's own set, in APNAP order"
+            );
+            assert!(
+                !per_opponent_fanout_retarget_options(&state, &ability)
+                    .contains(&TargetRef::Object(controller_creature)),
+                "the caster's creature is never a legal new target for any fanout slot"
+            );
+        }
     }
 
     /// CR 601.2d building-block (AST-shape) test: a division is announced only

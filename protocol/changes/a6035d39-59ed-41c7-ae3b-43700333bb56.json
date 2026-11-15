@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Issue #10266 declared-target identity: ResolvedAbility gains declared_player_target_slots (each announced declared-player slot position and the stored position it keeps after CR 608.2b legality compaction) and ForwardedResultContext gains phase_population (a phase action's resolved population is an input to its one-hop application-filter rider). Older full-game and P2P peers drop both: without the slot map a mixed primary-object/companion-player role loses its announced identity, so a retarget reads the wrong pool, and without the marker a phase rider falls back to the declared/player-only antecedent, which is the #10266 leak. Lobby, draft and directory surfaces are unchanged."
+}

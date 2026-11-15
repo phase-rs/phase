@@ -667,6 +667,23 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         }
     }
 
+    // CR 115.1 + CR 115.7d: a per-opponent fanout ("for each opponent, choose
+    // up to one target permanent that opponent controls") announces one slot
+    // per opponent, each legal only for the opponent its header names. The
+    // printed filter's controller is the anaphoric `You`/unbound, which the
+    // generic branch below would read against `pool_controller` — i.e. the
+    // retargeting spell's controller — offering the CASTER's permanents. The
+    // flat pool is instead the union of every opponent's own legal set.
+    // Positions themselves are non-exact at the addressing layer, so this
+    // superset cannot authorize an illegal application.
+    if crate::game::ability_utils::is_per_opponent_target_fanout(active_ability) {
+        let options =
+            crate::game::ability_utils::per_opponent_fanout_retarget_options(state, active_ability);
+        if !options.is_empty() {
+            return options;
+        }
+    }
+
     // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
     // target filter against current game state. Ask the mass-aware declaration
     // authority first: a population filter that merely reads a target player
