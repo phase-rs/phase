@@ -1,3 +1,4 @@
+import type { ObjectIncarnationRef } from "../adapter/types.ts";
 import { measureSurface } from "../components/animation/cardVfx/cardAnchors.ts";
 import { dispatchAction } from "./dispatch.ts";
 
@@ -8,6 +9,12 @@ import { dispatchAction } from "./dispatch.ts";
  * only marks itself so the hit-test below can find it.
  */
 export const UN_TOUCH_ATTRIBUTE = "data-un-touch-object-id";
+
+/**
+ * Carried alongside `UN_TOUCH_ATTRIBUTE` to pin the permanent to its exact
+ * incarnation (CR 400.7).
+ */
+export const UN_TOUCH_INCARNATION_ATTRIBUTE = "data-un-touch-incarnation";
 
 /**
  * Carried by an attachment control (e.g. collapsed-count or fan button) rendered
@@ -26,21 +33,22 @@ export const KEYWORD_BADGE_ATTRIBUTE = "data-keyword-badge";
 const PERMANENT_CARD_ATTRIBUTE = "data-permanent-card";
 
 /** The touchable object each pointer is currently over, if any. */
-const overByPointer = new Map<number, number | null>();
+const overByPointer = new Map<number, ObjectIncarnationRef | null>();
 
 /**
- * Pointer `pointerId` is now over touchable `objectId` (or over none). Entering
+ * Pointer `pointerId` is now over touchable `target` (or over none). Entering
  * a touchable object is one touch; staying on it is not another.
  */
-function pointerOverTouchable(pointerId: number, objectId: number | null): void {
-  if ((overByPointer.get(pointerId) ?? null) === objectId) return;
-  overByPointer.set(pointerId, objectId);
-  if (objectId === null) return;
+function pointerOverTouchable(pointerId: number, target: ObjectIncarnationRef | null): void {
+  const current = overByPointer.get(pointerId) ?? null;
+  if (current?.object_id === target?.object_id && current?.incarnation === target?.incarnation) return;
+  overByPointer.set(pointerId, target);
+  if (target === null) return;
   // A touch the engine refuses (over its bound, or the object just left) is
   // already reported by dispatch; the pointer has nothing left to do with it.
   dispatchAction({
     type: "UnAction",
-    data: { action: { type: "TouchObject", data: { object_id: objectId } } },
+    data: { action: { type: "TouchObject", data: { target } } },
   }).catch(() => {});
 }
 
@@ -95,8 +103,8 @@ export function cardFaceContainsPoint(
   const u = dx * cos + dy * sin;
   const v = -dx * sin + dy * cos;
 
-  const halfW = w / 2 + 0.01;
-  const halfH = h / 2 + 0.01;
+  const halfW = w / 2;
+  const halfH = h / 2;
   return Math.abs(u) <= halfW && Math.abs(v) <= halfH;
 }
 
@@ -116,7 +124,7 @@ function touchableAt(
   element: Element | null | undefined,
   clientX?: number,
   clientY?: number,
-): number | null {
+): ObjectIncarnationRef | null {
   if (element?.closest(`[${ATTACHMENT_CONTROL_ATTRIBUTE}]`)) return null;
   const card = element?.closest(`[${PERMANENT_CARD_ATTRIBUTE}]`);
   if (!card) return null;
@@ -130,7 +138,10 @@ function touchableAt(
   const marked = card?.getAttribute(UN_TOUCH_ATTRIBUTE);
   if (marked == null) return null;
   const objectId = Number(marked);
-  return Number.isInteger(objectId) ? objectId : null;
+  if (!Number.isInteger(objectId)) return null;
+  const markedIncarnation = card?.getAttribute(UN_TOUCH_INCARNATION_ATTRIBUTE);
+  const incarnation = markedIncarnation != null ? Number(markedIncarnation) : 0;
+  return { object_id: objectId, incarnation };
 }
 
 /**

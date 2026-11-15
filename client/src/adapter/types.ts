@@ -1435,7 +1435,7 @@ export type UnAction =
   | { type: "SetEnabled"; data: { enabled: boolean } }
   | { type: "PerformTell"; data: { tell: UnTell } }
   | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } }
-  | { type: "TouchObject"; data: { object_id: ObjectId } };
+  | { type: "TouchObject"; data: { target: ObjectIncarnationRef } };
 
 export interface GotchaOffer {
   id: number;
@@ -1462,7 +1462,7 @@ export interface UnActionState {
   /** Objects with a functioning touch ability ("Whenever a player's skin or
    *  fingernail touches this creature", Vile Bile). The client reports a touch
    *  (`TouchObject`) when an opted-in player's pointer enters one of them. */
-  touchable?: ObjectId[];
+  touchable?: ObjectIncarnationRef[];
 }
 
 export type UnlessCost =

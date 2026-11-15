@@ -7,7 +7,12 @@ import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } from "../../game/unTouch.ts";
+import {
+  ATTACHMENT_CONTROL_ATTRIBUTE,
+  retainTouchTracking,
+  UN_TOUCH_ATTRIBUTE,
+  UN_TOUCH_INCARNATION_ATTRIBUTE,
+} from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -457,12 +462,14 @@ export const PermanentCard = memo(function PermanentCard({
   // game/unTouch.ts resolves the card under the pointer (never a host whose
   // attachment the pointer is on) and counts each entry once.
   const spectator = useSpectatorMode();
-  const reportsTouch = useGameStore((s) => {
+  const touchableRef = useGameStore((s) => {
     const unActions = s.gameState?.un_actions;
-    return !spectator
-      && (unActions?.enabled_players?.includes(playerId) ?? false)
-      && (unActions?.touchable?.includes(objectId) ?? false);
+    if (spectator || !(unActions?.enabled_players?.includes(playerId) ?? false)) {
+      return null;
+    }
+    return unActions?.touchable?.find((t) => t.object_id === objectId) ?? null;
   });
+  const reportsTouch = touchableRef != null;
   useEffect(() => (reportsTouch ? retainTouchTracking() : undefined), [reportsTouch]);
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile || event.pointerType === "touch") return;
@@ -832,7 +839,7 @@ export const PermanentCard = memo(function PermanentCard({
       data-object-id={objectId}
       data-permanent-card={objectId}
       data-tap-angle={isRotatedFull ? tapAngle : undefined}
-      {...(reportsTouch ? { [UN_TOUCH_ATTRIBUTE]: objectId } : {})}
+      {...(touchableRef ? { [UN_TOUCH_ATTRIBUTE]: objectId, [UN_TOUCH_INCARNATION_ATTRIBUTE]: touchableRef.incarnation } : {})}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}

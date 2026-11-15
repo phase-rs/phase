@@ -43,7 +43,7 @@ class Refusal extends Promise<void> {
 
 const touchAction: GameAction = {
   type: "UnAction",
-  data: { action: { type: "TouchObject", data: { object_id: 1 } } },
+  data: { action: { type: "TouchObject", data: { target: { object_id: 1, incarnation: 0 } } } },
 };
 
 describe("Un-card touch pointer boundary", () => {
@@ -180,18 +180,28 @@ describe("Un-card touch pointer boundary", () => {
     // Card tapped with 17° rotation (MTGA default)
     card.setAttribute("data-tap-angle", "17");
 
-    // Untransformed card is 200x300 centered at (200, 250).
-    // Rotated by 17°, the axis-aligned bounding box spans [60.51, 339.49] x [77.31, 422.69].
-    // A point at (110, 150) lies within this bounding box, but outside the rotated card face.
+    // Untransformed card is 85.7142857x120 (120px height with 5/7 aspect ratio) centered at (200, 250).
+    // Rotated by 17°, the actual half-width is 42.857px.
+    // A badge point at (-42.95, -18) in local coordinates lies beyond the actual 42.857px half-width
+    // but within an integer-rounded 86px (43px half-width) boundary.
+    // Both pointer routes must reject the outboard badge point and accept the inboard neighbor (-42.5, -18).
+    const cardW = 120 * (5 / 7); // 85.71428571428571
+    const cardH = 120;
+    const angleDeg = 17;
+    const rad = (angleDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const bboxW = cardW * cos + cardH * sin;
+    const bboxH = cardW * sin + cardH * cos;
     const hostRect = {
-      left: 60.51,
-      top: 77.31,
-      right: 339.49,
-      bottom: 422.69,
-      width: 278.98,
-      height: 345.38,
-      x: 60.51,
-      y: 77.31,
+      left: 200 - bboxW / 2,
+      top: 250 - bboxH / 2,
+      right: 200 + bboxW / 2,
+      bottom: 250 + bboxH / 2,
+      width: bboxW,
+      height: bboxH,
+      x: 200 - bboxW / 2,
+      y: 250 - bboxH / 2,
       toJSON: () => {},
     };
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
@@ -202,8 +212,8 @@ describe("Un-card touch pointer boundary", () => {
       pose: {
         x: 200,
         y: 250,
-        w: 200,
-        h: 300,
+        w: cardW,
+        h: cardH,
         angleDeg: 17,
       },
       opacity: 1,
@@ -212,17 +222,24 @@ describe("Un-card touch pointer boundary", () => {
     let under: Element = badge;
     Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
 
+    // Outboard badge point: local (-42.95, -18) -> client coordinates
+    const outboardX = 200 + (-42.95 * cos - (-18) * sin);
+    const outboardY = 250 + (-42.95 * sin + (-18) * cos);
+    // Inboard neighbor: local (-42.5, -18) -> client coordinates
+    const inboardX = 200 + (-42.5 * cos - (-18) * sin);
+    const inboardY = 250 + (-42.5 * sin + (-18) * cos);
+
     // Route 1 (hovering uncaptured pointer):
-    // Pointer enters the badge overhang: clientX = 110, clientY = 150 (outside rotated face)
-    badge.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerId: 1, pointerType: "mouse", clientX: 110, clientY: 150 }));
+    // Pointer enters the badge overhang: outboard point lies outside the fractional face
+    badge.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerId: 1, pointerType: "mouse", clientX: outboardX, clientY: outboardY }));
     expect(dispatched).toEqual([]);
 
     // Zero-button move still outboard sends zero touches
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 115, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: outboardX, clientY: outboardY }));
     expect(dispatched).toEqual([]);
 
-    // Zero-button move crosses onto the rotated card face: clientX = 135, clientY = 150 (one touch)
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 135, clientY: 150 }));
+    // Zero-button move crosses onto the rotated card face: clientX = inboardX, clientY = inboardY (one touch)
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: inboardX, clientY: inboardY }));
     expect(dispatched).toEqual([touchAction]);
 
     // Zero-button move to host face center (200, 250) preserves touch
@@ -233,16 +250,16 @@ describe("Un-card touch pointer boundary", () => {
 
     // Moving back to badge inboard preserves touch
     under = badge;
-    badge.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerId: 1, pointerType: "mouse", clientX: 135, clientY: 150 }));
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 135, clientY: 150 }));
+    badge.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerId: 1, pointerType: "mouse", clientX: inboardX, clientY: inboardY }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: inboardX, clientY: inboardY }));
     expect(dispatched).toHaveLength(1);
 
     // Zero-button move outboard to overhang clears touch
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 110, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: outboardX, clientY: outboardY }));
     expect(dispatched).toHaveLength(1);
 
     // Zero-button move back inboard sends a new touch
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 135, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: inboardX, clientY: inboardY }));
     expect(dispatched).toEqual([touchAction, touchAction]);
 
     // Moving away to elsewhere ends touch
@@ -260,11 +277,11 @@ describe("Un-card touch pointer boundary", () => {
     // Moving to badge overhang sends no touch
     under = badge;
     capturedMove(5);
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: 110, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: outboardX, clientY: outboardY }));
     expect(dispatched).toHaveLength(3);
 
     // Crossing inboard sends 4th touch
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: 135, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: inboardX, clientY: inboardY }));
     expect(dispatched).toEqual([touchAction, touchAction, touchAction, touchAction]);
 
     // Moving to host face preserves touch
@@ -274,7 +291,7 @@ describe("Un-card touch pointer boundary", () => {
 
     // Moving back to badge inboard preserves touch
     under = badge;
-    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: 135, clientY: 150 }));
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 5, buttons: 1, pointerType: "touch", clientX: inboardX, clientY: inboardY }));
     expect(dispatched).toHaveLength(4);
 
     // Moving back to host face preserves touch

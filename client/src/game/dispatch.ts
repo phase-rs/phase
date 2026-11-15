@@ -366,8 +366,21 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "CancelAutoPass"
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
-    || next.action.type === "UnAction"
   ) {
+    return true;
+  }
+  if (next.action.type === "UnAction") {
+    // CR 400.7: an Un-card touch must target the object's exact live incarnation.
+    // A delayed touch queued across a prompt change (such as during Cloudshift)
+    // must not trigger a returned permanent that is now a new object.
+    if (next.action.data.action.type === "TouchObject") {
+      const target = next.action.data.action.data.target;
+      const { gameState } = useGameStore.getState();
+      const touchable = gameState?.un_actions?.touchable;
+      return touchable?.some(
+        (t) => t.object_id === target.object_id && t.incarnation === target.incarnation,
+      ) ?? false;
+    }
     return true;
   }
   const { gameState, legalActions, waitingFor } = useGameStore.getState();

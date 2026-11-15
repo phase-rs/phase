@@ -24,11 +24,12 @@ import { dispatchAction } from "../dispatch";
 
 const TOUCH: GameAction = {
   type: "UnAction",
-  data: { action: { type: "TouchObject", data: { object_id: 7 } } },
+  data: { action: { type: "TouchObject", data: { target: { object_id: 7, incarnation: 0 } } } },
 };
 
 function seed(submitAction: EngineAdapter["submitAction"]): EngineAdapter {
   const state = buildGameState({ waiting_for: buildPriorityWaitingFor() });
+  state.un_actions = { enabled_players: [0], touchable: [{ object_id: 7, incarnation: 0 }] };
   const legal = buildLegalActionsResult({ actions: [{ type: "PassPriority" }] });
   const adapter: EngineAdapter = {
     initialize: vi.fn().mockResolvedValue(undefined),
@@ -37,10 +38,10 @@ function seed(submitAction: EngineAdapter["submitAction"]): EngineAdapter {
     estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
     submitAction,
-    getState: vi.fn(async () => state),
+    getState: vi.fn(async () => useGameStore.getState().gameState ?? state),
     getLegalActions: vi.fn(async () => legal),
     getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
-      state,
+      state: useGameStore.getState().gameState ?? state,
       legalResult: legal,
       seq: nextSnapshotSeq(),
     })),
@@ -93,5 +94,30 @@ describe("dispatching Un-card touches", () => {
     await Promise.all([first, second]);
 
     expect(adapter.submitAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a queued touch if the target incarnation is no longer current", async () => {
+    let callCount = 0;
+    const adapter = seed(vi.fn(async (): Promise<SubmitResult> => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First action resolves Cloudshift/blink: bumps object 7's incarnation to 1
+        const updatedState = { ...useGameStore.getState().gameState! };
+        updatedState.un_actions = { enabled_players: [0], touchable: [{ object_id: 7, incarnation: 1 }] };
+        useGameStore.setState({ gameState: updatedState });
+      }
+      return { events: [], log_entries: [] };
+    }));
+
+    const pass: GameAction = { type: "PassPriority" };
+    // Pass is in flight; touch targeting old incarnation 0 is queued behind it
+    const passPromise = dispatchAction(pass, 0);
+    const touchPromise = dispatchAction(TOUCH, 0);
+    await vi.runAllTimersAsync();
+    await Promise.all([passPromise, touchPromise]);
+
+    // Pass was submitted, but the queued touch for incarnation 0 was dropped because incarnation 1 is current
+    expect(adapter.submitAction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(adapter.submitAction).mock.calls[0][0]).toEqual(pass);
   });
 });

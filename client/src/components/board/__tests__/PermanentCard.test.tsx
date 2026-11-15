@@ -836,17 +836,23 @@ describe("PermanentCard", () => {
   });
 
   describe("Un-card touch (Vile Bile)", () => {
-    const touchOf = (objectId: number): GameAction => ({
+    const touchOf = (objectId: number, incarnation = 0): GameAction => ({
       type: "UnAction",
-      data: { action: { type: "TouchObject", data: { object_id: objectId } } },
+      data: { action: { type: "TouchObject", data: { target: { object_id: objectId, incarnation } } } },
     });
     const touchAction = touchOf(1);
     const touches = () =>
       vi.mocked(dispatchAction).mock.calls.filter(([action]) => action.type === "UnAction");
 
-    function setUnActions(enabledPlayers: number[], touchable: number[]) {
+    function setUnActions(
+      enabledPlayers: number[],
+      touchable: (number | { object_id: number; incarnation: number })[],
+    ) {
       const gameState = makeState();
-      gameState.un_actions = { enabled_players: enabledPlayers, touchable };
+      gameState.un_actions = {
+        enabled_players: enabledPlayers,
+        touchable: touchable.map((t) => (typeof t === "number" ? { object_id: t, incarnation: 0 } : t)),
+      };
       useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
     }
 
@@ -988,7 +994,7 @@ describe("PermanentCard", () => {
         base_color: ["Green"],
       });
       gameState.battlefield = [1, 2, 3, 4];
-      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      gameState.un_actions = { enabled_players: [0], touchable: [{ object_id: 1, incarnation: 0 }] };
       useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
       const { container } = renderPermanent();
@@ -1034,7 +1040,7 @@ describe("PermanentCard", () => {
       // axis-aligned bounding box. It must not register as a touch on the host.
       const gameState = makeState();
       gameState.objects[1] = { ...gameState.objects[1], tapped: true };
-      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      gameState.un_actions = { enabled_players: [0], touchable: [{ object_id: 1, incarnation: 0 }] };
       gameState.derived = {
         ...gameState.derived,
         battlefield_keyword_badges: { 1: ["Trample"] },
@@ -1048,20 +1054,30 @@ describe("PermanentCard", () => {
       expect(host.contains(badge)).toBe(true);
       expect(host.getAttribute("data-tap-angle")).toBe("17");
 
-      // Mock measureSurface to return the 17° rotated pose.
-      // Untransformed card is 200x300 centered at (200, 250).
-      // Rotated by 17°, the axis-aligned bounding box spans [60.51, 339.49] x [77.31, 422.69].
-      // A point at (110, 150) lies within this bounding box, but outside the rotated card face.
+      // Mock measureSurface to return the 17° rotated pose with fractional rendered dimensions.
+      // Untransformed card is 85.7142857x120 (120px height with 5/7 aspect ratio) centered at (200, 250).
+      // Rotated by 17°, the actual half-width is 42.857px.
+      // A badge point at (-42.95, -18) in local coordinates lies beyond the actual 42.857px half-width
+      // but within an integer-rounded 86px (43px half-width) boundary.
+      // Both pointer routes must reject the outboard badge point and accept the inboard neighbor (-42.5, -18).
       const { measureSurface } = await import("../../../components/animation/cardVfx/cardAnchors.ts");
+      const cardW = 120 * (5 / 7); // 85.71428571428571
+      const cardH = 120;
+      const angleDeg = 17;
+      const rad = (angleDeg * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const bboxW = cardW * cos + cardH * sin;
+      const bboxH = cardW * sin + cardH * cos;
       const hostRect = {
-        left: 60.51,
-        top: 77.31,
-        right: 339.49,
-        bottom: 422.69,
-        width: 278.98,
-        height: 345.38,
-        x: 60.51,
-        y: 77.31,
+        left: 200 - bboxW / 2,
+        top: 250 - bboxH / 2,
+        right: 200 + bboxW / 2,
+        bottom: 250 + bboxH / 2,
+        width: bboxW,
+        height: bboxH,
+        x: 200 - bboxW / 2,
+        y: 250 - bboxH / 2,
         toJSON: () => {},
       };
       vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
@@ -1069,12 +1085,19 @@ describe("PermanentCard", () => {
         pose: {
           x: 200,
           y: 250,
-          w: 200,
-          h: 300,
+          w: cardW,
+          h: cardH,
           angleDeg: 17,
         },
         opacity: 1,
       });
+
+      // Outboard badge point: local (-42.95, -18) -> client coordinates
+      const outboardX = 200 + (-42.95 * cos - (-18) * sin);
+      const outboardY = 250 + (-42.95 * sin + (-18) * cos);
+      // Inboard neighbor: local (-42.5, -18) -> client coordinates
+      const inboardX = 200 + (-42.5 * cos - (-18) * sin);
+      const inboardY = 250 + (-42.5 * sin + (-18) * cos);
 
       // Route 1: an uncaptured hovering mouse enters the badge's OVERHANG (outboard),
       // moves across the rotated card boundary into the INBOARD portion (zero-button moves:
@@ -1083,16 +1106,16 @@ describe("PermanentCard", () => {
       // returns inboard (sends new touch), exits to elsewhere (ends touch), and
       // re-entering host face sends a new touch.
       //
-      // One pointer entry onto the badge overhang: clientX = 110, clientY = 150 (outside rotated face)
-      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: 110, clientY: 150 });
+      // One pointer entry onto the badge overhang: outboard point lies outside the fractional face
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: outboardX, clientY: outboardY });
       expect(touches()).toEqual([]);
 
       // Zero-button move while still outboard sends zero touches
-      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: 115, clientY: 150, buttons: 0 });
+      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: outboardX, clientY: outboardY, buttons: 0 });
       expect(touches()).toEqual([]);
 
-      // Zero-button move crossing onto the rotated card face (first inboard contact): clientX = 135, clientY = 150
-      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: 135, clientY: 150, buttons: 0 });
+      // Zero-button move crossing onto the rotated card face (first inboard contact)
+      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: inboardX, clientY: inboardY, buttons: 0 });
       expect(touches()).toEqual([[touchAction]]);
 
       // Moving to host face (center at 200, 250) preserves the touch
@@ -1101,16 +1124,16 @@ describe("PermanentCard", () => {
       expect(touches()).toHaveLength(1);
 
       // Moving back to badge inboard preserves the touch
-      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: 135, clientY: 150 });
-      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: 135, clientY: 150, buttons: 0 });
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: inboardX, clientY: inboardY });
+      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: inboardX, clientY: inboardY, buttons: 0 });
       expect(touches()).toHaveLength(1);
 
       // An outboard excursion over the same badge clears the touch
-      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: 110, clientY: 150, buttons: 0 });
+      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: outboardX, clientY: outboardY, buttons: 0 });
       expect(touches()).toHaveLength(1);
 
       // Moving back inboard sends a new touch
-      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: 135, clientY: 150, buttons: 0 });
+      fireEvent.pointerMove(badge, { pointerId: 1, pointerType: "mouse", clientX: inboardX, clientY: inboardY, buttons: 0 });
       expect(touches()).toEqual([[touchAction], [touchAction]]);
 
       // Moving away to elsewhere ends the touch
@@ -1131,12 +1154,12 @@ describe("PermanentCard", () => {
       // back to host face (preserves).
       let under: Element = badge;
       stubElementFromPoint(() => under);
-      // Outboard: clientX = 110, clientY = 150
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 110, clientY: 150 });
+      // Outboard badge point: rejected
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: outboardX, clientY: outboardY });
       expect(touches()).toHaveLength(3);
-      // First inboard contact: clientX = 135, clientY = 150
+      // First inboard contact: clientX = inboardX, clientY = inboardY
       under = badge;
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 135, clientY: 150 });
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: inboardX, clientY: inboardY });
       expect(touches()).toEqual([[touchAction], [touchAction], [touchAction], [touchAction]]);
       // Moving to host face preserves the touch
       under = host;
@@ -1144,7 +1167,7 @@ describe("PermanentCard", () => {
       expect(touches()).toHaveLength(4);
       // Moving back to badge inboard preserves the touch
       under = badge;
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 135, clientY: 150 });
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: inboardX, clientY: inboardY });
       expect(touches()).toHaveLength(4);
       // Moving back to host face preserves the touch
       under = host;
@@ -1160,7 +1183,7 @@ describe("PermanentCard", () => {
       // If the 90° destination were used, it would map to (−24, 51) — inside.
       const gameState = makeState();
       gameState.objects[1] = { ...gameState.objects[1], tapped: true };
-      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      gameState.un_actions = { enabled_players: [0], touchable: [{ object_id: 1, incarnation: 0 }] };
       useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
       usePreferencesStore.setState({ tapRotation: "classic" });
       const { container } = renderPermanent();
