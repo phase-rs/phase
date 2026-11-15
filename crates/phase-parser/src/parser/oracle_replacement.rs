@@ -19885,10 +19885,12 @@ mod tests {
                 count,
                 target,
                 destination,
+                position,
             } => {
                 assert_eq!(*count, that_many);
                 assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
                 assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(*position, LibraryPosition::Top);
             }
             other => panic!("expected Effect::Mill, got {other:?}"),
         }
