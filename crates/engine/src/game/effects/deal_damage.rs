@@ -6182,6 +6182,7 @@ mod tests {
                                 qty: QuantityRef::EventContextAmount,
                             },
                             target: TargetFilter::SelfRef,
+                            scope: crate::types::ability::EffectScope::Single,
                         },
                     ))
                     .description("Protean Hydra prevention shield".to_string()),

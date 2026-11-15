@@ -248,6 +248,17 @@ fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 611.3a: AND a split leading "As long as" gate with any gate the effect
+/// parser already set, so neither is lost.
+fn attach_leading_condition(def: &mut StaticDefinition, leading: StaticCondition) {
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![leading, existing],
+        },
+        None => leading,
+    });
+}
+
 /// CR 502.3 + CR 611.3a + CR 604.1: "[As long as <condition>, ]players can't
 /// untap more than <N> <type> during their untap steps[ as long as
 /// <condition>]." — the Smoke / Damping Field / Imi Statue / Stoic Angel
@@ -1034,7 +1045,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1058,7 +1069,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1095,7 +1106,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -3831,9 +3842,8 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
-    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
-    // static mode the flash-timing path (granted_spell_keywords) reads, and the
-    // one that preserves the "creature spells" restriction (issue #1957).
+    // Emits `CastWithFlash` with the spell-type filter, a timing permission read
+    // by `spell_has_effective_flash` that preserves the "creature spells" restriction.
     if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
         return Some(def);
     }

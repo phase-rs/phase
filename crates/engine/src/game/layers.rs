@@ -305,7 +305,9 @@ fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
         | CoreType::Scheme
         | CoreType::Conspiracy
         | CoreType::Boss
-        | CoreType::Event => None,
+        | CoreType::Event
+        // CR 313.3: vanguard cards have no subtypes.
+        | CoreType::Vanguard => None,
     }
 }
 
