@@ -929,6 +929,12 @@ fn red_mana(amount: usize) -> Vec<ManaUnit> {
         .collect()
 }
 
+fn black_mana(amount: usize) -> Vec<ManaUnit> {
+    (0..amount)
+        .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+        .collect()
+}
+
 fn stolen_observer_board(players: u8, leavers: &[PlayerId]) -> StolenObserverBoard {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(players, 42);
@@ -1915,6 +1921,90 @@ fn a_regained_graveyard_ability_is_controlled_by_the_cards_owner_not_the_thief()
     assert_eq!(dread_triggers_under_humility(Some(P1)), vec![P0]);
 }
 
+/// How many triggers `source` has queued or on the stack.
+fn triggers_waiting_from(runner: &GameRunner, source: ObjectId) -> usize {
+    let state = runner.state();
+    state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == source)
+        .count()
+        + triggers_from(runner, source)
+}
+
+/// P1's Hushbringer ("Creatures entering or dying don't cause abilities to
+/// trigger.") is on the battlefield, flying, so P0's Earthquake for `x` ("Earthquake
+/// deals X damage to each creature without flying and each player.") leaves it.
+/// P2 is at lethal life, so P2 loses and `dying` (P0's) dies in one check. Returns
+/// how many triggers `dying` has queued or on the stack, and whether Hushbringer
+/// is still on the battlefield.
+fn triggers_of_a_creature_dying_under_hushbringer(
+    dying_card: &str,
+    witness_protection: bool,
+    x: u32,
+) -> (usize, bool) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let dying = scenario.add_real_card(P0, dying_card, Zone::Battlefield, db);
+    if witness_protection {
+        // Witness Protection's only legal host must be the dying creature.
+        scenario.add_real_card(P0, "Witness Protection", Zone::Battlefield, db);
+    }
+    let hushbringer = scenario.add_real_card(P1, "Hushbringer", Zone::Battlefield, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(6));
+    scenario.with_life(P2, x as i32);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner.cast(earthquake).x(x).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, dying), Zone::Graveyard);
+    (
+        triggers_waiting_from(&runner, dying),
+        zone(&runner, hushbringer) == Zone::Battlefield,
+    )
+}
+
+/// CR 603.6c + CR 603.10: Hushbringer does not stop a dying creature's own "from
+/// anywhere" graveyard ability (Wizards' Throne of Eldraine release notes: "if the
+/// ability is of a dying creature that triggers only when that creature is put
+/// into a graveyard from anywhere"). P0's Dread, enchanted with Witness Protection
+/// ("Enchanted creature loses all abilities ..."), is a 1/1 that has no abilities
+/// on the battlefield; it dies to Earthquake for 1 with Hushbringer active, and
+/// its shuffle trigger ("When Dread is put into a graveyard from anywhere,
+/// shuffle it into its owner's library.") is queued once.
+#[test]
+fn hushbringer_does_not_suppress_a_dying_creatures_from_anywhere_graveyard_trigger() {
+    assert_eq!(
+        triggers_of_a_creature_dying_under_hushbringer("Dread", true, 1),
+        (1, true)
+    );
+}
+
+/// The ordinary control: a creature's own dies ability ("When Solemn Simulacrum
+/// dies, you may draw a card.") is still suppressed by Hushbringer.
+#[test]
+fn hushbringer_still_suppresses_an_ordinary_dies_trigger() {
+    assert_eq!(
+        triggers_of_a_creature_dying_under_hushbringer("Solemn Simulacrum", false, 2),
+        (0, true)
+    );
+}
+
 /// CR 111.7 + CR 603.6c + CR 603.10: a token's ability triggers before it ceases
 /// to exist. P0 controls Dread and a token copy of it (Cackling Counterpart:
 /// "Create a token that's a copy of target creature you control."); P0's
@@ -2115,9 +2205,47 @@ fn concede_the_active_player_mid_skyfisher(with_imp: bool) {
         .expect("P1 concedes");
     assert!(runner.state().players[1].is_eliminated);
     // Patrol's counter and the Imp's scry differ, so P0 orders them (CR 603.3b).
-    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
-        assert!(with_imp, "only the Imp's second trigger needs ordering");
-        engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+    let mut chosen_order_of_sources = None;
+    match (with_imp, runner.state().waiting_for.clone()) {
+        (true, WaitingFor::OrderTriggers { player, triggers }) => {
+            assert_eq!(player, P0, "P0 orders their own triggers");
+            let sources: Vec<ObjectId> = triggers.iter().map(|t| t.source_id).collect();
+            assert!(
+                sources.contains(&patrol) && imp.is_some_and(|imp| sources.contains(&imp)),
+                "the prompt holds both sources: {sources:?}"
+            );
+            // The reverse of the offered order is not the identity (two or more
+            // triggers), so the answer decides the stack order.
+            let order: Vec<usize> = (0..triggers.len()).rev().collect();
+            chosen_order_of_sources = Some(order.iter().map(|&i| sources[i]).collect::<Vec<_>>());
+            runner
+                .act(GameAction::OrderTriggers { order })
+                .expect("P0 submits a non-identity order");
+        }
+        (true, other) => panic!("P0 must be asked to order the triggers: {other:?}"),
+        (false, other) => assert!(
+            !matches!(other, WaitingFor::OrderTriggers { .. }),
+            "a single trigger needs no ordering"
+        ),
+    }
+    if let Some(chosen) = chosen_order_of_sources {
+        // Index 0 is placed first, the bottom of P0's group (CR 603.3b, CR 405.3).
+        let stacked: Vec<ObjectId> = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| chosen.contains(&entry.source_id))
+            .map(|entry| entry.source_id)
+            .collect();
+        assert_eq!(stacked, chosen, "the stack follows the chosen order");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P2 }
+            ),
+            "CR 800.4j: the next player in turn order after departed P1 has priority: {:?}",
+            runner.state().waiting_for
+        );
     }
     let on_stack = |source: ObjectId| {
         runner
@@ -2230,9 +2358,21 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     scenario.at_phase(Phase::PreCombatMain);
     let vampire = scenario.add_real_card(vampire_owner, "Welcoming Vampire", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
-    // P2 controls the Hushbringer; `suppressor_owner` owns it.
-    let suppressor =
-        suppressor_owner.map(|_| scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db));
+    // `Some(P2)`: P2 owns and controls the Hushbringer. `Some(P0)`: it is in P0's
+    // graveyard and P2 reanimates it below, so P0 owns it and P2 controls it.
+    let reanimated = suppressor_owner == Some(P0);
+    let suppressor = suppressor_owner.map(|_| {
+        if reanimated {
+            scenario.add_real_card(P0, "Hushbringer", Zone::Graveyard, db)
+        } else {
+            scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db)
+        }
+    });
+    let reanimate = reanimated.then(|| {
+        scenario.add_real_card(P0, "Leyline of Anticipation", Zone::Battlefield, db);
+        scenario.with_mana_pool(P2, black_mana(3));
+        scenario.add_real_card(P2, "Reanimate", Zone::Hand, db)
+    });
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
     let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Hand, db);
     let tooth_and_nail = scenario.add_real_card(P0, "Tooth and Nail", Zone::Hand, db);
@@ -2242,13 +2382,27 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
     scenario.with_mana_pool(P0, pool);
     let mut runner = scenario.build();
-    if let (Some(hushbringer), Some(owner)) = (suppressor, suppressor_owner) {
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&hushbringer)
-            .unwrap()
-            .owner = owner;
+    if let (Some(hushbringer), Some(reanimate)) = (suppressor, reanimate) {
+        // CR 117.1a: it is P2's turn and main phase, so P2 casts the sorcery
+        // Reanimate through the public path; P0 then casts with Leyline's flash.
+        {
+            let state = runner.state_mut();
+            state.active_player = P2;
+            state.priority_player = P2;
+            state.waiting_for = WaitingFor::Priority { player: P2 };
+        }
+        runner.cast(reanimate).target_object(hushbringer).resolve();
+        {
+            let state = runner.state_mut();
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let object = &runner.state().objects[&hushbringer];
+        assert_eq!(
+            (object.zone, object.owner, object.controller),
+            (Zone::Battlefield, P0, P2),
+            "reach guard: P2 reanimated P0's Hushbringer and controls it"
+        );
     }
     if vampire_owner != P0 {
         runner.cast(turn_against).target_object(vampire).resolve();
@@ -2285,6 +2439,11 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
     runner
         .act(GameAction::Concede { player_id: P2 })
         .expect("P2 concedes");
+    if reanimated {
+        // CR 800.4a: the permanent P2 still controls is exiled with them.
+        assert_eq!(zone(&runner, suppressor.unwrap()), Zone::Exile);
+        assert_eq!(runner.state().objects[&suppressor.unwrap()].owner, P0);
+    }
     for _ in 0..6 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { .. } => {
@@ -2356,7 +2515,8 @@ fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_on
 /// onto the battlefield under your control.") is exiled when P2 concedes, with
 /// the objects P2 controls, and still suppressed the entry completed before
 /// that: the Bears entered under Hushbringer, so Welcoming Vampire does not
-/// trigger for it.
+/// trigger for it. P2 casts Reanimate in their own main phase through the public
+/// path; the row checks ownership, control and the exile.
 #[test]
 fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_entry() {
     assert_eq!(

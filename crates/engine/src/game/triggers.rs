@@ -3212,13 +3212,36 @@ fn collect_matching_triggers_inner(
         }
         TriggerSource::Context(_) => true,
     };
+    let after_read_of_moving_source = use_latched_trigger_entries
+        && matches!(visit, TriggerSourceVisit::EventSubject)
+        && matches!(
+            collection,
+            LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyAfter)
+        );
+    // CR 603.6c + CR 603.10: a creature dying doesn't cause its own "from
+    // anywhere" graveyard ability to trigger as a dies ability, so the dying
+    // suppression of Hushbringer ("Creatures entering or dying don't cause
+    // abilities to trigger.") does not apply to the after-read of the moving
+    // source; the dies abilities that do look back are read, and suppressed,
+    // in the before pass.
+    let after_read_of_dying_source = after_read_of_moving_source
+        && matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                ..
+            }
+        );
     let obj_id = source_context.identity.reference.object_id;
-    if event_is_suppressed_by_static_triggers_cached(
-        state,
-        event,
-        Some(&source_context),
-        active_suppress_triggers,
-    ) {
+    if !after_read_of_dying_source
+        && event_is_suppressed_by_static_triggers_cached(
+            state,
+            event,
+            Some(&source_context),
+            active_suppress_triggers,
+        )
+    {
         return Vec::new();
     }
 
@@ -3290,12 +3313,6 @@ fn collect_matching_triggers_inner(
     // has already ceased to exist has no such object, and its ability triggers
     // from the record (CR 111.7); an ability such a token had suppressed on
     // the battlefield (Humility) is not in the record, so it is not supported.
-    let after_read_of_moving_source = use_latched_trigger_entries
-        && matches!(visit, TriggerSourceVisit::EventSubject)
-        && matches!(
-            collection,
-            LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyAfter)
-        );
     let after_read_destination_object = if after_read_of_moving_source {
         match event {
             GameEvent::ZoneChanged { to, .. } => state
