@@ -6095,7 +6095,7 @@ mod restored_card_db_requirements_tests {
         });
         load_and_hydrate_decks(
             runner.state_mut(),
-            &resolve_deck_list(&database, &forest_decks()),
+            &resolve_deck_list(&database, &ComboTable::default(), &forest_decks()),
             Some(&*database),
         );
         engine::game::install_card_db(runner.state_mut(), Arc::clone(&database));
