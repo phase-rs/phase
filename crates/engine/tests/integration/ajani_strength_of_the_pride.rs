@@ -21,9 +21,11 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{AbilityCost, Effect};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -142,6 +144,17 @@ fn minus_two_creates_named_cat_soldier_token() {
             && object.card_types.subtypes.contains(&"Soldier".to_string()),
         "Pridemate is a Cat Soldier; got {:?}",
         object.card_types.subtypes
+    );
+    assert_eq!(
+        object.color,
+        vec![ManaColor::White],
+        "Pridemate is white; got {:?}",
+        object.color
+    );
+    assert!(
+        object.card_types.core_types.contains(&CoreType::Creature),
+        "Pridemate is a Creature; got {:?}",
+        object.card_types.core_types
     );
     assert_eq!(object.controller, P0, "the controller creates the token");
     // The [-2] spends two loyalty (CR 606.4-class payment at activation).
@@ -288,7 +301,7 @@ fn two_pridemates_each_track_their_own_counters() {
 
 // ─── Row 3: [0] life-differential gate + mass exile ──────────────────────────
 
-fn exile_board(scenario: &mut GameScenario) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
+fn exile_board(scenario: &mut GameScenario) -> (ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
     let opp_creature = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let opp_artifact = scenario
         .add_artifact_from_oracle(P1, "Bauble", "{T}: You gain 1 life.")
@@ -297,7 +310,16 @@ fn exile_board(scenario: &mut GameScenario) -> (ObjectId, ObjectId, ObjectId, Ob
         .add_enchantment_from_oracle(P1, "Glorious Anthem", "Creatures you control get +1/+1.")
         .id();
     let own_creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    (opp_creature, opp_artifact, opp_enchantment, own_creature)
+    let own_artifact = scenario
+        .add_artifact_from_oracle(P0, "Own Bauble", "{T}: You gain 1 life.")
+        .id();
+    (
+        opp_creature,
+        opp_artifact,
+        opp_enchantment,
+        own_creature,
+        own_artifact,
+    )
 }
 
 /// CR 608.2c: at exactly starting+15 the gate holds — Ajani and each artifact
@@ -308,7 +330,8 @@ fn zero_at_exactly_fifteen_above_starting_exiles_ajani_and_opponent_artifacts_cr
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 35);
     let ajani = ajani(&mut scenario, 5);
-    let (opp_creature, opp_artifact, opp_enchantment, own_creature) = exile_board(&mut scenario);
+    let (opp_creature, opp_artifact, opp_enchantment, own_creature, own_artifact) =
+        exile_board(&mut scenario);
     let mut runner = scenario.build();
     let zero = loyalty_index(&runner, ajani, 0);
     // The [0] costs no loyalty: Ajani holds its full 5 before activation.
@@ -321,7 +344,10 @@ fn zero_at_exactly_fifteen_above_starting_exiles_ajani_and_opponent_artifacts_cr
     let outcome = runner.activate(ajani, zero).resolve();
 
     outcome.assert_zone(&[ajani, opp_creature, opp_artifact], Zone::Exile);
-    outcome.assert_zone(&[opp_enchantment, own_creature], Zone::Battlefield);
+    outcome.assert_zone(
+        &[opp_enchantment, own_creature, own_artifact],
+        Zone::Battlefield,
+    );
 }
 
 /// Below the gate (starting+14) nothing moves; the declined activation still
@@ -334,7 +360,8 @@ fn zero_below_gate_exiles_nothing_and_spends_the_loyalty_activation() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 34);
     let ajani = ajani(&mut scenario, 5);
-    let (opp_creature, opp_artifact, opp_enchantment, own_creature) = exile_board(&mut scenario);
+    let (opp_creature, opp_artifact, opp_enchantment, own_creature, own_artifact) =
+        exile_board(&mut scenario);
     let mut runner = scenario.build();
     let zero = loyalty_index(&runner, ajani, 0);
 
@@ -347,6 +374,7 @@ fn zero_below_gate_exiles_nothing_and_spends_the_loyalty_activation() {
             opp_artifact,
             opp_enchantment,
             own_creature,
+            own_artifact,
         ],
         Zone::Battlefield,
     );
@@ -404,6 +432,12 @@ fn plus_one_gains_creatures_plus_planeswalkers_controlled() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ajani = ajani(&mut scenario, 5);
+    // A second planeswalker under the controller's control: the walker summand
+    // must count every planeswalker, not just Ajani itself (cf.
+    // bolas_dragon_god_grants.rs "Donor Walker" furniture).
+    scenario
+        .add_planeswalker_from_oracle(P0, "Donor Walker", "Test", 3, "[+1]: You gain 1 life.")
+        .id();
     scenario.add_creature(P0, "Grizzly Bears", 2, 2);
     scenario.add_creature(P0, "Grizzly Bears", 2, 2);
     scenario.add_creature(P1, "Grizzly Bears", 2, 2);
@@ -414,8 +448,9 @@ fn plus_one_gains_creatures_plus_planeswalkers_controlled() {
 
     let outcome = runner.activate(ajani, plus_one).resolve();
 
-    // 2 own creatures + Ajani itself; the opponent's 3 creatures add nothing.
-    outcome.assert_life_delta(P0, 3);
+    // 2 own creatures + Ajani itself + the donor walker; the opponent's 3
+    // creatures add nothing.
+    outcome.assert_life_delta(P0, 4);
     assert_eq!(
         runner.state().objects[&ajani].loyalty,
         Some(6),
