@@ -1,3 +1,4 @@
+use crate::types::game_state::EntryEventReplay;
 use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
@@ -3169,7 +3170,7 @@ fn apply_copy_target_choice(
                 source_id,
                 events,
                 post_actions,
-                false,
+                EntryEventReplay::AlreadyDelivered,
                 CopyEntryCounters::ReplacementsOnly,
             )? {
                 if state.active_counter_additions().is_none() {
@@ -3346,7 +3347,7 @@ fn apply_copy_target_choice(
             source_id,
             events,
             counter_pause_post_actions,
-            true,
+            EntryEventReplay::Required,
             CopyEntryCounters::Merged {
                 exceptions: held_exceptions,
             },
@@ -3472,7 +3473,7 @@ fn apply_copy_target_choice(
         source_id,
         events,
         Vec::new(),
-        true,
+        EntryEventReplay::Required,
         CopyEntryCounters::Merged {
             exceptions: held_exceptions,
         },
@@ -3515,7 +3516,7 @@ fn finish_copy_target_choice_entry(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
@@ -3595,7 +3596,7 @@ fn finish_copy_target_choice_entry_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -3729,7 +3730,7 @@ pub(crate) fn resume_copy_target_choice_entry(
                 entrant.object_id,
                 events,
                 Vec::new(),
-                true,
+                EntryEventReplay::Required,
                 resume_stage,
             )?
         }
@@ -3834,7 +3835,7 @@ fn finish_copy_target_choice_entry_after_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
@@ -3894,7 +3895,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // battlefield — concede / error / chained-replacement paths can leave a
     // stale event in the vec, and we discard rather than fire a phantom entry
     // trigger.
-    if replay_entry_events {
+    if replay_entry_events == EntryEventReplay::Required {
         let delivery_start = events.len();
         if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
             state.capture_paused_zone_change_delivery_for_member(
@@ -3923,7 +3924,8 @@ fn finish_copy_target_choice_entry_after_counters(
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if replay_entry_events && state.active_batch_delivery().is_some() {
+    if replay_entry_events == EntryEventReplay::Required && state.active_batch_delivery().is_some()
+    {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(Some(state.waiting_for.clone()));
@@ -9441,7 +9443,7 @@ mod tests {
             entering_aura,
             &mut events,
             vec![continuation],
-            false,
+            EntryEventReplay::AlreadyDelivered,
             CopyEntryCounters::ReplacementsOnly,
         )
         .expect("the host pause is not an error");
@@ -10573,7 +10575,10 @@ mod tests {
                 serde_json::Value::Array(items) => {
                     items.iter_mut().for_each(|v| walk(v, removed, edits))
                 }
-                _ => {}
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
             }
         }
         let mut value =

@@ -10543,7 +10543,23 @@ pub(super) fn current_self_enter_replacement_modifiers(
                 .iter()
                 .find_map(|attribute| match attribute {
                     ChosenAttribute::Player(player) => Some(*player),
-                    _ => None,
+                    ChosenAttribute::Color(_)
+                    | ChosenAttribute::CreatureType(_)
+                    | ChosenAttribute::BasicLandType(_)
+                    | ChosenAttribute::CardType(_)
+                    | ChosenAttribute::OddOrEven(_)
+                    | ChosenAttribute::CardName(_)
+                    | ChosenAttribute::Number(_)
+                    | ChosenAttribute::RevealedNumber(_)
+                    | ChosenAttribute::TwoColors(_)
+                    | ChosenAttribute::TributeOutcome(_)
+                    | ChosenAttribute::Keyword(_)
+                    | ChosenAttribute::Label(_)
+                    | ChosenAttribute::Card(_)
+                    | ChosenAttribute::Counter(_)
+                    | ChosenAttribute::Direction(_)
+                    | ChosenAttribute::CopiableSnapshot(_)
+                    | ChosenAttribute::NotedManaSpent(_) => None,
                 })
         }) {
             *enter_with_choices = Some(Box::new(crate::types::proposed_event::EntryChoices(vec![
@@ -10849,7 +10865,35 @@ fn entry_group_payment_entrant(proposed: &ProposedEvent) -> Option<ObjectId> {
             to: Zone::Battlefield,
             ..
         } => Some(*object_id),
-        _ => None,
+        ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::Damage { .. }
+        | ProposedEvent::Draw { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::LifeGain { .. }
+        | ProposedEvent::LifeLoss { .. }
+        | ProposedEvent::AddCounter { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::CreateToken { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => None,
     }
 }
 
@@ -13326,7 +13370,35 @@ fn as_enters_payment_for_entry<'a>(
             ..
         } => *object_id,
         ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
-        _ => return None,
+        ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::Damage { .. }
+        | ProposedEvent::Draw { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::LifeGain { .. }
+        | ProposedEvent::LifeLoss { .. }
+        | ProposedEvent::AddCounter { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::CreateToken { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => return None,
     };
     if rid.source != entrant_id {
         return None;
@@ -13360,7 +13432,35 @@ fn as_enters_pay_terms(
     // direct TokenEntry callers still supply the live board and project here.
     let board = match proposed {
         ProposedEvent::TokenEntry { entry_ref, .. } => Some(copy_entry_board(state, *entry_ref)),
-        _ => None,
+        ProposedEvent::ZoneChange { .. }
+        | ProposedEvent::Damage { .. }
+        | ProposedEvent::Draw { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::LifeGain { .. }
+        | ProposedEvent::LifeLoss { .. }
+        | ProposedEvent::AddCounter { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::CreateToken { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => None,
     };
     let state = board.as_deref().unwrap_or(state);
     let def = as_enters_payment_for_entry(state, proposed, rid)?;
@@ -13373,7 +13473,34 @@ fn as_enters_pay_terms(
     let entrant_id = match proposed {
         ProposedEvent::ZoneChange { object_id, .. } => *object_id,
         ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
-        _ => return None,
+        ProposedEvent::Damage { .. }
+        | ProposedEvent::Draw { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::LifeGain { .. }
+        | ProposedEvent::LifeLoss { .. }
+        | ProposedEvent::AddCounter { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::CreateToken { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => return None,
     };
     let entrant = state.entering_or_live_object(entrant_id)?;
     let payer = match proposed {
@@ -13382,7 +13509,34 @@ fn as_enters_pay_terms(
             ..
         } => controller_override.unwrap_or(entrant.owner),
         ProposedEvent::TokenEntry { .. } => entrant.controller,
-        _ => return None,
+        ProposedEvent::Damage { .. }
+        | ProposedEvent::Draw { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::LifeGain { .. }
+        | ProposedEvent::LifeLoss { .. }
+        | ProposedEvent::AddCounter { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::CreateToken { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => return None,
     };
     let pay_max = crate::game::effects::pay::max_pay_any_life_amount(state, payer);
     let max = match &def.entry_payment_max {
