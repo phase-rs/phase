@@ -104,6 +104,51 @@ pub enum WinKind {
     Advantage,
 }
 
+impl WinKind {
+    /// Whether this outcome ENDS THE GAME at some repetition — a loss threshold crossed
+    /// (CR 704.5a / CR 704.5c / CR 104.3c) or a printed win (CR 104.2) — rather than describing
+    /// what the loop accrues as a whole. A game-ending outcome is the result of a take only where
+    /// that take reaches the repetition it lands on; an accrual is the result of any take.
+    pub fn ends_the_game(self) -> bool {
+        match self {
+            Self::LethalDamage | Self::PoisonLoss | Self::Decking | Self::ImmediateWin => true,
+            Self::ExtraTurns | Self::Advantage => false,
+        }
+    }
+}
+
+/// CR 732.2a + CR 704.5a: the outcome a shortcut ending after `ending` reaches — part of "the
+/// predictable results of the sequence of choices" — read off a certificate's (or proposal's)
+/// `win_kind` and the repetition `win_kind_at` it is decided at. `None` where no outcome can be
+/// stated for that ending.
+///
+/// * An `UntilLethal` ending IS the crossing, so it reaches the outcome by definition.
+/// * A fixed count reaches a game-ending outcome only when the proved crossing lies inside it; a
+///   classification with no proved crossing states nothing about where the game ends, so no
+///   fixed count claims it.
+/// * An accrual (advantage, extra turns) is the result of any take that repeats at least once.
+/// * A proposal without end performs no repetition, and zero repetitions reach nothing.
+///
+/// THE single authority the declare and respond projections (`game::interaction`) read, so a
+/// dialog never re-derives an outcome from the raw classification.
+pub fn outcome_at_ending(
+    win_kind: Option<WinKind>,
+    win_kind_at: Option<u32>,
+    ending: &IterationCount,
+) -> Option<WinKind> {
+    let kind = win_kind?;
+    match *ending {
+        IterationCount::Fixed(0) | IterationCount::WithoutEnd => None,
+        IterationCount::Fixed(_) | IterationCount::UntilLethal if !kind.ends_the_game() => {
+            Some(kind)
+        }
+        IterationCount::UntilLethal => Some(kind),
+        IterationCount::Fixed(count) => win_kind_at
+            .is_some_and(|at| (1..=count).contains(&at))
+            .then_some(kind),
+    }
+}
+
 /// A confirmed loop cycle — its unbounded axes, win kind and breakability — as
 /// [`detect_loop`] and `game::engine`'s offer producers mint it; `WaitingFor::LoopShortcut`
 /// carries it to the players.
@@ -159,6 +204,46 @@ impl LoopCertificate {
     pub fn covers(&self, expected: &[ResourceAxis]) -> bool {
         expected.iter().all(|e| self.unbounded.contains(e))
     }
+
+    /// CR 704.5a + CR 704.5c: whether the confirmed loop drives `seat` toward a loss — its life
+    /// is an unbounded axis that FALLS, or its poison one that rises. Read off the certificate's
+    /// own axes ([`LoopCertificate::unbounded`] and [`LoopCertificate::rising`]), so a consumer
+    /// asks this rather than re-deriving which axes are losses.
+    pub fn drives_toward_a_loss(&self, seat: PlayerId) -> bool {
+        let falls =
+            |axis: &ResourceAxis| self.unbounded.contains(axis) && !self.rising.contains(axis);
+        falls(&ResourceAxis::Life(seat)) || self.rising.contains(&ResourceAxis::Poison(seat))
+    }
+}
+
+/// CR 732.2a: the fixed count an offer states its take performs, where declaring it is an answer
+/// the proposer can give — `None` for an offer whose `Fixed` suggestion is no such statement.
+///
+/// Two offers state one. A BOUNDED offer
+/// ([`is_bounded`](crate::analysis::decision_template::ShortcutDecisionSchema::is_bounded))
+/// measured a CR 704 threshold, and its suggestion is the count its take drives. A LETHAL DRAIN STATED AT A
+/// FIXED COUNT — an offer whose certificate classifies a CR 704.5a / CR 704.5c drain but names no
+/// winner, because the crossing lies past what one take can drive — states the repetitions that
+/// do fit as its count, and that count is its whole promise: it measured no threshold, which is
+/// why the schema's `measured_repetition_bound` stays empty, and it crosses nothing.
+/// The rules threshold and the offered count are separate answers, and this reads only the
+/// second.
+///
+/// Every other `Fixed` suggestion — an advantage offer's capacity-valued seed — is not stated as
+/// a take of its own, so it answers `None`.
+pub fn offered_fixed_count(
+    schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
+    predicted_winner: Option<PlayerId>,
+    certificate: &LoopCertificate,
+) -> Option<u32> {
+    let IterationCount::Fixed(count) = schema.iteration_count else {
+        return None;
+    };
+    let lethal_drain = matches!(
+        certificate.win_kind,
+        Some(WinKind::LethalDamage | WinKind::PoisonLoss)
+    );
+    (schema.is_bounded() || (predicted_winner.is_none() && lethal_drain)).then_some(count)
 }
 
 /// Which producer minted a loop-shortcut offer: the ring sampler, or the priority holder's
@@ -263,7 +348,11 @@ pub struct ShortcutProposal {
     /// How the loop wins (from the certificate) — display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
-    /// The count `win_kind` is decided at (from the certificate) — display only.
+    /// The count `win_kind` is decided at, copied off the certificate. On an `UntilLethal`
+    /// proposal it is the repetition of the CR 704.5a / CR 704.5c crossing the offer proved —
+    /// the proposal's ENDING POINT: [`ShortcutProposal::shortening_places`] admits only places
+    /// before it, and checked restore and the consumption seam refuse an `UntilLethal` proposal
+    /// whose crossing is absent or outside its proved capacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind_at: Option<u32>,
     /// PR-7 Phase 4b: an optional CR 732.2a decision template pinning the loop's
@@ -309,6 +398,17 @@ pub struct ShortcutProposal {
     /// so a responder's preview splits the declaration by the lead the proposer's preview used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
+    /// CR 732.2a: the highest count an accept may legally specify against this offer, derived at
+    /// declare from `ShortcutDecisionSchema::deliverable_capacity` under the declared schedule, so
+    /// the proposal carries the same resource and representability proof across declaration,
+    /// response, restore, and settlement.
+    ///
+    /// `None` is a proposal that carries NO proof — a save written before the field existed —
+    /// and is never read as the engine budget: checked restore refuses it
+    /// (`types::game_state::reject_unproved_shortcut_proposal`) and the drivability gate drives
+    /// nothing against it. Only `Some(n)` with `1..=MAX_SHORTCUT_CYCLES` is a proved capacity.
+    #[serde(default)]
+    pub deliverable_capacity: Option<u32>,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and
@@ -323,6 +423,51 @@ pub struct ShortcutProposal {
 }
 
 impl ShortcutProposal {
+    /// CR 732.2a: the count ceiling the DRIVE enforces for this proposal, read by the
+    /// consumption-time bound and the drivability gate. Never the published range: the engine's
+    /// budget is not a rule, so `shortening_places` keeps a restored proposal's own ends and the
+    /// reducer alone refuses a place the board cannot take.
+    ///
+    /// Returns `None` if the proposal carries no proved capacity: an absent one (a save written
+    /// before the field existed), zero, or one past the engine maximum. An absent capacity is
+    /// never defaulted to the budget — the capacity comes from the offer's
+    /// `ShortcutDecisionSchema` at declare time, not from a fallback.
+    pub fn effective_deliverable_capacity(&self) -> Option<u32> {
+        self.deliverable_capacity
+            .filter(|&capacity| (1..=crate::game::engine::MAX_SHORTCUT_CYCLES).contains(&capacity))
+    }
+
+    /// CR 732.2a + CR 704.5a: whether this proposal states the ending point its count names. A
+    /// `Fixed` count is its own ending point, and a proposal without end has none to state. An
+    /// `UntilLethal` proposal ends at the crossing its offer proved ([`Self::win_kind_at`]), so it
+    /// states one only where that crossing is carried and lies inside the proved capacity — a
+    /// crossing past what the take can perform is not a sequence that "may be legally taken".
+    pub fn states_its_ending_point(&self) -> bool {
+        match self.count {
+            // CR 704.5a: a fixed count past the proved crossing names repetitions after the game
+            // has ended, which no player can take. Every proposal the engine builds or restores
+            // is bound first (`bind_count_to_reachable_end`), so this refuses only a proposal
+            // that bypassed both.
+            IterationCount::Fixed(count) => count == reachable_fixed_count(count, self.win_kind_at),
+            IterationCount::WithoutEnd => true,
+            IterationCount::UntilLethal => crossing_within(
+                self.win_kind_at,
+                self.effective_deliverable_capacity().unwrap_or(0),
+            ),
+        }
+    }
+
+    /// CR 732.2a + CR 704.5a: binds a fixed count to the end the sequence can reach
+    /// ([`reachable_fixed_count`]). A declarer may name a count past the proved crossing — the
+    /// take drives to the crossing and the game ends there — but the proposal the table answers,
+    /// the response range it publishes and the outcome it states all describe the sequence that
+    /// is actually taken, which ends at the crossing. Other counts are left alone.
+    pub fn bind_count_to_reachable_end(&mut self) {
+        if let IterationCount::Fixed(count) = self.count {
+            self.count = IterationCount::Fixed(reachable_fixed_count(count, self.win_kind_at));
+        }
+    }
+
     /// CR 732.2b: every place a responder may name to shorten this proposal — "a place where
     /// they will make a game choice that's different than what's been proposed". A place at or
     /// past the proposed count names no such choice, so the range ends one below the count.
@@ -332,12 +477,23 @@ impl ShortcutProposal {
     /// `contains` refuses every place against it, zero included.
     pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
         let places = match self.count {
-            IterationCount::Fixed(iterations) => iterations
+            // CR 704.5a + CR 732.2b: the sequence ends at its count or at the proved crossing,
+            // whichever comes first — the drive ends the game at the crossing — so a place at or
+            // past either names nothing inside it.
+            IterationCount::Fixed(iterations) => self
+                .win_kind_at
+                .map_or(iterations, |crossing| iterations.min(crossing))
                 .checked_sub(1)
                 .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
-            // CR 704.5a: the drain runs until a player loses, so the proposal names no count
-            // and no place is past its end.
-            IterationCount::UntilLethal => 0..=u32::MAX,
+            // CR 704.5a + CR 732.2b: the drain runs until the crossing the offer proved, which
+            // is the sequence's ending point, so a place at or past it names nothing inside the
+            // sequence. A proposal stating no crossing has no ending point to bound the places.
+            IterationCount::UntilLethal => match self.win_kind_at {
+                Some(crossing) => crossing
+                    .checked_sub(1)
+                    .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
+                None => 0..=u32::MAX,
+            },
             // CR 732.2b: a proposal with no ending point has no place past its end.
             IterationCount::WithoutEnd => 0..=u32::MAX,
         };
@@ -347,6 +503,27 @@ impl ShortcutProposal {
             None => places,
         }
     }
+}
+
+/// CR 732.2a + CR 704.5a: whether a proved crossing lies inside `capacity` — at least one
+/// repetition in, and no further than the take can perform. Shared by the declare seam, which asks
+/// it of the offer, and the proposal, which asks it again at restore and consumption.
+pub fn crossing_within(crossing: Option<u32>, capacity: u32) -> bool {
+    crossing.is_some_and(|crossing| (1..=capacity).contains(&crossing))
+}
+
+/// CR 732.2a + CR 704.5a: the repetitions a fixed count of `count` can actually reach — the count
+/// itself, or the proved crossing ([`LoopCertificate::win_kind_at`]) where that comes first. The
+/// crossing's repetition ends the game with the proposer the winner (`win_kind` is set only for
+/// such a take), so a repetition past it is not part of a sequence that "may be legally taken
+/// based on the current game state and the predictable results of the sequence of choices". With
+/// no crossing proved the count states its own end.
+///
+/// THE single authority for a fixed count's reachable end: the declare seam binds the proposal to
+/// it ([`ShortcutProposal::bind_count_to_reachable_end`]), checked restore re-binds a persisted
+/// proposal, and the response range and consumption seam read the bound count.
+pub fn reachable_fixed_count(count: u32, crossing: Option<u32>) -> u32 {
+    crossing.map_or(count, |crossing| count.min(crossing))
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the

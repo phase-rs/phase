@@ -1116,9 +1116,26 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
         ),
         "reach guard: hostile case also begins from the real Replay offer"
     );
-    hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - takes;
     let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
-    let before_hostile = take_cost_snapshot();
+
+    // The declare seam re-proves the headroom by replaying the recorded period on the board it
+    // declares against, so a tally with room for one cycle refuses the count before any window.
+    let mut early = GameRunner::from_state(hostile.state().clone());
+    early.state_mut().players[0].life_gained_this_turn = u32::MAX - takes;
+    early
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(COUNT),
+            template: Some(hostile_recorded.clone()),
+        })
+        .expect("a refused declaration is handed back, not an error");
+    assert!(
+        matches!(early.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the re-proved headroom refuses the count before any response window, got {:?}",
+        early.state().waiting_for
+    );
+
+    // A window already open when the tally moves — a restored `RespondToShortcut` never passes the
+    // declare seam — is still refused atomically by the take.
     hostile
         .runner
         .act(GameAction::DeclareShortcut {
@@ -1126,6 +1143,8 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
             template: Some(hostile_recorded),
         })
         .expect("a valid recorded declaration opens the response window");
+    hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - takes;
+    let before_hostile = take_cost_snapshot();
     let mut rejected_after_progress = false;
     for _ in 0..4 {
         if !matches!(

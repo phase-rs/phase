@@ -108,6 +108,53 @@ fn greenbelt_rampager_pays_energy_and_stays_on_battlefield() {
     );
 }
 
+/// CR 107.14 + CR 118.12: When 2 energy is available but the paid-or-lost tally nears u32::MAX,
+/// paying {E}{E} overflows the stored tally. The failure must propagate through the action
+/// ingress failure channel as an EngineError::LifeChangeUnrepresentable, triggering a full
+/// typed rollback that restores the pre-action state and keeps the trigger pending on the stack (#10543).
+#[test]
+fn greenbelt_rampager_energy_payment_tally_overflow_rolls_back_action() {
+    let (mut runner, rampager) = scenario_with_rampager(2);
+
+    // Set the energy paid-or-lost tally to u32::MAX - 1. With 2 energy available, paying {E}{E}
+    // requires adding 2 to the tally, which overflows u32::MAX.
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .energy_paid_or_lost_this_turn = u32::MAX - 1;
+
+    let err = match runner.cast(rampager).try_resolve() {
+        Ok(_) => panic!("expected overflowing energy payment to reject resolution"),
+        Err(e) => e,
+    };
+
+    assert!(
+        matches!(
+            err,
+            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+        ),
+        "expected LifeChangeUnrepresentable for P0, got {err:?}"
+    );
+
+    // The rollback restored the pre-action snapshot:
+    let state = runner.state();
+    assert_eq!(state.stack.len(), 1, "ETB trigger remains on the stack");
+    assert_eq!(energy_of(state), 2, "both energy counters remain available");
+    assert_eq!(
+        state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .energy_paid_or_lost_this_turn,
+        u32::MAX - 1,
+        "energy paid-or-lost tally remains restored"
+    );
+}
+
 /// Doesn't have enough energy (0 available, needs 2) and can't pay: the
 /// creature BOUNCES to its owner's hand and the controller gets {E} (net
 /// energy: 0 -> 1). This is the issue #4955 regression assertion in reverse —

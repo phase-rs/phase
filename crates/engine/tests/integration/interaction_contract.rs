@@ -3644,6 +3644,7 @@ fn preview_offer_with_points(
                 engine::analysis::resource::PeriodSignature::EveryRepetition(
                     engine::analysis::resource::PeriodicDelta {
                         frames_per_period: 1,
+                        seat_life_gross: None,
                         delta,
                         declarable_victims: Vec::new(),
                         victim_slot,
@@ -4304,6 +4305,7 @@ fn the_preview_list_and_its_allocation_default_when_absent_and_are_omitted_when_
         points: Vec::new(),
         allow_decline: true,
         preview,
+        outcome: None,
         confirm: engine::types::interaction::ConfirmSemantics::Explicit,
     };
 
@@ -4378,6 +4380,7 @@ fn respond_window_on(
             road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: Some(1000),
         },
     };
     bind(&mut state, "respond-declared");
@@ -4464,6 +4467,7 @@ fn respond_period(
     }
     engine::analysis::resource::PeriodicDelta {
         frames_per_period: 1,
+        seat_life_gross: None,
         delta,
         declarable_victims: Vec::new(),
         victim_slot,
@@ -6112,6 +6116,7 @@ fn the_respond_side_points_and_declared_default_when_absent_and_are_omitted_when
             points,
             declared,
             allocation_group,
+            outcome: None,
             confirm: engine::types::interaction::ConfirmSemantics::Explicit,
         }
     };
@@ -6971,6 +6976,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             // a capacity at the global cap.
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: vec![
                 DecisionPoint {
                     slot: slot(ChoicePoint::AnnouncedTarget),
@@ -7208,6 +7214,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             iteration_count: IterationCount::Fixed(2),
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::Targets {
@@ -8532,7 +8539,9 @@ fn stage_sequenced_offer(
             unbounded: Vec::new(),
             rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
-            win_kind_at: None,
+            // CR 732.2a + CR 704.5a: a winner-naming offer carries the crossing its `UntilLethal`
+            // take ends at, as every production mint does.
+            win_kind_at: Some(1_000),
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
             per_cycle: None,
@@ -8548,6 +8557,7 @@ fn stage_sequenced_offer(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
             ),
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: slots
                 .iter()
                 .cloned()
@@ -11212,6 +11222,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: Some(1000),
         },
     };
     let wire = serde_json::to_string(&carrying).expect("serialize the pending proposal");

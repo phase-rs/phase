@@ -1183,11 +1183,20 @@ pub(super) fn drain_pending_phase_transition_progress(
                     // registration that creates the stash, so on current code the only
                     // bound-less stash is one deserialized from a save written before the
                     // bound was tracked.
-                    max: state
-                        .pending_materialization_count
-                        .get(&controller)
-                        .copied()
-                        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES),
+                    //
+                    // Live re-validation: an intervening action before this boundary may have
+                    // moved a player-resource scalar toward its limit (e.g. Chaplain's Blessing
+                    // gaining life after a marked shortcut), so re-validate the representable
+                    // range on the live board without exceeding the accepted count (#10543).
+                    max: {
+                        let agreed = state
+                            .pending_materialization_count
+                            .get(&controller)
+                            .copied()
+                            .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES);
+                        materialization_representable_bound(state, controller)
+                            .map_or(agreed, |rep| agreed.min(rep))
+                    },
                     accumulated: 0,
                     source_id: ObjectId(0),
                     pending_mana_ability: None,
@@ -1451,6 +1460,95 @@ fn scan_step_end_mana_handlers(
     }
 
     entries
+}
+
+/// CR 614.1 + CR 732.2a: Checks whether materializing `count` repetitions of the controller's
+/// pending unbounded materializations can be represented without overflowing any player-resource
+/// scalar, evaluating individual signed edits through the live replacement pipeline.
+pub fn materialization_count_is_representable(
+    state: &GameState,
+    controller: PlayerId,
+    count: u32,
+) -> bool {
+    let Some(items) = state.pending_unbounded_materialization.get(&controller) else {
+        return true;
+    };
+    if count == 0 {
+        return true;
+    }
+    // CR 614.1 + CR 732.2a: a stash axis the settlement boundary DECLINES is never applied, so
+    // it must not bound the count the prompt offers either. Ask the boundary's own selection
+    // authority (`boundary_declines` over the same `ObservedGrowth`) rather than re-deriving
+    // which axes settle: a live observer of the life-growth class leaves that axis ∞ while the
+    // other axes still collapse, and probing its replacement-doubled gain here would withhold
+    // counts the boundary would settle exactly.
+    let observed = crate::game::engine_resolution_choices::ObservedGrowth::at_boundary(state);
+    let mut probe_state = state.clone();
+    let mut probe_events = Vec::new();
+    for item in items {
+        if crate::game::engine_resolution_choices::boundary_declines(item, observed) {
+            continue;
+        }
+        if let crate::types::game_state::PersistentAxisMaterialization::Life {
+            player,
+            per_cycle_delta,
+        } = item
+        {
+            if *per_cycle_delta > 0 {
+                let gain = per_cycle_delta.saturating_mul(count);
+                if crate::game::effects::life::try_apply_life_gain(
+                    &mut probe_state,
+                    *player,
+                    gain,
+                    &mut probe_events,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The largest repetition count the controller's pending unbounded materializations can represent
+/// on the live board without overflowing any player-resource scalar; `None` when no live scalar
+/// limits it. Evaluates individual signed edits through live replacements (CR 614.1).
+pub fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
+    let items = state.pending_unbounded_materialization.get(&controller)?;
+    // Only a life axis the settlement boundary will actually apply limits the count — the same
+    // selection `materialization_count_is_representable` probes with.
+    let observed = crate::game::engine_resolution_choices::ObservedGrowth::at_boundary(state);
+    let has_life = items.iter().any(|item| {
+        !crate::game::engine_resolution_choices::boundary_declines(item, observed)
+            && matches!(
+                item,
+                crate::types::game_state::PersistentAxisMaterialization::Life {
+                    per_cycle_delta,
+                    ..
+                } if *per_cycle_delta > 0
+            )
+    });
+    if !has_life {
+        return None;
+    }
+    let agreed = state
+        .pending_materialization_count
+        .get(&controller)
+        .copied()
+        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES);
+    let mut low = 0u32;
+    let mut high = agreed;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if materialization_count_is_representable(state, controller, mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(low)
 }
 
 /// CR 117.3a + CR 400.7: Complete a phase entry after the per-player empty-

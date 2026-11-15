@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ShortcutProposal.deliverable_capacity becomes an optional proved capacity; a proposal without one is refused at checked restore instead of defaulting to the engine budget (#10543)"
+}

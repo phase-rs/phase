@@ -229,11 +229,14 @@ pub fn resolve(
         // player's chosen value. This X-prompt stays adapter-side; the authority
         // pays a concrete `PayEnergy` amount only.
         AbilityCost::PayEnergy { amount } if is_pay_any_amount(amount) => {
+            // CR 107.14: the maximum is what one CHECKED payment can remove — the reserve AND
+            // the per-turn paid-or-lost tally's remaining room — not the bare reserve, so the
+            // prompt never offers an amount its own settlement would refuse.
             let max = state
                 .players
                 .iter()
                 .find(|p| p.id == payer)
-                .map(|p| p.energy)
+                .map(crate::game::effects::life::max_representable_energy_spend)
                 .unwrap_or(0);
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: payer,
@@ -1678,6 +1681,138 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::EnergyChanged { .. })),
             "no EnergyChanged event until the player commits an amount"
+        );
+    }
+
+    /// CR 107.14 + CR 107.1c: the "pay any amount of {E}" prompt publishes the maximum ONE
+    /// checked payment can remove, not the bare reserve: the same edit advances the per-turn
+    /// paid-or-lost tally, so a reserve larger than that tally's remaining room is not payable.
+    /// The Harnessed Lightning shape (pay any amount, then deal that much damage) is driven
+    /// through the prompt, the settlement guard, the payment and the damage on the same bound.
+    #[test]
+    fn pay_any_amount_of_energy_publishes_only_the_representable_maximum() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, QuantityRef, TargetRef};
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(777),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let target = state.objects.get_mut(&target_id).unwrap();
+        target.card_types.core_types.push(CoreType::Creature);
+        target.toughness = Some(6);
+        target.power = Some(2);
+
+        state.players[0].energy = 9;
+        state.players[0].energy_paid_or_lost_this_turn = u32::MAX - 4;
+
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                damage_source: None,
+                excess: None,
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut pay_ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        pay_ability.sub_ability = Some(Box::new(damage));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay_ability, &mut events, 0).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => {
+                assert_eq!(*max, 4, "only four more pays fit the paid-or-lost tally")
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // One past the published maximum is outside the prompt's own legal range.
+        let mut over = state.clone();
+        let over_waiting_for = over.waiting_for.clone();
+        let over_events = handle_resolution_choice(
+            &mut over,
+            over_waiting_for,
+            GameAction::SubmitPayAmount { amount: 5 },
+            &mut events,
+        );
+        assert!(
+            matches!(
+                over_events,
+                Err(crate::game::engine::EngineError::InvalidAction(_))
+            ),
+            "an amount past the published maximum is outside the legal range"
+        );
+
+        // A STALE prompt (published before the tally moved) is refused at the same shared
+        // bound the checked edit enforces, rather than paid past it.
+        let mut stale = state.clone();
+        if let WaitingFor::PayAmountChoice { max, .. } = &mut stale.waiting_for {
+            *max = 9;
+        }
+        let stale_waiting_for = stale.waiting_for.clone();
+        let stale_events = handle_resolution_choice(
+            &mut stale,
+            stale_waiting_for,
+            GameAction::SubmitPayAmount { amount: 9 },
+            &mut events,
+        );
+        assert!(
+            matches!(
+                stale_events,
+                Err(crate::game::engine::EngineError::LifeChangeUnrepresentable { player })
+                    if player == PlayerId(0)
+            ),
+            "a stale prompt's over-bound amount must be the engine-capacity refusal"
+        );
+
+        // The published maximum is admitted, pays the energy and deals that much damage.
+        let waiting_for = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SubmitPayAmount { amount: 4 },
+            &mut events,
+        )
+        .expect("the published maximum is payable");
+        assert_eq!(state.players[0].energy, 5, "four energy consumed");
+        assert_eq!(
+            state.players[0].energy_paid_or_lost_this_turn,
+            u32::MAX,
+            "the payment exactly fills the tally"
+        );
+        assert_eq!(
+            state.objects.get(&target_id).map(|o| o.damage_marked),
+            Some(4),
+            "the printed shape deals the chosen amount"
         );
     }
 

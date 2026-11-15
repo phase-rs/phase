@@ -278,7 +278,22 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // The engine-side regression row that keeps this honest is
             // `bounded_fixed_count_commits_exactly_n_periods`, which asserts zero eliminations
             // and `committed == n × published δ` on all three fixtures.
-            (_, IterationCount::Fixed(_)) if !schema.is_bounded() => na(),
+            //
+            // The guard asks the engine's `offered_fixed_count`, not `is_bounded` alone: a lethal
+            // drain stated at a fixed count — its crossing past what one take can drive — measured
+            // no rules threshold, yet its offered count IS the take it states, so the arms below
+            // score it at that count. Only a `Fixed` suggestion that states no take of its own
+            // stays neutral here.
+            (_, IterationCount::Fixed(_))
+                if engine::analysis::loop_check::offered_fixed_count(
+                    schema,
+                    *predicted_winner,
+                    certificate,
+                )
+                .is_none() =>
+            {
+                na()
+            }
 
             // CR 732.2a: over the offered bound. The AI-side mirror of the engine's own
             // declare-time guard — such a declare names a count at which some living player
@@ -354,6 +369,19 @@ impl TacticalPolicy for LoopShortcutPolicy {
                             .with_fact("declared", i64::from(*n))
                             .with_fact("eliminates_at", fatal),
                     ),
+                    // CR 704.5a / CR 704.5c: an offer with no per-period signature — the lethal
+                    // drain stated at a fixed count — gives the elimination walk nothing to charge,
+                    // so ask its certificate whether the drain runs against the proposer. A count
+                    // that drains the declarer toward a loss is never progress for them, whoever
+                    // the drain crowns at its crossing.
+                    None if certificate.per_cycle.is_none()
+                        && certificate.drives_toward_a_loss(*proposer) =>
+                    {
+                        PolicyVerdict::reject(
+                            PolicyReason::new("loop_shortcut_declare_drains_proposer")
+                                .with_fact("declared", i64::from(*n)),
+                        )
+                    }
                     // CR 106.4 + CR 500.5 + CR 500.8 + CR 601.2g + CR 605.3a: a count whose
                     // period buys nothing but the mana its mana abilities add and the combats it
                     // adds is weakly dominated by declining.
@@ -598,15 +626,43 @@ mod tests {
         offer_state_with(predicted_winner, ShortcutDecisionSchema::default())
     }
 
+    /// The unbounded offers whose `Fixed` suggestion states no take of its own: an ADVANTAGE
+    /// offer naming no winner, and the lethal offer naming either seat. The lethal offer naming
+    /// NO winner is a drain stated at a fixed count, which `offered_fixed_count` reads as a take —
+    /// see `a_lethal_drain_offered_at_a_fixed_count_scores_its_offered_count`.
+    fn unbounded_offer_states() -> [(Option<PlayerId>, GameState); 3] {
+        let advantage = LoopCertificate {
+            win_kind: Some(WinKind::Advantage),
+            ..cert()
+        };
+        [
+            (
+                None,
+                offer_state_from(P0, None, advantage, ShortcutDecisionSchema::default()),
+            ),
+            (Some(P0), offer_state(Some(P0))),
+            (Some(P1), offer_state(Some(P1))),
+        ]
+    }
+
     fn offer_state_with(
         predicted_winner: Option<PlayerId>,
         schema: ShortcutDecisionSchema,
     ) -> GameState {
+        offer_state_from(P0, predicted_winner, cert(), schema)
+    }
+
+    fn offer_state_from(
+        proposer: PlayerId,
+        predicted_winner: Option<PlayerId>,
+        certificate: LoopCertificate,
+        schema: ShortcutDecisionSchema,
+    ) -> GameState {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
+            proposer,
             predicted_winner,
-            certificate: cert(),
+            certificate,
             schema,
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
@@ -806,8 +862,7 @@ mod tests {
     /// naming the guard, rather than here with no explanation.
     #[test]
     fn declare_fixed_is_never_rejected() {
-        for predicted_winner in [None, Some(P0), Some(P1)] {
-            let state = offer_state(predicted_winner);
+        for (predicted_winner, state) in unbounded_offer_states() {
             let v = verdict_for(&state, &declare(IterationCount::Fixed(3)));
             assert_eq!(
                 delta_of(&v),
@@ -817,6 +872,59 @@ mod tests {
             );
             assert_eq!(kind_of(&v), "loop_shortcut_na");
         }
+    }
+
+    /// CR 732.2a + CR 704.5a: a lethal drain whose crossing lies past what one take can drive is
+    /// offered at the repetitions that fit, naming no winner and measuring no rules threshold.
+    /// That offered count is the take it states, so a declaration of it is scored as committed
+    /// progress for the seat the drain feeds — not left neutral for want of a threshold — while a
+    /// count past it is refused, and a proposer the drain runs AGAINST is refused at any count.
+    ///
+    /// REVERT-PROBE: guard the neutral arm on `!schema.is_bounded()` again ⇒ the progress row
+    /// reads `loop_shortcut_na` ⇒ FAILS. Drop the `drives_toward_a_loss` arm ⇒ the drained
+    /// proposer's row scores progress ⇒ FAILS.
+    #[test]
+    fn a_lethal_drain_offered_at_a_fixed_count_scores_its_offered_count() {
+        const OFFERED: u32 = 1_000;
+        let fallback = |proposer: PlayerId| {
+            offer_state_from(
+                proposer,
+                None,
+                // The drain feeds P0 and runs against P1.
+                LoopCertificate {
+                    unbounded: vec![ResourceAxis::Life(P0), ResourceAxis::Life(P1)],
+                    rising: vec![ResourceAxis::Life(P0)],
+                    ..cert()
+                },
+                ShortcutDecisionSchema {
+                    iteration_count: IterationCount::Fixed(OFFERED),
+                    deliverable_capacity: OFFERED,
+                    ..ShortcutDecisionSchema::default()
+                },
+            )
+        };
+        let fed = fallback(P0);
+        assert!(
+            !schema_of(&fed).is_bounded(),
+            "REACH-GUARD: the fallback measured no rules threshold"
+        );
+        let progress = verdict_for(&fed, &declare(IterationCount::Fixed(OFFERED)));
+        assert_eq!(kind_of(&progress), "loop_shortcut_bounded_declare_progress");
+        assert!(delta_of(&progress) > 0.0, "{progress:?}");
+        assert_eq!(
+            kind_of(&verdict_for(
+                &fed,
+                &declare(IterationCount::Fixed(OFFERED + 1))
+            )),
+            "loop_shortcut_bounded_declare_over_bound"
+        );
+
+        let drained = verdict_for(&fallback(P1), &declare(IterationCount::Fixed(OFFERED)));
+        assert!(
+            matches!(drained, PolicyVerdict::Reject { .. }),
+            "{drained:?}"
+        );
+        assert_eq!(kind_of(&drained), "loop_shortcut_declare_drains_proposer");
     }
 
     /// A BOUNDED offer — the only shape `try_offer_bounded_cycle_shortcut` mints. `points`
@@ -891,6 +999,7 @@ mod tests {
     fn periodic(library_delta: &[(PlayerId, i64)], life: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta: ResourceVector {
                 library_delta: library_delta.iter().copied().collect(),
                 life: life.iter().copied().collect(),
@@ -910,6 +1019,7 @@ mod tests {
     fn periodic_poison(poison: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta: ResourceVector {
                 poison: poison.iter().copied().collect(),
                 ..Default::default()
@@ -1203,6 +1313,7 @@ mod tests {
         let slot = announced_slot(&mut state, CardId(1));
         let period = PeriodicDelta {
             frames_per_period: 1,
+            seat_life_gross: None,
             delta: ResourceVector {
                 life: [(P1, -2)].into_iter().collect(),
                 ..Default::default()
@@ -1545,8 +1656,7 @@ mod tests {
     /// with its own blast radius, not a drive-by.
     #[test]
     fn loop_shortcut_unbounded_declare_rejects_zero_count() {
-        for predicted_winner in [None, Some(P0), Some(P1)] {
-            let state = offer_state(predicted_winner);
+        for (predicted_winner, state) in unbounded_offer_states() {
             assert!(
                 !schema_of(&state).is_bounded(),
                 "REACH-GUARD: this row is about the UNBOUNDED schema — the bounded row above \
@@ -1583,8 +1693,7 @@ mod tests {
     /// fails with it.
     #[test]
     fn loop_shortcut_unbounded_offer_keeps_fixed_neutral() {
-        for predicted_winner in [None, Some(P0), Some(P1)] {
-            let state = offer_state(predicted_winner);
+        for (predicted_winner, state) in unbounded_offer_states() {
             assert!(
                 !schema_of(&state).is_bounded(),
                 "REACH-GUARD: this row asserts the UNBOUNDED branch, so the default schema must \
