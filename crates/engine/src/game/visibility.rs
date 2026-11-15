@@ -4448,6 +4448,17 @@ fn redact_pending_mana_ability_payment(
     // key is engine authority — never shown to a viewer. The single
     // choke point: every owner call site routes through here.
     pending.announced_usage_key = None;
+    // CR 400.2 + CR 613.1f: the activation-time definition snapshot is a
+    // stamped clone like the TCE grant payloads — a mana ability a hidden-zone
+    // provider donated (Thranduil holding a graveyard Elf's ability) names the
+    // provider once the activation pauses at a prompt. Walk the same node axis
+    // as the object/TCE walks; nested pendings recurse through this choke
+    // point via `ManaAbilityManaPayment`. Projection only.
+    if let Some(snapshot) = pending.ability_snapshot.as_mut() {
+        granter_symbols_mut::each_node(DefinitionNodeMut::Ability(snapshot), &mut |node| {
+            redact_granter_lineage_node(node, hidden_ids);
+        });
+    }
     redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
     if let Some(resume) = pending.cost_move_resume.as_mut() {
         redact_mana_ability_resume_payment(resume, hidden_ids);

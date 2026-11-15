@@ -25,13 +25,14 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::TargetRef;
-use engine::types::ability::{ContinuousModification, Effect};
+use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect};
+use engine::types::ability_visit::{granter_symbols, DefinitionNode};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
     CastPaymentMode, ManaChoice, ManaChoiceContext, ManaChoicePrompt, PendingCast, StackEntryKind,
     WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -726,5 +727,261 @@ fn projection_blanks_hidden_provider_lineage_in_transient_effects() {
                     if definition.granting_object == Some(mystic_stamp)
             )),
         "authoritative state retains the stamped transient clone"
+    );
+}
+
+/// Every lineage stamp on a definition snapshot's node axis naming
+/// `provider` — the same writer's-own axis the projection scrub walks.
+fn snapshot_lineage_hits(
+    snapshot: &AbilityDefinition,
+    provider: ObjectId,
+) -> Vec<ObjectIncarnationRef> {
+    let mut hits = Vec::new();
+    granter_symbols::each_node(DefinitionNode::Ability(snapshot), &mut |node| {
+        let stamps = match node {
+            DefinitionNode::Ability(def) => {
+                let mut stamps = vec![def.granting_object];
+                stamps.extend(def.grant_chain.iter().copied().map(Some));
+                stamps
+            }
+            DefinitionNode::Trigger(def) => vec![def.granting_object],
+            DefinitionNode::Static(def) => vec![def.granting_object],
+            DefinitionNode::Replacement(def) => vec![def.granting_object],
+        };
+        hits.extend(
+            stamps
+                .into_iter()
+                .flatten()
+                .filter(|stamp| stamp.object_id == provider),
+        );
+    });
+    hits
+}
+
+/// CR 400.2 + CR 613.1f + CR 605.3b: a paused granted mana ability projects
+/// no hidden provider lineage in its activation-time snapshot.
+///
+/// Board: Kraj gains the counter-bearing Brigid's X-mana ability (a stamped
+/// live donation); Quicksilver snapshots Kraj's stamped ability into a
+/// transient grant. Brigid then moves to hand — hidden from every viewer but
+/// its owner — while the duration-bound grant stays live. Activating
+/// Quicksilver's granted copy pauses at the color prompt with a
+/// `PendingManaAbility` whose `ability_snapshot` clones the stamped
+/// definition. Opponent and unseated projections must carry no snapshot
+/// lineage naming the hidden id (a node-axis scan plus an independent
+/// serialized scan), while authoritative state and trusted save/restore keep
+/// the clone intact. Answering Green completes the activation (X = 3).
+///
+/// Revert detector: skipping the snapshot walk makes both projection scans
+/// fail; dropping the authoritative clone fails the trusted-state assertion.
+#[test]
+fn paused_granted_mana_snapshot_projects_no_hidden_lineage() {
+    const QUICKSILVER_GRANT: &str =
+        "{U}: This creature gains all activated abilities of target creature until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kraj = scenario
+        .add_creature_from_oracle(P0, "Experiment Kraj", 4, 6, KRAJ)
+        .id();
+    let brigid = scenario
+        .add_creature_from_oracle(P0, "Brigid, Doun's Mind", 2, 3, BRIGID_TEXT)
+        .id();
+    let quicksilver = scenario
+        .add_creature_from_oracle(P0, "Quicksilver Elemental", 2, 2, QUICKSILVER_GRANT)
+        .id();
+    scenario.add_creature(P0, "Other Creature A", 1, 1);
+    scenario.add_creature(P0, "Other Creature B", 1, 1);
+    scenario.with_counter(brigid, engine::types::counter::CounterType::Plus1Plus1, 1);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    relayer(runner.state_mut());
+
+    // Reach-guards: Kraj holds the stamped Brigid donation.
+    let brigid_stamp = stamp_of(runner.state(), brigid);
+    fn is_brigid_mana(def: &AbilityDefinition) -> bool {
+        def.description
+            .as_deref()
+            .is_some_and(|text| text.contains("Add X"))
+    }
+    let kraj_mana: Vec<&AbilityDefinition> = runner.state().objects[&kraj]
+        .abilities
+        .iter()
+        .filter(|def| is_brigid_mana(def))
+        .collect();
+    assert_eq!(
+        kraj_mana.len(),
+        1,
+        "Kraj holds exactly Brigid's donated mana ability"
+    );
+    assert_eq!(
+        kraj_mana[0].granting_object,
+        Some(brigid_stamp),
+        "the live donation stamps Brigid"
+    );
+
+    // Quicksilver snapshots Kraj's stamped ability into a transient effect.
+    let gain = runner.state().objects[&quicksilver]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                *ability.effect,
+                Effect::GainActivatedAbilitiesOfTarget { .. }
+            )
+        })
+        .expect("Quicksilver's {U} ability");
+    runner
+        .activate(quicksilver, gain)
+        .target_object(kraj)
+        .resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .flat_map(|effect| effect.modifications.iter())
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if definition.granting_object == Some(brigid_stamp)
+            )),
+        "reach-guard: the snapshot cloned the stamped donation verbatim"
+    );
+
+    // Brigid moves to hand (hidden) while the duration-bound grant stays live.
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), brigid, Zone::Hand, &mut events);
+    assert_eq!(
+        runner.state().objects[&brigid].zone,
+        Zone::Hand,
+        "reach-guard: the provider is hidden from the opponent"
+    );
+
+    // Activate Quicksilver's granted copy; it pauses at the color prompt.
+    let granted = runner.state().objects[&quicksilver]
+        .abilities
+        .iter()
+        .position(is_brigid_mana)
+        .expect("Quicksilver's granted Brigid ability");
+    let live = &runner.state().objects[&quicksilver].abilities[granted];
+    assert!(
+        live.granting_object == Some(brigid_stamp) || live.grant_chain.contains(&brigid_stamp),
+        "reach-guard: the live granted copy names Brigid in its head stamp or chain"
+    );
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: quicksilver,
+            ability_index: granted,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating the granted mana ability must succeed");
+    let WaitingFor::ChooseManaColor {
+        choice, context, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the color-choice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(choice, ManaChoicePrompt::SingleColor { .. }),
+        "reach-guard: the AnyOneColor production offers a color choice"
+    );
+    let ManaChoiceContext::ManaAbility(pending) = context else {
+        panic!("the color prompt must retain the paused mana ability");
+    };
+    let snapshot = pending
+        .ability_snapshot
+        .as_ref()
+        .expect("reach-guard: the pause snapshots the activated definition");
+    assert!(
+        !snapshot_lineage_hits(snapshot, brigid).is_empty(),
+        "reach-guard: the authoritative snapshot names the hidden provider"
+    );
+    let marker = format!("\"object_id\":{}", brigid.0);
+    let raw = serde_json::to_string(snapshot).expect("the snapshot serializes");
+    assert!(
+        raw.contains(&marker),
+        "reach-guard: the serialized authoritative snapshot names the hidden id"
+    );
+
+    for viewer in [P1, unseated()] {
+        let filtered = filter_state_for_viewer(runner.state(), viewer);
+        let WaitingFor::ChooseManaColor { context, .. } = &filtered.waiting_for else {
+            panic!(
+                "{viewer:?} must see the same color prompt, got {:?}",
+                filtered.waiting_for
+            );
+        };
+        let ManaChoiceContext::ManaAbility(pending) = context else {
+            panic!("{viewer:?} must see the paused mana ability");
+        };
+        let snapshot = pending
+            .ability_snapshot
+            .as_ref()
+            .expect("the viewer still sees the snapshot itself");
+        assert!(
+            snapshot_lineage_hits(snapshot, brigid).is_empty(),
+            "{viewer:?} sees snapshot lineage naming the hidden provider"
+        );
+        let projected = serde_json::to_string(snapshot).expect("serializes");
+        assert!(
+            !projected.contains(&marker),
+            "{viewer:?} sees the hidden provider id anywhere in the snapshot"
+        );
+    }
+
+    // Trusted save/restore retains the stamped snapshot (projection only redacts).
+    let round_tripped: engine::types::game_state::GameState =
+        serde_json::from_str(&serde_json::to_string(runner.state()).expect("serializes"))
+            .expect("deserializes");
+    let WaitingFor::ChooseManaColor { context, .. } = &round_tripped.waiting_for else {
+        panic!(
+            "the round-tripped halt must be the color prompt, got {:?}",
+            round_tripped.waiting_for
+        );
+    };
+    let ManaChoiceContext::ManaAbility(pending) = context else {
+        panic!("the round-tripped prompt must retain the paused mana ability");
+    };
+    assert!(
+        !snapshot_lineage_hits(
+            pending
+                .ability_snapshot
+                .as_ref()
+                .expect("save/restore must retain the snapshot"),
+            brigid
+        )
+        .is_empty(),
+        "save/restore must retain the snapshot's hidden lineage"
+    );
+
+    // The authoritative path completes undisturbed by the projection.
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("submitting the Green color choice must succeed");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        3,
+        "X = 3 other creatures yields three green mana"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must complete, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the inline activation"
     );
 }
