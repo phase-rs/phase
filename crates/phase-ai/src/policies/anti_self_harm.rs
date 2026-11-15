@@ -7,6 +7,7 @@ use engine::game::combat;
 use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::GameObject;
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
@@ -191,20 +192,22 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
 /// the spell supplies no separate damage, removal, or AI-directed resource.
 fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) -> bool {
     let effects = ctx.effects();
-    let has_beneficial_creature_effect = effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
-    });
-    if !has_beneficial_creature_effect {
+    let beneficial_creature_effects: Vec<&Effect> = effects
+        .iter()
+        .copied()
+        .filter(|effect| {
+            matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+                && targets_creatures(effect)
+        })
+        .collect();
+    if beneficial_creature_effects.is_empty() {
         return false;
     }
 
-    let has_friendly_creature = ctx.state.battlefield.iter().any(|&id| {
-        ctx.state.objects.get(&id).is_some_and(|object| {
-            !players::is_opponent(ctx.state, ctx.ai_player, object.controller)
-                && object.card_types.core_types.contains(&CoreType::Creature)
-        })
-    });
-    if has_friendly_creature {
+    if beneficial_creature_effects
+        .iter()
+        .any(|effect| has_friendly_creature_recipient(ctx, Some(effect)))
+    {
         return false;
     }
 
@@ -393,10 +396,10 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // Its recipient is the token this same resolution creates, so it does not
     // need a creature of ours; this check reads the walk without those
     // placements. Every other check below keeps the full `effects`.
-    let mut has_beneficial_creature_target = ctx
+    let beneficial_creature_effects: Vec<&Effect> = ctx
         .effects_without_created_token_placements()
         .into_iter()
-        .any(|effect| {
+        .filter(|effect| {
             !matches!(
                 effect,
                 Effect::ChangeZone {
@@ -405,7 +408,9 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                 }
             ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
                 && targets_creatures(effect)
-        });
+        })
+        .collect();
+    let mut has_beneficial_creature_target = !beneficial_creature_effects.is_empty();
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
@@ -450,12 +455,14 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         return legend_penalty + etb_whiff_penalty + copy_whiff_penalty;
     }
 
-    let has_own_creature = ctx.state.battlefield.iter().any(|&id| {
-        ctx.state.objects.get(&id).is_some_and(|o| {
-            !players::is_opponent(ctx.state, ctx.ai_player, o.controller)
-                && o.card_types.core_types.contains(&CoreType::Creature)
-        })
-    });
+    // An Aura carries no effect, so it is judged without a filter.
+    let has_own_creature = if beneficial_creature_effects.is_empty() {
+        has_friendly_creature_recipient(ctx, None)
+    } else {
+        beneficial_creature_effects
+            .iter()
+            .any(|effect| has_friendly_creature_recipient(ctx, Some(effect)))
+    };
     // Targeting legality (CR 702.11/702.16/702.18) is owned by the engine.
     // Ask `find_legal_targets` with the spell's own creature-only harmful
     // filter so Shroud, Hexproof-vs-opponents, "Hexproof from [quality]",
@@ -1218,20 +1225,67 @@ fn filter_reaches_only_own_permanents(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    let mut reaches_own = false;
-    for &id in ctx.state.battlefield.iter() {
-        let Some(object) = ctx.state.objects.get(&id) else {
-            continue;
-        };
-        if !matches_target_filter(ctx.state, id, filter, filter_ctx) {
-            continue;
+    let admitted = battlefield_objects_admitted(ctx.state, filter, filter_ctx);
+    !admitted.is_empty()
+        && admitted
+            .iter()
+            .all(|object| !players::is_opponent(ctx.state, ctx.ai_player, object.controller))
+}
+
+/// The battlefield objects `filter` admits.
+fn battlefield_objects_admitted<'s>(
+    state: &'s GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<&'s GameObject> {
+    state
+        .battlefield
+        .iter()
+        .filter(|&&id| matches_target_filter(state, id, filter, filter_ctx))
+        .filter_map(|id| state.objects.get(id))
+        .collect()
+}
+
+/// Whether `filter` settles whose objects it admits from its source alone, with no target chosen.
+fn filter_settles_controller_from_source(filter: &TargetFilter) -> bool {
+    use engine::types::ability::ControllerRef;
+    match filter {
+        TargetFilter::Typed(typed) => matches!(
+            typed.controller,
+            None | Some(ControllerRef::You | ControllerRef::Opponent)
+        ),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_settles_controller_from_source)
         }
-        if players::is_opponent(ctx.state, ctx.ai_player, object.controller) {
-            return false;
-        }
-        reaches_own = true;
+        _ => false,
     }
-    reaches_own
+}
+
+/// Whether a creature on the AI's side can receive `effect`: among those its object filter
+/// admits from the source, or any of them when it has none.
+fn has_friendly_creature_recipient(ctx: &PolicyContext<'_>, effect: Option<&Effect>) -> bool {
+    let friendly_creature = |object: &&GameObject| {
+        !players::is_opponent(ctx.state, ctx.ai_player, object.controller)
+            && object.card_types.core_types.contains(&CoreType::Creature)
+    };
+    let filter = effect
+        .and_then(extract_target_filter)
+        .filter(|filter| filter_settles_controller_from_source(filter));
+    match (filter, ctx.source_object()) {
+        (Some(filter), Some(source)) => battlefield_objects_admitted(
+            ctx.state,
+            filter,
+            &FilterContext::from_source(ctx.state, source.id),
+        )
+        .iter()
+        .any(friendly_creature),
+        _ => ctx
+            .state
+            .battlefield
+            .iter()
+            .filter_map(|id| ctx.state.objects.get(id))
+            .any(|object| friendly_creature(&object)),
+    }
 }
 
 fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
@@ -1342,7 +1396,8 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         } else {
             object.controller
         };
-    // CR 102.3: a teammate's permanent is friendly, except that taking control moves it to the AI.
+    // "Does this help or harm my side?" is the team relation (CR 102.3); "whom does this reach or
+    // whose does it become?" is the effect's own call: its filter, or the AI seat for gained control.
     let friendly = if gains_control {
         effective_controller == ctx.ai_player
     } else {
@@ -1580,10 +1635,8 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     ..
                 } => 0.0,
                 // CR 702.21a: Compound costs sum severity of components.
-                // A Compound containing a lethal poison sub-cost is
-                // also already rejected upstream by `can_pay_ward_cost`
-                // (which requires every sub-cost payable), so this
-                // fold only ever sees payable compounds.
+                // `can_pay_ward_cost` requires every sub-cost payable, so
+                // this fold only ever sees payable compounds.
                 WardCost::Compound(costs) => costs
                     .iter()
                     .map(|c| match c {
@@ -3446,6 +3499,71 @@ mod tests {
                 .map(|(_, verdict)| verdict),
             Some(PolicyVerdict::Score { .. })
         ));
+    }
+
+    /// AntiSelfHarm's verdict on P0 casting the real `spell` in Two-Headed Giant while its
+    /// teammate controls Grizzly Bears, and P0 controls Grizzly Bears too when `own_bears`.
+    fn two_headed_giant_cast_verdict(spell: &str, own_bears: bool) -> PolicyVerdict {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(PlayerId(1), "Grizzly Bears", Zone::Battlefield, db);
+        if own_bears {
+            scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+        }
+        let spell_id = scenario.add_real_card(PlayerId(0), spell, Zone::Hand, db);
+        let mana = |color| ManaUnit::new(color, ObjectId(0), false, vec![]);
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                mana(ManaType::White),
+                mana(ManaType::White),
+                mana(ManaType::White),
+                mana(ManaType::White),
+                mana(ManaType::Green),
+            ],
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let state = runner.state();
+        let candidate = engine::ai_support::candidate_actions(state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell_id)
+            })
+            .expect("the engine offers the cast");
+        shared_registry_verdicts_for(state, &candidate)
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
+            .expect("AntiSelfHarm judges the cast")
+    }
+
+    /// CR 109.5: Silverflame Ritual's "each creature you control" never reaches the teammate's
+    /// creature, so with none of its own the AI is refused the cast; "target creature" (Giant
+    /// Growth) can reach the teammate's (CR 102.3), so that cast is not.
+    #[test]
+    fn a_beneficial_spell_reaches_only_the_recipients_its_filter_admits() {
+        let reason = |verdict: PolicyVerdict| match verdict {
+            PolicyVerdict::Reject { reason } => Some(reason.kind),
+            PolicyVerdict::Score { .. } => None,
+        };
+        assert_eq!(
+            reason(two_headed_giant_cast_verdict("Silverflame Ritual", false)),
+            Some("anti_self_harm_beneficial_creature_spell_no_friendly_recipient")
+        );
+        assert_eq!(
+            reason(two_headed_giant_cast_verdict("Silverflame Ritual", true)),
+            None
+        );
+        assert_eq!(
+            reason(two_headed_giant_cast_verdict("Giant Growth", false)),
+            None
+        );
     }
 
     #[test]
