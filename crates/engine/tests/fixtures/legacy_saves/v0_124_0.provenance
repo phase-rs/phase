@@ -536,7 +536,6 @@ rather than pay this spell's mana cost.\nYou gain X life.";
                 .with_subtypes(vec!["Centaur", "Warrior"]);
             let mut runner = scenario.build();
             cast(&mut runner, shoal, CastPaymentMode::Auto);
-            println!("shoal wf {:?}", runner.state().waiting_for);
             runner.act(GameAction::DecideOptionalCost { pay: true }).expect("pitch");
             write("shoal_pitch_prompt", runner.state().clone());
         }
