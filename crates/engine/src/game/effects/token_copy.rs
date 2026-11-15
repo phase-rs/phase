@@ -476,6 +476,10 @@ pub(crate) fn drain_pending_copy_token_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 603.6a + CR 603.3b: the inline liminal terminal also enters here.
+    // Claim its entries before taking the owner or resuming a later instruction.
+    let copy_owner = state.active_copy_token().cloned();
+    super::token::handoff_paused_liminal_copy_token_batch(state, copy_owner.as_ref(), events);
     let Some(pending) = state
         .take_active_copy_token()
         .expect("copy-token drain may consume only the active CopyToken frame")
@@ -573,7 +577,15 @@ fn drain_copy_token_resolution(
                     pending
                         .created_ids
                         .extend(state.last_created_token_ids.clone());
+                    let copy_owner = pending.clone();
                     park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
+                    // CR 603.6a + CR 603.3b: earlier completed batches and this
+                    // batch's committed prefix still owe their entry observers.
+                    super::token::handoff_paused_liminal_copy_token_batch(
+                        state,
+                        Some(&copy_owner),
+                        events,
+                    );
                     return;
                 }
                 pending
@@ -590,6 +602,14 @@ fn drain_copy_token_resolution(
                 park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
+                // CR 603.6a + CR 603.3b: the new batch has no entries yet;
+                // collect the completed batches held by the re-parked owner.
+                let copy_owner = state.active_copy_token().cloned();
+                super::token::handoff_paused_liminal_copy_token_batch(
+                    state,
+                    copy_owner.as_ref(),
+                    events,
+                );
                 return;
             }
         }

@@ -2295,40 +2295,53 @@ fn continue_liminal_copy_token_batch(
             status.completion,
             super::token_copy::CopyTokenApplyCompletion::Paused
         ) {
-            if copy_owner.as_ref().is_some_and(|owner| {
-                state.resolution_stack.iter().any(|frame| {
-                    matches!(frame, ResolutionFrame::CopyToken(current) if current == owner)
-                })
-            }) {
-                // CR 603.6a + CR 603.3b: these copies entered before the next
-                // entrant paused, with their CopyToken owner still parked. No
-                // later action scans this buffer. Collect only their committed
-                // entry pairs, claiming the original occurrences so a resumed
-                // post-resolution scan cannot collect them again.
-                let committed: HashSet<_> = state.last_created_token_ids.iter().copied().collect();
-                crate::game::triggers::collect_paused_exit_triggers_matching(
-                    state,
-                    events,
-                    0,
-                    |event| match event {
-                        // A consumer of the batch's entries, not a construction.
-                        GameEvent::ZoneChanged {
-                            object_id,
-                            from,
-                            to,
-                            ..
-                        } if from.is_none() && *to == Zone::Battlefield => {
-                            committed.contains(object_id)
-                        }
-                        GameEvent::TokenCreated { object_id, .. } => committed.contains(object_id),
-                        _ => false,
-                    },
-                );
-            }
+            handoff_paused_liminal_copy_token_batch(state, copy_owner.as_ref(), events);
             return false;
         }
     }
     finish_liminal_copy_token_batch(state, events)
+}
+
+/// CR 603.6a + CR 603.3b: retain committed entries' triggers at a batch handoff
+/// with its CopyToken owner still parked. Include completed batches held by the
+/// owner after a later batch has reset the ledger. Claim the original event
+/// occurrences so a resumed post-resolution scan cannot collect them again.
+pub(crate) fn handoff_paused_liminal_copy_token_batch(
+    state: &mut GameState,
+    copy_owner: Option<&PendingCopyTokenResolution>,
+    events: &[GameEvent],
+) {
+    if !copy_owner.is_some_and(|owner| {
+        state
+            .resolution_stack
+            .iter()
+            .any(|frame| matches!(frame, ResolutionFrame::CopyToken(current) if current == owner))
+    }) {
+        return;
+    }
+    let committed: HashSet<_> = state
+        .last_created_token_ids
+        .iter()
+        .chain(
+            copy_owner
+                .into_iter()
+                .flat_map(|owner| owner.created_ids.iter()),
+        )
+        .copied()
+        .collect();
+    crate::game::triggers::collect_paused_exit_triggers_matching(state, events, 0, |event| {
+        match event {
+            // A consumer of the batch's entries, not a construction.
+            GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                ..
+            } if from.is_none() && *to == Zone::Battlefield => committed.contains(object_id),
+            GameEvent::TokenCreated { object_id, .. } => committed.contains(object_id),
+            _ => false,
+        }
+    });
 }
 
 /// CR 614.1a + CR 608.2c: a liminal copy batch whose entry paused has finished;
@@ -2340,6 +2353,23 @@ pub(crate) fn finish_liminal_copy_token_batch(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     super::counters::retire_exhausted_counter_additions(state);
+    // CR 603.6a + CR 603.3b: claim this completed batch's entry occurrences
+    // before either handoff can pause on a later batch and replace its ledger.
+    // A compound event may still sit above the parked CopyToken owner. This
+    // snapshot is only an observer handoff witness; it does not drain that frame.
+    // The claims also protect the ordinary scan if both handoffs finish inline.
+    let copy_owner = state
+        .resolution_stack
+        .iter()
+        .filter_map(|frame| {
+            if let ResolutionFrame::CopyToken(owner) = frame {
+                Some(owner.clone())
+            } else {
+                None
+            }
+        })
+        .last();
+    handoff_paused_liminal_copy_token_batch(state, copy_owner.as_ref(), events);
     if !super::counters::resume_parked_token_event_delivery(state, events) {
         return false;
     }

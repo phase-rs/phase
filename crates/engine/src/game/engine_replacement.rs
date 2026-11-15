@@ -3319,6 +3319,7 @@ fn apply_copy_target_choice(
         if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation.filter(|(_, _, _, _, remaining_count)| *remaining_count > 0)
         {
+            let copy_owner = state.active_copy_token().cloned();
             let initial_created_ids = state.last_created_token_ids.clone();
             let status =
                 super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
@@ -3337,6 +3338,11 @@ fn apply_copy_target_choice(
                 }
                 super::effects::token_copy::CopyTokenApplyCompletion::Paused => {
                     state.last_created_token_ids = status.created_ids;
+                    super::effects::token::handoff_paused_liminal_copy_token_batch(
+                        state,
+                        copy_owner.as_ref(),
+                        events,
+                    );
                     return Ok(state.waiting_for.clone());
                 }
             }

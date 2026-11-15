@@ -402,7 +402,19 @@ fn build_board(
     let mut placed: Vec<(usize, ObjectId)> = placement
         .into_iter()
         .map(|index| {
-            let id = scenario.add_real_card(P0, targets[index], Zone::Battlefield, db);
+            let id = if targets[index] == QUICKSILVER_GARGANTUAN {
+                // Pre-existing uncopied Gargantuans: bypass setup entry choices,
+                // while the measured token entries use the public action pipeline.
+                scenario.add_creature_from_oracle(
+                    P0,
+                    QUICKSILVER_GARGANTUAN,
+                    7,
+                    7,
+                    "You may have this creature enter as a copy of any creature on the battlefield, except it's 7/7.",
+                ).id()
+            } else {
+                scenario.add_real_card(P0, targets[index], Zone::Battlefield, db)
+            };
             (index, id)
         })
         .collect();
@@ -2461,6 +2473,7 @@ fn r24s_doubled_gargantuan_own_entry_choices_across_save_and_restore() {
 }
 
 // Verbatim Oracle text checked against /mnt/data/dev/phase/data/card-data.json:
+// Memnite has no Oracle rules text; artifact creature — Construct, {0}, 1/1.
 // Soul Warden: "Whenever another creature enters, you gain 1 life."
 // Quicksilver Gargantuan: "You may have this creature enter as a copy of any creature on the battlefield, except it's 7/7."
 // Painter's Servant: "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors."
@@ -2470,6 +2483,8 @@ fn r24s_doubled_gargantuan_own_entry_choices_across_save_and_restore() {
 enum GargantuanBatch {
     BothCopy,
     ObserveEntries,
+    ObserveInlineThenPaused,
+    ObserveTerminalThenPaused,
     DeclineSecond,
 }
 
@@ -2484,6 +2499,34 @@ fn r25s_doubled_gargantuan_observer_across_save_and_restore() {
     r24_doubled_gargantuan(
         PauseCarry::SavedAndRestored,
         GargantuanBatch::ObserveEntries,
+    );
+}
+
+/// CR 603.6a + CR 603.3b: an inline entry and a later paused entry both trigger.
+#[test]
+fn r27_inline_then_paused_gargantuan_observer_sees_both_entries() {
+    r24_doubled_gargantuan(PauseCarry::Live, GargantuanBatch::ObserveInlineThenPaused);
+}
+
+#[test]
+fn r27s_inline_then_paused_gargantuan_observer_across_save_and_restore() {
+    r24_doubled_gargantuan(
+        PauseCarry::SavedAndRestored,
+        GargantuanBatch::ObserveInlineThenPaused,
+    );
+}
+
+/// CR 603.6a + CR 603.3b: terminal handoff to a later target retains both entries.
+#[test]
+fn r28_terminal_then_paused_gargantuan_observer_sees_both_entries() {
+    r24_doubled_gargantuan(PauseCarry::Live, GargantuanBatch::ObserveTerminalThenPaused);
+}
+
+#[test]
+fn r28s_terminal_then_paused_gargantuan_observer_across_save_and_restore() {
+    r24_doubled_gargantuan(
+        PauseCarry::SavedAndRestored,
+        GargantuanBatch::ObserveTerminalThenPaused,
     );
 }
 
@@ -2503,11 +2546,33 @@ fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
     let mut offers = 0;
     let mut colors = 0;
     let mut observed_batch = false;
+    let observes = matches!(
+        batch,
+        GargantuanBatch::ObserveEntries
+            | GargantuanBatch::ObserveInlineThenPaused
+            | GargantuanBatch::ObserveTerminalThenPaused
+    );
+    let inline_first = matches!(
+        batch,
+        GargantuanBatch::ObserveInlineThenPaused | GargantuanBatch::ObserveTerminalThenPaused
+    );
+    let expected_colors = if inline_first { 1 } else { 2 };
     let mut board = vec![(P0, PARALLEL_LIVES), (P0, PAINTERS_SERVANT)];
-    if batch == GargantuanBatch::ObserveEntries {
+    if batch == GargantuanBatch::ObserveTerminalThenPaused {
+        board.remove(0);
+    }
+    if observes {
         board.push((P1, "Soul Warden"));
     }
-    let driven = cast_twinflame_with(&[QUICKSILVER_GARGANTUAN], &board, |waiting, driven| {
+    if inline_first {
+        board.push((P0, MEMNITE));
+    }
+    let targets = if batch == GargantuanBatch::ObserveTerminalThenPaused {
+        vec![QUICKSILVER_GARGANTUAN, QUICKSILVER_GARGANTUAN]
+    } else {
+        vec![QUICKSILVER_GARGANTUAN]
+    };
+    let driven = cast_twinflame_with(&targets, &board, |waiting, driven| {
         if is_paused(&driven.runner) {
             assert!(
                 driven.runner.state().stack.is_empty(),
@@ -2544,12 +2609,22 @@ fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
                 ..
             } => {
                 assert_eq!(*player, P0);
+                let donor_name = if inline_first && choices == 0 {
+                    MEMNITE
+                } else {
+                    PAINTERS_SERVANT
+                };
+                assert_eq!(
+                    offers,
+                    choices + 1,
+                    "each target follows its replacement prompt"
+                );
                 let donor = driven
                     .pre
                     .iter()
                     .copied()
-                    .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
-                    .expect("original Painter's Servant exists");
+                    .find(|id| driven.runner.state().objects[id].name == donor_name)
+                    .expect("original donor exists");
                 assert!(valid_targets.contains(&donor));
                 choices += 1;
                 Some(GameAction::ChooseTarget {
@@ -2565,11 +2640,12 @@ fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
                     choice: options[0].clone(),
                 })
             }
-            WaitingFor::OrderTriggers { player, triggers }
-                if batch == GargantuanBatch::ObserveEntries =>
-            {
+            WaitingFor::OrderTriggers { player, triggers } if observes => {
                 assert_eq!(*player, P1);
-                assert_eq!(colors, 2, "both entries complete before the observer batch");
+                assert_eq!(
+                    colors, expected_colors,
+                    "all entry choices complete before the observer batch"
+                );
                 assert_eq!(
                     triggers.len(),
                     2,
@@ -2586,7 +2662,7 @@ fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
                 observed_batch = true;
                 None
             }
-            WaitingFor::Priority { .. } if batch == GargantuanBatch::ObserveEntries => {
+            WaitingFor::Priority { .. } if observes => {
                 // This also makes the reviewed head fail on its single-trigger exit.
                 assert_eq!(
                     driven.runner.state().stack.len(),
@@ -2609,23 +2685,29 @@ fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
     } else {
         2
     };
+    assert_eq!(choices, copied, "every accepted copy chooses its donor");
     assert_eq!(
-        choices, copied,
-        "every accepted copy chooses the Painter donor"
-    );
-    assert_eq!(
-        colors, copied,
-        "both tokens answer their acquired as-enters choice"
+        colors,
+        if inline_first { 1 } else { copied },
+        "each acquired as-enters choice is answered"
     );
     let tokens = driven.created_tokens();
-    assert_eq!(tokens.len(), 2, "Parallel Lives keeps both tokens");
-    assert_eq!(named(&driven, PAINTERS_SERVANT), tokens[..copied]);
+    assert_eq!(tokens.len(), 2, "both requested tokens entered");
+    if inline_first {
+        assert_eq!(driven.runner.state().objects[&tokens[0]].name, MEMNITE);
+        assert_eq!(
+            driven.runner.state().objects[&tokens[1]].name,
+            PAINTERS_SERVANT
+        );
+    } else {
+        assert_eq!(named(&driven, PAINTERS_SERVANT), tokens[..copied]);
+    }
     if batch == GargantuanBatch::DeclineSecond {
         let second = &driven.runner.state().objects[&tokens[1]];
         assert_eq!(second.name, QUICKSILVER_GARGANTUAN);
         assert_eq!((second.power, second.toughness), (Some(7), Some(7)));
     }
-    if batch == GargantuanBatch::ObserveEntries {
+    if observes {
         assert!(
             observed_batch,
             "the post-resolution observer batch was inspected"
