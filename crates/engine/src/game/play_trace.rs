@@ -2814,31 +2814,35 @@ mod tests {
                 })
                 .collect()
         };
-        let mut trace = PlayTrace::new(WindowKey::of(&GameState::new_two_player(1)));
-        let node = trace.intern(NodeKey::Unkeyed(0));
-        for beneath in ["Animate Dead", "Worldgorger Dragon"] {
-            let at = trace.entries.len();
-            let prior = trace.clone();
-            let entry = TraceEntry {
-                seat: PlayerId(0),
-                kind: EntryKind::Resolution { node },
-                depth: 2,
-                prompt: PromptClass::Priority,
-                next_object_id: 0,
-            };
-            trace.record(&prior, entry, None);
-            let before = stack(&[beneath, "Soul Warden"]);
-            trace.beneath.insert(at, beneath_identity(&before, 0));
+        for (top, optional, cause) in [
+            ("Soul Warden", false, NamingCause::MandatoryRecurrence),
+            ("Suture Priest", true, NamingCause::TriggerTop),
+        ] {
+            let mut trace = PlayTrace::new(WindowKey::of(&GameState::new_two_player(1)));
+            let node = trace.intern(NodeKey::Unkeyed(0));
+            for beneath in ["Animate Dead", "Worldgorger Dragon"] {
+                let at = trace.entries.len();
+                let prior = trace.clone();
+                let entry = TraceEntry {
+                    seat: PlayerId(0),
+                    kind: EntryKind::Resolution { node },
+                    depth: 2,
+                    prompt: PromptClass::Priority,
+                    next_object_id: 0,
+                };
+                trace.record(&prior, entry, None);
+                let before = stack(&[beneath, top]);
+                trace.beneath.insert(at, beneath_identity(&before, 0));
+            }
+            if optional {
+                trace.optional_triggers.insert(node);
+            }
+            let frame = stack(&["Animate Dead", top]);
+            assert_eq!(
+                trigger_top_cause(&trace, node, &frame),
+                Some((0, cause)),
+                "{top}"
+            );
         }
-        let frame = stack(&["Animate Dead", "Soul Warden"]);
-        assert_eq!(
-            trigger_top_cause(&trace, node, &frame),
-            Some((0, NamingCause::MandatoryRecurrence))
-        );
-        trace.optional_triggers.insert(node);
-        assert_eq!(
-            trigger_top_cause(&trace, node, &frame),
-            Some((0, NamingCause::TriggerTop))
-        );
     }
 }

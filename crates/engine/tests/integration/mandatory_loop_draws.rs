@@ -4853,15 +4853,16 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
 /// both seats, so a count is taken beside either Soul Warden (CR 603.6a: P0's Warden returns beside
 /// Wood Elves each cycle and triggers twice per period). P0's accepted `Fixed(3)` performs three
 /// cycles, in each of which Wood Elves and Worldgorger Dragon enter, so Soul Warden's controller
-/// gains exactly 6 life (CR 603.2).
+/// gains exactly 6 life (CR 603.2). P1's shortens are driven only where P1 holds Terramorphic
+/// Expanse, since a responder names only places at which it has a game choice (CR 732.2b).
 fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
-    for seat in [P1, P0] {
+    for (seat, p1_cards) in [(P1, P1_SHORTENER), (P0, &[][..]), (P0, P1_SHORTENER)] {
         let board = Board {
             soul_warden: Some(seat),
-            p1_cards: P1_SHORTENER,
+            p1_cards,
             ..WOOD_ELVES
         };
-        let leg = format!("{seat:?} {drive:?}");
+        let leg = format!("{seat:?} p1={p1_cards:?} {drive:?}");
         let before = play_trace_counters();
         let Some(offered) = run(board, LoopDetectionMode::Interactive, drive, 60) else {
             return;
@@ -4876,7 +4877,9 @@ fn shuffle_only_the_replay_draws_is_offered(drive: Drive) {
             offered.state().rng.get_word_pos() > 0,
             "{leg}: reach: the shuffles drew randomness"
         );
-        assert_counted_take_performs(offered.state(), &leg);
+        if !p1_cards.is_empty() {
+            assert_counted_take_performs(offered.state(), &leg);
+        }
         let (taken, _) = accepted_take(offered.state(), 3, &leg);
         assert_eq!(
             taken.players[seat.0 as usize].life,
@@ -4896,6 +4899,76 @@ fn a_shuffle_only_the_replay_draws_passing_is_offered() {
 #[test]
 fn a_shuffle_only_the_replay_draws_until_turn_boundary_is_offered() {
     shuffle_only_the_replay_draws_is_offered(Drive::UntilTurnBoundary);
+}
+
+/// CR 603.5 + CR 603.6a + CR 732.2a: Suture Priest ("Whenever another creature you control
+/// enters, you may gain 1 life. Whenever a creature an opponent controls enters, you may have that
+/// player lose 1 life.") beside the Wood Elves loop triggers optionally on each entry, and each
+/// frame at which its trigger tops a stack of three names no span: its trigger's span starts at the
+/// resolution with that frame's entry beneath it, which is the one span P0 is offered.
+#[test]
+fn an_optional_trigger_over_a_frame_entry_names_only_the_period_beneath_it() {
+    let board = Board {
+        p0_cards: &["Suture Priest"],
+        p1_cards: P1_SHORTENER,
+        ..WOOD_ELVES
+    };
+    let (mut named, mut priest_frames, mut priest_spans) = (0, 0, Vec::new());
+    let Some(run) = run_observed(
+        board,
+        LoopDetectionMode::Interactive,
+        Drive::Pass,
+        120,
+        |state| {
+            let priest_on_top = state.stack.len() == 3
+                && matches!(
+                    state.stack.back().map(|entry| &entry.kind),
+                    Some(StackEntryKind::TriggeredAbility { source_name, .. })
+                        if source_name == "Suture Priest"
+                );
+            priest_frames += usize::from(priest_on_top);
+            let Some(view) = engine::game::play_trace_view(state) else {
+                return;
+            };
+            if priest_on_top {
+                priest_spans.extend(
+                    view.named
+                        .iter()
+                        .skip(named)
+                        .filter(|span| span.cause == NamingCause::TriggerTop)
+                        .copied(),
+                );
+            }
+            named = view.named.len();
+        },
+    ) else {
+        return;
+    };
+    assert!(
+        priest_frames > 0,
+        "reach: Suture Priest's trigger topped a stack of three"
+    );
+    assert_eq!(priest_spans, Vec::new());
+    assert_eq!(
+        run.terminal,
+        Terminal::Offer {
+            predicted_winner: None,
+            mandatory: false
+        }
+    );
+    let state = run.state();
+    assert_eq!(counted_take(state), CountedTake::Performs);
+    let view = engine::game::play_trace_view(state).expect("the offer reads its play trace");
+    let span = view.offered.expect("the offer names its span");
+    assert_eq!(
+        (span.start, span.end, span.cause),
+        (9, 32, NamingCause::TriggerTop)
+    );
+    let resolutions = view.entries[span.start..span.end]
+        .iter()
+        .filter(|entry| matches!(entry.kind, engine::game::EntryKind::Resolution { .. }))
+        .count();
+    assert_eq!(resolutions, 7);
 }
 
 #[test]
