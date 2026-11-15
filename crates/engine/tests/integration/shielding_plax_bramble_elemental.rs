@@ -12,9 +12,12 @@ use engine::game::engine::EngineError;
 use engine::game::game_object::AttachTarget;
 use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{FilterProp, StaticDefinition, TargetFilter};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
@@ -1931,77 +1934,140 @@ fn ground_seal_does_not_protect_battlefield_creatures() {
     );
 }
 
-/// Rewrites every serialized `CantBeTargeted` static mode to the bare unit
-/// string a v0.125.0 writer persisted, leaving the persisted `affected` filter
-/// as is. Returns how many modes were rewritten.
-fn downgrade_cant_be_targeted_to_released_unit_form(value: &mut serde_json::Value) -> usize {
+/// Rewrites every serialized `CantBeTargeted` static to the shape a v0.125.0
+/// writer persisted: the bare unit string for the mode and the historical
+/// `SelfRef` subject its parser bound for "Cards in graveyards can't be the
+/// targets of spells or abilities." (the card is a recorded `wrong_object`
+/// misparse). Returns how many statics were rewritten.
+fn downgrade_cant_be_targeted_to_released_form(value: &mut serde_json::Value) -> usize {
     match value {
         serde_json::Value::Object(map) => {
             let mut rewritten = 0;
-            if let Some(mode) = map.get_mut("mode") {
-                if mode
-                    .as_object()
+            if map.get("mode").is_some_and(|mode| {
+                mode.as_object()
                     .is_some_and(|inner| inner.len() == 1 && inner.contains_key("CantBeTargeted"))
-                {
-                    *mode = serde_json::Value::String("CantBeTargeted".to_string());
-                    rewritten += 1;
-                }
+            }) {
+                map.insert("mode".into(), "CantBeTargeted".into());
+                map.insert("affected".into(), serde_json::json!({"type": "SelfRef"}));
+                rewritten += 1;
             }
             rewritten
                 + map
                     .values_mut()
-                    .map(downgrade_cant_be_targeted_to_released_unit_form)
+                    .map(downgrade_cant_be_targeted_to_released_form)
                     .sum::<usize>()
         }
         serde_json::Value::Array(items) => items
             .iter_mut()
-            .map(downgrade_cant_be_targeted_to_released_unit_form)
+            .map(downgrade_cant_be_targeted_to_released_form)
             .sum(),
         _ => 0,
     }
 }
 
-/// CR 702.18a + CR 707.2: a save written by v0.125.0 (a Mirrorworks copy of
-/// Silent Gravestone persisted with the bare unit-form `CantBeTargeted` and the
-/// subject the released parser bound, the copy itself) restores as the
-/// executable blanket prohibition, not an inert `Other`. The persisted subject
-/// is preserved (token characteristics are serialized copiable values), so the
-/// copy still cannot be targeted by Naturalize-class removal — exactly the
-/// released behavior — while cards in graveyards stay targetable (Raise Dead
-/// control), as they were when the save was written.
+/// Drive the prompts until the stack is empty, paying the optional {2} of
+/// Mirrorworks, with production actions only.
+fn settle_mirrorworks_copy(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(player, P0, "Mirrorworks's controller decides");
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("pay for the copy");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve the stack");
+            }
+            other => panic!("unexpected prompt while copying: {other:?}"),
+        }
+    }
+    panic!(
+        "the Mirrorworks copy never settled: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 702.18a + CR 707.2: a save written by v0.125.0 after Mirrorworks copied
+/// Silent Gravestone persists the token's characteristics with the bare
+/// unit-form `CantBeTargeted` and the subject the released parser bound (the
+/// copy itself). The copy token is restored through the production save path
+/// (`PersistedGameState` decode, `prepare_for_restore`, card-database
+/// rehydration), which preserves a token's serialized characteristics rather
+/// than re-deriving them from the printed card. With the original gone, the
+/// token keeps an executable blanket prohibition: Naturalize cannot target it.
+///
+/// Historical-filter treatment (chosen, asserted here): the persisted `affected`
+/// filter is NOT re-derived, so the restored rule binds exactly what the
+/// released engine bound; cards in graveyards stay targetable by Raise Dead,
+/// as they were in the saved game.
 #[test]
-fn released_unit_form_cant_be_targeted_save_restores_executable_restriction() {
+fn released_save_of_mirrorworks_copy_restores_executable_restriction() {
+    let db = crate::support::shared_card_db().expect("the checked-in fixture contains the cards");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let gravestone = scenario
-        .add_artifact_from_oracle(
-            P0,
-            "Silent Gravestone",
-            "Silent Gravestone can't be the target of spells or abilities.",
-        )
-        .id();
+    let mirrorworks = scenario.add_real_card(P0, "Mirrorworks", Zone::Battlefield, db);
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let gravestone = scenario.add_real_card(P0, "Silent Gravestone", Zone::Hand, db);
+    scenario.add_basic_land(P1, ManaColor::Green);
+    scenario.add_basic_land(P1, ManaColor::Green);
+    scenario.add_basic_land(P1, ManaColor::Black);
+    let naturalize = scenario.add_real_card(P1, "Naturalize", Zone::Hand, db);
+    let raise_dead = scenario.add_real_card(P1, "Raise Dead", Zone::Hand, db);
     let dead_bear = scenario
-        .add_creature_to_graveyard(P0, "Dead Bear", 2, 2)
+        .add_creature_to_graveyard(P1, "Dead Bear", 2, 2)
         .id();
-    let removal = scenario
-        .add_spell_to_hand_from_oracle(P1, "Naturalize", true, "Destroy target artifact.")
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    let raise_dead = scenario
-        .add_spell_to_hand_from_oracle(P1, "Raise Dead", true, GRAVEYARD_RETURN)
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    let runner = scenario.build();
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
-    let mut saved = serde_json::to_value(runner.state()).expect("state serializes");
+    // Production actions: cast Silent Gravestone; Mirrorworks's entry trigger
+    // offers the {2} payment, which creates the token copy.
+    let action = cast_action(&runner, gravestone);
+    runner.act(action).expect("cast Silent Gravestone");
+    settle_mirrorworks_copy(&mut runner);
+    let token = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].is_token)
+        .expect("Mirrorworks created a token copy");
+    assert_eq!(runner.state().objects[&token].name, "Silent Gravestone");
+    assert!(runner.state().objects[&token].printed_ref.is_some());
+
+    // Remove the original so only the copy can supply the restriction.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), gravestone, Zone::Exile, &mut events);
+    assert!(!runner.state().battlefield.contains(&gravestone));
+
+    let live = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the board serializes");
+    let mut saved: serde_json::Value = serde_json::from_str(&live).expect("save is JSON");
     assert!(
-        downgrade_cant_be_targeted_to_released_unit_form(&mut saved) > 0,
-        "the fixture must contain the CantBeTargeted static it downgrades"
+        downgrade_cant_be_targeted_to_released_form(&mut saved) > 0,
+        "the board must carry the token's CantBeTargeted static it downgrades"
     );
-    let restored: engine::types::game_state::GameState =
-        serde_json::from_value(saved).expect("a released-writer save restores");
+    let json = serde_json::to_string(&saved).expect("released-form save serializes");
+
+    let restored = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("the released save decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("the released save is admissible")
+        .finalize_after_rehydration(|state| {
+            engine::game::rehydrate_game_from_card_db(state, db);
+            Ok(())
+        })
+        .expect("the rehydrated save is publishable");
+
+    let token_obj = &restored.objects[&token];
+    assert!(token_obj.is_token, "the copy is still a token");
     assert!(
-        restored.objects[&gravestone]
+        token_obj
             .static_definitions
             .iter_unchecked()
             .any(|def| matches!(
@@ -2009,20 +2075,24 @@ fn released_unit_form_cant_be_targeted_save_restores_executable_restriction() {
                 StaticMode::CantBeTargeted {
                     who: ProhibitionScope::AllPlayers
                 }
-            )),
-        "the unit-form mode restores as the executable blanket prohibition"
+            ) && def.affected == Some(TargetFilter::SelfRef)),
+        "unit-form mode restores executable; historical subject preserved: {:?}",
+        token_obj.static_definitions
     );
 
     let mut runner = GameRunner::from_state(restored);
-    let legal = cast_legal_targets(&mut runner, P1, removal);
+    let legal = cast_legal_targets(&mut runner, P1, naturalize);
     assert!(
-        !legal.contains(&gravestone),
-        "restored restriction is enforced: {legal:?}"
+        legal.contains(&mirrorworks),
+        "positive control: Naturalize can target Mirrorworks: {legal:?}"
     );
-    let mut runner_for_raise = runner;
-    let graveyard_legal = cast_legal_targets(&mut runner_for_raise, P1, raise_dead);
+    assert!(
+        !legal.contains(&token),
+        "the restored copy keeps its executable restriction: {legal:?}"
+    );
+    let graveyard_legal = cast_legal_targets(&mut runner, P1, raise_dead);
     assert!(
         graveyard_legal.contains(&dead_bear),
-        "the persisted subject is not re-derived: graveyard cards stay targetable: {graveyard_legal:?}"
+        "historical filter is not re-derived: graveyard cards stay targetable: {graveyard_legal:?}"
     );
 }
