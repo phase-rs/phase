@@ -8,7 +8,10 @@ use crate::game::deck_loading::DeckList;
 
 /// Version 3 adds atomic Resolve All boundaries and verified AI pass markers.
 /// Version 2 recordings remain readable because they contain neither feature.
-pub const REPLAY_FORMAT_VERSION: u32 = 3;
+/// Version 4 records the CR 103.1 game-one choice as an ordinary
+/// `ChooseStartingPlayer` action; versions 2 and 3 predate it, and their
+/// contest winner took the first turn.
+pub const REPLAY_FORMAT_VERSION: u32 = 4;
 
 /// Everything needed to reconstruct a game's starting state, deterministically,
 /// from scratch. Mirrors the inputs `initialize_game` already accepts at the
@@ -16,11 +19,14 @@ pub const REPLAY_FORMAT_VERSION: u32 = 3;
 /// start instead of thrown away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayHeader {
+    /// Decoded with the values its game was recorded under, so reconstruction replays those rules.
+    #[serde(deserialize_with = "FormatConfig::deserialize_recorded")]
     pub format_config: FormatConfig,
     pub match_config: MatchConfig,
     pub player_count: u8,
     /// CR 103.1: `Some(0)` / `Some(1)` for an explicit starting player,
-    /// `None` for the engine's own d20 contest.
+    /// `None` for the engine's own d20 contest (the chooser's answer is then a
+    /// recorded action, from version 4).
     pub first_player: Option<u8>,
     pub seed: u64,
     /// `None` when the game was started with empty libraries (no deck data

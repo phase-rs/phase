@@ -34,6 +34,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RetargetChoice { .. }
         | WaitingFor::DistributeAmong { .. }
         | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::RemoveCountersChoice { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
@@ -104,6 +105,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -116,11 +118,16 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // mid-resolution decisions; route to the ability catch-all bucket.
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         // CR 119.7 + CR 119.8: redistribute life totals is a forced mid-resolution
         // selection; route to the ability catch-all bucket.
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: the remainder split is a forced mid-resolution selection,
+        // same bucket as the keep selection it follows.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
@@ -130,13 +137,19 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
+        | WaitingFor::SpellCopyOrderChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
+        // Turtle Team-Up (no CR section — casual product): hero-choice Events
+        // answer with SelectCards like a discard; route to the ability catch-all.
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -185,10 +198,13 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        // Host-driven contest: no seat is ever asked to decide.
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -214,6 +230,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::GameOver { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -261,11 +278,13 @@ mod tests {
             classify(
                 &WaitingFor::MulliganDecision {
                     pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 0,
                         phase: engine::types::game_state::MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
+                    declared: Vec::new(),
                 },
                 &dummy_action
             ),
@@ -329,6 +348,8 @@ mod tests {
                     valid_block_targets: std::collections::HashMap::new(),
                     block_requirements: std::collections::HashMap::new(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
                 &dummy_action
             ),
@@ -355,7 +376,8 @@ mod tests {
                 &priority,
                 &GameAction::ActivateAbility {
                     source_id: ObjectId(0),
-                    ability_index: 0
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto
                 }
             ),
             DecisionKind::ActivateAbility

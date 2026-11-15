@@ -49,8 +49,7 @@ fn pidx(p: PlayerId) -> usize {
 fn red_count(state: &GameState, player: PlayerId) -> usize {
     state.players[pidx(player)]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|u| u.color == ManaType::Red)
         .count()
 }
@@ -59,8 +58,7 @@ fn red_count(state: &GameState, player: PlayerId) -> usize {
 fn red_expiry(state: &GameState, player: PlayerId) -> Option<ManaExpiry> {
     state.players[pidx(player)]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .find(|u| u.color == ManaType::Red)
         .and_then(|u| u.expiry)
 }
@@ -333,6 +331,7 @@ fn boast_twice_with_birgi_rejects_third() {
     let third = runner.act(GameAction::ActivateAbility {
         source_id: boaster,
         ability_index: idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         third.is_err(),
@@ -365,6 +364,7 @@ fn boast_once_without_birgi_rejects_second() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: boaster,
         ability_index: idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         second.is_err(),
@@ -504,11 +504,13 @@ fn opponents_boast_creature_not_raised_by_your_birgi() {
         .act(GameAction::ActivateAbility {
             source_id: opp_boaster,
             ability_index: idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("first boast activation by the opponent must be legal");
     let second = runner.act(GameAction::ActivateAbility {
         source_id: opp_boaster,
         ability_index: idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         second.is_err(),

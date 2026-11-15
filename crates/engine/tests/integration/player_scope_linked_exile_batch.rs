@@ -72,6 +72,7 @@ fn cast_window(source: ObjectId) -> ResolvedAbility {
             },
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![],
         source,
@@ -82,6 +83,8 @@ fn cast_window(source: ObjectId) -> ResolvedAbility {
 fn scoped_graveyard_exile(source: ObjectId, tail: ResolvedAbility) -> ResolvedAbility {
     let mut exile = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter {
@@ -227,6 +230,7 @@ fn ordinary_scoped_sequential_exile_producer_remains_a_batch_barrier() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
         vec![],
         source,

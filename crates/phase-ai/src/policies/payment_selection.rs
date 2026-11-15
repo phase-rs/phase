@@ -81,8 +81,9 @@ impl PaymentSelectionPolicy {
         let extra_penalty = extra_count as f64 * 0.35;
         let resume_scale = match resume {
             CostResume::Spell { .. } | CostResume::SpellCost { .. } => 1.0,
-            CostResume::Resolution => 1.0,
+            CostResume::Resolution | CostResume::TeamTapPayment { .. } => 1.0,
             CostResume::ManaAbility { .. } => 0.8,
+            CostResume::TurnFaceUp { .. } => 1.0,
         };
 
         let needed_land_penalty = if discard_spends_last_playable_land(ctx, kind, cards) {
@@ -428,7 +429,7 @@ fn payment_cost(
         // CR 701.20a + CR 701.20b: Revealing doesn't move the card — it stays
         // in hand — so the real resource cost is ~0, mirroring Behold's
         // reveal-from-hand branch.
-        PayCostKind::Reveal => cost_card_value(state, obj_id) * 0.1,
+        PayCostKind::Reveal { .. } => cost_card_value(state, obj_id) * 0.1,
         PayCostKind::ReturnToHand => 0.5 + permanent_board_value(state, obj_id, penalties) * 0.5,
         PayCostKind::ExileFromZone { zone } => match zone {
             ExileCostSourceZone::Hand => cost_card_value(state, obj_id) * 1.2,

@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type {
   ManaRestriction,
   ManaSpellGrant,
@@ -19,7 +20,7 @@ export type ManaRestrictionTag = ExternallyTaggedVariantName<ManaRestriction>;
 // i18n key (under the `manaPool` group) per restriction variant. Exhaustive
 // `Record` — adding a `ManaRestriction` variant without a tooltip key here is a
 // type error.
-export const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
+export const RESTRICTION_LABEL_KEYS = {
   OnlyForSpell: "manaPool.onlyForSpell",
   OnlyForSpellType: "manaPool.onlyForSpellType",
   OnlyForCreatureType: "manaPool.onlyForCreatureType",
@@ -40,7 +41,7 @@ export const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
   OnlyForSpecialAction: "manaPool.onlyForSpecialAction",
   Impossible: "manaPool.impossible",
   ConvokePayment: "manaPool.convokePayment",
-};
+} as const satisfies Record<ManaRestrictionTag, ParseKeys<"game">>;
 
 export function restrictionTag(restriction: ManaRestriction): ManaRestrictionTag {
   return typeof restriction === "string"
@@ -121,7 +122,7 @@ export function groupManaPoolUnits(units: ManaUnit[]): ManaPoolGroup[] {
  * fall back to a generic label.
  */
 export function manaGroupTooltip(
-  translate: (key: string) => string,
+  translate: (key: ParseKeys<"game">) => string,
   group: Pick<ManaPoolGroup, "restrictions" | "grants" | "special">,
 ): string | undefined {
   if (!group.special) return undefined;

@@ -1,8 +1,8 @@
 //! Per-game JSON-Lines debug log sink (GitHub issue #7978).
 //!
 //! Shared by `server-core` (writes the engine's own [`GameLogEntry`] rows at
-//! the point each action result is minted — `SessionManager::handle_action`,
-//! `SessionManager::handle_interaction_with_rejection`,
+//! the point each action result is minted — `GameSession::handle_action`,
+//! `GameSession::handle_interaction_with_rejection`,
 //! `GameSession::run_ai_action_batch` — so every path that produces a
 //! transition is covered by construction, not by remembering to call a hook
 //! at each of `phase-server`'s call sites) and `phase-server` (writes
@@ -127,11 +127,13 @@ impl GameFileCache {
 
     /// Write one JSON-Lines row per [`GameLogEntry`], stamped with the
     /// wall-clock moment of writing — the entries themselves carry only
-    /// game-time (`turn`/`phase`); `seq` is left at whatever the engine set
+    /// game-time (`turn`/`phase`, and from a match's second game on,
+    /// `game_number`); `seq` is left at whatever the engine set
     /// (currently always `0` here — see `GameLogEntry`'s doc comment, it is
     /// assigned downstream by a UI consumer, not by this write path).
     /// Ordering for this stream comes from write order (callers write while
-    /// holding the session lock, so it's the actual game order), not `seq`.
+    /// holding that game's `Mutex<GameSession>`, so it's the actual game
+    /// order), not `seq`.
     pub fn write_game_log_entries(&self, game_code: &str, entries: &[GameLogEntry]) {
         if self.games_dir.is_none() {
             return;
@@ -275,6 +277,7 @@ mod tests {
             // a UI consumer, not this layer) — using a non-zero value would
             // test a fixture production never produces.
             seq: 0,
+            game_number: 1,
             turn: 1,
             phase: Phase::PreCombatMain,
             category,

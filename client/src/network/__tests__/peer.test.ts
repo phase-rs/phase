@@ -1,8 +1,10 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { getDiagnosticHistory, getDiagnosticSources } from "../../services/troubleshooting";
 import { trackEvent } from "../../services/telemetry";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import { createPeerSession } from "../peer";
+import type { PeerSessionOptions } from "../peer";
 import { validateMessage } from "../protocol";
 import type { P2PMessage } from "../protocol";
 import { FakeDataConnection } from "./fakeDataConnection";
@@ -10,11 +12,29 @@ import { FakeDataConnection } from "./fakeDataConnection";
 vi.mock("../../services/telemetry", () => ({ trackEvent: vi.fn() }));
 beforeEach(() => { vi.mocked(trackEvent).mockClear(); });
 
-function createTestSession(opts?: { onSessionEnd?: () => void }) {
+function createTestSession(opts?: PeerSessionOptions) {
   const conn = new FakeDataConnection();
   // Cast to satisfy DataConnection type — we only use the subset FakeDataConnection implements.
   const session = createPeerSession(conn as never, opts);
   return { conn, session };
+}
+
+/**
+ * `simulateData` encodes plain objects, so it can only ever produce a DECODE
+ * failure. The other drop site takes a frame that never was binary — what an
+ * old-bundle peer sending plain JSON objects puts on the wire — so capture the
+ * transport's own data handler and deliver one verbatim.
+ */
+class RawFrameConnection extends FakeDataConnection {
+  private readonly rawHandlers = new Set<(data: unknown) => void>();
+  override on(event: string, handler: (...args: unknown[]) => void): this {
+    if (event === "data") this.rawHandlers.add(handler as (data: unknown) => void);
+    return super.on(event, handler);
+  }
+
+  async deliverRaw(data: unknown): Promise<void> {
+    await Promise.allSettled([...this.rawHandlers].map((h) => h(data)));
+  }
 }
 
 // Drain all pending microtasks/timers so the recvQueue-chained pending-message
@@ -71,6 +91,67 @@ describe("P2P Protocol - validateMessage", () => {
 });
 
 describe("PeerSession", () => {
+  it("delivers claimed state acknowledgements while preserving the game FIFO", async () => {
+    vi.useFakeTimers();
+    const acknowledged: number[] = [];
+    const { conn, session } = createTestSession({ onStateAck: (msg) => { acknowledged.push(msg.revision); return true; } });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const received: string[] = [];
+    session.onMessage(async (msg) => {
+      received.push(msg.type);
+      if (msg.type === "action") await blocked;
+    });
+    const action = conn.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const acknowledgement = conn.simulateData({ type: "state_ack", revision: 8 });
+    const later = conn.simulateData({ type: "concede" });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acknowledged).toEqual([8]);
+      expect(received).toEqual(["action"]);
+      release();
+      await Promise.all([action, acknowledgement, later]);
+      expect(received).toEqual(["action", "concede"]);
+    } finally {
+      release();
+      await Promise.all([action, acknowledgement, later]);
+      session.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains ordinary dispatch for an unclaimed state acknowledgement", async () => {
+    const { conn, session } = createTestSession({ onStateAck: () => false });
+    const received: P2PMessage[] = [];
+    session.onMessage((msg) => { received.push(msg); });
+    try {
+      await conn.simulateData({ type: "state_ack", revision: 8 });
+      expect(received).toEqual([{ type: "state_ack", revision: 8 }]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("sends a one-shot serializable payload without re-reading it for diagnostics", async () => {
+    const { conn, session } = createTestSession();
+    let serialized = false;
+    const payload = Object.assign({ type: "concede" as const }, {
+      toJSON() {
+        if (serialized) throw new Error("Payload was already consumed by wire encoding");
+        serialized = true;
+        return { type: "concede" };
+      },
+    });
+    try {
+      await expect(session.send(payload)).resolves.toBe(true);
+      expect(await conn.getSentMessages()).toEqual([{ type: "concede" }]);
+      expect(conn.open).toBe(true);
+    } finally {
+      conn.open = false;
+      session.close();
+    }
+  });
+
   it("reports a dropped send and bypasses encoding when connection is not open", async () => {
     const { conn, session } = createTestSession();
     conn.open = false;
@@ -291,6 +372,38 @@ describe("PeerSession", () => {
     );
     session.close();
   });
+
+  // The frames that CANNOT traverse the transport — an unknown envelope version
+  // byte from a newer peer, a plain object from an older bundle — used to die
+  // here with a `console.warn` and nothing downstream told. Only the adapter
+  // holds the state to decide what a lost frame costs, so the transport has to
+  // say it lost one.
+  it("reports both undeliverable inbound frames instead of swallowing them", async () => {
+    const onUndeliverableFrame = vi.fn();
+    const conn = new RawFrameConnection();
+    const session = createPeerSession(conn as never, { onUndeliverableFrame });
+    const handler = vi.fn();
+    session.onMessage(handler);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await conn.simulateData(new Uint8Array([0x99, 0x01, 0x02]));
+    await conn.deliverRaw({ type: "concede" });
+
+    expect(onUndeliverableFrame.mock.calls).toEqual([["decode-failed"], ["non-binary"]]);
+    // Neither frame reached a handler; the neighbour above proves a frame that
+    // decodes does, so this is the drop and not a dead session.
+    expect(handler).not.toHaveBeenCalled();
+
+    // A frame arriving after `close()` reports nothing: both sites sit below
+    // `if (closed) return`, and a closed session has no adapter left to tell.
+    session.close();
+    onUndeliverableFrame.mockClear();
+    await conn.simulateData(new Uint8Array([0x99, 0x01, 0x02]));
+    await conn.deliverRaw({ type: "concede" });
+
+    expect(onUndeliverableFrame).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });
 
 /**
@@ -482,4 +595,139 @@ describe("PeerSession keep-alive", () => {
       vi.useRealTimers();
     }
   });
+});
+
+
+it("retains pre-teardown evidence after native state mutation and PeerJS field clearing", () => {
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed" });
+  const channel = Object.assign(new EventTarget(), { readyState: "open", bufferedAmount: 2048 });
+  const removePc = vi.spyOn(pc, "removeEventListener");
+  const removeChannel = vi.spyOn(channel, "removeEventListener");
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc as typeof pc | null, dataChannel: channel as typeof channel | null });
+  const before = getDiagnosticSources().peers.length;
+  const session = createPeerSession(conn as never);
+  channel.dispatchEvent(new Event("error"));
+  pc.connectionState = "closed";
+  pc.iceConnectionState = "closed";
+  channel.readyState = "closed";
+  channel.bufferedAmount = 0;
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  conn.peerConnection = null;
+  conn.dataChannel = null;
+  conn.simulateClose();
+  session.close();
+  expect(trackEvent).toHaveBeenCalledTimes(1);
+  expect(trackEvent).toHaveBeenCalledWith("p2p_disconnect", expect.objectContaining({ connection_state: "closed", last_connection_state: "connected", last_ice_state: "completed", last_channel_state: "open", last_buffered_bytes: 2048, channel_error: "data-channel-error" }));
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", preClose: { bufferedBytes: 2048, receiveAgeMs: null, pongAgeMs: null } });
+  expect(getDiagnosticSources().peers).toHaveLength(before);
+  expect(removePc).toHaveBeenCalledTimes(2);
+  expect(removeChannel).toHaveBeenCalledTimes(4);
+});
+
+
+it("retains the selected route after disconnect and ignores late stats", async () => {
+  const report = new Map<string, Record<string, unknown>>([
+    ["transport", { type: "transport", selectedCandidatePairId: "pair" }],
+    ["pair", { type: "candidate-pair", localCandidateId: "local", remoteCandidateId: "remote" }],
+    ["local", { candidateType: "relay", protocol: "udp", address: "SECRET" }],
+    ["remote", { candidateType: "host", protocol: "udp" }],
+  ]);
+  let complete: ((value: unknown) => void) | undefined;
+  const getStats = vi.fn().mockResolvedValueOnce(report).mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  await Promise.resolve();
+  conn.simulateClose();
+  const before = getDiagnosticHistory();
+  expect(before.slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", remoteType: "host", localProtocol: "udp", observedAt: expect.any(Number) } });
+  complete?.(report);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getDiagnosticHistory()).toEqual(before);
+  expect(JSON.stringify(before)).not.toContain("SECRET");
+  expect(getStats).toHaveBeenCalledTimes(2);
+  session.close();
+});
+
+
+it("does not start deferred route stats after immediate teardown or native closure", async () => {
+  const getStats = vi.fn().mockResolvedValue(new Map());
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  session.close();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getStats).not.toHaveBeenCalled();
+
+  const next = createPeerSession(Object.assign(new FakeDataConnection(), { peerConnection: pc }) as never);
+  pc.connectionState = "closed";
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getStats).not.toHaveBeenCalled();
+  next.close();
+});
+
+it("preserves typed established-connection errors with the same diagnostic identity", () => {
+  const conn = new FakeDataConnection();
+  const session = createPeerSession(conn as never);
+  const source = getDiagnosticSources().peers.slice(-1)[0];
+  conn.simulateError(Object.assign(new Error("SECRET"), { type: "negotiation-failed" }));
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", diagnosticId: source.diagnosticId, error: "negotiation-failed" });
+  expect(JSON.stringify(getDiagnosticHistory().slice(-1)[0])).not.toContain("SECRET");
+  session.close();
+});
+
+it("coalesces route changes during an in-flight probe and shares the refreshed evidence", async () => {
+  const selected = new Map<string, Record<string, unknown>>([
+    ["transport", { type: "transport", selectedCandidatePairId: "pair" }],
+    ["pair", { localCandidateId: "local" }],
+    ["local", { candidateType: "relay", protocol: "udp", relayProtocol: "tcp" }],
+  ]);
+  let finish!: (value: Map<string, Record<string, unknown>>) => void;
+  const getStats = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue(selected);
+  const pc = Object.assign(new EventTarget(), { connectionState: "connecting", iceConnectionState: "checking", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  await Promise.resolve();
+  pc.connectionState = "connected";
+  pc.iceConnectionState = "completed";
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  pc.dispatchEvent(new Event("iceconnectionstatechange"));
+  const pending = getDiagnosticSources().peers.slice(-1)[0].stats();
+  finish(new Map());
+  expect(await pending).toMatchObject({ localType: "relay", relayProtocol: "tcp" });
+  expect(getStats).toHaveBeenCalledTimes(2);
+  conn.simulateClose();
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", relayProtocol: "tcp" } });
+  session.close();
+});
+
+it("retains RTC transitions and native channel loss evidence before PeerJS reports closure", () => {
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed" });
+  const channel = Object.assign(new EventTarget(), { readyState: "open", bufferedAmount: 65536 });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc, dataChannel: channel });
+  const session = createPeerSession(conn as never);
+  const diagnosticId = getDiagnosticSources().peers.slice(-1)[0].diagnosticId;
+  try {
+    pc.connectionState = "disconnected";
+    pc.dispatchEvent(new Event("connectionstatechange"));
+    pc.iceConnectionState = "failed";
+    pc.dispatchEvent(new Event("iceconnectionstatechange"));
+    channel.dispatchEvent(new Event("error"));
+    channel.readyState = "closed";
+    channel.dispatchEvent(new Event("close"));
+    const transitions = getDiagnosticHistory().filter((entry) => entry.kind === "transport-transition" && entry.diagnosticId === diagnosticId);
+    expect(transitions).toMatchObject([
+      { event: "connectionstatechange", transport: { connectionState: "disconnected", bufferedBytes: 65536 } },
+      { event: "iceconnectionstatechange", transport: { iceState: "failed" } },
+      { event: "error", transport: { channelError: "data-channel-error", bufferedBytes: 65536 } },
+      { event: "close", transport: { channelState: "closed", bufferedBytes: 65536 } },
+    ]);
+    conn.simulateClose();
+    expect(getDiagnosticHistory().filter((entry) => entry.kind === "disconnect" && entry.diagnosticId === diagnosticId)).toHaveLength(1);
+  } finally {
+    session.close();
+  }
 });

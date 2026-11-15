@@ -289,9 +289,22 @@ function podView(): TournamentView {
   };
 }
 
-const ORGANIZER: TournamentCredential = { organizerToken: "org-token", updatedAt: 1 };
+// Credentials are bound to the broker they were minted against; the harness's
+// hosting server is `ws://localhost:8787`, so the role origins match it and the
+// fail-closed origin check admits these gated actions.
+const HOST_ORIGIN = "ws://localhost:8787";
+const ORGANIZER: TournamentCredential = {
+  organizerToken: "org-token",
+  organizerOrigin: HOST_ORIGIN,
+  updatedAt: 1,
+};
 function playerCredential(playerKey: string): TournamentCredential {
-  return { playerToken: "player-token", playerKey, updatedAt: 1 };
+  return {
+    playerToken: "player-token",
+    playerOrigin: HOST_ORIGIN,
+    playerKey,
+    updatedAt: 1,
+  };
 }
 
 function renderPage(code = "TOUR01") {
@@ -1149,7 +1162,9 @@ describe("TournamentPage catalog completeness", () => {
       tournamentCredentials: {
         TOUR01: {
           organizerToken: "org-token",
+          organizerOrigin: HOST_ORIGIN,
           playerToken: "player-token",
+          playerOrigin: HOST_ORIGIN,
           playerKey: "alice",
           updatedAt: 1,
         },
@@ -1289,7 +1304,9 @@ describe("TournamentPage concurrent action gating", () => {
       tournamentCredentials: {
         TOUR01: {
           organizerToken: "org-token",
+          organizerOrigin: HOST_ORIGIN,
           playerToken: "player-token",
+          playerOrigin: HOST_ORIGIN,
           playerKey: "alice",
           updatedAt: 1,
         },

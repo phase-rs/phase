@@ -1,0 +1,301 @@
+/**
+ * LLM-driven bot seats in a draft pod.
+ *
+ * Strictly opt-in and always recoverable: with no configured profile, or on any
+ * failure, the pick is submitted through the ordinary path and every bot seat
+ * is drafted by the heuristic bot in `draft_wasm::bot_ai`.
+ *
+ * As in the game path, the engine owns the decision. It renders each seat's own
+ * `DraftPlayerView` into a prompt, builds the HTTP request, and resolves the
+ * reply into pack cards; this module performs the calls.
+ */
+
+import { withDraftEngineOperation } from "../../adapter/draft-adapter";
+import type { LlmDraftResponsePayload } from "../../adapter/draft-adapter";
+import { ensureSetCatalog } from "../setCatalog";
+import { reportLlmFailure } from "./diagnostics";
+import { executeLlmRequest } from "./llmClient";
+import { resolvedEndpointOf } from "./endpoint";
+import { recordLlmUsage } from "./usage";
+import { type LlmDraftOutcome, type LlmDraftPickRequest, type LlmProfile } from "./types";
+
+/**
+ * Per-seat ceiling for a draft pick.
+ *
+ * The clock starts when the pack opens, not when the player clicks: a round is
+ * started the moment a pack is in front of the pod (`startLlmDraftRound`), so
+ * most of this budget is spent while the player is still reading the pack.
+ * Tighter than the in-game budget because a slow seat can still hold the pod
+ * at the end of a quick pick. The call runs with no engine lease held, so a
+ * seat that misses the window is simply drafted by the heuristic bot, with no
+ * consequence beyond that one card.
+ */
+export const LLM_DRAFT_TIMEOUT_MS = 20_000;
+
+/**
+ * The in-flight pick round, so a superseded one can be cut loose.
+ *
+ * A draft pick is a click the player can repeat, undo or navigate away from
+ * while the provider is still thinking. Without this, those calls run to their
+ * full timeout, hold sockets, and land replies for a pack that has already
+ * passed.
+ */
+let activeRun: AbortController | null = null;
+
+/**
+ * Abandon any in-flight LLM pick round.
+ *
+ * Safe to call at any time, including when nothing is running. Called when a
+ * new round starts and by the draft store when a pick is superseded or the
+ * session tears down.
+ */
+export function cancelLlmDraftRun(): void {
+  activeRun?.abort();
+  activeRun = null;
+}
+
+/** Set code -> printed name, so the format brief reads "Triple Mirrodin". */
+async function setNameMap(): Promise<Record<string, string>> {
+  const catalog = await ensureSetCatalog();
+  if (!catalog) return {};
+  return Object.fromEntries(
+    Object.entries(catalog).map(([code, info]) => [code.toUpperCase(), info.name]),
+  );
+}
+
+/** Where one LLM drafter is in the current pick round. */
+export type LlmDrafterState =
+  /** Its provider call is in flight. */
+  | "picking"
+  /** A reply came back; the engine will read it when the pick is submitted. */
+  | "ready"
+  /** The call failed or timed out; the engine bot drafts this seat's pick. */
+  | "fallback";
+
+export interface LlmDrafterStatus {
+  readonly seat: number;
+  readonly state: LlmDrafterState;
+}
+
+/** Progress callbacks for one round of provider calls. */
+export interface LlmDraftRoundObserver {
+  /** The engine built these requests; their calls are about to start. */
+  onRequests?(requests: readonly LlmDraftPickRequest[]): void;
+  /** One seat's call settled: `true` when bytes came back. */
+  onSeatSettled?(seat: number, replied: boolean): void;
+}
+
+/**
+ * One pick step's worth of LLM drafting, started as soon as the pack is open.
+ *
+ * The seats pick simultaneously (CR 905.1a), and none of them needs the
+ * player's pick to make its own — a seat's pack is already in front of it. So
+ * the provider calls start when the pack opens and run while the player
+ * decides; the player's pick only has to wait for whatever is still in flight
+ * when it is made, and a pick made after every seat has answered waits for
+ * nothing.
+ */
+export interface LlmDraftRound {
+  readonly profileId: string;
+  /** True once every seat's call has settled (replied, failed or timed out). */
+  readonly settled: boolean;
+  /**
+   * Every seat's reply, for `submitPickWithLlmBotPicks`. Never rejects; empty
+   * when nothing usable came back or the round was superseded.
+   */
+  readonly responses: Promise<LlmDraftResponsePayload[]>;
+  /** Prompt size of each seat's request, for usage reporting. */
+  readonly promptChars: ReadonlyMap<number, number>;
+}
+
+/**
+ * Start the round of LLM picks for the pack in front of the pod.
+ *
+ * Returns immediately; the calls run in the background. `onStatus` receives
+ * every seat's progress as it changes, so the UI can show which drafters have
+ * picked. Starting a round supersedes any earlier one, exactly as
+ * `collectLlmDraftResponses` does.
+ */
+export function startLlmDraftRound(
+  profile: LlmProfile,
+  stillCurrent: () => boolean,
+  onStatus: (statuses: readonly LlmDrafterStatus[]) => void,
+): LlmDraftRound {
+  const promptChars = new Map<number, number>();
+  let statuses: LlmDrafterStatus[] = [];
+  const publish = (next: LlmDrafterStatus[]): void => {
+    statuses = next;
+    if (stillCurrent()) onStatus(statuses);
+  };
+  const round: { -readonly [K in keyof LlmDraftRound]: LlmDraftRound[K] } = {
+    profileId: profile.id,
+    settled: false,
+    promptChars,
+    responses: Promise.resolve([]),
+  };
+  round.responses = collectLlmDraftResponses(profile, stillCurrent, {
+    onRequests(requests) {
+      for (const request of requests) promptChars.set(request.seat, request.promptChars);
+      publish(requests.map((request) => ({ seat: request.seat, state: "picking" })));
+    },
+    onSeatSettled(seat, replied) {
+      publish(statuses.map((status) => (
+        status.seat === seat ? { seat, state: replied ? "ready" : "fallback" } : status
+      )));
+    },
+  }).finally(() => {
+    round.settled = true;
+  });
+  return round;
+}
+
+/**
+ * Gather every LLM bot seat's reply for the pick about to be submitted.
+ *
+ * Deliberately split across the engine-operation lease rather than run inside
+ * it. The lease is a SINGLETON serializing every draft engine call, so holding
+ * it across a provider round trip would block `getView`, autosave and any other
+ * draft operation for the whole request timeout -- up to 20s per pick, on a
+ * queue the UI depends on. The three phases here are:
+ *
+ *   1. build the requests under a short-lived lease (a read-only engine call),
+ *   2. perform the network I/O with NO lease held,
+ *   3. hand the replies back so the caller can reacquire and submit.
+ *
+ * Correctness across the gap is the engine's, not this function's: every reply
+ * carries the pack fingerprint it was built from, and `submitPickWithLlmBotPicks`
+ * re-reads the live pack and refuses any seat whose pack moved on. A slow
+ * provider therefore costs that seat its flavour, never a wrong pick.
+ *
+ * Returns an empty list whenever the LLM path cannot contribute, which the
+ * caller treats as "submit the ordinary way".
+ */
+export async function collectLlmDraftResponses(
+  profile: LlmProfile,
+  stillCurrent: () => boolean,
+  observer: LlmDraftRoundObserver = {},
+): Promise<LlmDraftResponsePayload[]> {
+  // Supersede any round still running for an earlier pick: its replies are for
+  // a pack that has moved on, and the engine would refuse them anyway.
+  cancelLlmDraftRun();
+  const run = new AbortController();
+  activeRun = run;
+
+  // Phase 1 -- under lease, read-only. No pick is applied here.
+  let requests: LlmDraftPickRequest[];
+  try {
+    const setNames = await setNameMap();
+    // No seat list is supplied. Which seats an LLM may draft for is an
+    // AUTHORITY question the draft engine already answers (`DraftSeat::Bot`, in
+    // `llm_eligible_bot_seats`), and a second selection here would be a
+    // client-side classification of the same thing -- free to drift, and
+    // drifting toward disclosing a human seat's private pool.
+    requests = await withDraftEngineOperation((lease) =>
+      lease.buildLlmDraftPickRequests(JSON.stringify(resolvedEndpointOf(profile)), setNames),
+    );
+  } catch (error) {
+    // A run the draft lifecycle cancelled (abandon, new draft, resume) will
+    // reject here too, and that is not the provider's fault.
+    if (run.signal.aborted || !stillCurrent()) return [];
+    reportLlmFailure("LLM drafters unavailable; using the engine bots", error);
+    return [];
+  }
+  if (requests.length === 0) {
+    // Nothing to ask is not a provider failure: a pod with no eligible seat,
+    // or a step where every seat's pick is forced (the last card of a pack),
+    // which the engine never puts to a provider. It must not count toward
+    // giving up on the profile.
+    return [];
+  }
+  if (!stillCurrent() || run.signal.aborted) {
+    cancelRun(run);
+    return [];
+  }
+  observer.onRequests?.(requests);
+
+  // Phase 2 -- no lease held. One call per seat, in parallel: the seats pick
+  // simultaneously in the rules (CR 905.1a), and serializing them would
+  // multiply the pick's latency by the pod size.
+  const settled = await Promise.all(
+    requests.map(async (request): Promise<LlmDraftResponsePayload | null> => {
+      try {
+        const { status, body } = await executeLlmRequest(request.request, {
+          timeoutMs: LLM_DRAFT_TIMEOUT_MS,
+          signal: run.signal,
+        });
+        observer.onSeatSettled?.(request.seat, true);
+        return {
+          seat: request.seat,
+          fingerprint: request.fingerprint,
+          provider: profile.provider,
+          status,
+          body,
+        };
+      } catch (error) {
+        observer.onSeatSettled?.(request.seat, false);
+        // A round the draft cut loose (a new pack, an abandoned draft) is not
+        // the provider failing, and is not worth a line in the game log.
+        if (!run.signal.aborted) {
+          reportLlmFailure(`LLM drafter (seat ${request.seat}) failed`, error);
+        }
+        return null;
+      }
+    }),
+  );
+
+  const responses = settled.filter((entry): entry is LlmDraftResponsePayload => entry !== null);
+  cancelRun(run);
+
+  // A pick superseded mid-flight contributes nothing, even if replies arrived:
+  // they describe a pack this seat no longer holds.
+  if (!stillCurrent() || run.signal.aborted) return [];
+
+  // Bytes coming back says nothing about whether they were USABLE (the transport
+  // returns HTTP error bodies so a vendor's diagnostic survives); the verdict
+  // belongs to the engine and arrives at submit time. A failed or refused seat
+  // is drafted by the engine bot for that pick only -- the next pick asks the
+  // provider again, so a configured LLM drafts every pick it can.
+  return responses;
+}
+
+/** Clear `activeRun` only if it still refers to this round. */
+function cancelRun(run: AbortController): void {
+  if (activeRun === run) activeRun = null;
+}
+
+/**
+ * Log what each seat's call cost: the prompt size the engine built and the
+ * token usage the provider reported. Console only (see `usage.ts`).
+ */
+export function recordLlmDraftUsage(round: LlmDraftRound, outcomes: LlmDraftOutcome[]): void {
+  for (const outcome of outcomes) {
+    recordLlmUsage(
+      "draft",
+      `seat ${outcome.seat}`,
+      round.promptChars.get(outcome.seat),
+      outcome.usage,
+    );
+  }
+}
+
+/**
+ * Report what the engine did with each seat's reply.
+ *
+ * Only failures are reported. A drafter's reasoning is derived from its own
+ * pack and pool -- both private to that seat -- and `debugLog` writes a
+ * `visibility: "Public"` entry into the shared game log, so publishing it would
+ * turn hidden draft information into a public artifact.
+ */
+export function reportLlmDraftOutcomes(outcomes: LlmDraftOutcome[]): void {
+  for (const outcome of outcomes) {
+    if (!outcome.used && outcome.error) {
+      // `outcome.error` can carry a provider-authored diagnostic, and the game
+      // log is prompt-renderable, so only the seat is named there.
+      reportLlmFailure(
+        `LLM drafter (seat ${outcome.seat}) fell back to the engine bot`,
+        outcome.error,
+      );
+    }
+  }
+}
+

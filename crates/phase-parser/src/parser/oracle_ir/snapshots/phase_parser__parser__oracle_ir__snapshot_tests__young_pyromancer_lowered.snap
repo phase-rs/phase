@@ -1,0 +1,94 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Token",
+          "name": "Elemental",
+          "power": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "toughness": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "types": [
+            "Creature",
+            "Elemental"
+          ],
+          "colors": [
+            "Red"
+          ],
+          "keywords": [],
+          "tapped": false,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "owner": {
+            "type": "Controller"
+          },
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Or",
+        "filters": [
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Instant"
+            ],
+            "controller": null,
+            "properties": []
+          },
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Sorcery"
+            ],
+            "controller": null,
+            "properties": []
+          }
+        ]
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": {
+        "type": "Controller"
+      },
+      "valid_source": null,
+      "description": "Whenever you cast an instant or sorcery spell, create a 1/1 red Elemental creature token.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

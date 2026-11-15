@@ -10,16 +10,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   draftPodScreen,
   isMultiplayerDraftPodLive,
-  setArrivingCardBoardPreferences,
   useMultiplayerDraftStore,
   type DraftPodScreen,
+  type MultiplayerDraftPhase,
 } from "../multiplayerDraftStore";
-import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
+import {
+  createDefaultDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+} from "../../components/draft/workspace/workspacePreferences";
+import {
+  awaitSavedDeckLibraryIdle,
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
-import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import { draftViewPresentation, type DraftPlayerView } from "../../adapter/draft-adapter";
 import type { ActionRejection, EngineAdapter } from "../../adapter/types";
 import { actionRejectionError } from "../../adapter/types";
+import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../../constants/storage";
 import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
 import {
   commandAcknowledgement,
@@ -29,6 +40,19 @@ import {
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { useConnectivityStore } from "../connectivityStore";
+import { usePreferencesStore } from "../preferencesStore";
+import { detectAndParseDeck, expandParsedDeck } from "../../services/deckParser";
+import type { PrintingEntry } from "../../services/scryfall";
+import type * as Scryfall from "../../services/scryfall";
+import type { SubmissionDeck } from "../../services/deckSubmission";
+import { P2PGuestAdapter, P2PHostAdapter } from "../../adapter/p2p-adapter";
+import {
+  getDeckMeta,
+  loadSavedDeck,
+  loadSavedDeckFormat,
+  STORAGE_KEY_PREFIX,
+  writeDraftAutosaveDeck,
+} from "../../constants/storage";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -39,6 +63,49 @@ const guestRecovery = vi.hoisted(() => ({
   inspect: vi.fn(),
   loadSession: vi.fn(),
   clearIfCurrent: vi.fn(),
+}));
+
+const submissionIo = vi.hoisted(() => ({
+  face: vi.fn(), printings: vi.fn(), bounds: vi.fn(),
+  hostDestroy: vi.fn(), guestDestroy: vi.fn(),
+}));
+
+vi.mock("../../services/scryfall", async (importOriginal) => ({
+  ...await importOriginal<typeof Scryfall>(),
+  getCardPrintings: submissionIo.printings,
+}));
+
+vi.mock("../../network/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../network/connection")>()),
+  hostRoom: vi.fn(async () => ({
+    peer: { id: "host" }, onGuestConnected: vi.fn(), destroy: submissionIo.hostDestroy,
+  })),
+  joinRoom: vi.fn(async () => ({
+    peer: { id: "guest" }, conn: { peer: "host" }, destroyPeer: submissionIo.guestDestroy,
+  })),
+}));
+
+vi.mock("../../adapter/p2p-adapter", () => ({
+  P2PHostAdapter: vi.fn(function () {
+    let listener: ((event: unknown) => void) | undefined;
+    return {
+      onEvent: (next: (event: unknown) => void) => { listener = next; return () => {}; },
+      initialize: vi.fn(async () => { listener?.({ type: "roomFull" }); }),
+      startPregameGame: vi.fn(async () => ({ log_entries: [] })),
+      getSnapshot: wasmMatchAdapterMock.adapter.getSnapshot,
+      terminateGame: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    };
+  }),
+  P2PGuestAdapter: vi.fn(function () {
+    return {
+      onEvent: vi.fn(() => () => {}),
+      initialize: vi.fn(async () => {}),
+      initializeGame: vi.fn(async () => ({ log_entries: [] })),
+      getSnapshot: wasmMatchAdapterMock.adapter.getSnapshot,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 const mockHostAdapter = {
@@ -101,7 +168,7 @@ const wasmMatchAdapterMock = vi.hoisted(() => {
       adapter.sendMatchConcede = () => boundConcede?.();
     }),
     initialize: vi.fn(async () => {}),
-    initializeGame: vi.fn(async () => ({ log_entries: [] })),
+    initializeGame: vi.fn(async (..._args: unknown[]) => ({ log_entries: [] })),
     getSnapshot: vi.fn(async () => ({
       seq: 1,
       state: { waiting_for: { type: "Priority", data: {} } },
@@ -154,6 +221,10 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => ({
 
 vi.mock("../../adapter/wasm-adapter", () => ({
   WasmAdapter: wasmMatchAdapterMock.WasmAdapter,
+  getSharedAdapter: () => ({
+    getCardFaceData: submissionIo.face,
+    checkDeckPrintingsBounds: submissionIo.bounds,
+  }),
 }));
 
 vi.mock("../../game/controllers/gameLoopController", () => ({
@@ -218,6 +289,64 @@ function mockView(status: string): DraftPlayerView {
   };
 }
 
+function fifoView(
+  status: Extract<DraftPlayerView["status"], "Drafting" | "Review" | "Paused">,
+  pausedPhase: "Drafting" | "Review" | null = null,
+): DraftPlayerView {
+  return {
+    ...mockView(status),
+    flow: "FifoAsync",
+    fifo: {
+      state: {
+        session_id: "fifo-session",
+        revision: 7,
+        paused: pausedPhase ? { phase: pausedPhase, reason: "PausedByHost" } : null,
+        review_clock: null,
+      },
+      progress: { completed_steps: 3, round_completed_steps: 1 },
+      queue_count: 1,
+      head: { pack_id: 12, opening_seat: 0, round: 1, original_size: 14 },
+      prompt_id: null,
+      requirements: { picks: 1, burns: 0 },
+      effects: null,
+      clock: null,
+    },
+  };
+}
+
+async function enterPodRole(role: "host" | "guest", persistenceId?: string): Promise<void> {
+  if (role === "host") {
+    await useMultiplayerDraftStore.getState().hostDraft({
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId,
+      preferredRoomCode: persistenceId ? "ABCDE" : undefined,
+    });
+    return;
+  }
+  await useMultiplayerDraftStore.getState().joinDraft({
+    kind: "new",
+    roomCode: "ABCDE",
+    displayName: "Guest",
+  });
+}
+
+function deliverRoleView(role: "host" | "guest", view: DraftPlayerView): void {
+  if (role === "host") {
+    capturedHostEventHandler!({ type: "viewUpdated", view });
+    return;
+  }
+  capturedGuestEventHandler!({ type: "viewUpdated", view });
+}
+
+function roleWorkspaceAdapter(role: "host" | "guest") {
+  return role === "host" ? mockHostAdapter : mockGuestAdapter;
+}
+
 function card(instanceId: string, name = instanceId): DraftPlayerView["pool"][number] {
   return {
     instance_id: instanceId,
@@ -236,6 +365,7 @@ function card(instanceId: string, name = instanceId): DraftPlayerView["pool"][nu
 describe("multiplayerDraftStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
     mockHostAdapter.updateWorkspace.mockResolvedValue(undefined);
     mockGuestAdapter.updateWorkspace.mockResolvedValue(undefined);
     capturedHostEventHandler = null;
@@ -275,6 +405,145 @@ describe("multiplayerDraftStore", () => {
     });
   });
 
+  describe("FIFO Review presentation", () => {
+    it("maps the complete legacy and FIFO presentation table without manufacturing metadata", () => {
+      expect(draftViewPresentation(mockView("Drafting"))).toEqual({ podPhase: "drafting", isReadOnly: false });
+      expect(draftViewPresentation(fifoView("Drafting"))).toEqual({ podPhase: "drafting", isReadOnly: false });
+      expect(draftViewPresentation(mockView("Review"))).toEqual({ podPhase: "review", isReadOnly: true });
+      expect(draftViewPresentation(fifoView("Paused", "Review"))).toEqual({ podPhase: "review", isReadOnly: true });
+      expect(draftViewPresentation(fifoView("Paused", "Drafting"))).toEqual({ podPhase: "drafting", isReadOnly: true });
+      expect(draftViewPresentation(mockView("Paused"))).toEqual({ podPhase: "drafting", isReadOnly: true });
+
+      const malformed = { ...mockView("Drafting"), flow: "FifoAsync" } as unknown as DraftPlayerView;
+      expect(draftViewPresentation(malformed)).toEqual({ podPhase: "drafting", isReadOnly: true });
+    });
+
+    it("accepts the FIFO effect options the core publishes and refuses a per-card effect list", () => {
+      const drafting = fifoView("Drafting");
+      // Positive reach guard: the core publishes absent effect options as
+      // `null`, and that complete FIFO Drafting view is actionable.
+      expect(drafting.fifo?.effects).toBeNull();
+      expect(draftViewPresentation(drafting)).toEqual({ podPhase: "drafting", isReadOnly: false });
+
+      const fifo = drafting.fifo!;
+      const withOptions: DraftPlayerView = {
+        ...drafting,
+        fifo: {
+          ...fifo,
+          effects: {
+            card_instance_ids: ["effect-a", "effect-b"],
+            requirements: [{ picks: 2, burns: 0 }, { picks: 3, burns: 0 }],
+          },
+        },
+      };
+      expect(draftViewPresentation(withOptions)).toEqual({ podPhase: "drafting", isReadOnly: false });
+
+      for (const effects of [[], [{ card_instance_id: "effect-a", requirements: { picks: 2, burns: 0 } }]]) {
+        const perCard = { ...drafting, fifo: { ...fifo, effects } } as unknown as DraftPlayerView;
+        expect(draftViewPresentation(perCard)).toEqual({ podPhase: "drafting", isReadOnly: true });
+      }
+    });
+
+    for (const role of ["host", "guest"] as const) {
+      it(`${role} installs direct Review visibly but suppresses automatic and later workspace publication`, async () => {
+        if (role === "host") localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+        let guestLocator: string | null = null;
+        if (role === "guest") {
+          localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+          guestLocator = JSON.stringify({
+            roomCode: "ABCDE", displayName: "Guest", hostPeerId: "phase2-ABCDE", timestamp: Date.now(),
+          });
+          localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, guestLocator);
+        }
+        await enterPodRole(role, role === "host" ? "review-pod" : undefined);
+        const adapter = roleWorkspaceAdapter(role);
+        adapter.updateWorkspace.mockClear();
+
+        const view = { ...mockView("Review"), pool: [card("review-card")] };
+        deliverRoleView(role, view);
+
+        const state = useMultiplayerDraftStore.getState();
+        // Positive reach guard: the read-only Review event still reconciles a
+        // visible workspace before the mutation refusals below are measured.
+        expect(state.phase).toBe("review");
+        expect(state.view).toBe(view);
+        expect(state.workspaceState).not.toBeNull();
+        expect(adapter.updateWorkspace).not.toHaveBeenCalled();
+
+        state.selectCard("review-card");
+        await state.submitPick("review-card");
+        await state.autoPickCard();
+        state.setWorkspaceState({ ...state.workspaceState!, placements: {} });
+        state.setWorkspacePlacement("review-card", { zone: "sideboard", row: 0, column: 0, order: 0 });
+        state.addBasicLand("Plains");
+        state.removeBasicLand("Plains");
+        await state.retryWorkspaceSync();
+
+        expect(adapter.updateWorkspace).not.toHaveBeenCalled();
+        if (role === "host") {
+          expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "review" });
+          localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+        } else {
+          expect(localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY)).toBe(guestLocator);
+          expect(localStorage.getItem(ACTIVE_DRAFT_POD_KEY)).toBeNull();
+          localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+        }
+      });
+
+      it(`${role} projects paused-effective Review as the same visible locked workspace`, async () => {
+        await enterPodRole(role);
+        const adapter = roleWorkspaceAdapter(role);
+        adapter.updateWorkspace.mockClear();
+
+        const view = { ...fifoView("Paused", "Review"), pool: [card("paused-review-card")] };
+        deliverRoleView(role, view);
+
+        const state = useMultiplayerDraftStore.getState();
+        expect(state.phase).toBe("review");
+        expect(state.workspaceState).not.toBeNull();
+        await state.submitPick("paused-review-card");
+        await state.retryWorkspaceSync();
+        expect(adapter.updateWorkspace).not.toHaveBeenCalled();
+      });
+
+      it(`${role} preserves automatic and permitted manual publication for FIFO Drafting`, async () => {
+        await enterPodRole(role);
+        const adapter = roleWorkspaceAdapter(role);
+        adapter.updateWorkspace.mockClear();
+        const existing = card("existing");
+        const picked = card("picked");
+        const drafting = {
+          ...fifoView("Drafting"),
+          pool: [existing],
+          current_pack: [picked],
+          required_pick_count: 1,
+        };
+        deliverRoleView(role, drafting);
+
+        expect(useMultiplayerDraftStore.getState().phase).toBe("drafting");
+        expect(adapter.updateWorkspace).toHaveBeenCalledTimes(1);
+
+        const acknowledged = {
+          ...fifoView("Drafting"),
+          pool: [existing, picked],
+          current_pack: null,
+          required_pick_count: 0,
+        };
+        if (role === "host") {
+          mockHostAdapter.submitPick.mockResolvedValueOnce(acknowledged);
+          await expect(useMultiplayerDraftStore.getState().submitPick("picked")).resolves.toEqual({ status: "acknowledged" });
+          expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["picked"]);
+        } else {
+          const outcome = useMultiplayerDraftStore.getState().submitPick("picked");
+          await vi.waitFor(() => expect(mockGuestAdapter.submitPick).toHaveBeenCalledWith(["picked"]));
+          capturedGuestEventHandler!({ type: "pickAcknowledged", view: acknowledged });
+          await expect(outcome).resolves.toEqual({ status: "acknowledged" });
+        }
+        expect(adapter.updateWorkspace).toHaveBeenCalledTimes(2);
+      });
+    }
+  });
+
   describe("hostDraft", () => {
     it("does not replace the active adapter when effective offline already blocks hosting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
@@ -286,7 +555,7 @@ describe("multiplayerDraftStore", () => {
       await expect(useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier", podSize: 8, hostDisplayName: "Other", tournamentFormat: "Swiss", podPolicy: "Competitive",
-      })).resolves.toBe(false);
+      })).resolves.toMatchObject({ status: "failed" });
 
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
       expect(mockHostAdapter.dispose).not.toHaveBeenCalled();
@@ -320,7 +589,7 @@ describe("multiplayerDraftStore", () => {
         podPolicy: "Competitive" as const,
         persistenceId: "shared-recovery",
       };
-      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toBe(true);
+      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toEqual({ status: "opened" });
 
       let releaseCleanup!: () => void;
       mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -332,7 +601,7 @@ describe("multiplayerDraftStore", () => {
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
       releaseCleanup();
 
-      await expect(replacement).resolves.toBe(true);
+      await expect(replacement).resolves.toEqual({ status: "opened" });
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(2);
     });
 
@@ -347,7 +616,7 @@ describe("multiplayerDraftStore", () => {
         persistenceId: "shared-recovery",
       };
       const route = new AbortController();
-      await expect(useMultiplayerDraftStore.getState().hostDraft({ ...config, signal: route.signal })).resolves.toBe(true);
+      await expect(useMultiplayerDraftStore.getState().hostDraft({ ...config, signal: route.signal })).resolves.toEqual({ status: "opened" });
 
       let releaseCleanup!: () => void;
       mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -363,7 +632,7 @@ describe("multiplayerDraftStore", () => {
       useConnectivityStore.setState({ forcedOffline: true });
       releaseCleanup();
 
-      await expect(replacement).resolves.toBe(false);
+      await expect(replacement).resolves.toMatchObject({ status: "failed" });
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
         role: null,
@@ -381,7 +650,7 @@ describe("multiplayerDraftStore", () => {
         tournamentFormat: "Swiss" as const,
         podPolicy: "Competitive" as const,
       };
-      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toBe(true);
+      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toEqual({ status: "opened" });
 
       let releaseTeardown!: () => void;
       mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -392,7 +661,7 @@ describe("multiplayerDraftStore", () => {
       useConnectivityStore.setState({ forcedOffline: true });
       releaseTeardown();
 
-      await expect(replacement).resolves.toBe(false);
+      await expect(replacement).resolves.toMatchObject({ status: "failed" });
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
         role: null,
@@ -437,7 +706,7 @@ describe("multiplayerDraftStore", () => {
       useConnectivityStore.setState({ browserOnline: false });
       resolveHost();
 
-      await expect(hosting).resolves.toBe(true);
+      await expect(hosting).resolves.toEqual({ status: "opened" });
       expect(mockHostAdapter.dispose).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", phase: "connecting" });
     });
@@ -462,7 +731,7 @@ describe("multiplayerDraftStore", () => {
       controller.abort();
       resolveHost();
 
-      await expect(hosting).resolves.toBe(false);
+      await expect(hosting).resolves.toEqual({ status: "superseded" });
       expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
       expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
     });
@@ -476,7 +745,7 @@ describe("multiplayerDraftStore", () => {
       await expect(useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
-      })).resolves.toBe(false);
+      })).resolves.toMatchObject({ status: "failed" });
 
       expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
@@ -496,7 +765,7 @@ describe("multiplayerDraftStore", () => {
         tournamentFormat: "Swiss",
         podPolicy: "Competitive",
         signal: controller.signal,
-      })).resolves.toBe(true);
+      })).resolves.toEqual({ status: "opened" });
 
       controller.abort();
       await Promise.resolve();
@@ -552,6 +821,69 @@ describe("multiplayerDraftStore", () => {
       expect(state.view).toBe(view);
       expect(state.phase).toBe("drafting");
       expect(state.workspaceState).not.toBeNull();
+    });
+
+    it("saves the pick count of a draftStarted view to the saved pod record", async () => {
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+      await enterPodRole("host", "progress-pod");
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "lobby", pickCount: 0 });
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(false);
+
+      capturedHostEventHandler!({ type: "draftStarted", view: { ...mockView("Drafting"), pool: [card("first")] } });
+
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 1 });
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+    });
+
+    it("saves the pick count of the view the host's own pick broadcasts", async () => {
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+      await enterPodRole("host", "progress-pod");
+      deliverRoleView("host", { ...mockView("Drafting"), pool: [card("first")] });
+      const before = useMultiplayerDraftStore.getState().view;
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 1 });
+      const broadcast = { ...mockView("Drafting"), pool: [card("first"), card("second")] };
+      const atBroadcast: Array<{ locked: boolean; view: DraftPlayerView | null }> = [];
+      mockHostAdapter.submitPick.mockImplementationOnce(async () => {
+        capturedHostEventHandler!({ type: "viewUpdated", view: broadcast });
+        const state = useMultiplayerDraftStore.getState();
+        atBroadcast.push({ locked: state.pickInteractionLocked, view: state.view });
+        return broadcast;
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("second"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(atBroadcast).toHaveLength(1);
+      expect(atBroadcast[0]?.locked).toBe(true);
+      expect(atBroadcast[0]?.view).toBe(before);
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 2 });
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+    });
+
+    it("leaves the saved pod record alone when the host's own pick broadcasts a view with no pod phase", async () => {
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+      await enterPodRole("host", "progress-pod");
+      deliverRoleView("host", { ...mockView("Drafting"), pool: [card("first")] });
+      const before = useMultiplayerDraftStore.getState().view;
+      const saved = localStorage.getItem(ACTIVE_DRAFT_POD_KEY);
+      expect(JSON.parse(saved ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 1 });
+      const broadcast = { ...mockView("Abandoned"), pool: [card("first"), card("second")] };
+      const atBroadcast: Array<{ locked: boolean; view: DraftPlayerView | null }> = [];
+      mockHostAdapter.submitPick.mockImplementationOnce(async () => {
+        capturedHostEventHandler!({ type: "viewUpdated", view: broadcast });
+        const state = useMultiplayerDraftStore.getState();
+        atBroadcast.push({ locked: state.pickInteractionLocked, view: state.view });
+        return broadcast;
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("second"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(atBroadcast).toHaveLength(1);
+      expect(atBroadcast[0]?.locked).toBe(true);
+      expect(atBroadcast[0]?.view).toBe(before);
+      expect(localStorage.getItem(ACTIVE_DRAFT_POD_KEY)).toBe(saved);
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
     });
 
     it("tracks lobby state from lobbyUpdate events", async () => {
@@ -808,7 +1140,7 @@ describe("multiplayerDraftStore", () => {
 
       await expect(useMultiplayerDraftStore.getState().joinDraft({
         kind: "new", roomCode: "ABCDE", displayName: "Alice",
-      })).resolves.toBe(false);
+      })).resolves.toMatchObject({ status: "failed" });
 
       expect(capturedGuestEventHandler).toBeNull();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
@@ -835,7 +1167,7 @@ describe("multiplayerDraftStore", () => {
       useConnectivityStore.setState({ browserOnline: false });
       releaseTeardown();
 
-      await expect(joining).resolves.toBe(false);
+      await expect(joining).resolves.toMatchObject({ status: "failed" });
       expect(vi.mocked(DraftPodGuestAdapter)).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
         role: null,
@@ -892,7 +1224,7 @@ describe("multiplayerDraftStore", () => {
       useConnectivityStore.setState({ forcedOffline: true });
       resolveGuest();
 
-      await expect(joining).resolves.toBe(true);
+      await expect(joining).resolves.toEqual({ status: "opened" });
       expect(mockGuestAdapter.dispose).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "connecting" });
     });
@@ -905,7 +1237,7 @@ describe("multiplayerDraftStore", () => {
 
       await expect(useMultiplayerDraftStore.getState().joinDraft({
         kind: "new", roomCode: "ABCDE", displayName: "Alice",
-      })).resolves.toBe(false);
+      })).resolves.toMatchObject({ status: "failed" });
 
       expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: true });
       expect(useMultiplayerDraftStore.getState()).toMatchObject({
@@ -1195,12 +1527,12 @@ describe("multiplayerDraftStore", () => {
 
       await expect(useMultiplayerDraftStore.getState().joinDraft({
         kind: "new", roomCode: "NEWER", displayName: "Alice",
-      })).resolves.toBe(true);
+      })).resolves.toEqual({ status: "opened" });
       useConnectivityStore.setState({ forcedOffline: true });
       await expect(useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
-      })).resolves.toBe(false);
+      })).resolves.toMatchObject({ status: "failed" });
 
       if (settlement === "fulfillment") resolveSession({ draftToken: "old-token" });
       else rejectSession(new Error("old session failed"));
@@ -1213,6 +1545,56 @@ describe("multiplayerDraftStore", () => {
         phase: "connecting",
         error: "offline.startUnavailable",
       });
+    });
+  });
+
+  describe("resumeDraft never replaces a held guest session", () => {
+    const heldPhases: MultiplayerDraftPhase[] = [
+      "connecting",
+      "lobby",
+      "drafting",
+      "deckbuilding",
+      "pairing",
+      "matchInProgress",
+      "roundComplete",
+      "complete",
+      "kicked",
+      "hostLeft",
+    ];
+
+    beforeEach(async () => {
+      guestRecovery.inspect.mockReturnValue({
+        type: "present",
+        meta: { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-ABCDE", timestamp: 1 },
+        capture: { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-ABCDE", timestamp: 1 },
+      });
+      guestRecovery.loadSession.mockResolvedValue({ draftToken: "token" });
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+    });
+
+    it.each(heldPhases.map((phase) => [phase] as const))(
+      "a held guest in %s is not replaced, and the locator is not read",
+      async (phase) => {
+        if (phase !== "connecting") useMultiplayerDraftStore.setState({ phase });
+
+        await expect(useMultiplayerDraftStore.getState().resumeDraft()).resolves.toBe("resumed");
+
+        expect(vi.mocked(DraftPodGuestAdapter)).toHaveBeenCalledTimes(1);
+        expect(mockGuestAdapter.dispose).not.toHaveBeenCalled();
+        expect(guestRecovery.inspect).not.toHaveBeenCalled();
+        expect(guestRecovery.loadSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a guest in error still reconnects through the locator", async () => {
+      useMultiplayerDraftStore.setState({ phase: "error" });
+
+      await expect(useMultiplayerDraftStore.getState().resumeDraft()).resolves.toBe("resumed");
+
+      expect(vi.mocked(DraftPodGuestAdapter)).toHaveBeenCalledTimes(2);
+      expect(guestRecovery.loadSession).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1543,6 +1925,31 @@ describe("multiplayerDraftStore", () => {
       await expect(pending).resolves.toEqual({ status: "acknowledged" });
       expect(useMultiplayerDraftStore.getState().view?.shared_stack?.decisions).toBe(8);
     });
+
+    it("saves the pick count of the view the host's own decision broadcasts", async () => {
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+      await enterPodRole("host", "progress-pod");
+      deliverRoleView("host", winstonView(4, [card("first")]));
+      const before = useMultiplayerDraftStore.getState().view;
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 1 });
+      const broadcast = winstonView(5, [card("first"), card("second")]);
+      const atBroadcast: Array<{ locked: boolean; view: DraftPlayerView | null }> = [];
+      mockHostAdapter.submitSharedStackDecision.mockImplementationOnce(async () => {
+        capturedHostEventHandler!({ type: "viewUpdated", view: broadcast });
+        const state = useMultiplayerDraftStore.getState();
+        atBroadcast.push({ locked: state.pickInteractionLocked, view: state.view });
+        return broadcast;
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(atBroadcast).toHaveLength(1);
+      expect(atBroadcast[0]?.locked).toBe(true);
+      expect(atBroadcast[0]?.view).toBe(before);
+      expect(JSON.parse(localStorage.getItem(ACTIVE_DRAFT_POD_KEY) ?? "{}")).toMatchObject({ phase: "drafting", pickCount: 2 });
+      localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+    });
   });
 
   describe("shared actions", () => {
@@ -1630,6 +2037,631 @@ describe("multiplayerDraftStore", () => {
       });
     });
 
+    // CR 702.139a: the between-rounds editor starts from the designation the
+    // last accepted submission carried, so an unchanged resubmission keeps it
+    // and only an explicit removal (a submission without one) clears it.
+    it.each(["host", "guest"] as const)(
+      "records the %s's accepted companion designation and clears it only on a submission without one",
+      async (role) => {
+        const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+        if (role === "host") {
+          await useMultiplayerDraftStore.getState().hostDraft({
+            poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+            kind: "Premier",
+            podSize: 8,
+            hostDisplayName: "Host",
+            tournamentFormat: "Swiss",
+            podPolicy: "Casual",
+          });
+          capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+          mockHostAdapter.submitDeck.mockResolvedValue(deckbuildingView);
+        } else {
+          await useMultiplayerDraftStore.getState().joinDraft({
+            kind: "new",
+            roomCode: "ABCDE",
+            displayName: "Alice",
+          });
+          capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        }
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+
+        await useMultiplayerDraftStore.getState().submitDeck([], "Lurrus of the Dream-Den");
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The builder reopened from that designation resubmits it unchanged.
+        await useMultiplayerDraftStore.getState().submitDeck(
+          [],
+          useMultiplayerDraftStore.getState().submittedCompanion,
+        );
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The explicit remove control submits no companion.
+        await useMultiplayerDraftStore.getState().submitDeck([]);
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+      },
+    );
+
+    // CR 702.139a: a resumed guest whose acceptance was replayed with no
+    // surviving submit caller learns its companion only from the recovery event.
+    // The Casual RoundComplete re-edit reads `submittedCompanion` and resubmits
+    // it unchanged, so the recovery path must restore it or the resubmission
+    // would clear an accepted designation.
+    describe("recovered guest submission keeps its companion for a Casual re-edit", () => {
+      const recoverAndReopen = async (companion: string | undefined) => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "reconnecting", attempt: 1 } as never);
+        capturedGuestEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+        capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell"],
+          commanders: [],
+          ...(companion === undefined ? {} : { companion }),
+          view: deckbuildingView,
+        });
+        capturedGuestEventHandler!({
+          type: "viewUpdated",
+          view: { ...mockView("RoundComplete"), pod_policy: "Casual", pool: [card("spell", "Spell")] },
+        });
+        // The reopened builder's unchanged confirmation: what DraftPodPage does
+        // with `submittedCompanion` as its `initialCompanion`.
+        const reopened = useMultiplayerDraftStore.getState().submittedCompanion;
+        await useMultiplayerDraftStore.getState().submitDeck([], reopened);
+        return reopened;
+      };
+
+      it("restores the accepted companion, so an unchanged resubmit keeps it", async () => {
+        const reopened = await recoverAndReopen("Lurrus of the Dream-Den");
+        expect(reopened).toBe("Lurrus of the Dream-Den");
+        expect(mockGuestAdapter.submitDeck).toHaveBeenCalledWith(["Spell"], [], "Lurrus of the Dream-Den");
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+
+      it("keeps a recovered acceptance with no companion at null", async () => {
+        const reopened = await recoverAndReopen(undefined);
+        expect(reopened).toBeNull();
+        expect(mockGuestAdapter.submitDeck).toHaveBeenCalledWith(["Spell"], []);
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+      });
+    });
+
+    // CR 702.139a: after a full reload the acknowledged submission is no longer
+    // pending, so the guest has nothing to replay and the store starts empty. The
+    // host's authoritative view carries the accepted designation, and installing
+    // it restores the store.
+    describe("a reload after acknowledgement restores the accepted companion from the host view", () => {
+      it("restores it for a rejoining guest with nothing left to replay", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "reconnecting", attempt: 1 } as never);
+        const rejoinView = {
+          ...mockView("Deckbuilding"),
+          pool: [card("spell", "Spell")],
+          submitted_companion: "Lurrus of the Dream-Den",
+        };
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedGuestEventHandler!({ type: "reconnected", seatIndex: 1 });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: rejoinView });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // A later broadcast that omits the field never erases the designation.
+        capturedGuestEventHandler!({
+          type: "viewUpdated",
+          view: { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+
+      it("restores it for a reloaded host from its own seat's view", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedHostEventHandler!({
+          type: "viewUpdated",
+          view: {
+            ...mockView("Deckbuilding"),
+            pool: [card("spell", "Spell")],
+            submitted_companion: "Lurrus of the Dream-Den",
+          },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+    });
+
+    describe("draft deck autosave", () => {
+      beforeEach(async () => {
+        installFifoWebLocks();
+        await resetSavedDeckLibraryForTests();
+        useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+      });
+      afterEach(() => {
+        uninstallWebLocks();
+        localStorage.clear();
+      });
+
+      it("saves a host Premier submission as the Premier Draft autosave", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")?.main).toEqual([{ name: "Spell", count: 1 }]);
+        expect(getDeckMeta("[Autosave] Premier Draft")?.autosaveSlot).toBe("Premier");
+      });
+
+      it("saves a guest submission once, when the host acknowledges it", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedGuestEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: {
+              spell: { zone: "deck", row: 0, column: 0, order: 0 },
+              plains: { zone: "deck", row: 0, column: 0, order: 1 },
+            },
+            virtualBasics: [{ instanceId: "plains", name: "Plains" }],
+          },
+        });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")?.main).toEqual(expect.arrayContaining([
+          { name: "Spell", count: 1 }, { name: "Plains", count: 1 },
+        ]));
+      });
+
+      it("overwrites the solo Sealed autosave with a pod Sealed submission, leaving other slots untouched", async () => {
+        await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", JSON.stringify({ main: [], sideboard: [] }));
+        await writeDraftAutosaveDeck("Quick", "[Autosave] Quick Draft", JSON.stringify({ main: [], sideboard: [] }));
+
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Sealed",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Sealed" as const, pool: [card("spell", "Spell")] };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expect(loadSavedDeck("[Autosave] Sealed")?.main).toEqual([{ name: "Spell", count: 1 }]);
+        expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed (2)")).toBeNull();
+        expect(getDeckMeta("[Autosave] Quick Draft")?.autosaveSlot).toBe("Quick");
+      });
+
+      it("keeps a Commander Draft submission's commanders out of the main deck", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "CommanderDraft",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = {
+          ...mockView("Deckbuilding"), kind: "CommanderDraft" as const, commanders_required: 1,
+          pool: [card("cmdr", "Cmdr"), card("spell", "Spell")],
+        };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: {
+              cmdr: { zone: "deck", row: 0, column: 0, order: 0 },
+              spell: { zone: "deck", row: 0, column: 0, order: 1 },
+            },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        await useMultiplayerDraftStore.getState().submitDeck(["Cmdr"]);
+        await awaitSavedDeckLibraryIdle();
+
+        expect(loadSavedDeckFormat("[Autosave] Commander Draft")).toBe("CommanderDraft");
+        // Read the raw persisted JSON, not `loadSavedDeck`: its repair step
+        // independently strips a commander from `main`, which would mask a
+        // regression in the autosave's own commander-removal step.
+        const raw = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Commander Draft") ?? "{}");
+        expect(raw.commander).toEqual(["Cmdr"]);
+        expect(raw.main).toEqual([{ name: "Spell", count: 1 }]);
+      });
+
+      it("autosaves a recovered guest submission from the adapter event, and a bare ack alone does not", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+
+        capturedGuestEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        const winstonView = { ...mockView("Deckbuilding"), kind: "Winston" as const, pool: [card("spell", "Spell")] };
+        capturedGuestEventHandler!({ type: "viewUpdated", view: winstonView });
+
+        capturedGuestEventHandler!({
+          type: "deckSubmissionAcknowledged",
+          submissionId: "ignored",
+          view: mockView("Deckbuilding"),
+        });
+        expect(loadSavedDeck("[Autosave] Winston Draft")).toBeNull();
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell"],
+          commanders: [],
+          view: winstonView,
+        });
+
+        await vi.waitFor(() =>
+          expect(loadSavedDeck("[Autosave] Winston Draft")?.main).toEqual([{ name: "Spell", count: 1 }]),
+        );
+      });
+
+      // Shared fixture for the rows below: a drafted Plains (`dplains`) in the
+      // sideboard, and a virtual Plains (`vplains`) in the main deck. Both
+      // carry the same name, which is the case the workspace partition (not a
+      // name subtraction) must tell apart.
+      const sharedPool = [card("spell", "Spell"), card("dplains", "Plains")];
+      const sharedPremierView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: sharedPool };
+      const sharedWorkspace = () => ({
+        schemaVersion: 1 as const,
+        placements: {
+          spell: { zone: "deck" as const, row: 0, column: 0, order: 0 },
+          dplains: { zone: "sideboard" as const, row: 0, column: 0, order: 0 },
+          vplains: { zone: "deck" as const, row: 0, column: 0, order: 1 },
+        },
+        virtualBasics: [{ instanceId: "vplains", name: "Plains" }],
+      });
+      const expectSharedFixtureSaved = () => {
+        const saved = loadSavedDeck("[Autosave] Premier Draft");
+        expect(saved?.main).toEqual(expect.arrayContaining([
+          { name: "Spell", count: 1 }, { name: "Plains", count: 1 },
+        ]));
+        expect(saved?.sideboard).toEqual([{ name: "Plains", count: 1 }]);
+      };
+
+      it("keeps a drafted sideboard card in a host Premier autosave when a virtual card of the same name is in the main deck", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: sharedWorkspace() });
+        capturedHostEventHandler!({ type: "viewUpdated", view: sharedPremierView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(sharedPremierView);
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expectSharedFixtureSaved();
+      });
+
+      it("keeps a drafted sideboard card in a guest Premier autosave when a virtual card of the same name is in the main deck", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: sharedWorkspace() });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: sharedPremierView });
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expectSharedFixtureSaved();
+      });
+
+      it("keeps a drafted sideboard card in a recovered guest submission when a virtual card of the same name is in the main deck", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: sharedWorkspace() });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: sharedPremierView });
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell", "Plains"],
+          commanders: [],
+          view: sharedPremierView,
+        });
+
+        await vi.waitFor(expectSharedFixtureSaved);
+      });
+
+      it("writes no autosave for a recovered submission when the restored workspace no longer matches the accepted main deck", async () => {
+        await writeDraftAutosaveDeck(
+          "Premier", "[Autosave] Premier Draft",
+          JSON.stringify({ main: [{ name: "Old", count: 1 }], sideboard: [] }),
+        );
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        // No virtual Plains this time: the restored workspace projects main
+        // `["Spell"]`, while the accepted event says `["Spell", "Plains"]`.
+        const staleWorkspace = { ...sharedWorkspace(), virtualBasics: [] };
+        delete (staleWorkspace.placements as Record<string, unknown>).vplains;
+        capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: staleWorkspace });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: sharedPremierView });
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell", "Plains"],
+          commanders: [],
+          view: sharedPremierView,
+        });
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")?.main).toEqual([{ name: "Old", count: 1 }]);
+      });
+
+      it("writes no autosave for a recovered submission when the store holds no restored workspace", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell", "Plains"],
+          commanders: [],
+          view: sharedPremierView,
+        });
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")).toBeNull();
+      });
+
+      it("writes no autosave for a recovered submission when the event's pool has a card the restored workspace never placed", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: sharedWorkspace() });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: sharedPremierView });
+        const widerView = { ...sharedPremierView, pool: [...sharedPool, card("extra", "Extra")] };
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell", "Plains"],
+          commanders: [],
+          view: widerView,
+        });
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")).toBeNull();
+      });
+
+      it("the host submission resolves while the autosave waits for the library", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        let releaseHolder!: () => void;
+        const held = new Promise<void>((resolve) => {
+          releaseHolder = resolve;
+        });
+        const holder = withSavedDeckLibrary(() => held);
+        await vi.waitFor(async () => {
+          expect((await navigator.locks.query()).held).toHaveLength(1);
+        });
+
+        let settled = false;
+        void useMultiplayerDraftStore.getState().submitDeck().then(() => {
+          settled = true;
+        });
+        await vi.waitFor(() => expect(settled).toBe(true));
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+
+        releaseHolder();
+        await holder;
+        await awaitSavedDeckLibraryIdle();
+        expect(loadSavedDeck("[Autosave] Premier Draft")).not.toBeNull();
+      });
+
+      it("the guest submission resolves while the autosave waits for the library", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedGuestEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+
+        let releaseHolder!: () => void;
+        const held = new Promise<void>((resolve) => {
+          releaseHolder = resolve;
+        });
+        const holder = withSavedDeckLibrary(() => held);
+        await vi.waitFor(async () => {
+          expect((await navigator.locks.query()).held).toHaveLength(1);
+        });
+
+        let settled = false;
+        void useMultiplayerDraftStore.getState().submitDeck().then(() => {
+          settled = true;
+        });
+        await vi.waitFor(() => expect(settled).toBe(true));
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+
+        releaseHolder();
+        await holder;
+        await awaitSavedDeckLibraryIdle();
+        expect(loadSavedDeck("[Autosave] Premier Draft")).not.toBeNull();
+      });
+
+      it("shows a busy toast when the host's autosave is skipped by a lock-wait timeout, and the submission still resolves", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        let releaseHolder!: () => void;
+        const held = new Promise<void>((resolve) => {
+          releaseHolder = resolve;
+        });
+        const holder = withSavedDeckLibrary(() => held);
+        await vi.waitFor(async () => {
+          expect((await navigator.locks.query()).held).toHaveLength(1);
+        });
+        setSavedDeckTxnLockWaitForTests(50);
+
+        await expect(useMultiplayerDraftStore.getState().submitDeck()).resolves.toBeUndefined();
+
+        await vi.waitFor(() => {
+          expect(useAppNotificationStore.getState().notification).toEqual({
+            title: "Couldn't autosave your draft deck",
+            description: "Another Phase tab is busy. Close other Phase tabs and try again.",
+          });
+        });
+
+        setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+        releaseHolder();
+        await holder;
+      });
+
+      it("shows no toast when the host's autosave commits", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), kind: "Premier" as const, pool: [card("spell", "Spell")] };
+        capturedHostEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+        await useMultiplayerDraftStore.getState().submitDeck();
+        await awaitSavedDeckLibraryIdle();
+
+        expect(loadSavedDeck("[Autosave] Premier Draft")).not.toBeNull();
+        expect(useAppNotificationStore.getState().notification).toBeNull();
+      });
+    });
+
     it("submits a draft-effect pick through the host adapter", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
@@ -1664,6 +2696,49 @@ describe("multiplayerDraftStore", () => {
       expect(outcome).toEqual({ status: "acknowledged" });
       expect(useMultiplayerDraftStore.getState().workspaceState?.placements["card-1"]?.zone).toBe("sideboard");
       expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
+    });
+
+    // The pod twin of the solo store's
+    // `appends_a_hint_less_deck_draft_effect_pick_in_request_order`, and the
+    // sibling above cannot stand in for it: that one sends `"sideboard"`, which
+    // puts both ids in `ownPlacement` and out of the arriving pass. THIS case —
+    // deck, no hint — is what `PackDisplay.request` dispatches through
+    // `DraftPodPage`, and it is the one that makes the pass's position relative
+    // to `applyDestination` observable: both write these two ids' placements,
+    // the pass in POOL order and `applyDestination` in REQUEST order, and
+    // whichever runs last decides the stack. Run the pass after
+    // `applyDestination` instead and these land `first` then `second`.
+    it("appends a hint-less deck draft-effect pick in request order", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      // Two fixture choices, each measured by breaking it: drop the effect card
+      // from the pre-pick pool and `exactAddedIds` counts three additions
+      // against two requested ids, so the pick settles `rejected`
+      // `"unacknowledged"`; give it the pair's cmc 1 instead of 5 and it shares
+      // their column, so their `order` values start at 1 rather than 0.
+      const effect = { ...card("effect"), cmc: 5 };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        view: { ...mockView("Drafting"), pool: [effect] },
+      });
+      mockHostAdapter.submitPickWithDraftEffect.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [effect, card("first"), card("second")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+        "effect", ["second", "first"], "deck",
+      )).resolves.toEqual({ status: "acknowledged" });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      expect(placements.second.order).toBe(0);
+      expect(placements.first.order).toBe(1);
     });
 
     it("appends_an_acknowledged_host_pick_to_its_resolved_target_stack", async () => {
@@ -1762,6 +2837,155 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
+    // A PREMIER pod, deliberately — not Winston. `submitPick` is what
+    // `PackDisplay.request` reaches with no placement hint at all, so before
+    // `performPick` ran the arriving pass this card had only reconcile's
+    // column-0 default to fall back on, in every pick-and-pass format.
+    it("sorts a hint-less pick into the column the board's sort means", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      const picked = { ...card("costly"), cmc: 5 };
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      // The seeded default sort is by mana value, so a five-drop belongs in
+      // column 5 rather than the first column it would otherwise land in.
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(5);
+    });
+
+    // The companion claim: a hint is a column someone chose — the drop target
+    // from a drag, or `DraftPodPage.handleConfirmPick`'s resolution — and the
+    // arriving pass must not re-derive over it.
+    it("keeps the hint column on a pick that carries one", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      const picked = { ...card("costly"), cmc: 5 };
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck", { column: 2 }))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(2);
+    });
+
+    // The pod half of the same seam: `performPick` reads the geometry through
+    // `getArrivingCardBoardPreferences`. A six-drop clamps to column 2 under
+    // three columns and column 6 under the seven-column default, so the
+    // assertion cannot be satisfied by any default.
+    it("places a pick against the columns the page published, not the module default", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 3, rows: "one", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 6 }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(2);
+    });
+
+    // The sibling of the solo store's
+    // `leaves_a_hint_less_sideboard_pick_in_the_first_column`. The arriving pass
+    // is deck-only, so a sideboard-bound pick must be excluded from it: left in,
+    // it would carry a column from the DECK's seven-column geometry into the
+    // six-column sideboard, to be clamped at render to that zone's last column.
+    it("leaves a hint-less sideboard pick in the first column", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      // cmc 6, matching the solo sibling: the deck board's seven columns can hold
+      // it and the sideboard's six cannot, so this is the fixture that actually
+      // reaches the clamp the comment above describes. A five-drop would land in
+      // sideboard column 5 unclamped and prove less.
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 6 }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "sideboard"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.zone).toBe("sideboard");
+      expect(placement.column).toBe(0);
+    });
+
+    // The pod sibling of the solo store's
+    // `leaves_a_row_less_hint_on_a_two_row_board_in_the_reconcile_default_row`.
+    // `DraftPodPage`'s drop handler passes `request.placementHint` straight to
+    // `submitPick`, so the pod path sends the same column-only hint shape a drag
+    // produces when it misses the row bands. Without the `placementHint` arm of
+    // the exclusion the arriving pass resolves that card's row from the engine
+    // classification and the drop lands somewhere the player did not choose.
+    it("leaves a row-less hint on a two-row board in the reconcile default row", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 5, type_line: "Creature — Bear" }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck", { column: 2 }))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.column).toBe(2);
+      expect(placement.row).toBe(0);
+    });
+
     it("ignores selection replacement while pick interaction is locked", () => {
       useMultiplayerDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
 
@@ -1816,6 +3040,78 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-123"]);
       expect(useMultiplayerDraftStore.getState().workspaceState?.placements["card-123"])
         .toMatchObject({ zone: "deck", column: 3, row: 1 });
+    });
+
+    // The pod twin of the solo store's
+    // `leaves_a_row_less_auto_pick_hint_on_a_two_row_board_in_the_reconcile_default_row`.
+    // Pins the `auto-pick` arm of `ownPlacement`, which filters per id on
+    // `placementHints?.[id] !== undefined`: a hint naming only a column must
+    // still keep the arriving pass off that card's row.
+    it("leaves a row-less auto-pick hint on a two-row board in the reconcile default row", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const picked = { ...card("costly"), cmc: 5, type_line: "Creature — Bear" };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        // `required_pick_count` drives `chooseAutoPickCards`, which slices the
+        // scored pack to that length — left at `mockView`'s 0 the auto-pick
+        // selects nothing and never reaches the adapter.
+        view: {
+          ...mockView("Drafting"), pool: [], current_pack: [picked], required_pick_count: 1,
+        },
+      });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await useMultiplayerDraftStore.getState().autoPickCard({ costly: { column: 2 } });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.column).toBe(2);
+      expect(placement.row).toBe(0);
+    });
+
+    // The other direction of the same arm: an auto-pick carrying NO hint for a
+    // card has no placement decision of its own, so the arriving pass must sort
+    // it rather than leave it at reconcile's column 0.
+    it("sorts an auto-picked card that carries no hint of its own", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const picked = { ...card("costly"), cmc: 5 };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        // `required_pick_count` drives `chooseAutoPickCards`, which slices the
+        // scored pack to that length — left at `mockView`'s 0 the auto-pick
+        // selects nothing and never reaches the adapter.
+        view: {
+          ...mockView("Drafting"), pool: [], current_pack: [picked], required_pick_count: 1,
+        },
+      });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await useMultiplayerDraftStore.getState().autoPickCard();
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(5);
     });
 
     it("applies_each_multi-card_auto-pick_placement_hint_to_its_own_card", async () => {
@@ -1895,6 +3191,45 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-card"])
         .toEqual({ zone: "sideboard", column: 3, row: 1, order: 1 });
       expect(mockGuestAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles_a_real_guest_pick_as_adapter_rejected_only_after_the_ordinary_compatibility_error", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+      capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedGuestEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+
+      const rejected = useMultiplayerDraftStore.getState().submitPick("guest-card");
+      await Promise.resolve();
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(true);
+
+      // A typed incompatibility changes recovery state, but the existing
+      // pending-pick bridge is intentionally the ordinary error event.
+      capturedGuestEventHandler!({
+        type: "reconnectFailed",
+        failure: { kind: "incompatible", message: "Draft27 cannot accept FIFO delivery" },
+      });
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(true);
+
+      capturedGuestEventHandler!({ type: "error", message: "Draft27 cannot accept FIFO delivery" });
+      await expect(rejected).resolves.toEqual({ status: "rejected", reason: "adapter" });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        pendingPickIntent: null,
+        pickInteractionLocked: false,
+        guestRecoveryFailure: {
+          kind: "incompatible",
+          message: "Draft27 cannot accept FIFO delivery",
+        },
+      });
+
+      // Paired legacy reach guard: an actual pending pick still settles from
+      // its normal acknowledgement path rather than this rejection bridge.
+      const acknowledged = useMultiplayerDraftStore.getState().submitPick("guest-card");
+      await Promise.resolve();
+      capturedGuestEventHandler!({
+        type: "pickAcknowledged",
+        view: { ...mockView("Drafting"), pool: [card("guest-card")] },
+      });
+      await expect(acknowledged).resolves.toEqual({ status: "acknowledged" });
     });
 
     it("rejects_a_pick_acknowledgement_with_an_unrelated_extra_addition", async () => {
@@ -2168,7 +3503,171 @@ describe("multiplayerDraftStore", () => {
     });
   });
 
+  describe("owner printing at the 1v1 handover (V9)", () => {
+    const catalog: PrintingEntry[] = ["aaa", "bbb", "ccc", "tst"].map((set, index) => ({
+      id: set, set, set_name: set, collector_number: `00${index + 1}`,
+      released_at: `200${index}-01-01`, border_color: "black", frame_effects: [],
+      full_art: false, faces: [],
+    }));
+    const deck = () => expandParsedDeck(detectAndParseDeck("Deck\n2 Forest\n1 Island\n\nSideboard\n1 Forest"));
+    const rows = [
+      { section: "main_deck", name: "Forest", count: 2, printing: { set_code: "aaa", collector_number: "001" } },
+      { section: "main_deck", name: "Island", count: 1, printing: { set_code: "bbb", collector_number: "002" } },
+      { section: "sideboard", name: "Forest", count: 1, printing: { set_code: "aaa", collector_number: "001" } },
+    ];
+
+    // The client's configured Promise library predates Promise.withResolvers.
+    function held<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => { resolve = done; });
+      return { promise, resolve };
+    }
+
+    function pairing(type: "HumanHost" | "HumanGuest" | "Bot"): DraftMatchLaunch {
+      const common = {
+        matchId: "owner-art", round: 1, localSeat: 0,
+        matchConfig: { match_type: "Bo1" as const },
+        binding: {
+          podId: "pod", matchId: "owner-art", round: 1, sessionKey: "s", lease: "l",
+          nonce: "n", revision: 1, matchAuthoritySeat: 0,
+        },
+      };
+      if (type === "Bot") return {
+        ...common, type, botSeat: 1, botName: "Bot",
+        deckPayload: { player: deck(), opponent: deck(), ai_decks: [deck()] },
+      };
+      const human = { ...common, opponentSeat: 1, opponentName: "Other", matchRoomCode: "MATCH", matchHostPeerId: "host" };
+      return type === "HumanHost"
+        ? { ...human, type, deckPayload: { player: deck(), opponent: deck(), ai_decks: [] } }
+        : { ...human, type, localDeck: deck() };
+    }
+
+    async function install(type: "HumanHost" | "HumanGuest" | "Bot") {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+      const launch = pairing(type);
+      useMultiplayerDraftStore.setState({
+        matchPairing: launch, phase: "pairing",
+        view: { ...mockView("MatchInProgress"), pool: [card("004", "Forest")] },
+      });
+      return launch;
+    }
+
+    function preferences() {
+      const chain = { type: "set" as const, setCode: "bbb", label: "B" };
+      const pin = { scryfallId: "aaa", setCode: "aaa", collectorNumber: "001" };
+      usePreferencesStore.setState({
+        artChain: [{ type: "source_printing" }, chain], artOverrides: { Forest: pin },
+      });
+      return { chain, pin };
+    }
+
+    function outgoing(type: "HumanHost" | "HumanGuest" | "Bot") {
+      if (type === "HumanHost") return vi.mocked(P2PHostAdapter).mock.calls[0][0];
+      if (type === "HumanGuest") return vi.mocked(P2PGuestAdapter).mock.calls[0][0];
+      return wasmMatchAdapterMock.adapter.initializeGame.mock.calls[0][0];
+    }
+
+    beforeEach(() => {
+      submissionIo.face.mockImplementation(async (name: string) => ({ scryfall_oracle_id: name }));
+      submissionIo.printings.mockResolvedValue(catalog);
+      submissionIo.bounds.mockResolvedValue(undefined);
+    });
+
+    it.each(["HumanHost", "HumanGuest", "Bot"] as const)("%s submits frozen owner choices without changing the pairing", async (type) => {
+      const launch = await install(type);
+      const raw = JSON.stringify(launch);
+      const { chain, pin } = preferences();
+      const metadata = held<PrintingEntry[]>();
+      submissionIo.printings.mockReturnValue(metadata.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      // Capture must precede even the transport module import, not merely metadata.
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "ccc", label: "C" }], artOverrides: {} });
+      await vi.waitFor(() => expect(submissionIo.printings).toHaveBeenCalled());
+      chain.setCode = "ccc";
+      pin.scryfallId = "ccc";
+      metadata.resolve(catalog);
+
+      expect(await started).toBe("draft-match-owner-art");
+      // The mock handover retains the real adapter payload, including optional AI seats.
+      const payload = outgoing(type) as { player: SubmissionDeck; opponent?: SubmissionDeck; ai_decks?: SubmissionDeck[] };
+      expect(payload.player.printings, `${type} player owner rows`).toEqual(rows);
+      if (type === "HumanHost" && launch.type === "HumanHost") {
+        expect(payload.opponent, "HumanHost guest payload stays name-only").toEqual(launch.deckPayload.opponent);
+        expect(payload.opponent).not.toHaveProperty("printings");
+      } else if (type === "HumanGuest") {
+        expect(Object.keys(payload)).toEqual(["player"]);
+      } else {
+        expect(payload.opponent?.printings, "Bot opponent owner rows").toEqual(rows);
+        expect(payload.ai_decks?.map((seat) => seat.printings), "Bot AI owner rows").toEqual([rows]);
+      }
+      expect(JSON.stringify(launch), "matchPairing remains name-only").toBe(raw);
+      expect(JSON.stringify(useMultiplayerDraftStore.getState().matchPairing)).toBe(raw);
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBe(useGameStore.getState().adapter);
+      expect(matchLoopMock.controller.start).toHaveBeenCalledOnce();
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+    });
+
+    it.each(["HumanHost", "HumanGuest", "Bot"] as const)("%s does not infer draft-pool source printing", async (type) => {
+      await install(type);
+      usePreferencesStore.setState({ artChain: [{ type: "source_printing" }], artOverrides: {} });
+      expect(await useMultiplayerDraftStore.getState().startMatch()).toBe("draft-match-owner-art");
+      expect(submissionIo.face).toHaveBeenCalledWith("Forest");
+      const payload = outgoing(type) as { player: SubmissionDeck };
+      expect(payload.player).not.toHaveProperty("printings");
+    });
+
+    it.each([
+      ["HumanHost", "leave"], ["HumanHost", "reset"],
+      ["HumanGuest", "leave"], ["HumanGuest", "reset"],
+      ["Bot", "leave"], ["Bot", "reset"],
+    ] as const)("%s held preparation then %s never constructs a stale game", async (type, end) => {
+      await install(type);
+      preferences();
+      const metadata = held<PrintingEntry[]>();
+      submissionIo.printings.mockReturnValue(metadata.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      await vi.waitFor(() => expect(submissionIo.printings).toHaveBeenCalled());
+      if (end === "leave") await useMultiplayerDraftStore.getState().leave();
+      else useMultiplayerDraftStore.getState().reset();
+      metadata.resolve(catalog);
+      expect(await started).toBeNull();
+      expect(P2PHostAdapter, `${type} cancellation blocks host construction`).not.toHaveBeenCalled();
+      expect(P2PGuestAdapter, `${type} cancellation blocks guest construction`).not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.WasmAdapter, `${type} cancellation blocks WASM construction`).not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.adapter.initializeGame).not.toHaveBeenCalled();
+      if (type === "HumanHost") expect(submissionIo.hostDestroy).toHaveBeenCalledOnce();
+      if (type === "HumanGuest") expect(submissionIo.guestDestroy).toHaveBeenCalledOnce();
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBeNull();
+      expect(matchLoopMock.controller.start).not.toHaveBeenCalled();
+    });
+
+    it("Bot abort after adapter initialization prevents initializeGame", async () => {
+      await install("Bot");
+      preferences();
+      const initialization = held<void>();
+      wasmMatchAdapterMock.adapter.initialize.mockReturnValueOnce(initialization.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      await vi.waitFor(() => expect(wasmMatchAdapterMock.adapter.initialize).toHaveBeenCalledOnce());
+      useMultiplayerDraftStore.getState().reset();
+      initialization.resolve();
+      expect(await started).toBeNull();
+      expect(wasmMatchAdapterMock.adapter.initializeGame, "Bot cancellation blocks initGame").not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.adapter.dispose).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("bot-match concede", () => {
+    // A pod match is started from a live pod session.
+    beforeEach(async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+    });
+
     it("binds the pod match concession through startMatch and concedes the local game seat", async () => {
       const dispatch = vi.fn(async () => []);
       useGameStore.setState({ dispatch });
@@ -2199,6 +3698,32 @@ describe("multiplayerDraftStore", () => {
       expect(wasmMatchAdapterMock.adapter.supportsMatchConcede).toBe(true);
       wasmMatchAdapterMock.adapter.sendMatchConcede?.();
       expect(dispatch).toHaveBeenCalledWith({ type: "Concede", data: { player_id: 0 } });
+    });
+
+    it("bot arm: leave() while initializeGame is parked disposes the adapter and publishes nothing", async () => {
+      useGameStore.setState({ dispatch: vi.fn(async () => []) });
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot", matchId: "bot-match-1", round: 1, localSeat: 0, botSeat: 4, botName: "Chandra",
+          deckPayload: { player: { main_deck: [], sideboard: [], commander: [] }, opponent: { main_deck: [], sideboard: [], commander: [] }, ai_decks: [] },
+          matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1", matchId: "bot-match-1", round: 1,
+            sessionKey: "session-1", lease: "lease-1", nonce: "nonce-1",
+            revision: 0, matchAuthoritySeat: 0,
+          },
+        },
+      });
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      wasmMatchAdapterMock.adapter.initializeGame.mockImplementationOnce(async () => { await gate; return { log_entries: [] }; });
+      const start = useMultiplayerDraftStore.getState().startMatch();
+      await vi.waitFor(() => expect(wasmMatchAdapterMock.adapter.initializeGame).toHaveBeenCalledOnce());
+      await useMultiplayerDraftStore.getState().leave();
+      open();
+      expect(await start).toBeNull();
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBeNull();
+      expect(wasmMatchAdapterMock.adapter.dispose).toHaveBeenCalledOnce();
     });
   });
 

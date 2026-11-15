@@ -331,6 +331,7 @@ fn modok_activation_rejected_on_opponents_turn() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: id,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
 
     assert!(

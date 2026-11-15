@@ -16,14 +16,24 @@
 //!   6. After resolution, "Each player sacrifices two creatures" fires for
 //!      every player (covered by the symptom-2 fix in dd91a9b91, included
 //!      here as the resolution check).
+//!
+//! The last test is the CR 116.2h pre-spend regression: a foretell special
+//! action whose {2} is auto-tapped from a land under Selesnya Loft Gardens must
+//! settle the choice-bearing chaos echo BEFORE it spends and exiles, exactly
+//! like a Room unlock.
 
 use engine::ai_support::legal_actions;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::triggers::process_triggers;
 use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    CastPaymentMode, CastingVariant, ManaChoice, ManaChoicePrompt, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -324,5 +334,184 @@ fn tergrids_shadow_foretell_cast_resolves_each_player_sacrifices() {
         count_creatures(P1),
         0,
         "P1 should have sacrificed both creatures (Tergrid's Shadow resolution)"
+    );
+}
+
+// CR 702.143a + CR 605.4a + CR 608.2d: the Selesnya chaos bonus is a
+// choice-bearing delayed mana trigger, so paying the {2} foretell cost must
+// settle its choice BEFORE spending and BEFORE exiling the card.
+const SELESNYA_ORACLE: &str = "If an effect would create one or more tokens, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent, it puts twice that many of those counters on that permanent instead.\nWhenever chaos ensues, until end of turn, whenever you tap a land for mana, add one mana of any type that land produced.";
+const CHAMBER_ORACLE: &str =
+    "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
+const DOOMSKAR_ORACLE: &str = "Destroy all creatures.\nForetell {1}{W}{W} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+
+fn count_color(runner: &GameRunner, color: ManaType) -> usize {
+    runner.state().players[P0.0 as usize]
+        .mana_pool
+        .count_color(color)
+}
+
+fn foretell_cost_11ww() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White, ManaCostShard::White],
+        generic: 1,
+    }
+}
+
+/// Doomskar ({1}{W}{W} foretell) in hand, one untapped Simic Growth Chamber as
+/// the only mana source, and Selesnya Loft Gardens' chaos bonus installed.
+/// Tapping the Chamber fires the bonus, whose "of any type that land produced"
+/// text is a mandatory choice, so the {2} special-action payment owes that
+/// choice before it can spend.
+fn runner_with_foretell_echo() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let selesnya = scenario
+        .add_land_from_oracle(P0, "Selesnya Loft Gardens", SELESNYA_ORACLE)
+        .id();
+    let chamber = scenario
+        .add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER_ORACLE)
+        .id();
+    let doomskar = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doomskar", false, DOOMSKAR_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().objects[&doomskar]
+            .base_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Foretell(_))),
+        "premise: the parsed Doomskar carries its printed foretell keyword"
+    );
+
+    // CR 311.7 / CR 901.9b: synthesize the chaos event keyed by Selesnya's
+    // object id; the real plane-identity binding installs the delayed trigger.
+    let events = vec![GameEvent::ChaosEnsued { plane_id: selesnya }];
+    process_triggers(runner.state_mut(), &events);
+    while runner.state().delayed_triggers.is_empty() && !runner.state().stack.is_empty() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolving the chaos trigger must succeed");
+    }
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "chaos must install exactly one Selesnya delayed trigger"
+    );
+    (runner, doomskar, chamber)
+}
+
+/// CR 116.2h + CR 702.143a + CR 605.4a + CR 608.2d: the foretell special
+/// action's {2} payment pauses on the mandatory Selesnya echo with the card
+/// still in hand, unspent, and not yet foretold; the answer resumes the exact
+/// action and only then exiles the card and stamps its permission.
+#[test]
+fn foretell_special_action_requires_bonus_choice_before_spending() {
+    let (mut runner, doomskar, chamber) = runner_with_foretell_echo();
+    let card_id = runner.state().objects[&doomskar].card_id;
+    let turn = runner.state().turn_number;
+
+    runner
+        .act(GameAction::Foretell {
+            object_id: doomskar,
+            card_id,
+        })
+        .expect("the foretell special action must reach the delayed-mana choice");
+
+    // The echo must NOT resolve silently or after a partial spend: the base
+    // {G}{U} is still pooled and the card is still in hand while it is pending.
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            assert_eq!(*player, P0, "the choice belongs to the foretelling player");
+            assert_eq!(
+                options.len(),
+                2,
+                "the choice must offer exactly the chamber's produced types; got {options:?}"
+            );
+            assert!(
+                options.contains(&ManaType::Green) && options.contains(&ManaType::Blue),
+                "the choice must offer Green and Blue; got {options:?}"
+            );
+        }
+        other => panic!("expected the Selesnya echo choice, got {other:?}"),
+    }
+    let obj = &runner.state().objects[&doomskar];
+    assert_eq!(
+        obj.zone,
+        Zone::Hand,
+        "the card is not exiled until its {{2}} is paid"
+    );
+    assert!(
+        !obj.foretold,
+        "the card is not foretold before it is exiled"
+    );
+    assert!(
+        obj.casting_permissions.is_empty(),
+        "no foretell permission exists while the payment is pending"
+    );
+    assert_eq!(
+        count_color(&runner, ManaType::Green),
+        1,
+        "the chamber's base {{G}} is still unspent while the choice is pending"
+    );
+    assert_eq!(
+        count_color(&runner, ManaType::Blue),
+        1,
+        "the chamber's base {{U}} is still unspent while the choice is pending"
+    );
+    assert!(
+        runner.state().objects[&chamber].tapped,
+        "the Chamber is the source whose tap owes the choice"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the echo resolves inline, not on the stack"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("answering the bonus must resume the foretell payment");
+
+    let obj = &runner.state().objects[&doomskar];
+    assert_eq!(obj.zone, Zone::Exile);
+    assert!(runner.state().exile.contains(&doomskar));
+    assert!(obj.foretold, "the resumed payment marks the card foretold");
+    assert!(obj.face_down, "a foretold card is exiled face down");
+    assert!(
+        matches!(
+            obj.casting_permissions.as_slice(),
+            [CastingPermission::Foretold { cost, turn_foretold }]
+                if *cost == foretell_cost_11ww() && *turn_foretold == turn
+        ),
+        "the permission latches the card's foretell cost from the announcing turn"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        1,
+        "base {{G}}{{U}} pays the {{2}}; the chosen bonus is the only unit left"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the completed special action returns priority to its controller, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        resumed.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Exile,
+                ..
+            } if *object_id == doomskar
+        )),
+        "the exile happens exactly when the payment completes"
     );
 }

@@ -48,7 +48,7 @@ interface EngineLostSnapshot {
 }
 
 export function EngineLostModal() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);

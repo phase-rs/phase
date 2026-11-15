@@ -4,7 +4,7 @@
  * The Turn Checkpoints section has two independent sources now:
  *
  *   1. Server-published boundaries (`rewindTargets`), offered only when the
- *      installed adapter declares `ServerRewindCapability`. This is the desktop
+ *      installed adapter declares `TurnRewindCapability`. This is the desktop
  *      solo-vs-AI path, where the sidecar owns the state and a local restore
  *      would desync.
  *   2. The pre-existing browser-local `turnCheckpoints`, restored through
@@ -19,17 +19,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DebugPanel } from "../DebugPanel";
 import type { GameMode } from "../../../stores/gameStore";
 import { restoreGameState } from "../../../game/dispatch";
+import { exportAuthoritativeGameStateZip, exportGameStateDebugZip } from "../../../services/gameStateExport";
+import { buildGameState } from "../../../test/factories/gameStateFactory";
 
 const sendRequestTakeback = vi.fn();
 
 /** A stub shaped exactly like `WebSocketAdapter`'s capability surface. */
 function rewindCapableAdapter() {
-  return { supportsServerRewind: true, sendRequestTakeback };
+  return { supportsTakeback: true, supportsTurnRewind: true, sendRequestTakeback };
 }
 
-/** A P2P-shaped stub: wire-authoritative, but no rollback capability. */
+/** A P2P-shaped stub: a takeback transport that cannot address a turn. */
 function rewindIncapableAdapter() {
-  return { supportsMatchConcede: true, sendMatchConcede: vi.fn() };
+  return {
+    supportsTakeback: true,
+    sendRequestTakeback,
+    sendRespondTakeback: vi.fn(),
+    sendCancelTakeback: vi.fn(),
+  };
 }
 
 const storeState = {
@@ -71,8 +78,15 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn(async () => n
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (k: string, o?: { detail?: string }) => (o?.detail ? `${k}|${o.detail}` : k) }),
+}));
 vi.mock("../../../services/cardNames", () => ({ getCardNames: async () => [] }));
+vi.mock("../../../services/gameStateExport", () => ({
+  copyGameStateDebugSnapshot: vi.fn(),
+  exportAuthoritativeGameStateZip: vi.fn(),
+  exportGameStateDebugZip: vi.fn(),
+}));
 
 beforeEach(() => {
   storeState.gameMode = "native-ai";
@@ -89,6 +103,36 @@ afterEach(() => {
 });
 
 describe("DebugPanel — server-published turn rewind", () => {
+  it("shows the native export failure reason", async () => {
+    storeState.adapter = { exportPersistenceState: vi.fn() };
+    vi.mocked(exportAuthoritativeGameStateZip).mockRejectedValueOnce(
+      new Error("Failed to serialize authoritative game state: key must be a string"),
+    );
+
+    render(<DebugPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "debug.exportAuthoritative" }));
+
+    expect(await screen.findByText(
+      "help.status.exportFailedDetail|Failed to serialize authoritative game state: key must be a string",
+    )).toBeInTheDocument();
+    expect(exportAuthoritativeGameStateZip).toHaveBeenCalledWith(storeState.adapter);
+  });
+
+  it("downloads the viewer snapshot in multiplayer without requesting private state", async () => {
+    storeState.gameMode = "online";
+    storeState.gameState = buildGameState();
+    storeState.adapter = { exportPersistenceState: vi.fn() };
+    vi.mocked(exportGameStateDebugZip).mockResolvedValueOnce({ kind: "saved", filename: "snapshot.zip" });
+
+    render(<DebugPanel />);
+    expect(screen.getByRole("button", { name: "debug.exportAuthoritative" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "game:engineLost.exportClientSnapshot" }));
+
+    expect(await screen.findByText("help.status.exported")).toBeInTheDocument();
+    expect(exportGameStateDebugZip).toHaveBeenCalledWith(storeState.gameState);
+    expect(exportAuthoritativeGameStateZip).not.toHaveBeenCalled();
+  });
+
   it("renders the server's boundaries and asks the server to roll back to one", () => {
     storeState.adapter = rewindCapableAdapter();
     storeState.rewindTargets = [{ turn_number: 3, active_player: 1 }];

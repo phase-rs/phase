@@ -38,6 +38,49 @@ describe("zone pile contextual anchors", () => {
     );
   });
 
+  it("anchors a shared graveyard on its holder whichever seat the pile is asked for", () => {
+    const first = buildGameObject({ id: 101, zone: "Graveyard", entered_battlefield_turn: null });
+    const top = buildGameObject({ id: 102, zone: "Graveyard", entered_battlefield_turn: null });
+    const gameState = buildGameState({
+      players: buildPlayers([{ id: 0, graveyard: [first.id, top.id] }, { id: 1, graveyard: [] }]),
+      objects: buildObjectMap(first, top),
+      battlefield: [],
+      exile: [],
+      stack: [],
+      waiting_for: buildPriorityWaitingFor(),
+      derived: { shared_piles: { library: 0, graveyard: 0 } },
+    });
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, legalActionsByObject: {} });
+
+    const { container } = render(<GraveyardPile playerId={1} onClick={vi.fn()} />);
+
+    expect(container.querySelector('[data-graveyard-pile="0"]')).toHaveAttribute(
+      "data-grouped-ids",
+      "101 102",
+    );
+    expect(container.querySelector('[data-graveyard-pile="1"]')).toBeNull();
+  });
+
+  it("keeps a per-seat graveyard on its own seat when no holder is published", () => {
+    const own = buildGameObject({ id: 201, zone: "Graveyard", entered_battlefield_turn: null });
+    const gameState = buildGameState({
+      players: buildPlayers([{ id: 0, graveyard: [] }, { id: 1, graveyard: [own.id] }]),
+      objects: buildObjectMap(own),
+      battlefield: [],
+      exile: [],
+      stack: [],
+      waiting_for: buildPriorityWaitingFor(),
+    });
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, legalActionsByObject: {} });
+
+    const { container } = render(<GraveyardPile playerId={1} onClick={vi.fn()} />);
+
+    expect(container.querySelector('[data-graveyard-pile="1"]')).toHaveAttribute(
+      "data-grouped-ids",
+      "201",
+    );
+  });
+
   it("groups only exile cards whose identities the pile can represent", () => {
     const faceUp = buildGameObject({ id: 201, zone: "Exile", entered_battlefield_turn: null });
     const hidden = buildGameObject({

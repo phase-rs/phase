@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "lobby"
+  ],
+  "reason": "GameFormat gains TwoHeadedGiantCommander; lobby frames naming it hard-error on older builds"
+}

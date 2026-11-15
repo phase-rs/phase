@@ -120,7 +120,10 @@ fn entering_under_your_control_journals_an_exact_controller_override() {
         .zone_change_index
         .expect("a battlefield entry records its zone-change snapshot position");
     assert_eq!(
-        state.zone_changes_this_turn[zone_change_index].controller, P0,
+        state.zone_changes_this_turn[zone_change_index]
+            .arrival
+            .controller,
+        P0,
         "CR 400.7: the zone-change snapshot is retagged to the new controller"
     );
     let entry_index = command
@@ -167,7 +170,10 @@ fn entering_under_your_control_journals_an_exact_controller_override() {
         "CR 110.2a: replay pins the base controller the override established"
     );
     assert_eq!(
-        replay.zone_changes_this_turn[zone_change_index].controller, P0,
+        replay.zone_changes_this_turn[zone_change_index]
+            .arrival
+            .controller,
+        P0,
         "replay retags the exact recorded zone-change snapshot"
     );
     assert_eq!(

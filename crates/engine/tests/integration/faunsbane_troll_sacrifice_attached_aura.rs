@@ -13,7 +13,7 @@
 //! Aura on the battlefield satisfied it, including an Aura enchanting a creature
 //! this player does not control. Ronin, Shadow Stalker carries the identical
 //! shape with Equipment. Both riders are now consumed into
-//! `FilterProp::AttachedToSource`, whose matcher is "this object's `attached_to`
+//! `FilterProp::AttachedTo { to: AttachmentReferent::Source }`, whose matcher is "this object's `attached_to`
 //! is the filter source".
 //!
 //! These tests drive the production read-out (`ai_support::legal_actions_full`
@@ -53,6 +53,7 @@ fn offered_indices(runner: &GameRunner, id: ObjectId) -> Vec<usize> {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == id => Some(*ability_index),
             _ => None,
         })

@@ -2,10 +2,12 @@ use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds}
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    AbilityCondition, Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
+    EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -123,9 +125,110 @@ fn resolve_with_prompt(
     };
 
     match prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
-        AttachPromptOutcome::Execute => resolve_bound_attachment_operation(state, ability, events),
+        AttachPromptOutcome::Execute => {
+            let bound = bind_determined_attachment_set(state, ability, attachment_filter);
+            resolve_bound_attachment_operation(state, &bound, events)
+        }
         AttachPromptOutcome::Completed => Ok(AttachResolutionOutcome::Completed),
         AttachPromptOutcome::Paused => Ok(AttachResolutionOutcome::Paused),
+    }
+}
+
+/// CR 107.1c + CR 608.2d: "attach all <filter>" is a DETERMINED set — every
+/// matching object attaches and no player chooses. Bind that whole live set
+/// before execution so the operation resolves through the same bound-target
+/// tier a player choice produces: the executor's multi-attachment loop and its
+/// replacement-pause deferral (`defer_remaining_selected_attachments`) then
+/// apply unchanged.
+///
+/// Returns the ability unchanged for every other shape (a printed target, an
+/// "any number"/"up to N" choice, or an operation that already carries a bound
+/// set from a forwarded candidate or a parked answer).
+fn bind_determined_attachment_set(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+) -> ResolvedAbility {
+    if !attach_is_determined_set(&ability.effect)
+        || !ability.attach_attachment_targets().is_empty()
+        || !ability.attach_attachment_candidates().is_empty()
+    {
+        return ability.clone();
+    }
+    let mut bound = ability.clone();
+    bound.set_attach_attachment_targets(
+        battlefield_ids_matching_filter(state, ability, attachment_filter)
+            .iter()
+            .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+            .collect(),
+    );
+    bound
+}
+
+/// CR 107.1c + CR 608.2d: True when this effect's ATTACHMENT operand is a
+/// determined set ("attach all <filter>") rather than a printed target or a
+/// described choice. Single authority for the prompt-phase short-circuit and
+/// the executor's set binding.
+fn attach_is_determined_set(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Attach {
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::All,
+            },
+            ..
+        }
+    )
+}
+
+/// CR 608.2d + CR 608.2h + CR 609.3: Resolve the ATTACHMENT operand of an
+/// Attach operation. Single authority for every attachment-role tier, shared
+/// by the executor and the prompt phase so the two cannot disagree.
+///
+/// `target_slots` is the shared explicit-target iterator: the executor threads
+/// `ability.targets.iter()` through this call and the host read so `Any`/`Any`
+/// slot pairs stay ordered (Zack Fair). Prompt callers pass
+/// `std::iter::empty()`; that is equivalent because every tier reachable for a
+/// context-ref attachment (the only class the prompt branch serves) either
+/// ignores the iterator (the `ParentTarget` tier) or already hard-codes an
+/// empty one (the final tier) — the explicit-slot tier is unreachable for
+/// every Attach attachment operand shape the parser emits (the one overlap in
+/// the predicates, `Typed{controller: ChosenPlayer}`, is admitted by both
+/// `is_context_ref` and `attach_attachment_filter_needs_target_slot` but is
+/// not a shape the Attach parser produces).
+fn resolve_attachment_ids<'a>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+    target_slots: &mut impl Iterator<Item = &'a TargetRef>,
+) -> Vec<ObjectId> {
+    if !ability.attach_attachment_targets().is_empty() {
+        // CR 608.2d: This event-scoped Attach may resolve only the explicitly
+        // selected member of its forwarded candidate set. Do not fall back to
+        // a trigger event or a general ParentTarget projection.
+        resolve_bound_attachment_targets(state, ability, attachment_filter)
+    } else if matches!(attachment_filter, TargetFilter::ParentTarget) {
+        resolve_parent_target_attachment_from_trigger(state)
+            .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
+            .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
+            .into_iter()
+            .collect()
+    } else if crate::types::ability::attach_attachment_claims_announcement_slot(
+        attachment_filter,
+        &attach_selection(ability),
+    ) {
+        // CR 115.1a/c/d/e: only a printed-target attachment operand may take a
+        // declared slot out of `target_slots`. A described (`AtResolution`)
+        // operand resolves through the tier above (its bound resolution choice)
+        // or the final battlefield-scan tier — never from the announced host.
+        resolve_bound_attachment_target(state, ability, attachment_filter)
+            .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
+            .into_iter()
+            .collect()
+    } else {
+        resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
+            .into_iter()
+            .collect()
     }
 }
 
@@ -139,7 +242,9 @@ fn resolve_bound_attachment_operation(
 ) -> Result<AttachResolutionOutcome, EffectError> {
     let source_id = ability.source_id;
     let (attachment_filter, target_filter) = match &ability.effect {
-        Effect::Attach { attachment, target } => (attachment, target),
+        Effect::Attach {
+            attachment, target, ..
+        } => (attachment, target),
         _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
     };
 
@@ -165,6 +270,48 @@ fn resolve_bound_attachment_operation(
         return Ok(AttachResolutionOutcome::Completed);
     }
 
+    // CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: a printed
+    // "attach … to up to one target creature …" makes the HOST optional — zero
+    // targets may be chosen. The ability still requires targets, but with none
+    // chosen it is not targeted, and it still resolves. An announced host slot is bound before this resolver runs
+    // (CR 601.2c for spells, CR 602.2b for activated abilities, CR 603.3d for
+    // triggered abilities), so arriving here with NO host binding means the
+    // controller chose none: the instruction is followed in order and does
+    // nothing (CR 608.2c). The ability itself resolved, so emit the resolution
+    // event and complete rather than surfacing a missing-operand error.
+    //
+    // Gate on an OBJECT host population. `attach_host_target()` only ever binds
+    // object hosts, so a player-host Attach (no corpus card prints one) must not
+    // be silently skipped, and a context-ref/scan host needs no announced slot —
+    // its absence stays the missing-operand error below, unchanged.
+    // CR 115.1a/c/d + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: an announced object target
+    // is HOST evidence only when it occupies the HOST slot. The ATTACHMENT
+    // operand prints "target …" on the same class ("attach target Equipment you
+    // control to up to one target creature you control", Iron Hills Stalwart;
+    // Blacksmith's Talent level 2), so that Equipment sits in `ability.targets`
+    // too. Treating ANY object target as the chosen host would therefore skip
+    // this no-op when the controller chose the Equipment and declined the host;
+    // the resolver would then fall through to `resolve_object_filter`'s
+    // battlefield scan and auto-attach to an unchosen creature. Match against
+    // the HOST filter instead — the same filter authority the resolver uses —
+    // so only a target that could BE the host counts. If the host was chosen
+    // (or its binding was lost downstream — a separate pre-existing chain
+    // defect), keep the existing resolution path rather than turning an error
+    // into a silent no-op.
+    if ability.optional_targeting
+        && ability.attach_host_target().is_none()
+        && !host_slot_announced(state, ability, target_filter)
+        && crate::types::ability::attach_host_filter_needs_target_slot(target_filter)
+        && target_filter.denotes_battlefield_objects()
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id,
+            subject: None,
+        });
+        return Ok(AttachResolutionOutcome::Completed);
+    }
+
     // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
     // battlefield/LKI unless they are explicit player-chosen targets.
     // Typed/scan-based attachment filters (e.g. "Equipment attached to ~") resolve
@@ -172,27 +319,8 @@ fn resolve_bound_attachment_operation(
     // `ability.targets` here would steal the ParentTarget bearer (Zack Fair).
     // `Any`/`Any` pairs share one iterator so [equipment, host] slots stay ordered.
     let mut target_slots = ability.targets.iter();
-    let attachment_ids = if !ability.attach_attachment_targets().is_empty() {
-        // CR 608.2d: This event-scoped Attach may resolve only the explicitly
-        // selected member of its forwarded candidate set. Do not fall back to
-        // a trigger event or a general ParentTarget projection.
-        resolve_bound_attachment_targets(state, ability, attachment_filter)
-    } else if matches!(attachment_filter, TargetFilter::ParentTarget) {
-        resolve_parent_target_attachment_from_trigger(state)
-            .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
-            .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
-            .into_iter()
-            .collect()
-    } else if attachment_filter_uses_explicit_target_slot(attachment_filter) {
-        resolve_bound_attachment_target(state, ability, attachment_filter)
-            .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
-            .into_iter()
-            .collect()
-    } else {
-        resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
-            .into_iter()
-            .collect()
-    };
+    let attachment_ids =
+        resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
         return Err(EffectError::MissingParam(
             "No attachment for Attach".to_string(),
@@ -386,17 +514,24 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let host_of = |state: &GameState| state.objects.get(&attachment_id)?.attached_to;
+    let already_on_host = host_of(state) == Some(AttachTarget::Object(target_id));
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
             old_target,
         });
     }
+    // CR 701.3b: a refused or same-host attach did nothing, so it carries no subject.
+    let attached = !already_on_host && host_of(state) == Some(AttachTarget::Object(target_id));
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
         source_id,
-        subject: None,
+        subject: attached
+            .then(|| state.capture_event_object_snapshot(attachment_id))
+            .flatten()
+            .map(Box::new),
     });
 
     crate::game::engine_replacement::apply_pending_post_replacement_effect(
@@ -420,8 +555,6 @@ pub fn resolve_unattach_all(
         _ => (&TargetFilter::Any, &TargetFilter::Any),
     };
 
-    let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
-
     let ctx = FilterContext::from_ability(ability);
     // CR 608.2c + CR 701.3d: A context-ref attachment anaphor ("unattach it" →
     // `ParentTarget`/`ParentTargetSlot`) designates the snapshot object recorded
@@ -436,13 +569,12 @@ pub fn resolve_unattach_all(
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
     )
     .then(|| {
-        // CR 400.7 + CR 603.7c: substitution only. Population inside the class
-        // is 0 (zero `UnattachAll` nodes), and the one card that reaches this
-        // (`stolen uniform`) is denied a pin by
-        // `condition_names_referent_zone_change`, so `live_object_targets` is
-        // the identity here today. Applied for uniformity and defence in depth;
-        // deliberately NO early return, since a population of 0 admits no
-        // non-vacuous test.
+        // CR 400.7 + CR 603.7c: a pinned referent that has changed zones is a
+        // new object and is dropped here. Unexpected Request's delayed "unattach
+        // it" pins the Equipment its Attach attached, so an Equipment that left
+        // and returned is not unattached; Stolen Uniform is denied a pin by
+        // `condition_names_referent_zone_change`, so this is the identity for
+        // it. Deliberately NO early return: an empty pool unattaches nothing.
         //
         // Slot carve-out DOES apply: `attachment_filter` may be
         // `ParentTargetSlot`, and `effect_object_targets` indexes it
@@ -457,6 +589,23 @@ pub fn resolve_unattach_all(
             };
         super::effect_object_targets(attachment_filter, pool)
     });
+    let target_ids = match (&explicit_attachment_ids, target_filter) {
+        // CR 701.3d: "unattach it" names the attachment and no host, so it is
+        // unattached from whatever it is attached to now.
+        (Some(ids), TargetFilter::Any) => {
+            let mut hosts: Vec<ObjectId> = Vec::new();
+            for host in ids
+                .iter()
+                .filter_map(|&id| attachment_current_host(state, id))
+            {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+            hosts
+        }
+        _ => resolved_object_ids_for_filter(state, ability, target_filter),
+    };
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -489,6 +638,33 @@ pub fn resolve_unattach_all(
     Ok(())
 }
 
+/// CR 608.2c + CR 701.3b: The result of an Attach instruction — each object it
+/// actually attached, at the incarnation it had when it became attached. A
+/// refused or same-host attach did nothing and carries no subject, so it is
+/// not part of the result. A later "unattach it" names exactly these objects.
+pub(crate) fn attach_result_from_events(
+    events: &[GameEvent],
+) -> crate::types::ability::ForwardedResultContext {
+    let attached: Vec<ObjectIncarnationRef> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                subject: Some(subject),
+                ..
+            } => Some(subject.identity),
+            _ => None,
+        })
+        .collect();
+    crate::types::ability::ForwardedResultContext {
+        targets: attached
+            .iter()
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect(),
+        object_incarnations: attached,
+    }
+}
+
 pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
     match target {
         AttachTarget::Object(id) => TargetRef::Object(id),
@@ -516,6 +692,33 @@ fn attachment_tree_contains(state: &GameState, root_id: ObjectId, candidate_id: 
     false
 }
 
+/// CR 115.10a + CR 608.2d: Every BATTLEFIELD object matching `filter`
+/// under this ability's semantic context — the enumeration shared by the
+/// resolution-time attachment prompt and the described-host prompt.
+///
+/// `resolved_object_ids_for_filter` is deliberately NOT used: its
+/// explicit-target-first arm (`targeting.rs`
+/// `resolved_object_ids_for_filter_with_context`) returns the ability's DECLARED
+/// targets when they match the filter. For a resolution-time choice the declared
+/// targets belong to a DIFFERENT role — measured on Aura Graft, whose declared
+/// target is the Aura being moved: that helper returned only the Aura and
+/// shadowed the real host population, collapsing the prompt to zero legal hosts
+/// (the attach then silently did nothing).
+fn battlefield_ids_matching_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, filter);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| matches_target_filter(state, *id, &effective, &ctx))
+        .collect()
+}
+
 /// CR 608.2d + CR 601.2c: Optional or activation-deferred attach sub-instructions
 /// (Nahiri, the Lithomancer +2) choose the Equipment only after the controller
 /// accepts at resolution. When multiple Equipment match, prompt instead of
@@ -539,21 +742,67 @@ fn prompt_resolution_attachment_choice(
         bound.bind_attach_attachment_candidates(candidates);
         return prompt_forwarded_attachment_choice(state, &bound, events);
     }
-    if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
+    // CR 115.1d + CR 608.2d + CR 609.3: a DESCRIBED host ("attach it to a
+    // creature you control") is not a target, so a Resolution-timed Attach has no
+    // declared host slot; the host is chosen while the effect resolves. The
+    // attachment role must already be determined without a player choice, and the
+    // host must be a population the battlefield-object prompt can express. This
+    // mirrors the parser arm's conjuncts — the two gates share
+    // `attach_host_filter_needs_target_slot` and
+    // `TargetFilter::denotes_battlefield_objects`.
+    //
+    // A GUARDED destructure, not an `unreachable!`: the surrounding seams
+    // (`resolve_with_prompt`, `resolve_bound_attachment_operation`) deliberately
+    // keep non-Attach fallbacks, so this prompt phase stays panic-free for every
+    // caller and simply falls through for a non-Attach effect.
+    if let Effect::Attach {
+        target: host_filter,
+        ..
+    } = &ability.effect
+    {
+        if ability.target_choice_timing == TargetChoiceTiming::Resolution
+            && ability.attach_host_target().is_none()
+            && attachment_filter.is_context_ref()
+            && crate::types::ability::attach_host_filter_needs_target_slot(host_filter)
+            && host_filter.denotes_battlefield_objects()
+        {
+            return prompt_described_host_choice(
+                state,
+                ability,
+                attachment_filter,
+                host_filter,
+                events,
+            );
+        }
+    }
+    // CR 107.1c + CR 608.2d: a DETERMINED set ("attach all <filter>") offers no
+    // choice — every matching object attaches. An empty population attaches
+    // nothing (CR 608.2d: nothing to choose, nothing to affect); otherwise the
+    // caller binds the whole live set and executes it.
+    if attach_is_determined_set(&ability.effect) {
+        return if battlefield_ids_matching_filter(state, ability, attachment_filter).is_empty() {
+            Ok(AttachPromptOutcome::Completed)
+        } else {
+            Ok(AttachPromptOutcome::Execute)
+        };
+    }
+    if !crate::types::ability::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
-    if explicit_attachment_target_chosen(state, ability, attachment_filter) {
+    // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
+    // satisfied by a declared target slot. A described (`AtResolution`) operand is
+    // chosen while the effect resolves and must never be read out of the announced
+    // target set — even when the announced HOST itself matches the attachment
+    // filter (an Equipment-creature host for Beatrix, an Aura/Equipment host
+    // permanent for Ardenn). Without this gate the shortcut fires, no prompt is
+    // created, and the host is consumed as the attachment operand.
+    if attach_selection(ability).is_targeted()
+        && explicit_attachment_target_chosen(state, ability, attachment_filter)
+    {
         return Ok(AttachPromptOutcome::Execute);
     }
 
-    let ctx = FilterContext::from_ability(ability);
-    let effective = crate::game::effects::resolved_object_filter(state, ability, attachment_filter);
-    let eligible: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| matches_target_filter(state, *id, &effective, &ctx))
-        .collect();
+    let eligible = battlefield_ids_matching_filter(state, ability, attachment_filter);
 
     let bounds = attachment_choice_bounds(state, ability, eligible.len())?;
 
@@ -577,6 +826,192 @@ fn prompt_resolution_attachment_choice(
     }
 }
 
+/// CR 701.3b + CR 608.2d: True when `host_id` is an admissible host under the
+/// HOST-RELATIVE reading of `host_filter` — Aura Graft's "attach it to another
+/// permanent it can enchant" names a destination OTHER than the permanent the
+/// attachment is currently on, not merely an object other than the ability's
+/// source.
+///
+/// The evaluation is SEMANTIC, not a structural scan for `FilterProp::Another`:
+/// that property reads `FilterContext::recipient_id` first (filter.rs), so each
+/// attachment operand is re-evaluated against `host_id` with a context derived
+/// from this ability whose `recipient_id` IS that operand's current host. That
+/// excludes exactly the current host while preserving every other
+/// ability-relative fact (`source_id`/`source_controller` keep
+/// `ControllerRef::You`, `SelfRef`, … meaning what they meant during
+/// enumeration), and it keeps `Not` polarity and sibling `Or` legs intact — a
+/// structural scan would invert under `Not` and over-exclude under `Or`.
+///
+/// True when NO attachment operand has a current host (nothing to exclude), or
+/// when EVERY operand with current host `C` accepts `host_id` under its
+/// `recipient_id = C` context. The host-relative "another" is an eligibility
+/// condition for EACH attachment it governs, so a single admitted operand is
+/// not enough: with two attachments on different hosts, the existential reading
+/// would admit host A (it is "another" relative to B) and the later attachment
+/// choice could then select the attachment already on A. CR 701.3b makes an
+/// attach to the object the attachment is already on do nothing and CR 608.2d
+/// forbids offering an option the effect cannot take; Scryfall's Aura Graft
+/// ruling adds that with no legal place to move the enchantment it simply
+/// doesn't move.
+///
+/// Consumers, kept on this one authority so they cannot drift: the host
+/// enumerations ([`prompt_described_host_choice`],
+/// [`prompt_forwarded_attachment_choice`]) and the answer-binding check
+/// ([`bind_resolution_attachment_choice`]).
+fn host_choice_admissible_for_attachment_references(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host_filter: &TargetFilter,
+    host_id: ObjectId,
+    attachment_ids: &[ObjectId],
+) -> bool {
+    let effective = crate::game::effects::resolved_object_filter(state, ability, host_filter);
+    for &attachment_id in attachment_ids {
+        let Some(current_host) = attachment_current_host(state, attachment_id) else {
+            continue;
+        };
+        // `recipient_id` IS the `Another` reference: "another permanent" means
+        // a permanent other than the one this attachment is on.
+        let ctx = FilterContext::from_ability_with_recipient(ability, current_host);
+        if !matches_target_filter(state, host_id, &effective, &ctx) {
+            return false;
+        }
+    }
+    true
+}
+
+/// CR 701.3a + CR 303.4b: The battlefield object an attachment is currently
+/// attached to, if it has one. `None` covers an unattached object and a
+/// player-attached Aura (`AttachTarget::Player`, the Curse class) — the
+/// described-host prompt only expresses battlefield objects, so a player host
+/// is never an excluded battlefield candidate.
+///
+/// Compares bare `ObjectId`s: `attached_to` carries no incarnation today, so a
+/// host that left and returned within the same resolution could in principle be
+/// wrongly excluded. The file's sibling role bindings preserve CR 400.7
+/// incarnation identity instead (`ObjectIncarnationRef`, e.g.
+/// `resolve_bound_attachment_targets`); no corpus card reaches the id-keyed
+/// case today.
+fn attachment_current_host(state: &GameState, attachment_id: ObjectId) -> Option<ObjectId> {
+    state
+        .objects
+        .get(&attachment_id)?
+        .attached_to
+        .as_ref()?
+        .as_object()
+}
+
+/// The attachment operands whose current hosts are the host-relative "another"
+/// references, read from the SAME set the operation's host prompt enumerated
+/// from: a forwarded-candidate operation
+/// ([`prompt_forwarded_attachment_choice`]) parks hosts from
+/// `attach_attachment_candidates()`, while the described-host prompt
+/// ([`prompt_described_host_choice`]) enumerates through
+/// `resolve_attachment_ids`. Keeping both on one authority is what stops the
+/// bind leg from disagreeing with the parked offer.
+fn excluded_host_operand_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if !ability.attach_attachment_candidates().is_empty() {
+        return ability
+            .attach_attachment_candidates()
+            .iter()
+            .filter(|candidate| candidate.is_current(state))
+            .map(|candidate| candidate.object_id)
+            .collect();
+    }
+    let mut no_slots = std::iter::empty();
+    resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots)
+}
+
+/// CR 115.1d + CR 608.2d + CR 609.3 + CR 702.5a + CR 303.4j: choose the host of
+/// a described attach instruction while it resolves. Zero offerable hosts ⇒ the
+/// instruction does nothing (the transform/sibling instructions have already
+/// resolved); exactly one ⇒ bind it and execute; several ⇒ park the choice.
+fn prompt_described_host_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+    host_filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<AttachPromptOutcome, EffectError> {
+    // CR 608.2d + CR 609.3: the attachment operand is not a player choice, so
+    // the instruction can only proceed if the SAME cascade the executor uses
+    // resolves it. Reading `resolve_attachment_ids` here (rather than
+    // `resolved_object_ids_for_filter` alone) keeps the prompt and the
+    // executor on one authority; an empty cascade is a silent `Completed`
+    // no-op, mirroring `prompt_forwarded_attachment_choice`'s 0-candidate
+    // convention. `MissingParam` stays for callers that bypass this phase.
+    let mut no_slots = std::iter::empty();
+    let attachment_ids = resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots);
+    if attachment_ids.is_empty() {
+        return Ok(AttachPromptOutcome::Completed);
+    }
+    // CR 115.1d + CR 608.2d: the host candidates are the BATTLEFIELD objects
+    // matching the described filter — the same enumeration the explicit-slot
+    // attachment branch above uses.
+    let mut hosts = battlefield_ids_matching_filter(state, ability, host_filter);
+    // CR 608.2d "can't choose an option that's illegal or impossible" +
+    // CR 702.5a + CR 303.4j + CR 301.5c: offer only hosts the instruction can
+    // actually attach to — the COMPLETE authority the executor's Aura gate
+    // and `attach_to` fold together (`attachment_illegality` + the Aura's
+    // Enchant filter + the zone gate + the Equipment/Fortification host-type
+    // requirement). `any` (not `all`): for a multi-attachment instruction the
+    // executor attaches what it can and each illegal pair stays put
+    // (CR 609.3 + CR 701.3b), so a host that takes at least one attachment is
+    // a legal option, and every offered host yields at least one attach.
+    hosts.retain(|host_id| {
+        attachment_ids.iter().any(|&attachment_id| {
+            crate::game::sba::is_valid_attachment_target(state, attachment_id, *host_id)
+        })
+    });
+    // CR 608.2d + CR 609.3 + CR 701.3b: a HOST-RELATIVE "another permanent"
+    // excludes the permanent the attachment is currently on (Aura Graft) even
+    // though `FilterProp::Another` is source-relative by default. The admission
+    // is the semantic per-recipient evaluation (see
+    // `host_choice_admissible_for_attachment_references`), so `Not` polarity
+    // and sibling `Or` legs keep their meaning. Zero candidates after this
+    // filter is the ordinary `Completed` no-op (CR 609.3 + the 2004-10-04 Aura
+    // Graft ruling: with no legal place to move the enchantment, it doesn't
+    // move).
+    hosts.retain(|host_id| {
+        host_choice_admissible_for_attachment_references(
+            state,
+            ability,
+            host_filter,
+            *host_id,
+            &attachment_ids,
+        )
+    });
+    match hosts.len() {
+        0 => Ok(AttachPromptOutcome::Completed),
+        1 => {
+            let mut bound = ability.clone();
+            let host = state
+                .objects
+                .get(&hosts[0])
+                .map(ObjectIncarnationRef::from_object)
+                .expect("resolved attachment host must exist");
+            bound.bind_attach_host_target(host);
+            match resolve_bound_attachment_operation(state, &bound, events)? {
+                AttachResolutionOutcome::Completed => Ok(AttachPromptOutcome::Completed),
+                AttachResolutionOutcome::Paused => Ok(AttachPromptOutcome::Paused),
+            }
+        }
+        _ => {
+            park_resolution_attachment_choice(
+                state,
+                ability,
+                hosts,
+                MultiTargetBounds { min: 1, max: 1 },
+            );
+            Ok(AttachPromptOutcome::Paused)
+        }
+    }
+}
+
 /// CR 400.7 + CR 608.2c + CR 701.3b: A `ZoneChangedThisWay` Attach whose attachment
 /// operand is `ParentTarget` means "one of them", not merely the most recent
 /// trigger event. Preserve the exact event-scoped battlefield objects as typed
@@ -593,10 +1028,15 @@ pub(crate) fn attachment_candidates_from_zone_change(
     else {
         return Vec::new();
     };
+    // CR 603.12: a "When … this way" reflexive carries the zone change as its
+    // creation-gate event; it names the same event-scoped set as an "if" head.
     let Some(AbilityCondition::ZoneChangedThisWay {
         filter,
         destination: Some(Zone::Battlefield),
-    }) = ability.condition.as_ref()
+    }) = ability
+        .condition
+        .as_ref()
+        .and_then(AbilityCondition::zone_changed_this_way_head)
     else {
         return Vec::new();
     };
@@ -637,7 +1077,20 @@ fn prompt_forwarded_attachment_choice(
     };
 
     if ability.attach_host_target().is_none() {
-        let hosts = resolved_object_ids_for_filter(state, ability, target);
+        let mut hosts = resolved_object_ids_for_filter(state, ability, target);
+        // CR 608.2d + CR 701.3b: this host prompt applies the same semantic
+        // host-relative "another" admission as the described-host prompt, so the
+        // two cannot offer different sets. `candidates` is already the live
+        // forwarded operand set the bind leg reads.
+        hosts.retain(|host_id| {
+            host_choice_admissible_for_attachment_references(
+                state,
+                ability,
+                target,
+                *host_id,
+                &candidates,
+            )
+        });
         match hosts.len() {
             0 => return Ok(AttachPromptOutcome::Completed),
             1 => {
@@ -702,6 +1155,7 @@ fn park_resolution_attachment_choice(
     let mut operation = ability.clone();
     let tail = operation.sub_ability.take();
     let waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards,
         count: bounds.max,
@@ -717,11 +1171,14 @@ fn park_resolution_attachment_choice(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -793,6 +1250,32 @@ fn attachment_choice_bounds(
     ability: &ResolvedAbility,
     eligible_count: usize,
 ) -> Result<MultiTargetBounds, EffectError> {
+    // CR 107.1c + CR 608.2d: a DESCRIBED attachment operand carries its printed
+    // cardinality on the effect (`AttachSelection::AtResolution { count }`),
+    // because `clause.multi_target` is the announced-target count and must stay
+    // empty for a described choice. `All` maps to the legacy single-choice bounds
+    // (documented gap), and the zero-eligible short-circuit is required for the
+    // `One`/`UpTo` forms, whose min is >= 1 — `resolve_multi_target_bounds`
+    // errors when `legal < min` (CR 608.2d: no illegal or impossible option).
+    //
+    // Deliberately not taken for a forwarded-candidate operation
+    // (`attach_attachment_candidates` non-empty): those shapes carry their own
+    // `multi_target`/`optional_targeting` bounds and never reach a described
+    // count today.
+    if ability.attach_attachment_candidates().is_empty() {
+        if let Effect::Attach {
+            selection: AttachSelection::AtResolution { count },
+            ..
+        } = &ability.effect
+        {
+            if eligible_count == 0 {
+                return Ok(MultiTargetBounds { min: 0, max: 0 });
+            }
+            let spec = count.to_multi_target_spec();
+            return resolve_multi_target_bounds(state, ability, &spec, eligible_count)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()));
+        }
+    }
     if let Some(spec) = &ability.multi_target {
         return resolve_multi_target_bounds(state, ability, spec, eligible_count)
             .map_err(|error| EffectError::InvalidParam(error.to_string()));
@@ -817,6 +1300,26 @@ pub(crate) fn complete_resolution_attachment_choice(
     resolve_bound_attachment_operation(state, &choice_ability, events).map(|_| ())
 }
 
+/// CR 608.2d: which role a parked `EffectZoneChoice` on an Attach operation is
+/// choosing. The host role is open exactly when the host is unbound and the
+/// attachment role is already determined without a player choice — either a
+/// forwarded candidate set this same prompt preceded, or a context reference
+/// that claims no explicit slot. Total over the operation's own typed
+/// bindings, so the answer cannot drift from `AttachTargetBindings`.
+fn parked_attach_choice_selects_host(operation: &ResolvedAbility) -> bool {
+    operation.attach_host_target().is_none()
+        && match &operation.effect {
+            Effect::Attach { attachment, .. } => {
+                !operation.attach_attachment_candidates().is_empty()
+                    || (attachment.is_context_ref()
+                        && !crate::types::ability::attach_attachment_filter_needs_target_slot(
+                            attachment,
+                        ))
+            }
+            _ => false,
+        }
+}
+
 /// Bind the answer to a resolution-time attachment choice before the child
 /// operation is resumed. The binding records exact object incarnations, so a
 /// later re-park cannot attach a new object that reused the selected id.
@@ -825,12 +1328,49 @@ pub(crate) fn bind_resolution_attachment_choice(
     ability: ResolvedAbility,
     attachment_ids: &[ObjectId],
 ) -> Result<ResolvedAbility, EffectError> {
-    let selecting_host = !ability.attach_attachment_candidates().is_empty()
-        && ability.attach_host_target().is_none();
+    let selecting_host = parked_attach_choice_selects_host(&ability);
+    // CR 608.2d + CR 609.3 + CR 701.3b: the answer-binding leg of the
+    // host-relative "another" admission. The host enumerations above are the
+    // primary gate; this leg keeps the bind total for a caller that bypasses the
+    // generic `chosen ⊆ cards` check, so an inadmissible host can never be
+    // bound. The operand set comes from `excluded_host_operand_ids`, the same
+    // authority the operation's host prompt enumerated from. Total and
+    // non-panicking: an unusable answer is an `InvalidParam`.
+    let rejected_hosts: Vec<ObjectId> = if selecting_host {
+        match &ability.effect {
+            Effect::Attach {
+                attachment, target, ..
+            } => {
+                let operand_ids = excluded_host_operand_ids(state, &ability, attachment);
+                attachment_ids
+                    .iter()
+                    .copied()
+                    .filter(|&selected_id| {
+                        !host_choice_admissible_for_attachment_references(
+                            state,
+                            &ability,
+                            target,
+                            selected_id,
+                            &operand_ids,
+                        )
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     let mut choice_ability = ability;
     choice_ability.sub_ability = None;
     for &selected_id in attachment_ids {
-        choice_ability.targets.push(TargetRef::Object(selected_id));
+        if rejected_hosts.contains(&selected_id) {
+            return Err(EffectError::InvalidParam(
+                "the selected host is not an admissible \"another\" destination for the attachment"
+                    .to_string(),
+            ));
+        }
+        choice_ability.push_target(TargetRef::Object(selected_id));
         let selected = state
             .objects
             .get(&selected_id)
@@ -871,8 +1411,8 @@ pub(crate) fn resolve_selected_attachment_choice(
                 "Attach EffectZoneChoice missing typed attachment operation".to_string(),
             )
         })?;
-    let selecting_host = !operation.attach_attachment_candidates().is_empty()
-        && operation.attach_host_target().is_none();
+    let events_before = events.len();
+    let selecting_host = parked_attach_choice_selects_host(&operation);
     let bound_operation = bind_resolution_attachment_choice(state, operation, attachment_ids)?;
     let operation = {
         let frame = state
@@ -892,6 +1432,12 @@ pub(crate) fn resolve_selected_attachment_choice(
     // A host answer must re-enter the prompt phase to choose from the
     // forwarded Equipment set. An already-bound Equipment answer instead
     // executes directly, avoiding a recursive replay of its own prompt.
+    //
+    // The owning child is the active top here; its depth anchors where the
+    // answer's outcome is published, whatever the attach then raises above it.
+    // The depth is call-local: it is spent below, in this same synchronous
+    // call, and must never be stored or carried across a pause.
+    let child_boundary = state.resolution_stack.capture_child_boundary();
     let outcome = if selecting_host {
         resolve_with_prompt(state, &operation, events)?
     } else {
@@ -899,14 +1445,85 @@ pub(crate) fn resolve_selected_attachment_choice(
     };
 
     match outcome {
-        AttachResolutionOutcome::Paused => Ok(false),
+        AttachResolutionOutcome::Paused => {
+            // CR 701.3a + CR 608.2c: the selected attachment's printed
+            // attach-time choice ("as this becomes attached, choose …",
+            // Sanctuary Blade) pauses AFTER the attach, and that pause retires
+            // with its post-replacement pair without returning here. The later
+            // instructions wait for that choice, but what this answer did is
+            // already settled, so publish it now. A pause before any attach
+            // (a host answer re-parking for the Equipment answer) publishes
+            // nothing; its own completion does. Known limit: a CR 616.1
+            // ordering pause between several Attached replacements resumes
+            // through `deliver_attach`, not here, so its outcome is never
+            // published and an "If you do" rider reads not-performed. Every
+            // printed Attached replacement is self-referential, so no printed
+            // board reaches it.
+            if attach_happened(&events[events_before..]) {
+                publish_selected_attach_outcome(
+                    state,
+                    child_boundary,
+                    &operation,
+                    &events[events_before..],
+                );
+            }
+            Ok(false)
+        }
         AttachResolutionOutcome::Completed => {
+            publish_selected_attach_outcome(
+                state,
+                child_boundary,
+                &operation,
+                &events[events_before..],
+            );
             let _ = state
                 .take_active_attachment_choice_continuation()
                 .expect("completed attach choice must retain its active child")
                 .expect("completed attach choice must own its active child");
             Ok(true)
         }
+    }
+}
+
+/// CR 701.3b: only an attach that took effect carries a subject.
+fn attach_happened(events: &[GameEvent]) -> bool {
+    !attach_result_from_events(events).targets.is_empty()
+}
+
+/// CR 608.2c: hand a selected Attach answer's outcome to the instructions
+/// parked after it — whether it attached (an "If you do" rider) and, for a
+/// forwarding Attach, which objects it attached (a later "unattach it"). The
+/// owner of those instructions is the continuation directly beneath the
+/// Attach-choice child captured at `child_boundary`, so this must run while
+/// that child is still on the stack. Any other frame shape publishes nothing.
+fn publish_selected_attach_outcome(
+    state: &mut GameState,
+    child_boundary: ChildStackDepth,
+    operation: &ResolvedAbility,
+    events: &[GameEvent],
+) {
+    let performed = !super::compound_run_unperformed(operation)
+        && super::mandatory_parent_effect_performed(&operation.effect, events);
+    let forwarded = operation
+        .forward_result
+        .then(|| attach_result_from_events(events));
+    let Some(tail) = state
+        .resolution_stack
+        .ability_continuation_outside_attachment_choice_child_mut(child_boundary)
+        .map(|frame| frame.pending.chain.as_mut())
+    else {
+        return;
+    };
+    if let Some(forwarded) = forwarded {
+        tail.context.forwarded_result_context = Some(Box::new(forwarded));
+    }
+    if tail.sub_link == crate::types::ability::SubAbilityLink::SequentialSibling
+        && tail
+            .condition
+            .as_ref()
+            .is_some_and(super::condition_depends_on_effect_performed)
+    {
+        tail.set_optional_effect_performed_recursive(performed);
     }
 }
 
@@ -1093,6 +1710,17 @@ fn resolve_parent_target_host_from_trigger(state: &GameState) -> Option<ObjectId
     }
 }
 
+/// CR 115.1a/c/d/e + CR 608.2d: the printed role of this operation's ATTACHMENT
+/// operand. Total and fail-closed: a non-`Attach` effect reads as `Targeted`, so
+/// the existing gate behavior for callers that reach here with another effect is
+/// unchanged.
+fn attach_selection(ability: &ResolvedAbility) -> AttachSelection {
+    match &ability.effect {
+        Effect::Attach { selection, .. } => selection.clone(),
+        _ => AttachSelection::Targeted,
+    }
+}
+
 fn explicit_attachment_target_chosen(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1104,6 +1732,52 @@ fn explicit_attachment_target_chosen(
         matches!(
             target,
             TargetRef::Object(id) if matches_target_filter(state, *id, &effective, &ctx)
+        )
+    })
+}
+
+/// CR 115.1a/c/d + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: whether an announced object
+/// target occupies the HOST slot of this Attach instruction.
+///
+/// Both roles can print "target" on one instruction ("attach target Equipment
+/// you control to up to one target creature you control"), so the ATTACHMENT
+/// object also appears in `ability.targets`. Filter membership and the resolver's attachment-slot
+/// window are the discriminators — a target that could not be the host, or that
+/// the attachment operand already consumed, cannot be host evidence — and it is the same filter the resolver itself matches host
+/// candidates against (see `resolve_attach_target`), so the two seams cannot
+/// disagree about what counts as a host.
+fn host_slot_announced(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host_filter: &TargetFilter,
+) -> bool {
+    let attachment_filter = match &ability.effect {
+        Effect::Attach { attachment, .. } => attachment,
+        _ => return false,
+    };
+    // CR 115.1a/c/d/e + CR 601.2c + CR 702.151b: the resolver consumes the
+    // attachment operand's announced slot(s) FIRST, so only the slots after that
+    // window can be host evidence. A reconfigure Equipment is itself a creature
+    // while unattached (and an animated Equipment matches "creature you
+    // control"), so an announced ATTACHMENT that also satisfies the host filter
+    // must not be read as a chosen host — otherwise the declined-host no-op is
+    // skipped and the resolver attaches to an unchosen object.
+    let mut remaining = ability.targets.iter();
+    let mut attachment_ids =
+        resolve_attachment_ids(state, ability, attachment_filter, &mut remaining);
+    if attachment_ids.is_empty() {
+        // `resolve_attachment_ids` short-circuits on bound attachment targets
+        // without advancing the iterator; exclude those ids explicitly.
+        attachment_ids = current_attachment_target_ids(state, ability);
+    }
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, host_filter);
+    remaining.any(|target| {
+        matches!(
+            target,
+            TargetRef::Object(id)
+                if !attachment_ids.contains(id)
+                    && matches_target_filter(state, *id, &effective, &ctx)
         )
     })
 }
@@ -1136,24 +1810,6 @@ fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<Ob
     })
 }
 
-/// Only explicit attachment choices consume player-chosen target slots.
-/// Scan-based filters (e.g. "Equipment that was attached to ~") resolve from
-/// the battlefield or LKI and must not steal `ParentTarget` slots.
-fn attachment_filter_uses_explicit_target_slot(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(tf) => !tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToSource)),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(attachment_filter_uses_explicit_target_slot),
-        TargetFilter::Not { filter } => attachment_filter_uses_explicit_target_slot(filter),
-        _ => false,
-    }
-}
-
 fn resolve_object_filter<'a>(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1161,7 +1817,16 @@ fn resolve_object_filter<'a>(
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => Some(ability.source_id),
+        // CR 400.7: the source names itself only while it is the same object.
+        TargetFilter::SelfRef => match &ability.trigger_source {
+            Some(source) if source.identity.reference.object_id != ability.source_id => {
+                Some(ability.source_id)
+            }
+            Some(_) => ability
+                .source_is_current(state)
+                .then_some(ability.source_id),
+            None => ability.self_ref_binding(state),
+        },
         TargetFilter::LastCreated => target_slots
             .find_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),
@@ -1224,10 +1889,14 @@ fn resolve_object_filter<'a>(
 
 fn filter_has_attached_to_source(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToSource)),
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }
+            )
+        }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_has_attached_to_source)
         }
@@ -1242,7 +1911,14 @@ fn strip_attached_to_source_prop(filter: &TargetFilter) -> TargetFilter {
             properties: tf
                 .properties
                 .iter()
-                .filter(|p| !matches!(p, FilterProp::AttachedToSource))
+                .filter(|p| {
+                    !matches!(
+                        p,
+                        FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source
+                        }
+                    )
+                })
                 .cloned()
                 .collect(),
             ..tf.clone()
@@ -1365,6 +2041,45 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
+/// CR 701.3b: [`attach_to`] that reports whether the attachment actually moved
+/// onto `target_id`. Same-host re-attaches (a no-op under CR 701.3b) and
+/// rejected attaches return `false`, so "becomes attached" events (CR 603.2e)
+/// are emitted only for a genuine transition.
+pub(crate) fn attach_to_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+) -> bool {
+    let host = Some(AttachTarget::Object(target_id));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to(state, attachment_id, target_id);
+    !was_attached && host_of(state) == host
+}
+
+/// Player-host sibling of [`attach_to_reporting_change`].
+pub(crate) fn attach_to_player_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> bool {
+    let host = Some(AttachTarget::Player(target_player));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to_player(state, attachment_id, target_player);
+    !was_attached && host_of(state) == host
+}
+
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.
@@ -1449,12 +2164,17 @@ pub(crate) fn attach_to_with_authority(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    let recorded_reference = reference.filter(|_| moving_to_new_host);
+    if recorded_reference.is_some() {
+        crate::game::layers::flush_layers_for_attachment_command(state);
+    } else {
+        crate::game::layers::flush_layers(state);
+    }
 
     // CR 733: journal the settled edit through its owning family. A same-host
     // re-attach (CR 701.3b) leaves every field above unchanged, so only a real
     // host transition is recorded.
-    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+    if let Some(reference) = recorded_reference {
         record_attachment_edit(
             state,
             reference,
@@ -1504,15 +2224,13 @@ pub(crate) enum AttachIllegality {
     Prohibited,
 }
 
-/// Returns `Some(reason)` when an object host forbids `attachment` via
-/// protection or a can't-be-attached static, else `None`.
-///
-/// Does NOT evaluate the Enchant filter or zone — that legality is applied by
-/// the caller (`is_valid_attachment_target` checks it for the SBA path). The
-/// checks here are purely additive prohibitions that apply equally at attach
-/// time and continuously thereafter, so routing both paths through this resolver
-/// keeps them from drifting.
-pub(crate) fn attachment_illegality(
+/// Live-object convenience over [`attachment_illegality_projected`], kept for
+/// the unit tests below: production routes live reads through
+/// `sba::is_valid_attachment_target_for_attacher` (which feeds the stored
+/// object) and pre-entry reads through the projected resolver directly, so a
+/// second production entry point would be a second authority to drift.
+#[cfg(test)]
+fn attachment_illegality(
     state: &GameState,
     attachment_id: ObjectId,
     host_id: ObjectId,
@@ -1615,8 +2333,11 @@ pub(crate) fn attachment_illegality_projected(
     None
 }
 
-/// CR 702.16c/d + CR 702.16n/p: True when some protection instance on `host`
-/// matches `attachment` and is not exempted for that attachment.
+/// CR 702.16c/d + CR 613.7: only protection that the layer pass left on the
+/// host applies at the attachment boundary. A matching quality blocks unless
+/// EVERY surviving instance of it is a ridered grant that exempts this
+/// attachment (CR 702.16m + CR 702.16n + CR 702.16p); an instance with no
+/// recorded provenance (printed or copiable) never exempts.
 fn protection_blocks_attachment(
     state: &GameState,
     host_id: ObjectId,
@@ -1624,143 +2345,43 @@ fn protection_blocks_attachment(
     host: &crate::game::game_object::GameObject,
     attachment: &crate::game::game_object::GameObject,
 ) -> bool {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::keywords::Keyword;
-    use crate::types::statics::StaticMode;
-
-    // CR 702.16: Printed / base protection on the host has no 702.16n rider —
-    // it always blocks matching attachments.
-    for kw in &host.base_keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            if crate::game::keywords::source_matches_protection_target(pt, host, attachment) {
-                return true;
-            }
+    crate::game::keywords::protection_qualities(host).any(|quality| {
+        if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
+            return false;
         }
-    }
-
-    // Continuous grants: each matching protection instance blocks unless its
-    // StaticDefinition/TCE carries a CR 702.16n/p exemption covering this
-    // attachment.
-    let mut any_matching_grant = false;
-    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::Continuous) {
-            continue;
-        }
-        let source_id = source_obj.id;
-        let def_index = live_static_def_index(source_obj, def);
-        let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
-        let ctx = FilterContext::from_source(state, source_id);
-        if !matches_target_filter(state, host_id, &affected, &ctx) {
-            continue;
-        }
-        for (mod_index, modification) in def.modifications.iter().enumerate() {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            let resolved = resolve_protection_target_for_grant(state, source_id, pt);
-            let Some(resolved) = resolved else {
-                continue;
-            };
-            if !crate::game::keywords::source_matches_protection_target(&resolved, host, attachment)
-            {
-                continue;
-            }
-            any_matching_grant = true;
-            if !protection_grant_exempts_attachment(
-                state,
-                attachment_id,
-                source_id,
-                (def_index, mod_index, host_id),
-                &resolved,
-                def.protection_does_not_remove.as_ref(),
-            ) {
-                return true;
-            }
-        }
-    }
-
-    // Transient continuous protection grants (e.g. Mother of Runes) — no
-    // StaticDefinition rider today; treat as always-blocking when they match.
-    for tce in &state.transient_continuous_effects {
-        let ctx = FilterContext::from_source(state, tce.source_id);
-        if !matches_target_filter(state, host_id, &tce.affected, &ctx) {
-            continue;
-        }
-        for modification in &tce.modifications {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            let resolved = resolve_protection_target_for_grant(state, tce.source_id, pt);
-            let Some(resolved) = resolved else {
-                continue;
-            };
-            if crate::game::keywords::source_matches_protection_target(&resolved, host, attachment)
-            {
-                // Transients currently carry no 702.16n rider field.
-                return true;
-            }
-        }
-    }
-
-    // If host.keywords still match (granted protection present) but we found no
-    // continuous grant — fall back to the pre-exemption query so we never open
-    // a hole when grant discovery misses a path.
-    if !any_matching_grant && crate::game::keywords::protection_prevents_from(host, attachment) {
-        return true;
-    }
-
-    false
-}
-
-/// CR 702.16 + CR 105.4: Resolve `ChosenColor` / `ChosenCardType` against the
-/// granting source before matching the attachment (mirrors layer bake-in).
-fn resolve_protection_target_for_grant(
-    state: &GameState,
-    source_id: ObjectId,
-    pt: &crate::types::keywords::ProtectionTarget,
-) -> Option<crate::types::keywords::ProtectionTarget> {
-    use crate::types::keywords::ProtectionTarget;
-    match pt {
-        ProtectionTarget::ChosenColor => state
-            .objects
-            .get(&source_id)
-            .and_then(|src| src.chosen_color())
-            .map(ProtectionTarget::Color),
-        ProtectionTarget::ChosenCardType => state
-            .objects
-            .get(&source_id)
-            .and_then(|src| src.chosen_card_type())
-            .and_then(|ct| ct.protection_quality_str())
-            .map(|quality| ProtectionTarget::CardType(quality.to_string())),
-        other => Some(other.clone()),
-    }
-}
-
-/// Composite key for one protection modification on a host:
-/// `(static_definitions index, modifications index, host object id)`.
-use crate::game::game_object::ProtectionEffectHostKey;
-
-/// Live `static_definitions` index for an active static returned by
-/// `battlefield_active_statics`.
-fn live_static_def_index(
-    source: &crate::game::game_object::GameObject,
-    def: &crate::types::ability::StaticDefinition,
-) -> usize {
-    source
-        .static_definitions
-        .iter_all()
-        .position(|d| std::ptr::eq(d, def))
-        .expect("active static definition must index live static_definitions")
+        let mut instances = host
+            .protection_provenance
+            .iter()
+            .filter(|entry| entry.quality == *quality)
+            .peekable();
+        // Fail closed: a live quality with no recorded instance came from a
+        // writer that carries no rider (printed, copy layer, stickers).
+        instances.peek().is_none()
+            || instances.any(|entry| {
+                !entry.rider.as_ref().is_some_and(|rider| {
+                    protection_grant_exempts_attachment(
+                        state,
+                        attachment_id,
+                        host_id,
+                        rider,
+                        quality,
+                    )
+                })
+            })
+    })
 }
 
 /// CR 702.16p: Capture attachment IDs matching `resolved_pt` that are already
 /// on `host_id` and controlled by `grant_controller` at protection-start time.
+///
+/// Not claimed: an attachment that becomes attached in the same attach
+/// operation as the protection source (Ardenn, Intrepid Archaeologist moving
+/// Benevolent Blessing and another Aura to one permanent). The attach resolver
+/// moves its members one at a time and flushes layers after each, so the
+/// protection starts, and is captured here, once the source has moved and
+/// before the next member is checked; a member moved after it is not in the
+/// snapshot. The per-member resolver and its per-member flush predate this
+/// PR's snapshot, which keeps the same timing.
 fn capture_protection_start_attachment_snapshot(
     state: &GameState,
     host_id: ObjectId,
@@ -1770,10 +2391,9 @@ fn capture_protection_start_attachment_snapshot(
     let Some(host) = state.objects.get(&host_id) else {
         return Vec::new();
     };
-    host.attachments
-        .iter()
-        .filter_map(|&attachment_id| {
-            let attachment = state.objects.get(&attachment_id)?;
+    // CR 702.26b: a phased-out attachment is not "already attached" when protection starts.
+    crate::game::filter::phased_in_attachments(state, host)
+        .filter_map(|attachment| {
             let is_aura_or_equipment = attachment
                 .card_types
                 .subtypes
@@ -1789,142 +2409,172 @@ fn capture_protection_start_attachment_snapshot(
             ) {
                 return None;
             }
-            Some(attachment_id)
+            Some(attachment.id)
         })
         .collect()
 }
 
 /// CR 702.16p: When a continuous protection grant with the already-attached
 /// rider starts applying to a host, snapshot the matching controlled
-/// attachments once; consult that per-grant map in
-/// [`protection_grant_exempts_attachment`]. Prune entries when the grant stops
-/// applying to a host or the source leaves the battlefield.
+/// attachments once (those already attached when the layer pass that starts
+/// the grant runs; see [`capture_protection_start_attachment_snapshot`] for
+/// the same-operation case that is not covered); consult that snapshot in
+/// [`protection_grant_exempts_attachment`]. The grants come from the layer pass
+/// that just ran (`GameObject::protection_start_grants`), each keyed by its
+/// grant occurrence and host incarnation, so a grant keeps its snapshot while it
+/// keeps applying, whatever slot its static occupies. Prune entries when the
+/// grant stops applying to a host or the source leaves the battlefield.
 pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameState) {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::ability::ProtectionDoesNotRemove;
-    use crate::types::keywords::Keyword;
-    use crate::types::statics::StaticMode;
+    use crate::game::game_object::{ProtectionStartGrant, ProtectionStartKey};
     use std::collections::{HashMap, HashSet};
 
-    struct ActiveGrant {
-        def_index: usize,
-        mod_index: usize,
-        host_id: ObjectId,
-        resolved_pt: crate::types::keywords::ProtectionTarget,
-        controller: PlayerId,
+    // CR 702.26b + CR 702.26c: a phased-out host is treated as though it does
+    // not exist, and the layer pass leaves its recorded grants frozen. Only
+    // phased-in hosts count, so an effect that stops applying while its host is
+    // phased out starts again, with a new snapshot, when the host phases in.
+    let mut active_by_source: HashMap<ObjectId, Vec<ProtectionStartGrant>> = HashMap::new();
+    for host_id in &state.battlefield {
+        let Some(host) = state
+            .objects
+            .get(host_id)
+            .filter(|host| host.is_phased_in_permanent())
+        else {
+            continue;
+        };
+        for grant in &host.protection_start_grants {
+            active_by_source
+                .entry(grant.source)
+                .or_default()
+                .push(grant.clone());
+        }
     }
 
-    let mut active_by_source: HashMap<ObjectId, Vec<ActiveGrant>> = HashMap::new();
-
-    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::Continuous) {
-            continue;
-        }
-        if def.protection_does_not_remove
-            != Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached)
+    for &source_id in &state.battlefield {
+        if state
+            .objects
+            .get(&source_id)
+            .is_none_or(|source| source.protection_start_snapshots.is_empty())
         {
             continue;
         }
-        let source_id = source_obj.id;
-        let def_index = live_static_def_index(source_obj, def);
-        let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
-        let ctx = FilterContext::from_source(state, source_id);
-        for (mod_index, modification) in def.modifications.iter().enumerate() {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            let Some(resolved_pt) = resolve_protection_target_for_grant(state, source_id, pt)
-            else {
-                continue;
-            };
-            for &host_id in &state.battlefield {
-                if !matches_target_filter(state, host_id, &affected, &ctx) {
-                    continue;
-                }
-                active_by_source
-                    .entry(source_id)
-                    .or_default()
-                    .push(ActiveGrant {
-                        def_index,
-                        mod_index,
-                        host_id,
-                        resolved_pt: resolved_pt.clone(),
-                        controller: source_obj.controller,
-                    });
-            }
-        }
-    }
-
-    let active_sources: HashSet<ObjectId> = active_by_source.keys().copied().collect();
-
-    for &source_id in &state.battlefield {
-        let Some(source) = state.objects.get(&source_id) else {
-            continue;
-        };
-        if source.protection_start_exempt_attachments.is_empty() {
-            continue;
-        }
-        let active_keys = active_by_source
+        let active_keys: HashSet<&ProtectionStartKey> = active_by_source
             .get(&source_id)
-            .map(|grants| {
-                grants
-                    .iter()
-                    .map(|g| (g.def_index, g.mod_index, g.host_id))
-                    .collect::<HashSet<ProtectionEffectHostKey>>()
-            })
-            .unwrap_or_default();
-        if active_sources.contains(&source_id) {
-            state
-                .objects
-                .get_mut(&source_id)
-                .expect("battlefield object")
-                .protection_start_exempt_attachments
+            .into_iter()
+            .flatten()
+            .map(|grant| &grant.key)
+            .collect();
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            source
+                .protection_start_snapshots
                 .retain(|key, _| active_keys.contains(key));
-        } else {
-            state
-                .objects
-                .get_mut(&source_id)
-                .expect("battlefield object")
-                .protection_start_exempt_attachments
-                .clear();
         }
     }
 
-    let mut to_capture = Vec::new();
     for (source_id, grants) in active_by_source {
         for grant in grants {
-            let key = (grant.def_index, grant.mod_index, grant.host_id);
             let already_snapshotted = state.objects.get(&source_id).is_some_and(|source| {
                 source
-                    .protection_start_exempt_attachments
-                    .get(&key)
-                    .is_some_and(|entry| entry.resolved_quality == grant.resolved_pt)
+                    .protection_start_snapshots
+                    .get(&grant.key)
+                    .is_some_and(|entry| entry.resolved_quality == grant.resolved_quality)
             });
             if already_snapshotted {
                 continue;
             }
-            to_capture.push((source_id, key, grant.resolved_pt, grant.controller));
-        }
-    }
-
-    for (source_id, key, resolved_pt, controller) in to_capture {
-        let snapshot =
-            capture_protection_start_attachment_snapshot(state, key.2, controller, &resolved_pt);
-        state
-            .objects
-            .get_mut(&source_id)
-            .expect("grant source must exist")
-            .protection_start_exempt_attachments
-            .insert(
-                key,
+            // CR 109.5: "you" is the current controller of the object the
+            // static is on, read after this pass's control-changing effects
+            // (layer 2), not the controller the effect was gathered with.
+            // Only a battlefield source holds a snapshot: the prune above
+            // visits battlefield sources only, and leaving the battlefield
+            // clears the map (CR 400.7), so a snapshot on any other source
+            // would never be pruned.
+            let Some(controller) = state
+                .objects
+                .get(&source_id)
+                .filter(|source| source.zone == Zone::Battlefield)
+                .map(|source| source.controller)
+            else {
+                continue;
+            };
+            let snapshot = capture_protection_start_attachment_snapshot(
+                state,
+                grant.key.host.object_id,
+                controller,
+                &grant.resolved_quality,
+            );
+            let Some(source) = state.objects.get_mut(&source_id) else {
+                continue;
+            };
+            source.protection_start_snapshots.insert(
+                grant.key,
                 crate::game::game_object::ProtectionStartSnapshot {
-                    resolved_quality: resolved_pt,
+                    resolved_quality: grant.resolved_quality,
                     attachment_ids: snapshot,
                 },
             );
+        }
+    }
+}
+
+/// CR 702.16p: move snapshots an older save stored under slot keys to the
+/// occurrence keys. A slot key that names the source's own static migrates to
+/// `ProtectionGrantOccurrence::Static` with the host's current incarnation. A
+/// key at a slot layer 6 filled with a granted static cannot be mapped to its
+/// grant occurrence: it migrates to a key no grant claims, the refresh prunes
+/// it, and that grant takes a new snapshot (no printed card grants a ridered
+/// static). Entries whose host is gone are dropped. Run at each place a
+/// serialized object enters the game, before anything can flush layers: when
+/// a persisted state is prepared for restore
+/// (`PersistedGameState::prepare_for_restore`), and when a canceled cast's
+/// recorded inverse is decoded (`engine_casting::restore_sparse_cast_fields`,
+/// which an older save's unfinished cast reaches after that restore).
+pub(crate) fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
+    use crate::game::game_object::ProtectionStartKey;
+    use crate::types::layers::ProtectionGrantOccurrence;
+
+    let sources: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| !obj.legacy_protection_start_exempt_attachments.is_empty())
+        })
+        .collect();
+    for source_id in sources {
+        let legacy = std::mem::take(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("battlefield object")
+                .legacy_protection_start_exempt_attachments,
+        );
+        let migrated: Vec<_> = legacy
+            .into_iter()
+            .filter_map(|((definition_index, mod_index, host_id), snapshot)| {
+                let host = state.objects.get(&host_id)?;
+                Some((
+                    ProtectionStartKey {
+                        occurrence: ProtectionGrantOccurrence::Static { definition_index },
+                        mod_index,
+                        host: ObjectIncarnationRef::from_object(host),
+                    },
+                    snapshot,
+                ))
+            })
+            .collect();
+        let source = state
+            .objects
+            .get_mut(&source_id)
+            .expect("battlefield object");
+        for (key, snapshot) in migrated {
+            source
+                .protection_start_snapshots
+                .entry(key)
+                .or_insert(snapshot);
+        }
     }
 }
 
@@ -1933,46 +2583,47 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
 fn protection_grant_exempts_attachment(
     state: &GameState,
     attachment_id: ObjectId,
-    grant_source_id: ObjectId,
-    grant_key: ProtectionEffectHostKey,
+    host_id: ObjectId,
+    rider: &crate::game::game_object::ProtectionRiderGrant,
     resolved_pt: &crate::types::keywords::ProtectionTarget,
-    exemption: Option<&crate::types::ability::ProtectionDoesNotRemove>,
 ) -> bool {
     use crate::types::ability::ProtectionDoesNotRemove;
 
-    let (grant_def_index, grant_mod_index, host_id) = grant_key;
-
-    let Some(exemption) = exemption else {
-        return false;
-    };
     let Some(attachment) = state.objects.get(&attachment_id) else {
         return false;
     };
-    match exemption {
-        // CR 702.16n: "this effect doesn't remove this Aura"
-        ProtectionDoesNotRemove::Source => attachment_id == grant_source_id,
+    match rider.does_not_remove {
+        // CR 702.16n: "this effect doesn't remove this Aura" names the object
+        // that has the static.
+        ProtectionDoesNotRemove::Source => attachment_id == rider.source,
         // CR 702.16n: "this effect doesn't remove Auras"
         ProtectionDoesNotRemove::Auras => attachment
             .card_types
             .subtypes
             .iter()
             .any(|s| s.eq_ignore_ascii_case("Aura")),
-        // CR 702.16p: only attachments snapshotted for this specific protection
-        // modification (`def_index`, `mod_index`) and host when it started applying.
-        ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => state
-            .objects
-            .get(&grant_source_id)
-            .and_then(|source| {
-                source.protection_start_exempt_attachments.get(&(
-                    grant_def_index,
-                    grant_mod_index,
-                    host_id,
-                ))
-            })
-            .is_some_and(|entry| {
-                entry.resolved_quality == *resolved_pt
-                    && entry.attachment_ids.contains(&attachment_id)
-            }),
+        // CR 702.16p: only attachments snapshotted for this protection effect
+        // occurrence and this host incarnation when the effect started applying.
+        ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => {
+            let (Some(source), Some(host)) = (
+                state.objects.get(&rider.source),
+                state.objects.get(&host_id),
+            ) else {
+                return false;
+            };
+            let key = crate::game::game_object::ProtectionStartKey {
+                occurrence: rider.occurrence.clone(),
+                mod_index: rider.mod_index,
+                host: ObjectIncarnationRef::from_object(host),
+            };
+            source
+                .protection_start_snapshots
+                .get(&key)
+                .is_some_and(|entry| {
+                    entry.resolved_quality == *resolved_pt
+                        && entry.attachment_ids.contains(&attachment_id)
+                })
+        }
     }
 }
 
@@ -2176,12 +2827,17 @@ pub(crate) fn attach_to_player_with_authority(
     });
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    let recorded_reference = reference.filter(|_| moving_to_new_host);
+    if recorded_reference.is_some() {
+        crate::game::layers::flush_layers_for_attachment_command(state);
+    } else {
+        crate::game::layers::flush_layers(state);
+    }
 
     // CR 733: journal the settled edit through its owning family, on the same
     // terms as the object-host authority — a same-player re-attach (CR 701.3b)
     // changed nothing and is not recorded.
-    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+    if let Some(reference) = recorded_reference {
         record_attachment_edit(
             state,
             reference,
@@ -2215,7 +2871,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
         attachment.attached_to = None;
     }
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    crate::game::layers::flush_layers_for_attachment_command(state);
 
     // CR 733 + CR 701.3d: an unattach installs no host and, unlike an attach,
     // draws no new timestamp (CR 613.7e applies to attaching to a new host).
@@ -2291,9 +2947,13 @@ pub fn apply_resolved_attachment(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
+    crate::game::layers::flush_layers_for_attachment_command(state);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "attach_protection_rider_tests.rs"]
+mod protection_rider_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2315,7 +2975,7 @@ mod tests {
     }
 
     /// Build Equipment on the battlefield (Artifact + Equipment subtype).
-    fn spawn_equipment(state: &mut GameState, name: &str, card_id: u64) -> ObjectId {
+    pub(super) fn spawn_equipment(state: &mut GameState, name: &str, card_id: u64) -> ObjectId {
         let id = create_object(
             state,
             CardId(card_id),
@@ -2433,6 +3093,8 @@ mod tests {
         );
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -2526,6 +3188,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -3080,6 +3744,111 @@ mod tests {
         assert_eq!(state.objects.get(&equipment).unwrap().attached_to, None);
     }
 
+    /// CR 107.1c + CR 608.2d: the resolution-time bounds of a DESCRIBED
+    /// attachment operand follow its printed cardinality — `any number` is zero
+    /// or more (up to the live eligible count), `an`/`all` keep the legacy
+    /// single choice, and the zero-eligible case is a no-op rather than an error.
+    #[test]
+    fn described_attachment_bounds_follow_the_printed_cardinality() {
+        use crate::types::ability::{AttachCardinality, AttachSelection, TypeFilter};
+
+        let mut state = setup();
+        let seed = spawn_creature(&mut state, "Seed Bear");
+        let ability = |selection: AttachSelection| {
+            crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Attach {
+                    attachment: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .subtype("Equipment".to_string())
+                            .controller(ControllerRef::You),
+                    ),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    selection,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+        };
+        let bounds = |selection: AttachSelection, eligible: usize| {
+            attachment_choice_bounds(&state, &ability(selection), eligible)
+                .expect("described bounds must never error")
+        };
+
+        let described = |count: AttachCardinality| AttachSelection::AtResolution { count };
+
+        // CR 107.1c: "any number" is zero or more, bounded by the live population.
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 3);
+                (b.min, b.max)
+            },
+            (0, 3)
+        );
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 1);
+                (b.min, b.max)
+            },
+            (0, 1),
+            "one eligible object is still an optional choice (any number includes zero)"
+        );
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 0);
+                (b.min, b.max)
+            },
+            (0, 0),
+            "nothing eligible means nothing to choose (CR 608.2d)"
+        );
+
+        // "an Equipment" with no eligible object must short-circuit instead of
+        // asking `resolve_multi_target_bounds` for `legal < min`.
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::One), 0);
+                (b.min, b.max)
+            },
+            (0, 0)
+        );
+
+        // "all Equipment" never reaches the choice bounds: the prompt phase
+        // short-circuits a determined set and the caller binds the whole live
+        // set (see `bind_determined_attachment_set`). This row only pins the
+        // total-mapping fallback.
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::All), 3);
+                (b.min, b.max)
+            },
+            (1, 1)
+        );
+
+        // A printed-target attachment keeps the announced-slot fallbacks.
+        assert_eq!(
+            {
+                let b = bounds(AttachSelection::Targeted, 3);
+                (b.min, b.max)
+            },
+            (1, 1)
+        );
+
+        // Precedence: a forwarded-candidate operation keeps its own bounds even
+        // when the effect carries a described count (the arm is skipped).
+        let mut forwarded = ability(described(AttachCardinality::AnyNumber));
+        let candidate = ObjectIncarnationRef::from_object(
+            state.objects.get(&seed).expect("the seed creature exists"),
+        );
+        forwarded.bind_attach_attachment_candidates(vec![candidate]);
+        let b = attachment_choice_bounds(&state, &forwarded, 3)
+            .expect("forwarded bounds must not error");
+        assert_eq!(
+            (b.min, b.max),
+            (1, 1),
+            "forwarded candidate operations keep their own bounds"
+        );
+    }
+
     #[test]
     fn deferred_attach_prompts_when_multiple_equipment_match() {
         use crate::types::ability::TypeFilter;
@@ -3099,6 +3868,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3161,6 +3931,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3207,6 +3978,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3255,6 +4027,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::SelfRef,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             cloud,
@@ -3370,6 +4143,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3421,6 +4195,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3457,6 +4232,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3510,6 +4286,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(equipment)],
                 ObjectId(999),
@@ -3537,6 +4314,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::ParentTarget,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![
                 TargetRef::Object(equipment),
@@ -3578,6 +4356,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![
                     TargetRef::Object(equipment),
@@ -3627,6 +4406,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![],
                 ObjectId(999),
@@ -3678,6 +4458,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![
                     TargetRef::Object(equipment),
@@ -3733,6 +4514,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(equipment)],
                 ObjectId(999),
@@ -3770,6 +4552,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             equipment,
@@ -3808,6 +4591,7 @@ mod tests {
                 crate::types::ability::Effect::Attach {
                     attachment: attachment_filter.clone(),
                     target,
+                    selection: AttachSelection::Targeted,
                 },
                 vec![],
                 ObjectId(999),
@@ -3871,6 +4655,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             // Parent chain walkers can propagate the LastCreated bearer into
             // `targets` before the Equipment pick is appended at resolution.
@@ -3902,6 +4687,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: filter.clone(),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(999),
@@ -3960,6 +4746,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastZoneChanged,
+                selection: AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(999),
@@ -3980,6 +4767,236 @@ mod tests {
             state.objects[&selected_attachment].attached_to,
             Some(AttachTarget::Object(former_attachment)),
             "the selected Equipment attaches to the new incarnation, not to itself"
+        );
+    }
+
+    /// CR 608.2d + CR 701.3b: the answer-binding leg of the host-relative
+    /// "another" exclusion. A parked HOST choice whose host filter carries
+    /// `Another` must refuse the attachment's current host even when a caller
+    /// bypasses the parked `cards` set, while a sibling host still binds.
+    #[test]
+    fn host_binding_rejects_the_attachments_current_host_under_another() {
+        let mut state = setup();
+        let attachment = spawn_equipment(&mut state, "Selected Blade", 10);
+        let current_host = spawn_creature(&mut state, "Current Host");
+        let sibling_host = spawn_creature(&mut state, "Sibling Host");
+        attach_to(&mut state, attachment, current_host);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::ParentTarget,
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Another]),
+                ),
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(attachment)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        assert!(
+            parked_attach_choice_selects_host(&ability),
+            "the parked role must read as a HOST choice for this leg to apply"
+        );
+
+        let rejected = bind_resolution_attachment_choice(&state, ability.clone(), &[current_host]);
+        assert!(
+            matches!(rejected, Err(EffectError::InvalidParam(_))),
+            "the attachment's current host is not a legal \"another\" answer: {rejected:?}"
+        );
+
+        let accepted = bind_resolution_attachment_choice(&state, ability, &[sibling_host])
+            .expect("a sibling host is a legal \"another\" answer");
+        assert_eq!(
+            accepted.attach_host_target().map(|host| host.object_id),
+            Some(sibling_host),
+        );
+    }
+
+    /// CR 701.3b + CR 608.2d: the host-relative "another" admission is
+    /// SEMANTIC. `FilterProp::Another` reads the evaluation context's
+    /// `recipient_id`, so a sibling `Or` leg can still admit the attachment's
+    /// current host, and a `Not` wrapper inverts the polarity. A structural
+    /// scan for the property gets both wrong (over-excludes under `Or`,
+    /// inverts under `Not`).
+    #[test]
+    fn host_choice_admission_respects_or_legs_and_not_polarity() {
+        let mut state = setup();
+        let attachment = spawn_equipment(&mut state, "Selected Blade", 10);
+        let current_host = spawn_creature(&mut state, "Current Host");
+        let sibling_host = spawn_creature(&mut state, "Sibling Host");
+        attach_to(&mut state, attachment, current_host);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::ParentTarget,
+                target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(attachment)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let operands = vec![attachment];
+
+        // `Or[Permanent+Another, Creature you control]`: the second leg admits
+        // the current host even though the first excludes it.
+        let or_filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Another])),
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            ],
+        };
+        assert!(
+            host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &or_filter,
+                current_host,
+                &operands,
+            ),
+            "a sibling Or leg must still admit the current host"
+        );
+        assert!(
+            host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &or_filter,
+                sibling_host,
+                &operands,
+            ),
+            "the Another leg admits every other permanent"
+        );
+
+        // `Not[Permanent+Another]`: the polarity inverts, so ONLY the current
+        // host is admissible.
+        let not_filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::Another]),
+            )),
+        };
+        assert!(
+            host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &not_filter,
+                current_host,
+                &operands,
+            ),
+            "Not(Another) is true exactly for the current host"
+        );
+        assert!(
+            !host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &not_filter,
+                sibling_host,
+                &operands,
+            ),
+            "Not(Another) must reject every other permanent"
+        );
+    }
+
+    /// CR 701.3b + CR 608.2d: the host-relative "another" admission is a
+    /// CONJUNCTION over the attachment operands. With two forwarded attachments
+    /// on two different current hosts, each host fails "another" for the
+    /// attachment already there, so only a third host is admitted — and the
+    /// forwarded prompt parks the ATTACHMENT choice for that one host rather
+    /// than a host choice over the two occupied hosts. (Existential admission
+    /// would offer both occupied hosts.)
+    #[test]
+    fn host_choice_admission_requires_every_attachments_another_leg() {
+        let mut state = setup();
+        let host1 = spawn_creature(&mut state, "Host One");
+        let host2 = spawn_creature(&mut state, "Host Two");
+        let spare = spawn_creature(&mut state, "Spare Host");
+        let attachment_a = spawn_equipment(&mut state, "Blade A", 10);
+        let attachment_b = spawn_equipment(&mut state, "Blade B", 11);
+        attach_to(&mut state, attachment_a, host1);
+        attach_to(&mut state, attachment_b, host2);
+
+        let host_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: host_filter.clone(),
+                selection: AttachSelection::Targeted,
+            },
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.bind_attach_attachment_candidates(vec![
+            ObjectIncarnationRef::from_object(state.objects.get(&attachment_a).unwrap()),
+            ObjectIncarnationRef::from_object(state.objects.get(&attachment_b).unwrap()),
+        ]);
+        let operands = vec![attachment_a, attachment_b];
+
+        // Helper level: every occupied host is rejected; only the spare is
+        // admitted.
+        assert!(
+            !host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                host1,
+                &operands,
+            ),
+            "host1 fails \"another\" for the attachment already on it"
+        );
+        assert!(
+            !host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                host2,
+                &operands,
+            ),
+            "host2 fails \"another\" for the attachment already on it"
+        );
+        assert!(
+            host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                spare,
+                &operands,
+            ),
+            "a host carrying neither attachment is admissible"
+        );
+
+        // Enumeration level: the forwarded prompt auto-binds the one admitted
+        // host and then parks the ATTACHMENT choice for it. Under existential
+        // admission it would instead park a HOST choice over host1/host2/spare.
+        let mut events = Vec::new();
+        let outcome = prompt_forwarded_attachment_choice(&mut state, &ability, &mut events)
+            .expect("the forwarded host prompt must resolve without error");
+        assert!(
+            matches!(outcome, AttachPromptOutcome::Paused),
+            "the attachment choice for two forwarded Equipment parks"
+        );
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => assert_eq!(
+                cards,
+                &vec![attachment_a, attachment_b],
+                "the parked choice is the ATTACHMENT set, not the occupied hosts"
+            ),
+            other => panic!("expected the parked attachment choice, got {other:?}"),
+        }
+        let bound_host = state
+            .active_ability_continuation_frame()
+            .and_then(|frame| frame.pending.attachment_choice.as_ref())
+            .and_then(|choice| choice.operation.attach_host_target())
+            .map(|host| host.object_id);
+        assert_eq!(
+            bound_host,
+            Some(spare),
+            "the enumeration bound the only host admissible for BOTH attachments"
         );
     }
 
@@ -4023,6 +5040,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![], // No explicit targets — should fall back to LastCreated
             equipment_id,
@@ -4064,6 +5082,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(creature_a)],
             equipment_id,
@@ -4091,6 +5110,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::Any,
                 target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
             },
             vec![
                 crate::types::ability::TargetRef::Object(equipment_id),
@@ -4367,9 +5387,12 @@ mod tests {
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
                         .subtype("Equipment".to_string())
-                        .properties(vec![FilterProp::AttachedToSource]),
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source,
+                        }]),
                 ),
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(bearer)],
             zack,
@@ -4416,9 +5439,12 @@ mod tests {
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
                         .subtype("Equipment".to_string())
-                        .properties(vec![FilterProp::AttachedToSource]),
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source,
+                        }]),
                 ),
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(bearer)],
             zack,
@@ -4435,7 +5461,7 @@ mod tests {
         assert_eq!(state.objects.get(&old_equipment).unwrap().attached_to, None);
     }
 
-    fn spawn_grant_source(state: &mut GameState, name: &str, card_id: u64) -> ObjectId {
+    pub(super) fn spawn_grant_source(state: &mut GameState, name: &str, card_id: u64) -> ObjectId {
         create_object(
             state,
             CardId(card_id),
@@ -4445,7 +5471,7 @@ mod tests {
         )
     }
 
-    fn apply_protection_grant(
+    pub(super) fn apply_protection_grant(
         state: &mut GameState,
         source_id: ObjectId,
         host_id: ObjectId,
@@ -4471,28 +5497,50 @@ mod tests {
             .push(def);
     }
 
-    fn evaluate_protection_layers(state: &mut GameState) {
+    pub(super) fn evaluate_protection_layers(state: &mut GameState) {
         crate::game::layers::mark_layers_full(state);
         crate::game::layers::evaluate_layers(state);
     }
 
-    fn protection_snapshot_ids(
+    /// The CR 702.16p start snapshot `source_id` holds for `occurrence`'s
+    /// modification `mod_index` on `host_id`'s current incarnation.
+    pub(super) fn protection_snapshot_ids(
+        state: &GameState,
+        source_id: ObjectId,
+        occurrence: crate::types::layers::ProtectionGrantOccurrence,
+        mod_index: usize,
+        host_id: ObjectId,
+    ) -> Vec<ObjectId> {
+        let key = crate::game::game_object::ProtectionStartKey {
+            occurrence,
+            mod_index,
+            host: ObjectIncarnationRef::from_object(&state.objects[&host_id]),
+        };
+        state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.protection_start_snapshots.get(&key))
+            .map(|entry| entry.attachment_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// [`protection_snapshot_ids`] for the source's own static `def_index`.
+    pub(super) fn printed_snapshot_ids(
         state: &GameState,
         source_id: ObjectId,
         def_index: usize,
         mod_index: usize,
         host_id: ObjectId,
     ) -> Vec<ObjectId> {
-        state
-            .objects
-            .get(&source_id)
-            .and_then(|source| {
-                source
-                    .protection_start_exempt_attachments
-                    .get(&(def_index, mod_index, host_id))
-            })
-            .map(|entry| entry.attachment_ids.clone())
-            .unwrap_or_default()
+        protection_snapshot_ids(
+            state,
+            source_id,
+            crate::types::layers::ProtectionGrantOccurrence::Static {
+                definition_index: def_index,
+            },
+            mod_index,
+            host_id,
+        )
     }
 
     fn replace_source_protection_statics(state: &mut GameState, source_id: ObjectId) {
@@ -4518,7 +5566,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 11);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            11,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -4528,7 +5580,7 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
 
-        let snapshot = protection_snapshot_ids(&state, grant_source, 0, 0, host);
+        let snapshot = printed_snapshot_ids(&state, grant_source, 0, 0, host);
         assert!(
             snapshot.contains(&equipment),
             "CR 702.16p: matching controlled attachment at grant start must be snapshotted"
@@ -4548,6 +5600,90 @@ mod tests {
         );
     }
 
+    /// CR 702.16i + CR 109.5: attachment legality expands a resolution-created
+    /// color-set protection grant with the controller that CREATED the effect
+    /// (`tce.controller`), not the controller of its source object. P0 (the
+    /// creator) has a {U,R} commander, so the grant is protection from W, B and G;
+    /// the source is controlled by P1, who has no commander (CR 903.4f: no colors).
+    /// Another grant's CR 702.16n rider (Flickering Ward, chosen White) exempts only
+    /// itself, so the white Aura must still be illegal through the transient grant.
+    #[test]
+    fn transient_each_color_grant_uses_creating_controller_identity() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::ability::{ChosenAttribute, ContinuousModification, Duration};
+        use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        // P0's pool-less commander: printed identity {U, R}.
+        let commander = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Niv-Mizzet".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.base_color = vec![ManaColor::Blue, ManaColor::Red];
+            obj.color = obj.base_color.clone();
+        }
+
+        let host = spawn_creature(&mut state, "Bear");
+        let ward = spawn_with_subtype(&mut state, "Flickering Ward", "Aura");
+        {
+            let obj = state.objects.get_mut(&ward).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_color = vec![ManaColor::White];
+            obj.color = vec![ManaColor::White];
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(ManaColor::White));
+        }
+        attach_to(&mut state, ward, host);
+        apply_protection_grant(
+            &mut state,
+            ward,
+            host,
+            ProtectionTarget::ChosenColor,
+            Some(ProtectionDoesNotRemove::Source),
+        );
+        evaluate_protection_layers(&mut state);
+        // Reach guard: before the transient grant, Ward's own rider keeps it legal.
+        assert_eq!(attachment_illegality(&state, ward, host), None);
+
+        // The granting source is controlled by P1 (no commander); the effect was
+        // created by P0 (commander {U, R}).
+        let grant_source = spawn_grant_source(&mut state, "Equipment Source", 31);
+        {
+            let obj = state.objects.get_mut(&grant_source).unwrap();
+            obj.owner = PlayerId(1);
+            obj.controller = PlayerId(1);
+        }
+        state
+            .add_transient_continuous_effect(
+                grant_source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                        ProtectionColorSet::OutsideCommanderColorIdentity,
+                    )),
+                }],
+                None,
+            )
+            .expect("transient grant must register");
+        evaluate_protection_layers(&mut state);
+
+        assert_eq!(
+            attachment_illegality(&state, ward, host),
+            Some(AttachIllegality::Protection),
+            "CR 702.16i: the creating controller's identity {{U,R}} leaves protection \
+             from White, which Ward's own rider does not exempt"
+        );
+    }
+
     #[test]
     fn cr_702_16p_does_not_exempt_attachment_that_becomes_matching_after_grant_start() {
         use crate::types::ability::ProtectionDoesNotRemove;
@@ -4559,7 +5695,11 @@ mod tests {
         let equipment = spawn_equipment(&mut state, "Sword", 20);
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 21);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            21,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -4570,7 +5710,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
 
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "colorless Equipment must not enter the start-time snapshot"
         );
 
@@ -4615,7 +5755,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let rider_source = spawn_grant_source(&mut state, "Blessing", 31);
+        let rider_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            31,
+        );
         apply_protection_grant(
             &mut state,
             rider_source,
@@ -4625,7 +5769,14 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
 
-        let plain_source = spawn_grant_source(&mut state, "Mother of Runes", 32);
+        // Synthetic: a rider-less static protection grant, as Akroma's Memorial's
+        // ("Creatures you control have … protection from black and from red.")
+        // is, but from white and to this host only.
+        let plain_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider-less source (Akroma's Memorial analogue)",
+            32,
+        );
         apply_protection_grant(
             &mut state,
             plain_source,
@@ -4651,7 +5802,7 @@ mod tests {
     }
 
     #[test]
-    fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
+    fn cr_702_16p_recolored_rider_does_not_keep_the_old_qualitys_attachments() {
         use crate::types::ability::ProtectionDoesNotRemove;
         use crate::types::keywords::ProtectionTarget;
         use crate::types::mana::ManaColor;
@@ -4665,7 +5816,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Dual Blessing", 41);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic recolored rider source (Benevolent Blessing analogue)",
+            41,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -4675,7 +5830,7 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
         assert!(
-            protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "blue rider must snapshot the blue Equipment at effect start"
         );
 
@@ -4689,8 +5844,8 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
-            "white rider must not inherit the prior blue snapshot at the same def_index"
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            "the white rider takes a new snapshot under the same key: the blue Equipment from the blue snapshot is not in it"
         );
 
         state
@@ -4716,6 +5871,63 @@ mod tests {
         );
     }
 
+    /// CR 702.16p: a start snapshot exempts only attachments of the quality it
+    /// was taken for. Synthetic: the refresh replaces a snapshot whose quality
+    /// no longer matches, so a mismatched entry is unreachable through a layer
+    /// pass; this sets one directly to hold the legality lookup to the quality
+    /// it was asked about (a white Equipment, a snapshot taken for blue).
+    #[test]
+    fn cr_702_16p_snapshot_of_another_quality_exempts_nothing() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Bear");
+        let equipment = spawn_equipment(&mut state, "Sword", 60);
+        state
+            .objects
+            .get_mut(&equipment)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        attach_to(&mut state, equipment, host);
+
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            61,
+        );
+        apply_protection_grant(
+            &mut state,
+            grant_source,
+            host,
+            ProtectionTarget::Color(ManaColor::White),
+            Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached),
+        );
+        evaluate_protection_layers(&mut state);
+        assert_eq!(
+            attachment_illegality(&state, equipment, host),
+            None,
+            "reach guard: the white Equipment attached at effect start is exempt"
+        );
+
+        for entry in state
+            .objects
+            .get_mut(&grant_source)
+            .unwrap()
+            .protection_start_snapshots
+            .values_mut()
+        {
+            entry.resolved_quality = ProtectionTarget::Color(ManaColor::Blue);
+        }
+        assert_eq!(
+            attachment_illegality(&state, equipment, host),
+            Some(AttachIllegality::Protection),
+            "a snapshot taken for blue does not exempt a white Equipment from protection from white"
+        );
+    }
+
     #[test]
     fn cr_702_16p_opponent_controlled_matching_attachment_not_exempt() {
         use crate::types::ability::ProtectionDoesNotRemove;
@@ -4733,7 +5945,11 @@ mod tests {
         }
         attach_to(&mut state, equipment, host);
 
-        let grant_source = spawn_grant_source(&mut state, "Blessing", 51);
+        let grant_source = spawn_grant_source(
+            &mut state,
+            "Synthetic rider source (Benevolent Blessing analogue)",
+            51,
+        );
         apply_protection_grant(
             &mut state,
             grant_source,
@@ -4744,7 +5960,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
 
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "702.16p only exempts attachments you control at effect start"
         );
         assert_eq!(
@@ -4759,5 +5975,279 @@ mod tests {
             None,
             "opponent-controlled matching Equipment must unattach"
         );
+    }
+
+    /// CR 115.1a/c/d/e + CR 601.2c + CR 702.151b: the resolver consumes the
+    /// attachment operand's announced slot first. An attachment that ALSO matches
+    /// the host filter (a reconfigure Equipment is a creature while unattached;
+    /// an animated Equipment likewise) must not count as host evidence, or a
+    /// declined optional host would fall through to the battlefield scan.
+    #[test]
+    fn host_slot_announced_excludes_the_attachment_slot() {
+        let mut state = setup();
+        let equipment = spawn_equipment(&mut state, "Animated Relic", 910);
+        state
+            .objects
+            .get_mut(&equipment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let bystander = spawn_creature(&mut state, "Bystander");
+        let effect = Effect::Attach {
+            attachment: TargetFilter::Any,
+            target: TargetFilter::Any,
+            selection: AttachSelection::Targeted,
+        };
+        // Production tier (CR 601.2c): the trigger binds the chosen attachment,
+        // so `resolve_attachment_ids` short-circuits without advancing the
+        // iterator; only the bound-id exclusion keeps the Equipment out of the
+        // host evidence.
+        let mut attachment_only = ResolvedAbility::new(
+            effect.clone(),
+            vec![TargetRef::Object(equipment)],
+            equipment,
+            PlayerId(0),
+        );
+        attachment_only.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&equipment],
+        )]);
+        assert!(
+            !host_slot_announced(&state, &attachment_only, &TargetFilter::Any),
+            "the bound attachment slot is not host evidence"
+        );
+        let mut with_host = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(equipment), TargetRef::Object(bystander)],
+            equipment,
+            PlayerId(0),
+        );
+        with_host.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&equipment],
+        )]);
+        assert!(
+            host_slot_announced(&state, &with_host, &TargetFilter::Any),
+            "a target beyond the attachment window is host evidence"
+        );
+
+        // Defensive fallback: a bound attachment that no longer matches the
+        // attachment filter resolves empty, so the bound-id fallback must still
+        // exclude it from host evidence.
+        let plain = spawn_equipment(&mut state, "Plain Relic", 911);
+        let mut stale_binding = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(plain)],
+            plain,
+            PlayerId(0),
+        );
+        stale_binding.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&plain],
+        )]);
+        assert!(
+            !host_slot_announced(&state, &stale_binding, &TargetFilter::Any),
+            "a bound id that no longer matches the attachment filter is not host evidence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retirement_ownership_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{ContinuousModification, Duration, ObjectScope, StaticCondition};
+    use crate::types::game_state::{LayersDirty, TransientContinuousEffectBindings};
+    use crate::types::phase::Phase;
+    use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    #[test]
+    fn same_host_object_and_player_flushes_keep_standalone_retirement_ownership() {
+        for player_host in [false, true] {
+            for real_transition in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let first = scenario.add_vanilla(P0, 2, 2);
+                let second = scenario.add_vanilla(P0, 2, 2);
+                let subject = scenario.add_vanilla(P0, 2, 2);
+                // A typed unrestricted Aura isolates graph ownership from
+                // printed enchant restrictions in these authority-level tests.
+                let aura = scenario
+                    .add_enchantment_from_oracle(P0, "Typed Aura", "")
+                    .with_subtypes(vec!["Aura"])
+                    .id();
+                let mut runner = scenario.build();
+                let state = runner.state_mut();
+                if player_host {
+                    attach_to_player(state, aura, P0);
+                } else {
+                    attach_to(state, aura, first);
+                }
+                let expected = if player_host {
+                    AttachTarget::Player(P0)
+                } else {
+                    AttachTarget::Object(first)
+                };
+                assert_eq!(state.objects[&aura].attached_to, Some(expected));
+                state.objects.get_mut(&subject).unwrap().tapped = true;
+                let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+                let id = state
+                    .add_transient_continuous_effect_with_bindings(
+                        subject,
+                        P0,
+                        Duration::ForAsLongAs {
+                            condition: StaticCondition::IsTapped {
+                                scope: ObjectScope::Recipient,
+                            },
+                        },
+                        TargetFilter::SpecificObject { id: subject },
+                        vec![ContinuousModification::AddPower { value: 1 }],
+                        None,
+                        TransientContinuousEffectBindings {
+                            affected_recipient: Some(reference),
+                            duration_subject: Some(reference),
+                            granting_object: None,
+                        },
+                    )
+                    .expect("the fixture's duration begins");
+                crate::game::layers::flush_layers(state);
+                assert_eq!(state.objects[&subject].power, Some(3));
+                let installed = state
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|e| e.id == id)
+                    .unwrap()
+                    .clone();
+                state.objects.get_mut(&subject).unwrap().tapped = false;
+                let prefix = state.clone();
+                let start = state.resolved_rules_journal.entries().len();
+                if player_host {
+                    attach_to_player(state, aura, if real_transition { P1 } else { P0 });
+                } else {
+                    attach_to(state, aura, if real_transition { second } else { first });
+                }
+                assert_eq!(state.objects[&subject].power, Some(2));
+                assert_eq!(state.layers_dirty, LayersDirty::Clean);
+                assert!(!state
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|e| e.id == id));
+                let commands: Vec<_> = state
+                    .resolved_rules_journal
+                    .entries()
+                    .iter()
+                    .skip(start)
+                    .filter_map(|e| e.command.as_ref())
+                    .collect();
+                assert_eq!(commands.len(), 1);
+                let mut replay = prefix;
+                let journal = replay.resolved_rules_journal.clone();
+                match commands[0] {
+                    ResolvedRulesCommand::Attachment(command) => {
+                        assert!(real_transition);
+                        for invalidation in ["missing", "stale", "old_host"] {
+                            let mut rejected = replay.clone();
+                            match invalidation {
+                                "missing" => {
+                                    rejected.objects.remove(&aura);
+                                }
+                                "stale" => {
+                                    rejected.objects.get_mut(&aura).unwrap().bump_incarnation();
+                                }
+                                "old_host" => {
+                                    rejected.objects.get_mut(&aura).unwrap().attached_to = None;
+                                }
+                                _ => unreachable!(),
+                            }
+                            let before = rejected.clone();
+                            assert!(apply_resolved_attachment(&mut rejected, command).is_err());
+                            assert_eq!(
+                                serde_json::to_value(&rejected).unwrap(),
+                                serde_json::to_value(&before).unwrap()
+                            );
+                            assert_eq!(rejected.layers_dirty, before.layers_dirty);
+                            assert_eq!(
+                                rejected.resolved_rules_journal,
+                                before.resolved_rules_journal
+                            );
+                        }
+                        apply_resolved_attachment(&mut replay, command).unwrap();
+                        assert_eq!(replay.layers_dirty, LayersDirty::Clean);
+                    }
+                    ResolvedRulesCommand::ContinuousEffect(edit) => {
+                        assert!(!real_transition);
+                        assert!(
+                            matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(command) if command.effects == vec![installed])
+                        );
+                        replay.apply_resolved_continuous_effect_edit(edit).unwrap();
+                    }
+                    other => panic!("unexpected owner: {other:?}"),
+                }
+                assert!(!replay
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|e| e.id == id));
+                assert_eq!(replay.resolved_rules_journal, journal);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_attachment_and_unattached_early_return_do_not_settle_unowned_work() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let subject = scenario.add_vanilla(P0, 2, 2);
+        let equipment = scenario
+            .add_artifact_from_oracle(P0, "Typed Equipment", "")
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.objects.get_mut(&subject).unwrap().tapped = true;
+        let reference = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+        let id = state
+            .add_transient_continuous_effect_with_bindings(
+                subject,
+                P0,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                TargetFilter::SpecificObject { id: subject },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(reference),
+                    duration_subject: Some(reference),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
+        crate::game::layers::flush_layers(state);
+        assert_eq!(state.objects[&subject].power, Some(3));
+        state.objects.get_mut(&subject).unwrap().tapped = false;
+        let before = state.clone();
+        assert_eq!(attach_to_player(state, equipment, P0), None);
+        assert_eq!(unattach(state, equipment), None);
+        assert_eq!(unattach(state, ObjectId(u64::MAX)), None);
+        assert_eq!(state.resolved_rules_journal, before.resolved_rules_journal);
+        assert_eq!(state.layers_dirty, before.layers_dirty);
+        assert_eq!(state.next_timestamp, before.next_timestamp);
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|e| e.id == id));
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+        assert!(!state
+            .transient_continuous_effects
+            .iter()
+            .any(|e| e.id == id));
     }
 }

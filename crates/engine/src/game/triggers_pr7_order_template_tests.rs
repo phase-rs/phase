@@ -7,7 +7,8 @@
 //!   * persistent (`AllCopies`) = PERMUTE-ONCE + register ephemeral marker — T7, T4.
 use super::*;
 use crate::analysis::decision_template::{
-    DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+    ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, PinnedDecision,
+    ReplayMode,
 };
 use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, TriggerOrderGroup, YieldTarget};
@@ -176,18 +177,27 @@ fn duplicate_or_legacy_persistent_templates_never_auto_order() {
         owner: PlayerId(0),
         decisions: vec![
             PinnedDecision::Order {
-                source: YieldTarget::AllCopies {
-                    card_id: CardId(CARD_X),
-                    trigger_description: None,
-                },
+                slot: DecisionSlot::first(
+                    YieldTarget::AllCopies {
+                        card_id: CardId(CARD_X),
+                        trigger_description: None,
+                    },
+                    ChoicePoint::TriggerOrder,
+                ),
                 pos: 0,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_Y, "Y trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_Y, "Y trigger"),
+                    ChoicePoint::TriggerOrder,
+                ),
                 pos: 1,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_X, "X trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_X, "X trigger"),
+                    ChoicePoint::TriggerOrder,
+                ),
                 pos: 2,
             },
         ],
@@ -247,11 +257,17 @@ fn submitted_persistent_template_reapplies_in_saved_order() {
         tmpl.decisions,
         vec![
             PinnedDecision::Order {
-                source: all_copies(CARD_B, "B trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_B, "B trigger"),
+                    ChoicePoint::TriggerOrder
+                ),
                 pos: 0,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_A, "A trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_A, "A trigger"),
+                    ChoicePoint::TriggerOrder
+                ),
                 pos: 1,
             },
         ],
@@ -390,11 +406,17 @@ fn live_order_triggers_persists_only_nonidentity_named_order() {
         persistent[0].decisions,
         vec![
             PinnedDecision::Order {
-                source: all_copies(CARD_B, "B trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_B, "B trigger"),
+                    ChoicePoint::TriggerOrder
+                ),
                 pos: 0,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_A, "A trigger"),
+                slot: DecisionSlot::first(
+                    all_copies(CARD_A, "A trigger"),
+                    ChoicePoint::TriggerOrder
+                ),
                 pos: 1,
             },
         ],

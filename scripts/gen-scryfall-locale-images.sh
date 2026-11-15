@@ -12,6 +12,7 @@ SCRYFALL_DATA_DIR="${SCRYFALL_DATA_DIR:-data/scryfall}"
 ALL_CARDS_FILE="${SCRYFALL_ALL_CARDS_FILE:-$SCRYFALL_DATA_DIR/all-cards.json}"
 OUTPUT_DIR="${SCRYFALL_LOCALE_IMAGES_OUTPUT_DIR:-client/public}"
 SCHEMA_VERSION="v2"
+FALLBACK_MARKER="$OUTPUT_DIR/scryfall-images.$SCHEMA_VERSION.fallback.json"
 
 # MTGJSON `foreignData.language` (full English language name) -> UI locale code.
 # MUST stay in lockstep with `locale_code` in crates/engine/src/bin/oracle_gen.rs,
@@ -23,17 +24,55 @@ SCHEMA_VERSION="v2"
 # Scryfall rejects `lang:pl` outright ("Unknown language `pl`"), so `pl` — which
 # IS in the frontend's SUPPORTED_LNGS — can never have localized card data from
 # either source. Its chrome is translated; its cards stay English.
+#
+# `zh` covers the printings Wizards actually produced in Simplified Chinese. That
+# run ended at Bloomburrow (official announcement, 2024-02-23), so no set from
+# 2024-08 onward carries any Chinese in MTGJSON's foreignData or at Scryfall —
+# measured, not assumed: 2025 and 2026 sets are 0%. The same-card fallback can
+# reuse available historical Chinese artwork for later English printings;
+# cards without a Chinese printing retain English artwork. Traditional
+# (`Chinese Traditional`) is deliberately NOT mapped: no Traditional UI
+# catalog ships, so its chrome would stay English over Chinese cards.
 LOCALE_MAP='{
   "German": "de",
   "Spanish": "es",
   "French": "fr",
   "Italian": "it",
-  "Portuguese (Brazil)": "pt"
+  "Japanese": "ja",
+  "Portuguese (Brazil)": "pt",
+  "Chinese Simplified": "zh"
 }'
 
 echo "=== Scryfall Locale Image Map Generation ==="
 
 CODES=$(jq -r '.[]' <<< "$LOCALE_MAP" | sort)
+
+# The Rust side cannot read this map and this side cannot read the Rust map, so
+# the lockstep contract the comment above declares has to be asserted rather than
+# trusted. Without this, adding a locale here and not there ships localized art
+# with English card text for the same card — the two halves come from different
+# files, so nothing downstream notices.
+#
+# The expected set is written out literally (not derived from LOCALE_MAP, which
+# would make the check vacuous) and mirrored by
+# `locale_code_covers_exactly_the_shipped_card_content_locales` in
+# crates/engine/src/bin/oracle_gen.rs. Both must be updated together with the
+# map itself; that is the point.
+EXPECTED_CODES='de
+es
+fr
+it
+ja
+pt
+zh'
+if [ "$CODES" != "$EXPECTED_CODES" ]; then
+  echo "ERROR: LOCALE_MAP codes do not match the shipped card-content locales." >&2
+  echo "  expected: $(tr '\n' ' ' <<< "$EXPECTED_CODES")" >&2
+  echo "  actual  : $(tr '\n' ' ' <<< "$CODES")" >&2
+  echo "  Update this check and locale_code() in crates/engine/src/bin/oracle_gen.rs" >&2
+  echo "  together, or the text and art halves drift apart." >&2
+  exit 1
+fi
 
 validate_locale_map() {
   jq -e '
@@ -52,15 +91,19 @@ validate_locale_map() {
   ' "$1" > /dev/null
 }
 
-# Skip only when every locale output already exists — a partial set must
-# regenerate, or a locale added to LOCALE_MAP would never be built. A cached
-# output must also match this schema version's contract before we reuse it.
+# Skip only when every locale output exists and the same-card fallback pass has
+# completed. The marker prevents legacy exact-only caches from silently
+# bypassing the fallback pass; it is included in the locale-map cache glob.
 ALL_PRESENT=1
 for code in $CODES; do
   out="$OUTPUT_DIR/scryfall-images.$SCHEMA_VERSION.$code.json"
   [ -f "$out" ] && validate_locale_map "$out" || ALL_PRESENT=0
 done
-if [ "$ALL_PRESENT" = 1 ]; then
+if [ "$ALL_PRESENT" = 1 ] && jq -e --arg schema "$SCHEMA_VERSION" '
+    type == "object"
+    and .schema_version == $schema
+    and .algorithm == "same-card-localized-printing-v1"
+  ' "$FALLBACK_MARKER" > /dev/null 2>&1; then
   echo "Skipping generation — all $SCHEMA_VERSION locale maps already exist in $OUTPUT_DIR (delete to regenerate)."
   exit 0
 fi
@@ -257,6 +300,12 @@ for code in $CODES; do
   fi
   printf "  %-8s %7d entries  %s\n" "$code" "$(jq 'length' "$out")" "$(du -h "$out" | cut -f1)"
 done
+
+echo "Filling missing localized printings from same-card candidates..."
+python3 "$SCRIPT_DIR/lib/localized-image-fallback.py" \
+  --bulk "$ALL_CARDS_FILE" \
+  --output "$OUTPUT_DIR" \
+  --schema-version "$SCHEMA_VERSION"
 
 # Validate the exact URLs stored in the output, not a reconstructed CDN path.
 # A sample keeps generation bounded while still catching a stale all_cards

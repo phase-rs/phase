@@ -36,6 +36,43 @@ export function auto_pick(): any;
 export function booster_pack_pool_for_game(): any;
 
 /**
+ * Build one LLM pick request per eligible bot seat.
+ *
+ * Takes NO seat list. Which seats an LLM may draft for is an authority
+ * question this crate already owns ([`llm_eligible_bot_seats`]), and accepting
+ * a caller's list made the display layer a second classifier of the same
+ * thing -- one free to drift toward naming a human seat, whose private pool
+ * and unpassed pack would then be rendered into a third-party prompt.
+ *
+ * `set_names_json` is an optional set-code -> name map so the format brief
+ * reads "Triple Mirrodin" rather than "Triple MRD"; codes are used verbatim
+ * when it is absent.
+ */
+export function buildLlmDraftPickRequests(endpoint_json: string, set_names_json: string): any;
+
+/**
+ * Check a saved draft session against the draft engine's legacy admission
+ * without restoring it.
+ *
+ * Returns `{ type: "Admitted" }` when the session deserializes and the
+ * admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+ * the admission refuses it, and `{ type: "Unreadable" }` when it does not
+ * deserialize as a draft session. It never throws, and it reads and writes no
+ * installed session, random state, pack generator, difficulty or card
+ * database.
+ */
+export function check_restorable_draft_session(json: string): any;
+
+/**
+ * CR 702.139a + CR 100.4b: whether `companion` is backed by a drafted pool
+ * copy the main deck does not use. Both card lists are JSON arrays of card
+ * names (the pool's instance names and the main deck's names). Stateless —
+ * usable by P2P guests, and the one rule `validate_limited_deck` enforces at
+ * submission, so the deck builder never re-counts copies itself.
+ */
+export function companion_has_drafted_copy_outside_deck(pool_names_json: string, main_deck_json: string, companion: string): boolean;
+
+/**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * multiplayer draft of any `DraftKind` with a wire number, with human + bot
  * seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
@@ -149,6 +186,12 @@ export function import_draft_session(json: string, difficulty: number): any;
 export function init_panic_hook(): void;
 
 /**
+ * The engine-owned LLM provider catalog, mirrored here so a draft-only client
+ * surface does not have to load the game engine to render the settings UI.
+ */
+export function llmProviderCatalog(): any;
+
+/**
  * Load the card database from a JSON string (card-data.json contents).
  * Required for Hard/VeryHard bot AI evaluation and accurate deck suggestion.
  * Returns the number of cards loaded.
@@ -174,6 +217,13 @@ export function pool_filter_options(pool_json: string): any;
  * renders what comes back, and computes nothing.
  */
 export function resolve_shared_stack_bot_turns(): any;
+
+/**
+ * Opt bots and auto-pick in or out of the built-in draft-guide pick
+ * enhancements. Independent of difficulty; the frontend sets it from the
+ * player's setting before starting or resuming a draft.
+ */
+export function set_draft_pick_enhancements(enabled: boolean): void;
 
 /**
  * Mark a human seat as connected or disconnected. The host adapter calls
@@ -234,6 +284,14 @@ export function start_quick_draft(selection_json: string, difficulty: number, se
 export function start_sealed_draft(selection_json: string, difficulty: number, seed: number): any;
 
 /**
+ * Submit the human's pick, resolving any LLM seat's pick from its response.
+ *
+ * Returns `{ view, llmOutcomes }`: the same `DraftPlayerView` `submit_pick`
+ * returns, plus a per-seat record of whether the LLM pick was used.
+ */
+export function submitPickWithLlmBotPicks(card_instance_id: string, responses_json: string): any;
+
+/**
  * Submit the human player's deck for limited play.
  *
  * `main_deck_json`: JSON array of card name strings.
@@ -241,9 +299,11 @@ export function start_sealed_draft(selection_json: string, difficulty: number, s
  * commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
  * the Commander variant, so `[]` is the correct and meaningful value for every
  * non-Commander kind.
+ * `companion`: the optional bare card name (not JSON) this seat designates as
+ * its companion (CR 702.139a).
  * The deck is validated against the pool via LimitedDeckValidator.
  */
-export function submit_deck(main_deck_json: string, commanders_json: string): any;
+export function submit_deck(main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit a deck for any seat.
@@ -255,7 +315,7 @@ export function submit_deck(main_deck_json: string, commanders_json: string): an
  * non-Commander kind.
  * Returns the DraftPlayerView for the specified seat.
  */
-export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string): any;
+export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit the human player's pick and resolve all bot picks synchronously.
@@ -328,6 +388,9 @@ export interface InitOutput {
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
     readonly auto_pick: () => [number, number, number];
     readonly booster_pack_pool_for_game: () => [number, number, number];
+    readonly buildLlmDraftPickRequests: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly check_restorable_draft_session: (a: number, b: number) => any;
+    readonly companion_has_drafted_copy_outside_deck: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
@@ -338,17 +401,18 @@ export interface InitOutput {
     readonly get_view: () => [number, number, number];
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
-    readonly init_panic_hook: () => void;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly resolve_shared_stack_bot_turns: () => [number, number, number];
+    readonly set_draft_pick_enhancements: (a: number) => void;
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly shared_stack_forced_decision: (a: number) => [number, number, number];
     readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly start_sealed_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly submit_deck: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly submit_deck_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly submitPickWithLlmBotPicks: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly submit_deck: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly submit_deck_for_seat: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly submit_pick: (a: number, b: number) => [number, number, number];
     readonly submit_pick_for_seat: (a: number, b: number, c: number) => [number, number, number];
     readonly submit_pick_with_draft_effect: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -356,6 +420,8 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
+    readonly init_panic_hook: () => void;
+    readonly llmProviderCatalog: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

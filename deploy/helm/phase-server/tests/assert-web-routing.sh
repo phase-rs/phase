@@ -223,70 +223,154 @@ while IFS=$'\t' read -r match sticky port; do
   [ "$sticky" = "yes" ] || fail "server rule \"$match\" lost its sticky cookie"
 done < "$work_dir/rules.tsv"
 
-# ── The default-server address is validated the way the client validates it ──
+# ── The chart refuses every default-server address the client would ignore ──
 # A value the client refuses is worse than a render failure: the site comes up and
 # quietly uses the bundle's own default instead of the operator's server. Whitespace
 # is rejected outright because URL parsing STRIPS a tab or newline rather than
-# failing, which would silently change the host.
-url_case() {
-  local expect=$1 value=$2 out
+# failing, which would silently change the host, and past the host and port only
+# printable ASCII is admitted: anything else must be percent-encoded.
+url_case() {                      # $1 = value key under web., $2 = render|refuse, $3 = value
+  local key=$1 expect=$2 value=$3 out
   if out=$(helm template phase-server "$chart_dir" --set ingress.host=phase.example.test \
       --set web.enabled=true --set web.image.digest=$web_digest \
-      --set-string web.defaultMultiplayerServerUrl="$value" 2>&1 >/dev/null); then
-    [ "$expect" = "render" ] || fail "web.defaultMultiplayerServerUrl=$(printf %q "$value") rendered, but the client would refuse it"
+      --set-string "web.$key=$value" 2>&1 >/dev/null); then
+    [ "$expect" = "render" ] || fail "web.$key=$(printf %q "$value") rendered, but the chart should refuse it"
   else
-    [ "$expect" = "refuse" ] || fail "web.defaultMultiplayerServerUrl=$(printf %q "$value") was refused, but it is a valid address"
+    [ "$expect" = "refuse" ] || fail "web.$key=$(printf %q "$value") was refused, but it is a valid address"
   fi
 }
-url_case render 'wss://play.example.com/ws'
-url_case render 'ws://192.168.1.5:9374/ws'
-url_case render 'wss://play.example.com/ws?region=eu'
-url_case render ''
-url_case refuse 'https://play.example.com'
-url_case refuse 'play.example.com'
-url_case refuse 'wss://'
-url_case refuse 'wss://play.example.com bad'
-url_case refuse "wss://play.example.com$(printf '\t')bad"
-url_case refuse ' wss://play.example.com/ws'
-url_case refuse 'wss://play.example.com/ws '
-url_case refuse 'wss://play.example.com/ws#lobby'
-url_case refuse 'wss://play.example.com/ws#'
+url_case defaultMultiplayerServerUrl render 'wss://play.example.com/ws'
+url_case defaultMultiplayerServerUrl render 'ws://192.168.1.5:9374/ws'
+url_case defaultMultiplayerServerUrl render 'wss://play.example.com/ws?region=eu'
+url_case defaultMultiplayerServerUrl render ''
+url_case defaultMultiplayerServerUrl refuse 'https://play.example.com'
+url_case defaultMultiplayerServerUrl refuse 'play.example.com'
+url_case defaultMultiplayerServerUrl refuse 'wss://'
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com bad'
+url_case defaultMultiplayerServerUrl refuse "wss://play.example.com$(printf '\t')bad"
+url_case defaultMultiplayerServerUrl refuse ' wss://play.example.com/ws'
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com/ws '
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com/ws#lobby'
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com/ws#'
+
+# The fragment rule has its own message, and the shape rule refuses "#" too, so a
+# refusal alone does not show which rule fired. The operator must be told the
+# fragment is the problem.
+for value in 'wss://play.example.com/ws#lobby' 'wss://play.example.com/ws#'; do
+  if out=$(helm template phase-server "$chart_dir" --set ingress.host=phase.example.test \
+      --set web.enabled=true --set web.image.digest=$web_digest \
+      --set-string "web.defaultMultiplayerServerUrl=$value" 2>&1 >/dev/null); then
+    fail "web.defaultMultiplayerServerUrl=$value rendered, but the client would refuse it"
+  fi
+  grep -q 'may not carry a fragment' <<<"$out" ||
+    fail "web.defaultMultiplayerServerUrl=$value was refused without the fragment message: $out"
+done
 
 # Authority grammar. The chart's accept-set must stay a SUBSET of what
 # `parseWebSocketUrl` accepts: anything the chart admits and the client drops is
 # a deployment that renders clean and then silently uses the build-time default.
 # Verdicts below are the client's, measured with node's WHATWG URL rather than
 # recalled — the corpus and the comparison live in client/src/config.
-url_case render 'wss://[::1]/ws'
-url_case render 'wss://[::1]:9374/ws'
-url_case render 'wss://[2001:db8::8a2e:370:7334]/ws'
-url_case render 'wss://play.example.com:65535/ws'
-url_case render 'wss://play.example.com:0/ws'
-url_case refuse 'wss://play.example.com:abc/ws'      # non-numeric port
-url_case refuse 'wss://play.example.com:99999/ws'    # port above 65535
-url_case refuse 'wss://play.example.com:-1/ws'       # negative port
-url_case refuse 'wss://[::1/ws'                      # unclosed bracket
-url_case refuse 'wss://[]/ws'                        # empty bracket
-url_case refuse 'wss://]::1[/ws'                     # reversed brackets
-url_case render 'wss://[::]/ws'
-url_case render 'wss://[::ffff:192.168.1.1]/ws'
-url_case refuse 'wss://[:::::]/ws'                   # more than one elision
-url_case refuse 'wss://[1::2::3]/ws'                 # two elisions, no ":::" substring
-url_case refuse 'wss://[1:1:1]/ws'                   # too few groups, no elision
-url_case refuse 'wss://[1:2:3:4:5:6:7:8:9]/ws'       # too many groups
-url_case refuse 'wss://[gggg::1]/ws'                 # non-hex group
-url_case refuse 'wss://:9374/ws'                     # port but no host
-url_case refuse 'wss://@/ws'                         # empty authority
-url_case refuse 'wss://%00.com/ws'                   # percent-encoding in a host
+url_case defaultMultiplayerServerUrl render 'wss://[::1]/ws'
+url_case defaultMultiplayerServerUrl render 'wss://[::1]:9374/ws'
+url_case defaultMultiplayerServerUrl render 'wss://[2001:db8::8a2e:370:7334]/ws'
+url_case defaultMultiplayerServerUrl render 'wss://play.example.com:65535/ws'
+url_case defaultMultiplayerServerUrl render 'wss://play.example.com:0/ws'
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com:abc/ws'      # non-numeric port
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com:99999/ws'    # port above 65535
+url_case defaultMultiplayerServerUrl refuse 'wss://play.example.com:-1/ws'       # negative port
+url_case defaultMultiplayerServerUrl refuse 'wss://[::1/ws'                      # unclosed bracket
+url_case defaultMultiplayerServerUrl refuse 'wss://[]/ws'                        # empty bracket
+url_case defaultMultiplayerServerUrl refuse 'wss://]::1[/ws'                     # reversed brackets
+url_case defaultMultiplayerServerUrl render 'wss://[::]/ws'
+url_case defaultMultiplayerServerUrl render 'wss://[::ffff:192.168.1.1]/ws'
+url_case defaultMultiplayerServerUrl refuse 'wss://[:::::]/ws'                   # more than one elision
+url_case defaultMultiplayerServerUrl refuse 'wss://[1::2::3]/ws'                 # two elisions, no ":::" substring
+url_case defaultMultiplayerServerUrl refuse 'wss://[1:1:1]/ws'                   # too few groups, no elision
+url_case defaultMultiplayerServerUrl refuse 'wss://[1:2:3:4:5:6:7:8:9]/ws'       # too many groups
+url_case defaultMultiplayerServerUrl refuse 'wss://[gggg::1]/ws'                 # non-hex group
+url_case defaultMultiplayerServerUrl refuse 'wss://:9374/ws'                     # port but no host
+url_case defaultMultiplayerServerUrl refuse 'wss://@/ws'                         # empty authority
+url_case defaultMultiplayerServerUrl refuse 'wss://%00.com/ws'                   # percent-encoding in a host
 
 # Dotted-numeric authorities. URL parsing decides a host is an IPv4 attempt from
 # its final label, so these fail to parse rather than resolving as hostnames.
-url_case render 'wss://192.168.1.5:9374/ws'
-url_case render 'wss://255.255.255.255/ws'
-url_case refuse 'wss://999.999.999.999/ws'           # octets out of range
-url_case refuse 'wss://256.1.1.1/ws'                 # first octet out of range
-url_case refuse 'wss://1.2.3.4.5/ws'                 # five parts
-url_case refuse 'wss://0x7f.0.0.1/ws'                # hex octet: a number, not a name
+url_case defaultMultiplayerServerUrl render 'wss://192.168.1.5:9374/ws'
+url_case defaultMultiplayerServerUrl render 'wss://255.255.255.255/ws'
+url_case defaultMultiplayerServerUrl refuse 'wss://999.999.999.999/ws'           # octets out of range
+url_case defaultMultiplayerServerUrl refuse 'wss://256.1.1.1/ws'                 # first octet out of range
+url_case defaultMultiplayerServerUrl refuse 'wss://1.2.3.4.5/ws'                 # five parts
+url_case defaultMultiplayerServerUrl refuse 'wss://0x7f.0.0.1/ws'                # hex octet: a number, not a name
+
+# Punycode labels. URL parsing throws on an xn-- label that is not valid punycode,
+# and a pattern cannot tell valid from invalid, so every xn-- label in the host is
+# refused. The refusal is confined to the host: the same text in a path renders.
+url_case defaultMultiplayerServerUrl refuse 'wss://xn--a.example/ws'             # leading label
+url_case defaultMultiplayerServerUrl refuse 'wss://a.xn--a/ws'                   # final label
+url_case defaultMultiplayerServerUrl render 'wss://play.example.com/xn--path'
+
+# Path and query characters: printable ASCII only, spelled as a range because
+# helm's regex engine and the drift test's disagree on what "not whitespace"
+# covers. The render row leaves out "," and "\", which --set-string splits on
+# and consumes.
+url_case defaultMultiplayerServerUrl render 'wss://host.example/!"$%&()*+-.:;<=>@[]^_`{|}~?q=!"$~'
+url_case defaultMultiplayerServerUrl refuse "wss://host.example/ws$(printf '\v')"               # vertical tab
+url_case defaultMultiplayerServerUrl refuse "wss://host.example/ws$(printf '\342\200\250')"     # U+2028 line separator
+url_case defaultMultiplayerServerUrl refuse "wss://host.example/ws$(printf '\177')"             # DEL
+url_case defaultMultiplayerServerUrl refuse "wss://host.example/ws$(printf '\303\251')"         # U+00E9, a letter outside ASCII
+
+# ── The chart refuses every preview site address the client would ignore ──
+# A release web build that reads the value opens it from its "Try Preview" badge
+# only if the client can open it as an http or https URL, and otherwise opens the
+# image's own preview site. The authority, punycode and printable-ASCII path
+# rules are the default server's, so the chart also refuses some addresses the
+# client would open. A query and a fragment are allowed.
+url_case previewSiteUrl render 'https://phase-preview.example.test'
+url_case previewSiteUrl render 'http://192.168.1.5:8080/'                    # LAN host without TLS
+url_case previewSiteUrl render 'https://preview.example.test/play?x=1#top'
+url_case previewSiteUrl render 'https://[::1]:8443/p'
+url_case previewSiteUrl render 'https://host.example/a.xn--b'                # punycode text outside the host
+url_case previewSiteUrl render ''
+url_case previewSiteUrl refuse 'phase-preview.example.test'                  # no scheme
+url_case previewSiteUrl refuse 'wss://preview.example.test'                  # not http or https
+url_case previewSiteUrl refuse 'javascript:alert(1)'
+url_case previewSiteUrl refuse 'https://'                                    # no host
+url_case previewSiteUrl refuse 'https://999.999.999.999/'                    # octets out of range
+url_case previewSiteUrl refuse 'https://host.example:99999/'                 # port above 65535
+url_case previewSiteUrl refuse 'https://xn--a.example/'                      # punycode label
+url_case previewSiteUrl refuse 'https://host.example/ bad'
+url_case previewSiteUrl refuse "https://host.example/$(printf '\t')bad"
+url_case previewSiteUrl render 'https://host.example/!"$%&()*+-.:;<=>@[]^_`{|}~?q=!~#!"#$~'
+url_case previewSiteUrl refuse "https://host.example/$(printf '\v')x"                  # vertical tab
+url_case previewSiteUrl refuse "https://host.example/$(printf '\302\240')x"            # U+00A0 no-break space
+url_case previewSiteUrl refuse "https://host.example/$(printf '\342\200\250')x"        # U+2028 line separator
+url_case previewSiteUrl refuse "https://host.example/x$(printf '\v')"                  # vertical tab at the end
+url_case previewSiteUrl refuse "https://host.example/$(printf '\177')x"                # DEL
+url_case previewSiteUrl refuse "https://host.example/$(printf '\001')x"                # a C0 control
+url_case previewSiteUrl refuse "https://host.example/caf$(printf '\303\251')"          # U+00E9, a letter outside ASCII
+
+# ── config.js carries exactly the values that are set ───────────────────────
+config_js() { extract_doc ConfigMap phase-server-web-conf "$1"; }
+render "$work_dir/web-preview.yaml" --set web.enabled=true --set web.image.digest=$web_digest \
+  --set-string web.previewSiteUrl=https://phase-preview.example.test
+render "$work_dir/web-both.yaml" --set web.enabled=true --set web.image.digest=$web_digest \
+  --set-string web.previewSiteUrl=https://phase-preview.example.test \
+  --set-string web.defaultMultiplayerServerUrl=wss://phase.example.test/ws
+none=$(config_js "$work_dir/web.yaml")
+[ -n "$none" ] || fail "web.enabled rendered no phase-server-web-conf ConfigMap"
+grep -qF 'window.__PHASE_CONFIG__ = {};' <<<"$none" ||
+  fail "with neither value set, config.js is not the empty config: $none"
+! grep -qE '^ *previewSiteUrl:' <<<"$none" || fail "with neither value set, config.js sets previewSiteUrl: $none"
+preview=$(config_js "$work_dir/web-preview.yaml")
+grep -qF 'previewSiteUrl: "https://phase-preview.example.test",' <<<"$preview" ||
+  fail "web.previewSiteUrl did not reach config.js: $preview"
+! grep -qE '^ *multiplayerServerUrl:' <<<"$preview" ||
+  fail "config.js sets multiplayerServerUrl although only web.previewSiteUrl is set: $preview"
+both=$(config_js "$work_dir/web-both.yaml")
+grep -qF 'previewSiteUrl: "https://phase-preview.example.test",' <<<"$both" ||
+  fail "with both values set, config.js lost previewSiteUrl: $both"
+grep -qF 'multiplayerServerUrl: "wss://phase.example.test/ws",' <<<"$both" ||
+  fail "with both values set, config.js lost multiplayerServerUrl: $both"
 
 # ── The SPA image must be immutable unless mutability is asked for by name ──
 # The SPA is a sidecar in the pod that serves /ws, so a tag that moves under the

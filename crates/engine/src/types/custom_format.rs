@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SideboardPolicy,
+    INDIVIDUAL_POISON_LOSS_THRESHOLD,
 };
 
 /// Lightweight, `Copy`, per-`GameState` transport tag for a custom format.
@@ -79,11 +80,14 @@ pub enum ManaBurnPolicy {
 
 /// CR 510 (Combat Damage Step): the modern rules deal all combat damage —
 /// first strike and regular — in one unified damage step per combat-damage
-/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the older
-/// pre-6th-edition procedure, where assigned combat damage was itself placed
-/// on the stack as a stack object rather than a triggered ability, giving
-/// players a priority window between assignment and dealing before it
-/// resolved. Variant names match `docs/proposals/custom-format-engine/
+/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the pre-M10
+/// procedure — introduced by the Classic Sixth Edition rules in 1999 and
+/// removed by Magic 2010 in July 2009 — where assigned combat damage was
+/// itself placed on the stack as a stack object rather than a triggered
+/// ability, giving players a priority window between assignment and dealing
+/// before it resolved. (An earlier revision of this comment called that
+/// "pre-6th-edition", which is backwards: Sixth Edition is what introduced it.)
+/// Variant names match `docs/proposals/custom-format-engine/
 /// PLAN.md`'s canonical schema exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CombatDamageTiming {
@@ -198,6 +202,10 @@ pub enum CommanderEligibilityRule {
     TinyLeaders,
     OathbreakerSignatureSpell,
     BrawlColorIdentity,
+    /// `GameFormat::FreeformCommander`'s rule: any card that can be cast.
+    /// See `deck_validation::is_freeform_commander_eligible` for which
+    /// `CoreType`s it admits.
+    FreeformAnyCastableCard,
 }
 
 impl CommanderEligibilityRule {
@@ -217,12 +225,22 @@ impl CommanderEligibilityRule {
             // CR 903.13f routes its deck construction through CR 903.5 — so
             // CR 903.3's commander eligibility test applies unchanged.
             GameFormat::Commander
+            | GameFormat::TwoHeadedGiantCommander
+            | GameFormat::ArchenemyCommander
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),
             GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
             GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
             GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),
+            // Departure from CR 903.3: `Ok(None)` would
+            // claim this format has no commander-eligibility concept, and
+            // `Ok(Some(Standard))` would claim it applies CR 903.3's test —
+            // the rule this format departs from. Neither is true.
+            GameFormat::FreeformCommander => Ok(Some(Self::FreeformAnyCastableCard)),
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -237,11 +255,29 @@ impl CommanderEligibilityRule {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => Ok(None),
+            | GameFormat::Momir
+            // Like Momir, the command zone holds an engine object (the Horde
+            // emblem), not a decklist commander — Commander-format hordes whose
+            // survivors run commanders are a config-level axis, not a
+            // format-level eligibility rule.
+            | GameFormat::Horde
+            | GameFormat::Freeform
+            | GameFormat::Dandan => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "from_source_format: source must be a built-in GameFormat, never Custom({})",
                 id.0
             ))),
+        }
+    }
+
+    /// Whether a custom format modeled on this rule's source is a Commander
+    /// variant (CR 903), mirroring `GameFormat::uses_commander`.
+    pub fn uses_commander(self) -> bool {
+        match self {
+            Self::Standard | Self::FreeformAnyCastableCard => true,
+            // CR 903.12a: Brawl is a Commander variant.
+            Self::BrawlColorIdentity => true,
+            Self::TinyLeaders | Self::OathbreakerSignatureSpell => false,
         }
     }
 }
@@ -302,6 +338,19 @@ pub struct StructuralRules {
     /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
     /// exists to prevent.
     pub default_deck_copy_limit: DeckCopyLimit,
+    /// CR 704.5c: the DECLARED individual poison loss threshold, mirroring
+    /// `FormatConfig.poison_counter_threshold`. A bare `u8`: a custom format never
+    /// takes the Two-Headed Giant shared-poison topology (`has_shared_poison` keys
+    /// on the built-in 2HG family), so CR 704.5c always applies to it.
+    /// Defaulted so definitions persisted before this field keep loading.
+    #[serde(default = "default_structural_poison_counter_threshold")]
+    pub poison_counter_threshold: u8,
+}
+
+/// Serde default for `StructuralRules.poison_counter_threshold`: a definition
+/// persisted before the field existed was written under CR 704.5c's ten.
+fn default_structural_poison_counter_threshold() -> u8 {
+    INDIVIDUAL_POISON_LOSS_THRESHOLD
 }
 
 impl StructuralRules {
@@ -334,6 +383,12 @@ impl StructuralRules {
             team_based: config.team_based,
             sideboard_policy: config.sideboard_policy,
             default_deck_copy_limit: config.default_deck_copy_limit,
+            // A Two-Headed Giant-family source has no individual rule (`None`),
+            // but the custom format it becomes never shares poison, so CR
+            // 704.5c's value is the rule that will govern it.
+            poison_counter_threshold: config
+                .poison_counter_threshold
+                .unwrap_or(INDIVIDUAL_POISON_LOSS_THRESHOLD),
         }
     }
 }
@@ -531,8 +586,8 @@ impl CustomFormatDef {
     /// state, not a format rule (and the only format that sets it is
     /// rejected below anyway), and `supplies_fixed_deck` is always `false`
     /// for every custom format — no custom-format use case for an
-    /// engine-supplied fixed deck exists, and the only built-in that sets it
-    /// (Momir) is likewise rejected below.
+    /// engine-supplied fixed deck exists, and the built-ins that set it
+    /// (Momir and Dandân) are likewise rejected below.
     pub fn from_lobby_config(
         name: String,
         config: &FormatConfig,
@@ -569,10 +624,10 @@ impl CustomFormatDef {
         // Closes the general defect class documented on
         // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase
         // (CR 901.15a, shared planar deck), Archenemy (CR 904.3, scheme deck),
-        // and Momir (CR 109.4c / CR 114.1, game-start emblem) each get an
-        // auxiliary deck/component from `deck_loading.rs` keyed on this exact
-        // `GameFormat` literal, with no `StructuralRules` field able to carry
-        // it forward. Checked ahead of the command-zone/eligibility match
+        // Momir (CR 109.4c / CR 114.1, game-start emblem), and Dandân (CR 400.1,
+        // shared library and graveyard) each rely on an auxiliary deck/component
+        // keyed on this exact `GameFormat` literal, with no `StructuralRules`
+        // field able to carry it forward. Checked ahead of the command-zone/eligibility match
         // below because Planechase's `command_zone` is `false` — it would
         // otherwise fall straight through to `CommandZoneMode::Disabled` and
         // save "successfully," silently losing the planar deck. Archenemy and
@@ -584,7 +639,7 @@ impl CustomFormatDef {
             return Err(FormatConfigError(format!(
                 "from_lobby_config cannot save {} as a custom format — its deck_loading.rs \
                  behavior grants an auxiliary deck or component (a shared planar deck, a scheme \
-                 deck, or a game-start emblem) keyed on this literal format, and StructuralRules \
+                 deck, a game-start emblem, or a shared library and graveyard) keyed on this literal format, and StructuralRules \
                  has no representation for it",
                 config.format
             )));

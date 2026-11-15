@@ -123,6 +123,7 @@ fn fallback_retarget_action_is_legal() {
     // A directly parked prompt: no pending cast, so `fallback_action`'s
     // cancel-cast escape cannot fire before the `RetargetChoice` arm.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -156,7 +157,7 @@ fn fallback_retarget_action_is_legal() {
     assert_ne!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(victim)],
+            new_targets: vec![Some(TargetRef::Object(victim))],
         }),
         "CR 115.7a: the fallback must propose ANOTHER legal target, not the \
          shrouded current target, got {action:?}"
@@ -204,7 +205,7 @@ fn fallback_retarget_action_is_legal() {
 ///   frozen scope.
 #[test]
 fn fallback_multi_role_retarget_action_is_slot_legal() {
-    let mut runner = GameScenario::new().build();
+    let mut runner = GameScenario::new_n_player(3, 42).build();
 
     let role = ManaTargetRole::Both {
         // Slot 0 (recipient, surfaced first): only an opponent of P0, i.e. P1.
@@ -227,9 +228,10 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         Zone::Stack,
     );
 
-    // Slot 0 holds P1, not P0 — so proposing `[P0]` would be a genuine change
-    // into a slot it is illegal for, rather than an exempt non-change.
-    let current_targets = vec![TargetRef::Player(P1), TargetRef::Player(P0)];
+    // Slot 0 holds P2, so P1 is a different legal opponent (CR 115.7a: a Single
+    // change must choose another target) and proposing `[P0]` would be a genuine
+    // change into a slot it is illegal for.
+    let current_targets = vec![TargetRef::Player(PlayerId(2)), TargetRef::Player(P0)];
     let ability = ResolvedAbility::new(
         Effect::Mana {
             produced: ManaProduction::Colorless {
@@ -279,8 +281,10 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     // same per-slot pools a real prompt would store, matching
     // `retarget_prompt_softlock.rs`'s `multi_role_mana_single_retarget_
     // candidates_are_slot_legal` fixture: slot 0 (recipient, opponent-only)
-    // admits only P1; slot 1 (count source, any player) admits both.
+    // offers P1 as the different opponent; slot 1 (count source, any player)
+    // admits every player.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -297,7 +301,11 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         ],
         slot_pools: vec![
             vec![TargetRef::Player(P1)],
-            vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Player(P1),
+                TargetRef::Player(PlayerId(2)),
+            ],
         ],
         legal_new_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
     };
@@ -315,7 +323,7 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     assert_eq!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Player(P1)],
+            new_targets: vec![Some(TargetRef::Player(P1))],
         }),
         "CR 115.7a: the fallback must not propose a pool member legal only for \
          another slot"
@@ -435,6 +443,7 @@ fn park_multi_role_retarget(
         .cloned()
         .collect();
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -502,7 +511,7 @@ fn fallback_multi_role_retarget_admits_a_legal_slot_change() {
     assert_eq!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Player(P2)],
+            new_targets: vec![Some(TargetRef::Player(P2))],
         }),
         "CR 115.7a: the fallback must propose the slot-0-legal CHANGE, and must not \
          propose the pool member legal only for the count-source slot"

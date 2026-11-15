@@ -706,6 +706,22 @@ fn tied_lowest_rolls_open_a_choice_limited_to_the_tied_indices() {
         1,
         "CR 706.6: exactly one surviving roll is emitted after the choice"
     );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::DieRollIgnored {
+                    player_id: P0,
+                    sides: 1,
+                    result: 1
+                }
+            ))
+            .count(),
+        1,
+        "CR 706.6: the ignored natural result reaches the display log after the choice"
+    );
 }
 
 /// V6 hostile — a submission naming a roll that is NOT among the tied-lowest set
@@ -725,6 +741,8 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         source_id: source,
         controller: P0,
         roller: P0,
+        quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 6,
         results: vec![2, 2, 6],
@@ -737,6 +755,13 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: Vec::new(),
+        trigger_context: None,
+        illegal_target_slots: Vec::new(),
+        chain_root_target_pins: Vec::new(),
+        declared_capture: None,
+        local_target_pins: Vec::new(),
+        keyed_target_incarnations: Vec::new(),
+        declared_player: None,
     };
     runner.state_mut().push_die_roll_frame(pending);
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
@@ -1139,6 +1164,8 @@ fn ai_candidates_cover_every_ignore_count() {
                 source_id: source,
                 controller: P0,
                 roller: P0,
+                quantity_controller: None,
+                scoped_player: None,
                 targets: vec![],
                 sides: 6,
                 results: results.clone(),
@@ -1151,6 +1178,13 @@ fn ai_candidates_cover_every_ignore_count() {
                 rolled_any: false,
                 forced_ignored: vec![],
                 chain_root_targets: Vec::new(),
+                trigger_context: None,
+                illegal_target_slots: Vec::new(),
+                chain_root_target_pins: Vec::new(),
+                declared_capture: None,
+                local_target_pins: Vec::new(),
+                keyed_target_incarnations: Vec::new(),
+                declared_player: None,
             });
         runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
             player: P0,
@@ -1375,6 +1409,8 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             source_id: source,
             controller: P0,
             roller: P0,
+            quantity_controller: None,
+            scoped_player: None,
             targets: vec![],
             sides: 20,
             results: vec![4, 7, 7],
@@ -1388,6 +1424,13 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             // The 4 is determined; only the tied 7s were offered to the roller.
             forced_ignored: vec![0],
             chain_root_targets: Vec::new(),
+            trigger_context: None,
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_capture: None,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
+            declared_player: None,
         });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,

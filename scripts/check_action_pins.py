@@ -33,7 +33,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by the runner, not t
     sys.exit("check_action_pins: PyYAML is required and was not found; refusing "
              "to check with a weaker method")
 
-DEFAULT_ENTRIES = (".github/workflows/release.yml", ".github/workflows/deploy.yml")
+DEFAULT_ENTRIES = (
+    ".github/workflows/release.yml",
+    ".github/workflows/deploy.yml",
+    ".github/workflows/shell-release.yml",
+)
 SHA = re.compile(r"@[0-9a-f]{40}$")
 # A container action is pinned by image digest, not by a commit SHA. A tag such
 # as docker://alpine:3.20 moves, so it is exactly what this gate exists to stop.

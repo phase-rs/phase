@@ -33,17 +33,26 @@
 //! chain` unit test on a hand-built stack-object ability (the plan's
 //! documented fallback) rather than a full SpellCast-trigger fixture -- see
 //! that test's doc comment for why.
+//!
+//! Mutiny and Breaking of the Fellowship ("another target creature that player
+//! controls") bind their second slot to the first slot's controller, both when
+//! the targets are chosen and when the spell resolves.
 
 use engine::game::ability_utils::validate_targets_in_chain;
 use engine::game::effects::exchange_control;
+use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
+use engine::game::zones::move_to_zone;
+use engine::types::ability::{
+    ContinuousModification, Duration, Effect, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, ChainStep, GameState, RetargetSlotAddress, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::mana::ManaCost;
@@ -51,6 +60,10 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
+
+use super::controller_anaphor_binds_through_context::{
+    cast_free, main_phase_scenario, settle_recording_offers,
+};
 
 const PUCA_MISCHIEF_ORACLE: &str = "At the beginning of your upkeep, you may exchange control of \
 target nonland permanent you control and target nonland permanent an opponent controls with \
@@ -729,4 +742,482 @@ fn t16_perplexing_chimera_stack_object_slot_validation_is_outcome_neutral() {
         "no-op: the spell must remain on the stack — it never became a \
          battlefield permanent under Chimera's control"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Mutiny / Breaking of the Fellowship — a prior-object controller slot
+// ---------------------------------------------------------------------------
+
+const P2: PlayerId = PlayerId(2);
+
+const MUTINY: &str = "Target creature an opponent controls deals damage equal to its power to another target creature that player controls.";
+const BREAKING_OF_THE_FELLOWSHIP: &str = "Target creature an opponent controls deals damage equal to its power to another target creature that player controls. The Ring tempts you.";
+const PRIOR_OBJECT_CONTROLLER_CARDS: [(&str, &str); 2] = [
+    ("Mutiny", MUTINY),
+    ("Breaking of the Fellowship", BREAKING_OF_THE_FELLOWSHIP),
+];
+
+fn add_free_sorcery(scenario: &mut GameScenario, name: &str, text: &str) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, name, false, text)
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+/// The object ids an offer contains, sorted.
+fn offered_objects(offer: &[TargetRef]) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = offer
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    ids.sort();
+    ids
+}
+
+/// Cast `name` at `first` then `second` (each preference used once, in the
+/// order the prompts take them) and assert the two slot offers.
+fn assert_prior_object_slot_offers(
+    runner: &mut GameRunner,
+    name: &str,
+    spell: ObjectId,
+    prefs: &[ObjectId],
+    slot_one: Vec<ObjectId>,
+    slot_two: Vec<ObjectId>,
+) {
+    cast_free(runner, spell);
+    let prefs: Vec<TargetRef> = prefs.iter().copied().map(TargetRef::Object).collect();
+    let offers = settle_recording_offers(runner, &prefs, &[]);
+    let offers: Vec<Vec<ObjectId>> = offers.iter().map(|offer| offered_objects(offer)).collect();
+    assert_eq!(
+        offers,
+        vec![sorted(slot_one), sorted(slot_two)],
+        "{name}: slot 1, then slot 2"
+    );
+}
+
+/// CR 115.1 + CR 601.2c + CR 109.4: "another target creature that player
+/// controls" is a creature controlled by the controller of the first target,
+/// so once the first target is chosen the second slot offers only that
+/// controller's other creatures. A first-target candidate whose controller has
+/// no other creature is not offered, and with no legal pair the spell cannot be
+/// cast.
+#[test]
+fn prior_object_controller_slot_offers_the_first_targets_controllers_creatures() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        // Two players: P1 controls A and B; P0 controls D.
+        let mut scenario = main_phase_scenario(2);
+        let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+        let b = scenario.add_creature(P1, "P1 B", 2, 2).id();
+        let d = scenario.add_creature(P0, "P0 D", 2, 2).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        assert_prior_object_slot_offers(&mut runner, name, spell, &[a, b, d], vec![a, b], vec![b]);
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&b].zone,
+            Zone::Graveyard,
+            "{name}: A deals 3 to B"
+        );
+        assert_eq!(state.objects[&a].damage_marked, 0, "{name}: A is undamaged");
+        assert_eq!(state.objects[&d].damage_marked, 0, "{name}: D is undamaged");
+
+        // Three players: as above, plus P2 controls only E.
+        let mut scenario = main_phase_scenario(3);
+        let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+        let b = scenario.add_creature(P1, "P1 B", 2, 2).id();
+        let e = scenario.add_creature(P2, "P2 E", 2, 2).id();
+        let d = scenario.add_creature(P0, "P0 D", 2, 2).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        assert_prior_object_slot_offers(
+            &mut runner,
+            name,
+            spell,
+            &[a, b, e, d],
+            vec![a, b],
+            vec![b],
+        );
+        assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard, "{name}");
+        assert_eq!(
+            runner.state().objects[&e].damage_marked,
+            0,
+            "{name}: P2's E"
+        );
+
+        // Three players, the first target is P2's: P2 controls E1 and E2.
+        let mut scenario = main_phase_scenario(3);
+        let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+        let e1 = scenario.add_creature(P2, "P2 E1", 3, 3).id();
+        let e2 = scenario.add_creature(P2, "P2 E2", 2, 2).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        // P1's lone A has no other P1 creature, so only E1 and E2 are offered.
+        assert_prior_object_slot_offers(
+            &mut runner,
+            name,
+            spell,
+            &[e1, a, e2],
+            vec![e1, e2],
+            vec![e2],
+        );
+        assert_eq!(runner.state().objects[&e2].zone, Zone::Graveyard, "{name}");
+
+        // Owner differs from controller: A is owned by P2 and controlled by
+        // P1, so the second slot offers P1's B, not P2's E.
+        let mut scenario = main_phase_scenario(3);
+        let a = scenario
+            .add_creature(P2, "P2-owned P1 A", 3, 3)
+            .controlled_by(P1)
+            .id();
+        let b = scenario.add_creature(P1, "P1 B", 2, 2).id();
+        let e = scenario.add_creature(P2, "P2 E", 2, 2).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        assert_prior_object_slot_offers(&mut runner, name, spell, &[a, e, b], vec![a, b], vec![b]);
+        assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard, "{name}");
+        assert_eq!(
+            runner.state().objects[&e].damage_marked,
+            0,
+            "{name}: P2's E"
+        );
+
+        // P1 controls only A: no legal pair exists, so the cast is refused.
+        let mut scenario = main_phase_scenario(2);
+        scenario.add_creature(P1, "P1 A", 3, 3);
+        scenario.add_creature(P0, "P0 D", 2, 2);
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        assert!(
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .is_err(),
+            "{name}: no legal pair of targets"
+        );
+    }
+}
+
+/// Cards whose `ParentTargetController` reference is a resolution-time choice
+/// ("that player may put …", "that player exiles a card from their hand") keep
+/// their single declared object target.
+#[test]
+fn resolution_time_parent_target_controller_choices_keep_their_target() {
+    const DIVINE_GAMBIT: &str = "Exile target artifact, creature, or enchantment an opponent controls. That player may put a permanent card from their hand onto the battlefield.";
+    const METAMORPHOSE: &str = "Put target permanent an opponent controls on top of its owner's library. That opponent may put an artifact, creature, enchantment, or land card from their hand onto the battlefield.";
+    const ASHIOK: &str = "[+1]: Create a 2/3 blue and black Nightmare creature token with \"Whenever this token attacks or blocks, each opponent exiles the top two cards of their library.\"\n[−3]: Return target nonland permanent to its owner's hand, then that player exiles a card from their hand.\n[−7]: You may cast up to three spells from among face-up cards your opponents own from exile without paying their mana costs.";
+
+    for (name, text, instant, zone) in [
+        ("Divine Gambit", DIVINE_GAMBIT, false, Zone::Exile),
+        ("Metamorphose", METAMORPHOSE, true, Zone::Library),
+    ] {
+        let mut scenario = main_phase_scenario(2);
+        let x = scenario.add_creature(P1, "P1 X", 2, 2).id();
+        let z = scenario.add_creature(P0, "P0 Z", 2, 2).id();
+        scenario.add_creature_to_hand(P1, "P1 Hand Bear", 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, instant, text)
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner
+            .cast(spell)
+            .target_object(x)
+            .decline_optional()
+            .resolve();
+        assert_eq!(outcome.zone_of(x), zone, "{name}");
+        assert_eq!(outcome.zone_of(z), Zone::Battlefield, "{name}");
+    }
+
+    let mut scenario = main_phase_scenario(2);
+    let x = scenario.add_creature(P1, "P1 X", 2, 2).id();
+    scenario.add_creature_to_hand(P1, "P1 Hand Bear", 2, 2);
+    let ashiok = scenario
+        .add_planeswalker_from_oracle(P0, "Ashiok, Nightmare Muse", "Ashiok", 5, ASHIOK)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.activate(ashiok, 1).target_object(x).resolve();
+    assert_eq!(outcome.zone_of(x), Zone::Hand, "Ashiok: X returns to hand");
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::EffectZoneChoice { player, .. } if *player == P1
+        ),
+        "Ashiok: X's controller chooses a card to exile; got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// The board mutation made while the spell waits on the stack.
+#[derive(Clone, Copy, Debug)]
+enum Mutation {
+    None,
+    StealB,
+    BounceA,
+    StealA,
+}
+
+/// P0 gains control of `id` until end of turn.
+fn gain_control(state: &mut GameState, source: ObjectId, id: ObjectId) {
+    state.add_transient_continuous_effect(
+        source,
+        P0,
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificObject { id },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
+    flush_layers(state);
+}
+
+/// CR 608.2b: as the spell resolves, the second target is rechecked against
+/// the first target's controller. If B is no longer controlled by A's
+/// controller, B is illegal and is not dealt damage. If A is illegal, it
+/// identifies no player, so B is illegal too; with every target illegal the
+/// spell does not resolve, and Breaking of the Fellowship's Ring does not
+/// tempt (Mutiny ruling 2018-01-19: "If either or both targets are illegal
+/// when Mutiny resolves, no creature will deal or be dealt damage.").
+#[test]
+fn prior_object_controller_slot_is_rechecked_on_resolution() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        let breaking = name == "Breaking of the Fellowship";
+        for mutation in [
+            Mutation::None,
+            Mutation::StealB,
+            Mutation::BounceA,
+            Mutation::StealA,
+        ] {
+            let label = format!("{name} / {mutation:?}");
+            // P0 controls no creature, so the Ring needs no Ring-bearer prompt.
+            let mut scenario = main_phase_scenario(2);
+            let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+            let b = scenario.add_creature(P1, "P1 B", 2, 2).id();
+            let spell = add_free_sorcery(&mut scenario, name, text);
+            let mut runner = scenario.build();
+
+            let mut commit = runner.cast(spell).target_objects(&[a, b]).commit();
+            let state = commit.state_mut();
+            match mutation {
+                Mutation::None => {}
+                Mutation::StealB => gain_control(state, spell, b),
+                Mutation::StealA => gain_control(state, spell, a),
+                Mutation::BounceA => move_to_zone(state, a, Zone::Hand, &mut Vec::new()),
+            }
+            let outcome = commit.resolve();
+            let state = outcome.state();
+            let ring = state.ring_level.get(&P0).copied().unwrap_or(0);
+
+            assert_eq!(state.objects[&spell].zone, Zone::Graveyard, "{label}: cast");
+            assert_eq!(state.objects[&a].damage_marked, 0, "{label}: A");
+            match mutation {
+                Mutation::None => {
+                    assert_eq!(state.objects[&b].zone, Zone::Graveyard, "{label}: B dies");
+                    if breaking {
+                        assert_eq!(ring, 1, "{label}: the spell resolved");
+                    }
+                }
+                Mutation::StealB => {
+                    assert_eq!(state.objects[&b].zone, Zone::Battlefield, "{label}");
+                    assert_eq!(state.objects[&b].damage_marked, 0, "{label}: B");
+                    if breaking {
+                        assert_eq!(ring, 1, "{label}: A is legal, so the spell resolved");
+                    }
+                }
+                Mutation::BounceA | Mutation::StealA => {
+                    assert_eq!(state.objects[&b].zone, Zone::Battlefield, "{label}");
+                    assert_eq!(state.objects[&b].damage_marked, 0, "{label}: B");
+                    if breaking {
+                        assert_eq!(ring, 0, "{label}: every target illegal");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mutiny / Breaking of the Fellowship — "choose new targets" (CR 115.7d)
+// ---------------------------------------------------------------------------
+
+const REDIRECT: &str = "You may choose new targets for target spell.";
+
+/// Cast `spell` at `targets`, apply `before_response` to the board, then cast
+/// Redirect at the spell and accept its "you may" up to the CR 115.7d prompt.
+/// Returns that prompt's per-position pools, after asserting the positions are
+/// the first target (the root) and the second (its `DealDamage` sub).
+fn redirect_prompt_pools(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    redirect: ObjectId,
+    targets: &[ObjectId],
+    before_response: impl FnOnce(&mut GameState),
+) -> Vec<Vec<TargetRef>> {
+    runner.cast(spell).target_objects(targets).commit();
+    before_response(runner.state_mut());
+    runner.cast(redirect).target_objects(&[spell]).commit();
+    for _ in 0..12 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept");
+            }
+            WaitingFor::RetargetChoice {
+                ref slots,
+                ref slot_pools,
+                ..
+            } => {
+                assert_eq!(
+                    *slots,
+                    vec![
+                        RetargetSlotAddress {
+                            path: vec![],
+                            slot: 0
+                        },
+                        RetargetSlotAddress {
+                            path: vec![ChainStep::SubAbility],
+                            slot: 0
+                        },
+                    ],
+                    "the first target, then the second"
+                );
+                return slot_pools.clone();
+            }
+            ref other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("no retarget prompt opened");
+}
+
+fn retarget(runner: &mut GameRunner, picks: [Option<ObjectId>; 2]) -> bool {
+    runner
+        .act(GameAction::RetargetSpell {
+            new_targets: picks.map(|pick| pick.map(TargetRef::Object)).to_vec(),
+        })
+        .is_ok()
+}
+
+/// CR 115.7d + CR 601.2c: "choose new targets" may move "another target
+/// creature that player controls" only onto a creature the first target's
+/// controller controls. With the second target still legal, a creature of
+/// another player is neither offered nor accepted, and another creature of the
+/// first target's controller is. Once P0 has gained control of the second
+/// target, the second target is illegal, and the offer still follows the
+/// first target's controller rather than the second target's new controller.
+#[test]
+fn choose_new_targets_keeps_the_second_target_with_the_first_targets_controller() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        for steal_b in [false, true] {
+            let label = format!("{name} / P0 steals B: {steal_b}");
+            // P1 controls A, B and B2; P0 controls D. B and B2 survive 3
+            // damage, so the damage is read from `damage_marked`.
+            let mut scenario = main_phase_scenario(2);
+            let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+            let b = scenario.add_creature(P1, "P1 B", 2, 5).id();
+            let b2 = scenario.add_creature(P1, "P1 B2", 2, 5).id();
+            let d = scenario.add_creature(P0, "P0 D", 2, 5).id();
+            let spell = add_free_sorcery(&mut scenario, name, text);
+            let redirect = scenario
+                .add_spell_to_hand_from_oracle(P0, "Redirect", true, REDIRECT)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+
+            let pools = redirect_prompt_pools(&mut runner, spell, redirect, &[a, b], |state| {
+                if steal_b {
+                    gain_control(state, spell, b);
+                }
+            });
+            let second = offered_objects(&pools[1]);
+            assert!(second.contains(&b2), "{label}: B2 is offered, {second:?}");
+            assert!(
+                !second.contains(&d),
+                "{label}: D is not offered, {second:?}"
+            );
+
+            assert!(
+                !retarget(&mut runner, [None, Some(d)]),
+                "{label}: P0's D is not controlled by A's controller"
+            );
+            assert!(
+                retarget(&mut runner, [None, Some(b2)]),
+                "{label}: B2 is controlled by A's controller"
+            );
+            runner.advance_until_stack_empty();
+            let state = runner.state();
+            assert_eq!(
+                state.objects[&b2].damage_marked, 3,
+                "{label}: A deals 3 to B2"
+            );
+            assert_eq!(state.objects[&b].damage_marked, 0, "{label}: B");
+            assert_eq!(state.objects[&d].damage_marked, 0, "{label}: D");
+        }
+    }
+}
+
+/// CR 115.7d + CR 115.7e: only the final set of targets is evaluated. Moving
+/// the first target to P2's creature while the second stays on P1's makes the
+/// unchanged second target illegal, and moving only the second target to P2's
+/// creature is not legal for the unchanged first target; both are refused.
+/// Moving both to P2's creatures is accepted.
+#[test]
+fn choose_new_targets_judges_the_second_target_against_the_final_first_target() {
+    for (name, text) in PRIOR_OBJECT_CONTROLLER_CARDS {
+        // P1 controls A and B; P2 controls E1 and E2; P0 controls no creature,
+        // so the Ring needs no Ring-bearer prompt.
+        let mut scenario = main_phase_scenario(3);
+        let a = scenario.add_creature(P1, "P1 A", 3, 3).id();
+        let b = scenario.add_creature(P1, "P1 B", 2, 5).id();
+        let e1 = scenario.add_creature(P2, "P2 E1", 3, 3).id();
+        let e2 = scenario.add_creature(P2, "P2 E2", 2, 5).id();
+        let spell = add_free_sorcery(&mut scenario, name, text);
+        let redirect = scenario
+            .add_spell_to_hand_from_oracle(P0, "Redirect", true, REDIRECT)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+
+        let pools = redirect_prompt_pools(&mut runner, spell, redirect, &[a, b], |_| {});
+        let second = offered_objects(&pools[1]);
+        assert!(
+            second.contains(&e2),
+            "{name}: E2 is offered, since the same choice may move A to P2's E1; {second:?}"
+        );
+
+        assert!(
+            !retarget(&mut runner, [Some(e1), None]),
+            "{name}: B would no longer be controlled by the first target's controller"
+        );
+        assert!(
+            !retarget(&mut runner, [None, Some(e2)]),
+            "{name}: E2 is not controlled by A's controller"
+        );
+        assert!(
+            retarget(&mut runner, [Some(e1), Some(e2)]),
+            "{name}: E2 is controlled by E1's controller"
+        );
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&e2].damage_marked, 3,
+            "{name}: E1 deals 3 to E2"
+        );
+        assert_eq!(state.objects[&a].damage_marked, 0, "{name}: A");
+        assert_eq!(state.objects[&b].damage_marked, 0, "{name}: B");
+        assert_eq!(state.objects[&e1].damage_marked, 0, "{name}: E1");
+    }
 }

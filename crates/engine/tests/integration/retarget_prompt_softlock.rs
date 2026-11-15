@@ -13,6 +13,7 @@
 //!    (`retarget_slot_violation`).
 
 use engine::ai_support::candidate_actions;
+use engine::game::ability_utils::assign_targets_in_chain;
 use engine::game::effects::change_targets;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
@@ -114,7 +115,7 @@ fn parked_retarget_pool(runner: &GameRunner) -> Vec<TargetRef> {
     legal_new_targets
 }
 
-fn retarget_candidates(state: &GameState) -> Vec<Vec<TargetRef>> {
+fn retarget_candidates(state: &GameState) -> Vec<Vec<Option<TargetRef>>> {
     candidate_actions(state)
         .into_iter()
         .filter_map(|candidate| match candidate.action {
@@ -143,6 +144,7 @@ fn aura_hosted_trigger_retarget_pool_uses_the_abilitys_own_filter() {
         .id();
     let bystander = scenario.add_creature(P0, "Goblin", 1, 1).id();
     let victim = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let other_opponent_creature = scenario.add_creature(P1, "Elk", 3, 3).id();
     let aura = scenario
         .add_enchantment_from_oracle(P0, "Pain for All", PAIN_FOR_ALL_ORACLE)
         .id();
@@ -290,12 +292,13 @@ fn aura_hosted_trigger_retarget_pool_uses_the_abilitys_own_filter() {
          reaches players; got {pool:?}"
     );
 
-    // Row 1b — the ability's current target must stay retargetable-to. It is a
-    // creature P1 controls, which the "creature you control" enchant filter
-    // excludes outright.
+    // Row 1b — another P1 creature distinguishes the ability's filter from
+    // the Aura's enchant filter, while the current occurrence is excluded.
+    assert!(pool.contains(&TargetRef::Object(other_opponent_creature)));
+    // CR 115.7a: changing a target requires another legal target.
     assert!(
-        pool.contains(&TargetRef::Object(victim)),
-        "CR 115.7a: the current target must remain in the pool; got {pool:?}"
+        !pool.contains(&TargetRef::Object(victim)),
+        "the current occurrence must be excluded; got {pool:?}"
     );
 }
 
@@ -366,16 +369,22 @@ fn retarget_with_no_legal_alternative_resolves_as_no_change() {
         .unwrap()
         .card_types
         .core_types = vec![CoreType::Instant];
-    let defense_ability = ResolvedAbility::new(
+    let mut defense_ability = ResolvedAbility::new(
         defense_parsed.abilities[0].effect.as_ref().clone(),
-        // CR 115.7a: an illegal-but-recorded current target. A stack entry with
-        // NO current targets no-ops earlier in `change_targets::resolve`, which
-        // would satisfy this row's assertion without the empty-pool guard ever
-        // running.
-        vec![TargetRef::Object(doomed)],
+        vec![],
         defense_id,
         P0,
     );
+    // CR 115.7a: an illegal-but-recorded current target. A stack entry with
+    // NO current targets no-ops earlier in `change_targets::resolve`, which
+    // would satisfy this row's assertion without the empty-pool guard ever
+    // running.
+    assign_targets_in_chain(
+        runner.state(),
+        &mut defense_ability,
+        &[TargetRef::Object(doomed)],
+    )
+    .expect("the spell takes one target");
     runner.state_mut().stack.push_back(StackEntry {
         id: defense_id,
         source_id: defense_id,
@@ -669,12 +678,45 @@ fn hallow_single_scope_prompt_with_empty_own_pool_resolves_as_no_change() {
     );
 }
 
+/// CR 115.7a: a nonempty raw pool containing only the current occurrence
+/// has no legal change and must complete without parking.
+#[test]
+fn hallow_single_scope_prompt_with_only_current_target_resolves_as_no_change() {
+    let (runner, events) = hallow_targets_axe_via_bolt_bend(false);
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::RetargetChoice { .. }
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::ChangeTargets,
+            ..
+        }
+    )));
+    let hallow = runner
+        .state()
+        .stack
+        .back()
+        .expect("Hallow remains on the stack");
+    let axe = runner
+        .state()
+        .stack
+        .front()
+        .expect("Axe remains on the stack");
+    assert_eq!(
+        hallow.ability().unwrap().targets,
+        vec![TargetRef::Object(axe.id)]
+    );
+}
+
 /// P-GATE-adjacent paired positive control (mandatory): with the source spell
 /// STILL on the stack, the `Single` prompt DOES park and IS dischargeable —
 /// so the negative row above cannot pass by suppressing everything.
 #[test]
 fn hallow_single_scope_prompt_with_nonempty_own_pool_still_parks() {
-    let (runner, _events) = hallow_targets_axe_via_bolt_bend(false);
+    let (mut runner, axe_id, shock_id) =
+        hallow_targets_axe_with_shock_also_on_stack_via_bolt_bend();
 
     assert!(
         matches!(
@@ -684,6 +726,20 @@ fn hallow_single_scope_prompt_with_nonempty_own_pool_still_parks() {
         "paired positive control: with the source spell still on the stack, the \
          prompt must still park"
     );
+    assert_eq!(
+        parked_retarget_pool(&runner),
+        vec![TargetRef::Object(shock_id)]
+    );
+    assert!(!parked_retarget_pool(&runner).contains(&TargetRef::Object(axe_id)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(shock_id)),
+        })
+        .expect("the different legal source must discharge the prompt");
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::RetargetChoice { .. }
+    ));
 }
 
 /// Row N22's fixture — B9's hostile row. Hallow (verbatim), currently
@@ -831,13 +887,8 @@ fn hallow_targets_axe_with_shock_also_on_stack_via_bolt_bend() -> (GameRunner, O
 /// offered the four-member player/creature cascade and refused both instants
 /// that were actually CR-legal for this slot.
 ///
-/// RELABELLED per §Disagreements #5 (phase-rs/phase#8355 round 8): accepting
-/// the CURRENT target (the axe) here is ordinary pool membership, not a
-/// softlock fix (`retarget_prompt_is_dischargeable` owns that class), and it
-/// is CR-loose under CR 115.7a while `shock` remains a legal, distinct
-/// alternative (`TRACKED` #12) — the assertion below is kept because it is
-/// what the code does and it is revert-failing, not because it is endorsed as
-/// CR-115.7a-correct.
+/// CR 115.7a: only Shock is a legal change; the current Axe occurrence
+/// must be excluded from both the offered pool and accepted submissions.
 #[test]
 fn hallow_single_scope_prompt_admits_its_own_cr_legal_pool() {
     let (runner, axe_id, shock_id) = hallow_targets_axe_with_shock_also_on_stack_via_bolt_bend();
@@ -860,13 +911,13 @@ fn hallow_single_scope_prompt_admits_its_own_cr_legal_pool() {
          outer-empty compatibility shape"
     );
 
-    // Discriminating: the pool is exactly [axe, shock] — no player, no
+    // Discriminating: the pool is exactly [shock] — no current axe, player, or
     // creature (both negative controls against BASE's four-member cascade).
     assert_eq!(
         slot_pools[0],
-        vec![TargetRef::Object(axe_id), TargetRef::Object(shock_id)],
+        vec![TargetRef::Object(shock_id)],
         "N22: the PreventDamage source slot's own pool must be exactly the \
-         two on-stack instants, not BASE's player/creature cascade"
+         different on-stack instant, not BASE's player/creature cascade"
     );
 
     // shock -> Ok (RF: at BASE Err, the pool never contained an instant).
@@ -885,14 +936,13 @@ fn hallow_single_scope_prompt_admits_its_own_cr_legal_pool() {
         })
         .expect_err("N22: a player is never CR-legal for a PreventDamage source slot");
 
-    // the current target (axe) -> Ok (RF: at BASE Err — BASE's cascade never
-    // contained the axe itself, only the four other objects).
+    // CR 115.7a: the current target is not a change.
     let mut axe_probe = GameRunner::from_state(runner.state().clone());
     axe_probe
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(axe_id)),
         })
-        .expect("N22 / TRACKED #12: the current target is ordinary pool membership");
+        .expect_err("N22: the current target must not be accepted as a change");
 }
 
 /// Push a single-target Lightning-Bolt-shaped spell at stack index 0 targeting
@@ -979,6 +1029,7 @@ fn ai_retarget_candidates_are_accepted_by_the_reducer() {
     // `victim` out of it.
     let slot_pool = vec![TargetRef::Object(alternative)];
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -1014,7 +1065,7 @@ fn ai_retarget_candidates_are_accepted_by_the_reducer() {
 
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(alternative)],
+            new_targets: vec![Some(TargetRef::Object(alternative))],
         })
         .expect("the retarget submission must be accepted");
     assert!(matches!(
@@ -1130,6 +1181,7 @@ fn all_scope_retarget_candidates_cover_every_slot() {
         TargetRef::Object(c),
     ];
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::All,
@@ -1149,6 +1201,7 @@ fn all_scope_retarget_candidates_cover_every_slot() {
     };
 
     let candidates = retarget_candidates(runner.state());
+    let anchor: Vec<Option<TargetRef>> = vec![None; current_targets.len()];
 
     // Positive reach-guards — each covers half the claim. Ordered BEFORE the
     // exact-equality assert deliberately: after it they are strictly entailed by
@@ -1156,23 +1209,23 @@ fn all_scope_retarget_candidates_cover_every_slot() {
     // uses this ordering. They localize a failure to "the anchor was dropped" or
     // "no substitution was offered" before the exact list is compared.
     assert!(
-        candidates.iter().any(|c| *c != current_targets),
+        candidates.iter().any(|c| *c != anchor),
         "reach guard: at least one per-slot substitution was offered"
     );
     assert!(
-        candidates.contains(&current_targets),
+        candidates.contains(&anchor),
         "reach guard: CR 115.7d's unchanged anchor survived"
     );
 
     // Derived from the arm's own shape: the anchor, plus one substitution per
-    // (slot, pool member) pair minus the two identity pairs. `[b, b]` and
-    // `[a, a]` are the duplicate-producing entries; per this row's SCOPE note
-    // they are pinned as observed behaviour, NOT asserted to be CR-legal.
+    // (slot, pool member) pair minus the two identity pairs, kept only when the
+    // reducer accepts it. `[b, keep]` would name B twice in one `UniformRun`
+    // (CR 115.3: one instance of "target" never names an object twice), so
+    // the validator's run-distinctness check refuses it and it is not proposed.
     let expected = vec![
-        vec![TargetRef::Object(a), TargetRef::Object(b)],
-        vec![TargetRef::Object(b), TargetRef::Object(b)],
-        vec![TargetRef::Object(c), TargetRef::Object(b)],
-        vec![TargetRef::Object(a), TargetRef::Object(c)],
+        vec![None, None],
+        vec![Some(TargetRef::Object(c)), None],
+        vec![None, Some(TargetRef::Object(c))],
     ];
     assert_eq!(
         candidates, expected,
@@ -1190,7 +1243,7 @@ fn all_scope_retarget_candidates_cover_every_slot() {
 /// is a parameter, never a shared constant.
 fn push_multi_role_mana_entry(runner: &mut GameRunner, current_targets: Vec<TargetRef>) {
     let role = ManaTargetRole::Both {
-        // Slot 0 (recipient, surfaced first): only an opponent of P0, i.e. P1.
+        // Slot 0 (recipient, surfaced first): any opponent of P0.
         recipient: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
         // Slot 1 (count source): any player.
         count_source: TargetFilter::Player,
@@ -1337,22 +1390,29 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 /// prompt would have stored (CR 115.7a; B9/B10).
 #[test]
 fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
-    let mut runner = GameScenario::new().build();
+    let mut runner = GameScenario::new_n_player(3, 42).build();
 
-    // Slot 0 holds P1 (legal for the opponent-only recipient slot); slot 1 holds
-    // P0 (legal for the any-player count-source slot). Slot 0 must NOT already
-    // hold P0, or submitting `[P0]` would be an exempt non-change and would
-    // survive for a reason unrelated to slot legality.
-    let current_targets = vec![TargetRef::Player(P1), TargetRef::Player(P0)];
+    // Slot 0 holds P2 (legal for the opponent-only recipient slot); slot 1 holds
+    // P0 (legal for the any-player count-source slot). P1 is a different
+    // legal opponent; P0 remains the slot-illegal negative control.
+    let current_targets = vec![TargetRef::Player(PlayerId(2)), TargetRef::Player(P0)];
     push_multi_role_mana_entry(&mut runner, current_targets.clone());
     assert_multi_role_entry_is_live(&runner);
 
     let legal_new_targets = vec![TargetRef::Player(P0), TargetRef::Player(P1)];
     // The per-position pools a real prompt would have stored: slot 0
-    // (recipient, opponent-only) admits only P1; slot 1 (count source, any
-    // player) admits both.
-    let slot_pools = vec![vec![TargetRef::Player(P1)], legal_new_targets.clone()];
+    // (recipient, opponent-only) offers P1 as a different opponent; slot 1
+    // (count source, any player) admits every player.
+    let slot_pools = vec![
+        vec![TargetRef::Player(P1)],
+        vec![
+            TargetRef::Player(P0),
+            TargetRef::Player(P1),
+            TargetRef::Player(PlayerId(2)),
+        ],
+    ];
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -1372,6 +1432,8 @@ fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
     };
 
     let candidates = retarget_candidates(runner.state());
+    // CR 115.7a: no candidate may preserve the current slot-0 occurrence.
+    assert!(!candidates.contains(&vec![Some(TargetRef::Player(PlayerId(2)))]));
 
     // Reach-guard (a): something survived — excludes the world where the
     // generator returns nothing and the discriminator holds by emptiness.
@@ -1391,7 +1453,7 @@ fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
     // `Single` submission lands in slot 0.
     assert_eq!(
         candidates,
-        vec![vec![TargetRef::Player(P1)]],
+        vec![vec![Some(TargetRef::Player(P1))]],
         "CR 115.7a: only the slot-0-legal pool member may be proposed"
     );
 
@@ -1440,6 +1502,7 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
     assert_multi_role_entry_is_live(&runner);
 
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::All,
@@ -1450,6 +1513,7 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
     };
 
     let candidates = retarget_candidates(runner.state());
+    let anchor: Vec<Option<TargetRef>> = vec![None; current_targets.len()];
 
     // Positive reach-guard: without this, "the anchor is accepted" could pass in
     // a world where the generator emits only the anchor and slot validation
@@ -1459,13 +1523,13 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
         "reach guard: substitutions must be offered alongside the anchor, got {candidates:?}"
     );
     assert!(
-        candidates.iter().any(|c| *c != current_targets),
+        candidates.iter().any(|c| *c != anchor),
         "reach guard: at least one slot substitution was offered"
     );
 
     // Discriminating (generator half): the unchanged anchor is proposed.
     assert!(
-        candidates.contains(&current_targets),
+        candidates.contains(&anchor),
         "CR 115.7d: the unchanged anchor must be proposed, got {candidates:?}"
     );
 
@@ -1487,7 +1551,7 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
     // is not independent evidence, and must not be cited as such.
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: current_targets.clone(),
+            new_targets: current_targets.clone().into_iter().map(Some).collect(),
         })
         .expect("CR 115.7d: leaving every target unchanged must be accepted");
 
@@ -1529,10 +1593,10 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
 /// inner-empty distinction must not be collapsed.
 #[test]
 fn n16_outer_empty_slot_pools_rederives_real_pools_not_the_union() {
-    let mut runner = GameScenario::new().build();
-    // Slot 0 holds P1 (legal for the opponent-only recipient slot); slot 1
+    let mut runner = GameScenario::new_n_player(3, 42).build();
+    // Slot 0 holds P2 (legal for the opponent-only recipient slot); slot 1
     // holds P0 (legal for the any-player count-source slot).
-    let current_targets = vec![TargetRef::Player(P1), TargetRef::Player(P0)];
+    let current_targets = vec![TargetRef::Player(PlayerId(2)), TargetRef::Player(P0)];
     push_multi_role_mana_entry(&mut runner, current_targets.clone());
     assert_multi_role_entry_is_live(&runner);
 
@@ -1547,17 +1611,22 @@ fn n16_outer_empty_slot_pools_rederives_real_pools_not_the_union() {
         },
     ];
     let live = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets: current_targets.clone(),
         slots: addresses.clone(),
         // The per-position pools a real prompt would have stored: slot 0
-        // (recipient, opponent-only) admits only P1; slot 1 (count source,
-        // any player) admits both.
+        // (recipient, opponent-only) offers the different opponent P1;
+        // slot 1 (count source, any player) admits every player.
         slot_pools: vec![
             vec![TargetRef::Player(P1)],
-            vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Player(P1),
+                TargetRef::Player(PlayerId(2)),
+            ],
         ],
         legal_new_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
     };
@@ -1616,6 +1685,15 @@ fn n16_outer_empty_slot_pools_rederives_real_pools_not_the_union() {
          per-position pool (opponent-only), not the flat union that also contains P0"
     );
 
+    let mut unchanged_probe = GameRunner::from_state(runner.state().clone());
+    unchanged_probe.state_mut().waiting_for = predating.clone();
+    // CR 115.7a: even compatibility payloads require another legal target.
+    unchanged_probe
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(2))),
+        })
+        .expect_err("the current occurrence must not be accepted as a change");
+
     // ---- The write lands as at BASE for a slot-0-legal submission: root-
     // level, unconditional (the `slots.is_empty()` compatibility branch itself
     // is untouched by H3).
@@ -1637,6 +1715,7 @@ fn n16_outer_empty_slot_pools_rederives_real_pools_not_the_union() {
     // NOT be treated as the outer-empty compatibility case — every position
     // has no legal alternative, and it must admit nothing.
     let inner_empty = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -1718,6 +1797,7 @@ fn compat_single_payload_on_b10_board_discharges_via_apply_retarget() {
     // A compat payload: outer-empty `slots`/`slot_pools`, exactly N16's shape,
     // for this Filtered (not multi-role-mana) node.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -1758,7 +1838,7 @@ fn compat_single_payload_on_b10_board_discharges_via_apply_retarget() {
         let mut probe = GameRunner::from_state(runner.state().clone());
         probe
             .act(GameAction::RetargetSpell {
-                new_targets: vec![target.clone()],
+                new_targets: vec![Some(target.clone())],
             })
             .unwrap_or_else(|err| {
                 panic!(
@@ -1780,7 +1860,7 @@ fn compat_single_payload_on_b10_board_discharges_via_apply_retarget() {
     assert!(
         unchanged_probe
             .act(GameAction::RetargetSpell {
-                new_targets: vec![axe_current],
+                new_targets: vec![Some(axe_current)],
             })
             .is_err(),
         "CR 115.7a: with a legal alternative available, resubmitting the vanished \
@@ -1820,6 +1900,7 @@ fn med1_all_scope_mismatched_pool_length_is_rejected_outright() {
         TargetRef::Player(P1),
     ];
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::All,
@@ -1850,9 +1931,9 @@ fn med1_all_scope_mismatched_pool_length_is_rejected_outright() {
     let mut probe = GameRunner::from_state(runner.state().clone());
     let result = probe.act(GameAction::RetargetSpell {
         new_targets: vec![
-            TargetRef::Player(P1),
-            TargetRef::Player(P0),
-            TargetRef::Player(P0),
+            Some(TargetRef::Player(P1)),
+            Some(TargetRef::Player(P0)),
+            Some(TargetRef::Player(P0)),
         ],
     });
     assert!(

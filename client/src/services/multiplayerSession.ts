@@ -1,4 +1,6 @@
-import type { FormatConfig, MatchType } from "../adapter/types";
+import type { FormatConfig, MatchType, PlayerId } from "../adapter/types";
+import { notifyActiveGameChange } from "./activeGameChange";
+import { sameFullSessionKey } from "./fullSessionKey";
 
 export const WS_SESSION_STORAGE_KEY = "phase-ws-session";
 export const WS_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
@@ -17,24 +19,35 @@ export interface FullSessionKey {
 
 export interface WsSessionData {
   gameCode: string;
+  playerId?: PlayerId;
   playerToken: string;
   fullKey: FullSessionKey;
   serverUrl: string;
   timestamp: number;
+  /** Pending terminal ACK routing must outlive playable reconnect expiry. */
+  terminalOnly?: true;
   hostSession?: WsHostSessionData;
   hostIsPublic?: boolean;
 }
 
 export function isWsSessionValid(session: WsSessionData): boolean {
-  return Date.now() - (session.timestamp ?? 0) < WS_SESSION_TTL_MS;
+  return session.terminalOnly === true
+    || Date.now() - (session.timestamp ?? 0) < WS_SESSION_TTL_MS;
 }
 
-export function loadWsSession(): WsSessionData | null {
-  try {
-    const raw = localStorage.getItem(WS_SESSION_STORAGE_KEY);
-    if (!raw) return null;
+// The latest session the store refused; null once a write lands.
+let pageSession: WsSessionData | null = null;
 
-    const session = JSON.parse(raw) as WsSessionData;
+export function loadWsSession(): WsSessionData | null {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(WS_SESSION_STORAGE_KEY);
+  } catch {
+    // Kept out of the parse `try`, whose catch would drop the page copy.
+  }
+  try {
+    const session = pageSession ?? (raw ? (JSON.parse(raw) as WsSessionData) : null);
+    if (!session) return null;
     if (
       !isWsSessionValid(session)
       || !session.fullKey
@@ -52,18 +65,39 @@ export function loadWsSession(): WsSessionData | null {
   }
 }
 
-export function saveWsSession(session: WsSessionData): void {
-  try {
-    localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
-  } catch {
-    // A blocked/quota-limited store disables reconnect persistence, not hosting.
-  }
+export type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
+
+export function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
+  const current = loadWsSession();
+  return current !== null
+    && current.serverUrl === expected.serverUrl
+    && sameFullSessionKey(current.fullKey, expected.fullKey)
+    && current.playerToken === expected.playerToken;
 }
 
-export function clearWsSession(): void {
+// The online session decides what the resume list offers for an online game
+// (resume, retained result, or nothing), so every landed write notifies it.
+export function saveWsSession(session: WsSessionData, expected?: WsSessionIdentity): void {
+  if (expected && !matchesStoredWsSession(expected)) return;
   try {
+    localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
+    pageSession = null;
+  } catch {
+    // A blocked/quota-limited store keeps the session for this page only.
+    pageSession = session;
+  }
+  notifyActiveGameChange();
+}
+
+export function clearWsSession(expected?: WsSessionIdentity): void {
+  if (expected && !matchesStoredWsSession(expected)) return;
+  let held = pageSession !== null;
+  pageSession = null;
+  try {
+    held ||= localStorage.getItem(WS_SESSION_STORAGE_KEY) !== null;
     localStorage.removeItem(WS_SESSION_STORAGE_KEY);
   } catch {
     // Nothing else can be done if the browser refuses storage access.
   }
+  if (held) notifyActiveGameChange();
 }

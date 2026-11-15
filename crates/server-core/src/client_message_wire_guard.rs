@@ -69,11 +69,11 @@ fn guard_booster_pack_pool(pool: &Option<Vec<String>>, ranked: bool) -> Result<(
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
-/// `mode` is used for variants whose policy differs between Full and LobbyOnly
-/// (currently none reject here — mode gating stays in `reject_if_disabled`).
+/// `mode` is used for variants whose policy differs between Full and LobbyOnly.
+/// Full mode re-runs the strict format-config gate that lobby decoding relaxes.
 pub fn guard_client_message_before_dispatch(
     msg: &ClientMessage,
-    _mode: ServerMode,
+    mode: ServerMode,
 ) -> Result<(), String> {
     match msg {
         ClientMessage::ClientHello {
@@ -111,6 +111,8 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        // One `u32` sequence number: no field to bound, so nothing to reject.
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -151,6 +153,7 @@ pub fn guard_client_message_before_dispatch(
             draft_metadata,
             ranked,
             booster_pack_pool,
+            requested_code,
             ..
         } => {
             guard_create_game_settings_inbound(CreateGameSettingsInbound {
@@ -163,9 +166,16 @@ pub fn guard_client_message_before_dispatch(
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
+                requested_code: requested_code.as_deref(),
             })?;
             guard_create_ai_seats(ai_seats, *player_count)?;
-            guard_booster_pack_pool(booster_pack_pool, *ranked)
+            guard_booster_pack_pool(booster_pack_pool, *ranked)?;
+            if matches!(mode, ServerMode::Full) {
+                if let Some(config) = format_config {
+                    config.check_strict_admission()?;
+                }
+            }
+            Ok(())
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -194,7 +204,7 @@ pub fn guard_client_message_before_dispatch(
         }),
         ClientMessage::Emote { emote } => guard_emote(emote),
         ClientMessage::SpectatorJoin { game_code } => guard_spectator_join(game_code),
-        ClientMessage::Ping { .. } => Ok(()),
+        ClientMessage::Ping { .. } | ClientMessage::ResyncState => Ok(()),
         ClientMessage::UpdateLobbyMetadata {
             game_code,
             current_players,
@@ -277,9 +287,11 @@ pub fn guard_client_message_before_dispatch(
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
@@ -370,6 +382,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -380,6 +393,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::BootstrapTerminalDelivery { .. }
         | ClientMessage::ReadTerminalResult { .. }
         | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::Ping { .. }
@@ -435,6 +449,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => guard_create_game_settings_inbound(CreateGameSettingsInbound {
             deck,
@@ -446,6 +461,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
+            requested_code: requested_code.as_deref(),
         }),
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -549,9 +565,11 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -560,6 +578,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede
@@ -567,6 +586,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::BootstrapTerminalDelivery { .. }
         | ClientMessage::ReadTerminalResult { .. }
         | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::SeatMutate { .. }
@@ -629,7 +649,8 @@ mod tests {
         PreviewRequestId, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::{
-        ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity,
+        ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
@@ -668,10 +689,12 @@ mod tests {
     }
 
     /// A settings-create frame as the dispatch guard sees it: a two-seat duel
-    /// that passes every other bound, varying only `ranked` and the pool.
+    /// that passes every other bound, varying only `ranked`, the pool and the
+    /// requested room code.
     fn create_game_with_settings(
         ranked: bool,
         booster_pack_pool: Option<Vec<String>>,
+        requested_code: Option<&str>,
     ) -> ClientMessage {
         ClientMessage::CreateGameWithSettings {
             deck: crate::protocol::DeckData {
@@ -691,8 +714,57 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked,
+            requested_code: requested_code.map(str::to_string),
             booster_pack_pool,
         }
+    }
+
+    /// CR 903.12h: Full mode runs the config, so a recorded Brawl threshold the
+    /// lobby relay admits is refused there; today's configs pass.
+    #[test]
+    fn full_mode_refuses_a_recorded_legacy_format_config() {
+        use engine::types::format::FormatConfig;
+        let with_config = |config: FormatConfig| {
+            let mut msg = create_game_with_settings(false, None, None);
+            if let ClientMessage::CreateGameWithSettings { format_config, .. } = &mut msg {
+                *format_config = Some(config);
+            }
+            msg
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let legacy = with_config(FormatConfig {
+                commander_damage_threshold: Some(21),
+                ..config.clone()
+            });
+            assert!(guard_client_message_before_dispatch(&legacy, ServerMode::LobbyOnly).is_ok());
+            let err = guard_client_message_before_dispatch(&legacy, ServerMode::Full).unwrap_err();
+            assert!(err.contains("commander_damage_threshold"), "{err}");
+            assert!(
+                guard_client_message_before_dispatch(&with_config(config), ServerMode::Full)
+                    .is_ok()
+            );
+        }
+        let commander = with_config(FormatConfig::commander());
+        assert!(guard_client_message_before_dispatch(&commander, ServerMode::Full).is_ok());
+    }
+
+    /// Both native dispatch guards carry the requested-code shape rule, in
+    /// either server mode.
+    #[test]
+    fn dispatch_guards_refuse_a_malformed_requested_code() {
+        let malformed = create_game_with_settings(false, None, Some("ab12cd"));
+        let valid = create_game_with_settings(false, None, Some("AB12CD"));
+        for mode in [ServerMode::Full, ServerMode::LobbyOnly] {
+            let err = guard_client_message_before_dispatch(&malformed, mode).unwrap_err();
+            assert!(err.contains("requested_code"), "{mode:?}: {err}");
+            assert!(
+                guard_client_message_before_dispatch(&valid, mode).is_ok(),
+                "{mode:?}"
+            );
+        }
+        let err = guard_broker_projection_inbound(&malformed).unwrap_err();
+        assert!(err.contains("requested_code"), "{err}");
+        assert!(guard_broker_projection_inbound(&valid).is_ok());
     }
 
     /// A rated game must not let its creator choose every card a pack opener
@@ -706,19 +778,19 @@ mod tests {
     fn dispatch_guard_refuses_a_booster_pack_pool_on_a_ranked_game() {
         for pool in [vec!["Cube Card".to_string()], Vec::new()] {
             let err = guard_client_message_before_dispatch(
-                &create_game_with_settings(true, Some(pool.clone())),
+                &create_game_with_settings(true, Some(pool.clone()), None),
                 ServerMode::Full,
             )
             .unwrap_err();
             assert!(err.contains("booster_pack_pool"), "{pool:?}: {err}");
             assert!(guard_client_message_before_dispatch(
-                &create_game_with_settings(false, Some(pool)),
+                &create_game_with_settings(false, Some(pool), None),
                 ServerMode::Full,
             )
             .is_ok());
         }
         assert!(guard_client_message_before_dispatch(
-            &create_game_with_settings(true, None),
+            &create_game_with_settings(true, None, None),
             ServerMode::Full,
         )
         .is_ok());
@@ -767,6 +839,27 @@ mod tests {
 
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("TapLandForMana.selection.restrictions.OnlyForAny"));
+    }
+
+    #[test]
+    fn dispatch_guard_accepts_deferred_mana_quantity_at_action_boundary() {
+        let msg = ClientMessage::Action {
+            action: GameAction::ActivateManaSource {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: Some(0),
+                    mana_type: ManaType::Colorless,
+                    output: ManaSourceOutput::DeferredColorChoice {
+                        quantity: ManaSourceQuantity::Fixed(3),
+                    },
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: ManaSourcePenalty::Sacrifices,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+        };
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok());
     }
 
     #[test]
@@ -1018,6 +1111,7 @@ mod tests {
                     code: "TOUR01".into(),
                     role: TournamentRole::Organizer,
                     token: long_token,
+                    rotation_nonce: "n".into(),
                 },
             ),
             (
@@ -1026,6 +1120,7 @@ mod tests {
                     code: long_code,
                     role: TournamentRole::Player,
                     token: "tok".into(),
+                    rotation_nonce: "n".into(),
                 },
             ),
         ]
@@ -1077,11 +1172,13 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "tok".into(),
+                rotation_nonce: "nonce".into(),
             },
             ClientMessage::RenewTournamentCredential {
                 code: "TOUR01".into(),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
             },
         ]
     }

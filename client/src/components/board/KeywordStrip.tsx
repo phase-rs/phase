@@ -1,4 +1,5 @@
 import { memo, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { Keyword } from "../../adapter/types";
 import {
@@ -63,6 +64,10 @@ export const KeywordStrip = memo(function KeywordStrip({
   maxVisible,
 }: KeywordStripProps) {
   const sorted = useMemo(() => sortKeywords(keywords), [keywords]);
+  // Keyword details carry translated prose, so the memo must recompute on a
+  // language change even when the keyword props are unchanged.
+  const { i18n } = useTranslation("game");
+  const language = i18n.language;
 
   const items = useMemo(
     () =>
@@ -78,7 +83,8 @@ export const KeywordStrip = memo(function KeywordStrip({
           reminder: getKeywordReminderText(kw),
         };
       }),
-    [sorted, baseKeywords, sourceByKeyword],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `language` is a recompute trigger: the details read the active locale through i18n.t.
+    [sorted, baseKeywords, sourceByKeyword, language],
   );
 
   if (items.length === 0) return null;
@@ -108,7 +114,7 @@ export const KeywordStrip = memo(function KeywordStrip({
         const ring = item.granted ? "ring-indigo-300/80" : "ring-white/25";
         const tint = item.granted ? "text-indigo-100" : "text-white";
         return (
-          <span key={i} title={title} className={`${BADGE_CLASS} ${ring} ${tint}`}>
+          <span key={i} title={title} className={`${BADGE_CLASS} ${ring} ${tint}`} data-keyword-badge="">
             {item.iconClass ? (
               <ManaFontIcon
                 iconClass={item.iconClass}
@@ -136,6 +142,7 @@ export const KeywordStrip = memo(function KeywordStrip({
         <span
           title={hidden.map((h) => h.text).join("\n")}
           className={`${BADGE_CLASS} text-white ring-white/30`}
+          data-keyword-badge=""
         >
           <span className="font-bold leading-none" style={{ fontSize: "0.46em" }}>
             +{hidden.length}

@@ -6,10 +6,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    GameState, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind, WaitingFor,
-};
-use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::game_state::{GameState, RetargetScope, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::ObjectId;
@@ -64,6 +61,19 @@ pub fn resolve(
             EffectError::MissingParam("ChangeTargets: targeted entry not on stack".to_string())
         })?;
 
+    if forced_to.is_none() {
+        if let Some(prompt) = retarget_prompt(state, stack_entry_index, scope, ability.controller) {
+            state.waiting_for = prompt;
+        } else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+        }
+        return Ok(());
+    }
+
     let Some(stack_ability) = state.stack[stack_entry_index].ability().cloned() else {
         // Permanent spell with no ability — nothing to retarget.
         events.push(GameEvent::EffectResolved {
@@ -85,9 +95,12 @@ pub fn resolve(
     // submission provably cannot write, which is the unanswerable-prompt shape
     // `retarget_prompt_softlock.rs` exists to prevent. `Single`/`ForcedTo`
     // therefore keep BASE's exposure exactly: the BASE-exposed prefix, which
-    // `chain_retarget_slots` guarantees equals `stack_ability.targets` (equal
-    // in VALUE under `AdditionalCostPaidInstead` delegation, where the root
-    // mirrors the delegated sub).
+    // `chain_retarget_slots` guarantees equals the declared positions of
+    // `stack_ability.targets` (equal in VALUE under `AdditionalCostPaidInstead`
+    // delegation, where the root mirrors the delegated sub). CR 115.10a: a value
+    // the base holds without having received it as a choice is not exposed;
+    // when the base declares nothing, the prefix is the first node that does,
+    // one group the bare `ChooseTarget` still addresses unambiguously.
     //
     // SCOPE SELECTS THE EXPOSED PREFIX, NOT A POOL AUTHORITY. Every exposed
     // position — under every scope — gets its pool from the same one
@@ -110,10 +123,13 @@ pub fn resolve(
         RetargetScope::Single | RetargetScope::ForcedTo(_) => base_exposed_prefix(&bindings),
     };
     let current_targets: Vec<TargetRef> = exposed.iter().map(|b| b.current.clone()).collect();
-    let slots: Vec<RetargetSlotAddress> = exposed.iter().map(|b| b.address.clone()).collect();
     debug_assert!(
-        stack_ability.targets.is_empty() || !exposed.is_empty(),
-        "CR 115.7: a non-empty `current_targets` must expose >=1 position"
+        !ability_utils::declared_position_addresses(&stack_ability)
+            .iter()
+            .flatten()
+            .any(|address| address.path.is_empty())
+            || !exposed.is_empty(),
+        "CR 115.7: a root's declared target must expose >=1 position"
     );
 
     if current_targets.is_empty() {
@@ -137,7 +153,7 @@ pub fn resolve(
     let base = legal_new_targets_for_entry(state, &state.stack[stack_entry_index]);
     let pool_controller =
         retarget_pool_controller(state, &state.stack[stack_entry_index], &stack_ability);
-    let slot_pools: Vec<Vec<TargetRef>> = exposed
+    let mut slot_pools: Vec<Vec<TargetRef>> = exposed
         .iter()
         .map(|b| {
             let node =
@@ -145,26 +161,55 @@ pub fn resolve(
             slot_pool(state, node, &b.enforcement, pool_controller, &base)
         })
         .collect();
+    ability_utils::widen_dependent_retarget_pools(
+        state,
+        &stack_ability,
+        exposed,
+        &mut slot_pools,
+        pool_controller,
+    );
 
     if let Some(filter) = forced_to {
-        // CR 115.7a/b: Forced retarget — resolve the new target from the filter,
-        // but only apply it if the targeted stack entry could legally target it.
+        // CR 115.7a/b: Forced retarget uses the exposed slot's legality, which
+        // can differ from the legacy whole-entry pool for a derived target.
+        // CR 115.7e: "only the final set of targets is evaluated": each
+        // candidate change is accepted only when THE retarget validator
+        // accepts the whole chain with that one position changed and every
+        // other position kept — so a change that would make an unchanged legal
+        // target illegal (Fiery Annihilation's Equipment no longer attached to
+        // the new creature) is not made. The validator's result is written:
+        // its pins (a changed occurrence takes the live incarnation, CR 400.7)
+        // and its re-derived chain targets.
         let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
-        if let Some(new_target) = new_targets.into_iter().find(|target| base.contains(target)) {
-            // CR 115.7b: "change a target" replaces exactly ONE of the targeted
-            // stack entry's declared positions — the FIRST exposed position
-            // whose slot pool admits the candidate AND whose current target
-            // actually differs from it (CR 115.7a: a change to itself is not a
-            // change). Generalizes the old `mana_multi_role`-only scan to
-            // every exposed position, second call site of Invariant SC.
-            if let Some(i) =
-                forced_retarget_target_position(exposed, &slot_pools, &current_targets, &new_target)
-            {
-                write_retarget_position(state, stack_entry_index, &exposed[i].address, &new_target);
+        let accepted = crate::game::retarget_completion::RetargetSearch::for_stack_entry(
+            state,
+            stack_entry_index,
+        )
+        .and_then(|search| {
+            new_targets.into_iter().find_map(|new_target| {
+                let i = forced_retarget_target_position(
+                    exposed,
+                    &slot_pools,
+                    &current_targets,
+                    &new_target,
+                )?;
+                let position = search
+                    .slots()
+                    .iter()
+                    .position(|slot| *slot == exposed[i].address)?;
+                let mut picks = vec![None; search.len()];
+                picks[position] = Some(new_target);
+                search.validate(&picks).ok()
+            })
+        });
+        if let Some(post) = accepted {
+            // CR 115.7b: exactly one position changed; every other position
+            // keeps its target and pin.
+            if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
+                *stack_ability_mut = post;
             }
-            // CR 115.7a: no exposed position can legally change to another
-            // target -> every target is left unchanged.
         }
+        // CR 115.7a: if no candidate change is legal, keep every target.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -173,32 +218,48 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Interactive retarget: present choices to the player.
-    // CR 115.7a: The current targets of the targeted spell/ability become the starting point.
-    // CR 115.7: Enumerate legal new targets by re-evaluating the stack entry's
-    // own targeting restriction against the current game state.
-    //
-    // CR 303.4a: An Aura SPELL's target is defined by its enchant *ability*, not
-    // by its effect's target field — the synthesized spell ability carries a
-    // placeholder effect with no targetable filter (`target_filter()` is `None`),
-    // so Aura hosts are enumerated from the source's `Keyword::Enchant(filter)`
-    // instead, mirroring the Aura branch of `casting::spell_has_legal_targets`.
-    // CR 115.1b: that substitution is keyed on the STACK ENTRY being the Aura
-    // spell — "An Aura permanent doesn't target anything; only the spell is
-    // targeted. (An activated or triggered ability of an Aura permanent can also
-    // be targeted.)" Every other entry — including a triggered or activated
-    // ability whose source happens to be a resident Aura — falls back to its own
-    // effect's declared target filter.
-    //
-    // CR 115.7d, INVARIANT SC: the UNION is BASE's cascade EXTENDED, never
-    // replaced, so it stays a literal prefix of BASE's (Invariant B) and the
-    // dischargeability gate below cannot newly fire where BASE's flat
-    // `legal_new_targets.is_empty()` guard did not. Extend-if-absent rather
-    // than concatenate: a root position's
-    // pool now frequently EQUALS the cascade, and blind concatenation would
-    // double the list the projection renders. BASE's own internal duplicates
-    // are preserved untouched — do NOT deduplicate `base` itself.
-    let mut legal_new_targets = base.clone();
+    Ok(())
+}
+
+/// CR 115.7a + CR 115.7d: construct an answerable prompt from the live
+/// entry. Both resolution and restore use this authority; no target is elected.
+pub(crate) fn retarget_prompt(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    chooser: PlayerId,
+) -> Option<WaitingFor> {
+    let entry = state.stack.get(stack_entry_index)?;
+    let stack_ability = entry.ability()?;
+    let bindings = ability_utils::chain_retarget_slots(stack_ability);
+    let exposed = match scope {
+        RetargetScope::All => &bindings[..],
+        RetargetScope::Single | RetargetScope::ForcedTo(_) => base_exposed_prefix(&bindings),
+    };
+    let current_targets: Vec<_> = exposed.iter().map(|b| b.current.clone()).collect();
+    if current_targets.is_empty() {
+        return None;
+    }
+    let slots: Vec<_> = exposed.iter().map(|b| b.address.clone()).collect();
+    let base = legal_new_targets_for_entry(state, entry);
+    let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed);
+    // CR 115.7a + CR 400.7: Single must elect a different target occurrence.
+    if matches!(scope, RetargetScope::Single) {
+        for (address, pool) in slots.iter().zip(&mut slot_pools) {
+            pool.retain(|target| {
+                ability_utils::retarget_positions_changed(
+                    state,
+                    stack_ability,
+                    std::slice::from_ref(address),
+                    &[Some(target.clone())],
+                )[0]
+            });
+        }
+    }
+    let mut legal_new_targets = match scope {
+        RetargetScope::Single => Vec::new(),
+        RetargetScope::All | RetargetScope::ForcedTo(_) => base,
+    };
     for p in &slot_pools {
         for t in p {
             if !legal_new_targets.contains(t) {
@@ -227,26 +288,35 @@ pub fn resolve(
     // predicate degenerates to `!base.is_empty()`, i.e. to BASE's test
     // exactly; for `All` it IS BASE's test, because `All` always admits
     // the no-change submission (CR 115.7d).
-    if !retarget_prompt_is_dischargeable(scope, &slot_pools, &legal_new_targets) {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
+    if !retarget_prompt_is_dischargeable(scope, &slot_pools, &legal_new_targets)
+        // CR 115.7d: park only when the reducer accepts at least one response
+        // (`ai_support::retarget_response_exists`, through
+        // `engine::validate_retarget_submission`). Otherwise every target is
+        // left unchanged, with its announced pin.
+        || !crate::ai_support::retarget_response_exists(
+            state,
+            stack_entry_index,
+            scope,
+            &slots,
+            &slot_pools,
+            &current_targets,
+            &legal_new_targets,
+        )
+    {
+        return None;
     }
 
-    state.waiting_for = WaitingFor::RetargetChoice {
-        player: ability.controller,
+    let keep_is_distinct = ability_utils::retarget_keep_is_distinct(state, stack_ability, &slots);
+    Some(WaitingFor::RetargetChoice {
+        player: chooser,
         stack_entry_index,
         scope: scope.clone(),
         current_targets,
         slots,
         slot_pools,
+        keep_is_distinct,
         legal_new_targets,
-    };
-    // EffectResolved is emitted by the engine handler after RetargetSpell action is submitted.
-    Ok(())
+    })
 }
 
 /// CR 115.7a: a parked `RetargetChoice` must be DISCHARGEABLE — at least one
@@ -284,9 +354,6 @@ pub(crate) fn retarget_prompt_is_dischargeable(
         // `slot_pools[0]`, with NO unchanged-position exemption — CR 115.7a/b
         // make "change a target" mandatory where an alternative exists, so the
         // exemption `All` has under CR 115.7d must NOT be granted here.
-        // (TRACKED(pending-approval) #12: admission itself is unconditioned on
-        // `changes`, so a pool-member current target de facto declines a
-        // change; see `apply_retarget`'s `Single` arm.)
         RetargetScope::Single => slot_pools.first().is_some_and(|p| !p.is_empty()),
         // CR 115.7d: `All` always admits the no-change submission (every
         // position takes `apply_retarget`'s unchanged-position skip), so it is
@@ -336,8 +403,8 @@ fn base_exposed_prefix(bindings: &[RetargetSlotBinding]) -> &[RetargetSlotBindin
 ///
 /// SINGLE-POSITION CASE (`exposed.len() == 1`, the overwhelming majority of
 /// forced retargets — BASE's `None => Some(0)` fallback for a non-mana-role
-/// node): NOT gated on `changes`. `write_retarget_position`'s own
-/// `retarget_target_requires_pin_refresh` call is what decides whether a
+/// node): NOT gated on `changes`. The validator's shared changed verdict
+/// (`retarget_positions_changed`) is what decides whether a
 /// write is a genuine change OR a same-TargetRef re-incarnation (CR 400.7 +
 /// CR 603.7c) that still needs its pin refreshed; gating candidacy on raw
 /// `TargetRef` inequality here would make that same-ID case unreachable, since
@@ -362,44 +429,6 @@ fn forced_retarget_target_position(
         let legal = slot_pools.get(i).is_some_and(|p| p.contains(new_target));
         changes && legal
     })
-}
-
-/// CR 115.7d: write a single addressed position's new target, refreshing its
-/// target-incarnation pin (CR 400.7 + CR 603.7c) and re-deriving the chain's
-/// non-declared targets (`restamp_derived_chain_targets`). Shared per-address
-/// writer for the forced path here and `engine::apply_retarget`'s interactive
-/// write loop, so the two cannot disagree about what "write position `i`"
-/// means.
-fn write_retarget_position(
-    state: &mut GameState,
-    stack_entry_index: usize,
-    address: &RetargetSlotAddress,
-    new_target: &TargetRef,
-) {
-    let Some(mut mutated) = state.stack[stack_entry_index].ability().cloned() else {
-        return;
-    };
-    if let Some(node) = ability_utils::node_at_mut(&mut mutated, &address.path) {
-        if let Some(old) = node.targets.get(address.slot).cloned() {
-            let refresh = node.retarget_target_requires_pin_refresh(&old, new_target, state);
-            node.targets[address.slot] = new_target.clone();
-            if refresh {
-                let pin = match new_target {
-                    TargetRef::Object(id) => {
-                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
-                    }
-                    TargetRef::Player(_) => None,
-                };
-                if let Some(pin) = pin {
-                    node.update_selected_target_incarnation(pin);
-                }
-            }
-        }
-    }
-    ability_utils::restamp_derived_chain_targets(&mut mutated);
-    if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
-        *stack_ability_mut = mutated;
-    }
 }
 
 /// CR 109.5 (+ CR 400.7a for a permanent spell whose controller changed):
@@ -446,12 +475,10 @@ pub(crate) fn retarget_pool_controller(
 /// NO root/sub branch and NO scope branch. Both are position-independent
 /// facts, and treating either as a pool concept is what produced round-4
 /// defect B7 and round-5 defect B9. Module-private — its call sites are both
-/// in this file: `resolve`'s single shared prompt/forced-path computation
-/// (the interactive and forced branches read ONE `slot_pools` vector computed
-/// before they split, so this is one call site serving both), and
-/// `derive_slot_pools` (H3, below — the outer-empty-payload re-derivation
-/// `engine::apply_retarget` and `ai_support::candidates::retarget_actions`
-/// call). This is what INVARIANT SC's compile-enforced half rests on (row
+/// in this file: `resolve`'s forced-path computation and `derive_slot_pools`
+/// (used by the shared interactive prompt builder and the outer-empty-payload
+/// re-derivation in `engine::apply_retarget` and
+/// `ai_support::candidates::retarget_actions`). This is what INVARIANT SC's compile-enforced half rests on (row
 /// V-ONE-SITES): no OTHER module can call `slot_pool` itself, whatever calls
 /// through it.
 fn slot_pool(
@@ -491,9 +518,9 @@ fn slot_pool(
 /// (Invariant SC), so a filter like `PreventDamage`'s source slot or a
 /// mana-role's per-role split can no longer be re-derived INSIDE the
 /// validator, and pool membership against the union admits candidates a real
-/// per-position pool would reject. Re-deriving here, at the two call sites
-/// that DO have `&GameState` (`engine::apply_retarget`,
-/// `ai_support::candidates::retarget_actions`), closes that gap without
+/// per-position pool would reject. The shared prompt builder and the legacy
+/// payload consumers (`engine::apply_retarget` and
+/// `ai_support::candidates::retarget_actions`) use this computation without
 /// widening `slot_pool`'s own visibility.
 ///
 /// `pub(crate)` — its callers are outside this file (unlike `slot_pool`
@@ -509,14 +536,22 @@ pub(crate) fn derive_slot_pools(
 ) -> Vec<Vec<TargetRef>> {
     let base = legal_new_targets_for_entry(state, entry);
     let pool_controller = retarget_pool_controller(state, entry, stack_ability);
-    bindings
+    let mut pools: Vec<Vec<TargetRef>> = bindings
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
             slot_pool(state, node, &b.enforcement, pool_controller, &base)
         })
-        .collect()
+        .collect();
+    ability_utils::widen_dependent_retarget_pools(
+        state,
+        stack_ability,
+        bindings,
+        &mut pools,
+        pool_controller,
+    );
+    pools
 }
 
 /// Extract the target filter from an effect variant, if it has a standard `target` field.
@@ -639,9 +674,28 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // Enumerate the legal replacement *players* via the same companion-slot
     // authority the cast path uses so retargeting offers a real alternative
     // instead of collapsing to the current target.
-    if let Some(players) =
-        crate::game::ability_utils::companion_target_player_retarget_options(state, stack_ability)
-    {
+    // The entry's own triggering events, not whichever trigger is constructing.
+    // Multi-event batches are stored per entry; a single event stays on the
+    // entry, the same fallback resolution uses when binding its scope.
+    let entry_trigger_events = match (
+        state.stack_trigger_event_batches.get(&entry.id),
+        &entry.kind,
+    ) {
+        (Some(batch), _) => batch.as_slice(),
+        (
+            None,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            },
+        ) => std::slice::from_ref(event),
+        (None, _) => &[],
+    };
+    if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
+        state,
+        stack_ability,
+        entry_trigger_events,
+    ) {
         return players;
     }
 
@@ -833,7 +887,7 @@ mod tests {
             legal_new_targets.contains(&TargetRef::Object(host_b)),
             "expected alternative enchantable host in legal targets, got {legal_new_targets:?}"
         );
-        assert!(legal_new_targets.contains(&TargetRef::Object(host_a)));
+        assert!(!legal_new_targets.contains(&TargetRef::Object(host_a)));
     }
 
     /// CR 608.2b + CR 115.7 + CR 303.4a: End-to-end regression for Bolt Bend
@@ -891,15 +945,21 @@ mod tests {
                 TypedFilter::creature(),
             ))];
         }
-        let aura_spell_ability = ResolvedAbility::new(
+        let mut aura_spell_ability = ResolvedAbility::new(
             Effect::Unimplemented {
                 name: String::new(),
                 description: None,
             },
-            vec![TargetRef::Object(host_a)],
+            vec![],
             aura_id,
             PlayerId(0),
         );
+        ability_utils::assign_targets_in_chain(
+            &state,
+            &mut aura_spell_ability,
+            &[TargetRef::Object(host_a)],
+        )
+        .expect("the Aura spell takes one target");
         state.stack.push_back(StackEntry {
             id: aura_id,
             source_id: aura_id,
@@ -1104,7 +1164,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             GameAction::RetargetSpell {
-                new_targets: vec![TargetRef::Player(PlayerId(1))],
+                new_targets: vec![Some(TargetRef::Player(PlayerId(1)))],
             },
         )
         .expect("retarget submission should succeed");

@@ -507,7 +507,7 @@ const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 #[test]
-fn v5_will_cycle_cards_remain_honestly_unsupported() {
+fn v5_will_cycle_permission_body_is_no_longer_refused() {
     // MULTI-AUTHORITY hostile fixture: three different arrival shapes — a bare
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
@@ -517,26 +517,59 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     // as much a failure as a missing one.
     for (text, name, types, expected_installs) in [
         // The two Sorceries expose their line-2 clause to the card-level line
-        // dispatch; Magus does not, because its line 2 is inside an activated
-        // ability's effect text.
+        // dispatch; Magus carries the same sentence inside its activated
+        // ability's effect chain, where the chain-position redirect authority
+        // lowers it — same install count, different route.
         (YAWGMOTHS_WILL, "Yawgmoth's Will", &["Sorcery"][..], 1usize),
         (GAEAS_WILL, "Gaea's Will", &["Sorcery"][..], 1usize),
         (
             MAGUS_OF_THE_WILL,
             "Magus of the Will",
             &["Creature"][..],
-            0usize,
+            1usize,
         ),
     ] {
         let parsed = parse_with_types(text, name, types);
 
-        // (i) coverage stays RED — the permission body is still unimplemented.
+        // (i) The permission body is no longer refused.
+        //
+        // INVERTED by the delivery seam (`will_cycle_delivery.rs`). It previously
+        // read "must still report an Unimplemented effect", pinning B1's honest
+        // claim that the duration seam alone made zero cards supported. That claim
+        // was true when written: the refused `"play lands"` fragment survived,
+        // because parsing it was never sufficient — `Effect::CastFromZone` is not a
+        // channel any land-permission consumer reads.
+        //
+        // The delivery pass now lowers the whole coordinated sentence to one
+        // `GenericEffect` that installs a `GraveyardCastPermission`, so no
+        // `Unimplemented` fragment remains. This row stays a REGRESSION GUARD on
+        // the ARRIVAL SHAPE — all three shapes must agree — while
+        // `will_cycle_delivery.rs` owns what a player can actually do with the
+        // grant (it resolves the card and asks the production consumer).
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "{name}: the permission body must not be refused"
+        );
+        // (i-b) POSITIVE SHAPE, paired with the absence check above.
+        //
+        // Assertion (i) is a negative, and for the Magus fixture so is (ii).
+        // An empty or wholly failed parse would therefore satisfy (i) and (ii)
+        // for that row — while (i-b) and the `expected_installs` count below
+        // (1 on all three arrival shapes) require the parse to actually
+        // deliver.
+        //
+        // Pin the delivered grant BY ITS MODE so the row cannot pass on an
+        // unrelated `GenericEffect`: the permission must actually be installed,
+        // on all three arrival shapes.
         assert!(
             parsed
                 .abilities
                 .iter()
-                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
-            "{name}: must still report an Unimplemented effect"
+                .any(ability_installs_graveyard_permission),
+            "{name}: the coordinated sentence must deliver a GraveyardCastPermission"
         );
         // (ii) B1 fabricates no emblem.
         assert!(
@@ -555,9 +588,10 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
         // card-hosted definition was never consulted; the resolution install
         // (CR 611.2a) is where it can actually apply.
         //
-        // Magus of the Will produces neither, because its line 2 sits INSIDE an
-        // activated ability's effect text, which the card-level line dispatch
-        // does not reach.
+        // Magus of the Will produces its install through the effect chain
+        // rather than the card-level line dispatch, because its sentence sits
+        // INSIDE an activated ability's effect text: the chain-position
+        // redirect authority lowers it as the delivered grant's tail.
         //
         // The load-bearing invariant is that NOTHING PERMANENT escapes. Every
         // replacement these cards produce, by EITHER route and however many
@@ -603,8 +637,8 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     );
 
     // REACH-GUARD (beta) for assertion (iii): the install path IS live for this
-    // exact sentence in isolation, so Magus's absence is a real absence rather
-    // than a dead instrument.
+    // exact sentence in isolation, so every row's count measures its own
+    // route rather than a dead instrument.
     let live = parse_sorcery(CASE_B, "Window Probe");
     assert_eq!(
         windowed_installs(&live).len(),
@@ -640,4 +674,40 @@ fn v5b_the_same_grammar_on_a_permanent_host_is_stamped_not_permanent() {
              PERMANENT replacement on a permanent host"
         );
     }
+}
+
+/// Does this ability (or anything down its chain) install a
+/// `GraveyardCastPermission`?
+///
+/// Selects the grant by the static mode it carries rather than by "some
+/// `GenericEffect` exists", so a fixture carrying an unrelated windowed
+/// continuous effect cannot satisfy the positive shape check.
+fn ability_installs_graveyard_permission(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> bool {
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*ability.effect
+    {
+        let installs = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    engine::types::ability::ContinuousModification::GrantStaticAbility {
+                        definition,
+                    } if matches!(
+                        definition.mode,
+                        engine::types::statics::StaticMode::GraveyardCastPermission { .. }
+                    )
+                )
+            })
+        });
+        if installs {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_installs_graveyard_permission)
 }

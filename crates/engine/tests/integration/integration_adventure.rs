@@ -506,6 +506,7 @@ fn bonecrusher_becomes_target_trigger() {
             engine::types::game_state::StackEntryKind::ActivatedAbility { .. } => "Activated",
             engine::types::game_state::StackEntryKind::TriggeredAbility { .. } => "Triggered",
             engine::types::game_state::StackEntryKind::KeywordAction { .. } => "KeywordAction",
+            engine::types::game_state::StackEntryKind::CombatDamage { .. } => "CombatDamage",
         })
         .collect();
 

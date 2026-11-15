@@ -66,6 +66,13 @@
     "discard": "Scarta",
     "saveAndContinue": "Salva e continua"
   },
+  "saveConflict": {
+    "title": "Mazzo modificato altrove",
+    "bodyChanged": "\"{{name}}\" è stato modificato altrove da quando questo editor l'ha aperto o salvato l'ultima volta, quindi non è stato salvato nulla. Carica la versione salvata per vederla (le modifiche non salvate andranno perse) oppure salva comunque la tua versione.",
+    "bodyDeleted": "\"{{name}}\" è stato eliminato altrove da quando questo editor l'ha aperto o salvato l'ultima volta, quindi non è stato salvato nulla. Salva comunque la tua versione.",
+    "loadSaved": "Carica versione salvata",
+    "saveMine": "Salva la mia versione"
+  },
   "card": {
     "moveToSideboard": "Sposta una {{name}} nella sideboard",
     "moveToMain": "Sposta una {{name}} nel mazzo principale",
@@ -222,6 +229,10 @@
     "identity": "Identità:",
     "setAsCommander": "Imposta come comandante:",
     "cardCount": "{{count}}/{{expected}} carte",
+    "cardCountNoMinimum_one": "{{count}} carta",
+    "cardCountNoMinimum_few": "{{count}} carte",
+    "cardCountNoMinimum_many": "{{count}} carte",
+    "cardCountNoMinimum_other": "{{count}} carte",
     "singletonViolations": "Violazioni singleton: {{cards}}",
     "colorViolations": "Violazioni dell'identità di colore: {{cards}}",
     "signatureSpell": {
@@ -267,7 +278,9 @@
     "dataVersion": "Dati: {{version}}",
     "aboutBrackets": "Informazioni sui bracket ↗",
     "estimatedChip": "Stimato: B{{tier}}",
-    "estimatedChipFull": "Bracket stimato: B{{tier}} {{label}}"
+    "estimatedChipFull": "Bracket stimato: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Bracket dichiarato: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Bracket del mazzo",

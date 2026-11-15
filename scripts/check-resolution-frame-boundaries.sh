@@ -343,7 +343,7 @@ def fail(failures: list[str], path: Path, source: str, offset: int, message: str
 legacy_key_pattern = re.compile('"(?:' + "|".join(sorted(legacy_keys)) + ')"')
 files = [
     path.relative_to(root).as_posix()
-    for path in sorted((root / "crates/engine/src").rglob("*.rs"))
+    for path in sorted([*(root / "crates/engine/src").rglob("*.rs"), *(root / "crates/phase-ast/src").rglob("*.rs"), *(root / "crates/phase-parser/src").rglob("*.rs")])
     if legacy_key_pattern.search(path.read_text())
 ]
 

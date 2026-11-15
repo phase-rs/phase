@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
+    "pickEnhancements": {
+      "label": "Usa l'IA integrata con miglioramenti alle scelte del draft",
+      "hint": "I bot seguono una guida scritta sull'ordine di scelta per i formati che ne hanno una (al momento Mirrodin, Darksteel e Fifth Dawn). Si applica dalla difficoltà media in su."
+    },
     "difficultyLevels": {
       "VeryEasy": "Molto facile",
       "Easy": "Facile",
@@ -132,6 +136,12 @@
     "packOrder": "Ordine delle buste",
     "candidateSets": "Set candidati",
     "clearPacks": "Svuota",
+    "randomSet": "Set casuale",
+    "randomSetHint": "Riempi tutte le buste con un set scelto a caso",
+    "randomPacks": "Buste casuali",
+    "randomPacksHint": "Assegna a ogni busta un proprio set scelto a caso",
+    "randomCandidates": "Set casuali",
+    "randomCandidatesHint": "Scegli a caso set candidati distinti",
     "emptyPacks_one": "Scegli un set per ogni busta. Un draft apre {{count}} busta per impostazione predefinita: ripeti un set o mescolane più di uno.",
     "emptyPacks_other": "Scegli un set per ogni busta. Un draft apre {{count}} buste per impostazione predefinita: ripeti un set o mescolane più di uno per draftare un blocco.",
     "emptyPacksFixed_one": "Il sealed apre esattamente {{count}} busta. Scegli un set per essa.",
@@ -156,6 +166,7 @@
     "startSealed": "Inizia sealed"
   },
   "pack": {
+    "label": "Busta del draft",
     "confirmPick": "Conferma scelta",
     "selected": "Selezionata",
     "draftEffects": "Effetti del draft:",
@@ -183,6 +194,7 @@
     "packProgress": "Busta {{current}} di {{total}}",
     "openPack": "Apri busta",
     "openPackArt": "Apri l’illustrazione della busta",
+    "openAllPacks": "Apri tutte le buste",
     "pulls": "Le tue carte",
     "nextPack": "Busta successiva",
     "viewPool": "Vedi il tuo pool",
@@ -360,6 +372,9 @@
     "moreNeeded": "{{count}} altre necessarie",
     "commanderRequired": "Designa un comandante dalla tua riserva per inviare.",
     "commanderUnavailable": "La designazione del comandante non è disponibile al momento: non è stato possibile caricare il database delle carte.",
+    "companionMet": "Requisito del compagno soddisfatto",
+    "companionUnmet": "Requisito del compagno non soddisfatto",
+    "setCompanion": "Imposta come compagno",
     "compatibilityPending": "Verifica della compatibilità del mazzo...",
     "compatibilityUnavailable": "La compatibilità del mazzo non è disponibile al momento: riprova prima di inviarlo.",
     "grantedFiller": "La tua riserva include anche fino a {{maximum}} × {{name}}, utilizzabile solo come comandante."
@@ -485,6 +500,10 @@
     "upNext": "Prossima — Partita {{number}}",
     "nextMatch": "Partita successiva",
     "endRun": "Termina run",
+    "retryEndRun": "Riprova a terminare la run",
+    "retryResume": "Riprova a riprendere",
+    "startUnavailable": "Impossibile avviare questa partita Draft.",
+    "resumeUnavailable": "Questa run Draft non è disponibile. Terminala per iniziare di nuovo.",
     "done": "Fatto",
     "perfectRun": "Run perfetta",
     "runComplete": "Run completata",
@@ -551,9 +570,11 @@
     "tournamentEliminationDesc": "I giocatori vengono eliminati dopo una sconfitta finché non rimane un vincitore.",
     "podPolicy": "Politica del pod",
     "policyCompetitive": "Competitivo",
-    "policyCompetitiveDesc": "Scelte a tempo, scelte automatiche allo scadere e avanzamento automatico dei round.",
+    "policyCompetitiveDesc": "Scelte a tempo, scelte automatiche allo scadere e avanzamento automatico dei round. I mazzi inviati sono definitivi; puoi usare la sideboard solo tra le partite di un match.",
+    "policyCompetitiveNoRoundsDesc": "Scelte a tempo e scelte automatiche allo scadere.",
     "policyCasual": "Casuale",
-    "policyCasualDesc": "Scelte senza tempo, avanzamento manuale dei round e controlli host per risolvere i problemi.",
+    "policyCasualDesc": "Scelte senza tempo, avanzamento manuale dei round, controlli host per risolvere i problemi e modifiche al mazzo tra i round.",
+    "policyCasualNoRoundsDesc": "Scelte senza tempo e controlli host per risolvere i problemi.",
     "podSize": "Dimensione del pod",
     "podSizeDesc": "{{count}} posti totali. I posti vuoti possono essere riempiti con i bot dalla lobby prima che inizi il draft.",
     "playerCount": "{{count}} giocatori",
@@ -571,7 +592,20 @@
     "tabs": {
       "set": "Espansione",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossibile raggiungere la lobby per elencare questo pod. Disattiva “$t(draft:podSetup.listInLobby)” per ospitare tramite codice stanza.",
+    "listingHostNameTooLong": "Per elencare questo pod nella lobby, usa un nome visualizzato di al massimo {{max}} caratteri.",
+    "listingRoomNameTooLong": "Per elencare questo pod nella lobby, usa un nome stanza di al massimo {{max}} caratteri.",
+    "listingCubeNameTooLong": "Per elencare questo pod nella lobby, usa un nome Cube di al massimo {{max}} caratteri.",
+    "listingPasswordTooLong": "Per elencare questo pod nella lobby, usa una password più corta.",
+    "listInLobby": "Elenca nella lobby",
+    "listingSeatLimit": "L'elenco della lobby supporta pod fino a {{max}} giocatori.",
+    "setPassword": "Imposta password",
+    "passwordPlaceholder": "Password del pod",
+    "roomName": "Nome stanza",
+    "optional": "(facoltativo)",
+    "roomNameHelp": "Mostrato ai giocatori che sfogliano la lobby.",
+    "roomNamePlaceholder": "es. Cube del venerdì sera"
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",
@@ -586,11 +620,21 @@
     "roundComplete": "Round completato",
     "waitingNextRound": "In attesa che l'host inizi il prossimo round...",
     "nextRoundShortly": "Il prossimo round inizierà a breve...",
+    "editDeck": "Modifica mazzo",
+    "backToStandings": "Torna alla classifica",
+    "editDeckHint": "Pod casuale: puoi modificare il mazzo prima che inizi il prossimo round.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Inviare questo mazzo?",
+    "confirm": "Conferma invio",
+    "competitive": "Questo è un pod competitivo: il mazzo inviato è definitivo per tutti i round. Puoi comunque usare la sideboard tra le partite di un match Bo3.",
+    "casual": "Potrai ancora modificare il mazzo tra i round.",
+    "final": "Il mazzo inviato è definitivo."
   },
   "betweenGames": {
     "game": "Partita {{number}}",
@@ -625,6 +669,7 @@
     "kicked": "Sei stato espulso dal pod",
     "hostLeft": "L'host ha abbandonato il draft",
     "connection": "Errore di connessione",
+    "incompatible": "Questo draft non è compatibile con la tua versione del protocollo.",
     "retry": "Prova a riconnetterti"
   },
   "winston": {
@@ -654,6 +699,8 @@
     "takeAria": "Prendi il mucchio {{index}}",
     "decline": "Rifiuta",
     "declineAria": "Rifiuta il mucchio {{index}}",
+    "spreadPile": "Distendi il mucchio {{index}}",
+    "stackPile": "Impila il mucchio {{index}}",
     "refusal": {
       "PileNotActive": "Non stai decidendo su questo mucchio.",
       "PileEmpty": "Questo mucchio è vuoto, non c'è nulla da prendere.",
@@ -705,5 +752,23 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Salvataggio automatico] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradizionale",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Drafter IA",
+    "picking": "Sceglie",
+    "ready": "Scelto",
+    "fallback": "Scelta del motore",
+    "waiting": "In attesa che tutti i giocatori scelgano…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

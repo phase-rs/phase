@@ -1,4 +1,4 @@
-import type { GameFormat, MatchType } from "../adapter/types";
+import type { ChallengeDeck, GameFormat, MatchType } from "../adapter/types";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 
@@ -67,15 +67,34 @@ interface DeckCompatibilityRequest {
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
   companion: string[];
+  /** CR 903.13f(3): set codes the draft contained, latched by the draft session. */
+  draft_set_codes: string[];
+  /**
+   * CR 100.2b + CR 702.139b: the draft session's own minimum deck size, which a
+   * Cube may configure away from 40. Absent keeps the selected format's minimum.
+   */
+  min_deck_size?: number | null;
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
+  selected_challenge_deck?: ChallengeDeck | null;
   player_count?: number;
   summary_only?: boolean;
 }
 
 interface EvaluateOptions {
   selectedFormat?: GameFormat | null;
+  draftSetCodes?: readonly string[];
+  /** The draft session's resolved minimum deck size (engine-published `min_deck_size`). */
+  minDeckSize?: number | null;
   selectedMatchType?: MatchType | null;
+  /**
+   * The Horde challenge deck to validate survivor requirements against, with
+   * or without a format tag. The AI-survivor catalog passes this alone (no
+   * selected format): the engine answers the picked challenge's survivor
+   * verdict (Commander shape for EDH hordes, unrestricted for
+   * constructed-block hordes).
+   */
+  selectedChallengeDeck?: ChallengeDeck | null;
   summaryOnly?: boolean;
   onResult?: (name: string, result: DeckCompatibilityResult) => void;
   onStatus?: (status: "starting-worker" | "loading-card-database" | "checking-deck", name?: string) => void;
@@ -92,8 +111,11 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     ...expandParsedDeck(deck),
     selected_format: options.selectedFormat ?? null,
     selected_match_type: options.selectedMatchType ?? null,
+    selected_challenge_deck: options.selectedChallengeDeck ?? null,
     player_count: options.playerCount ?? 2,
     summary_only: options.summaryOnly ?? false,
+    draft_set_codes: [...(options.draftSetCodes ?? [])],
+    min_deck_size: options.minDeckSize ?? null,
   };
 }
 
@@ -108,7 +130,19 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     companion: request.companion,
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
+    selected_challenge_deck: request.selected_challenge_deck ?? null,
     player_count: request.player_count ?? 2,
+    // Every request field the engine READS has to be named in
+    // compatibilityCacheKey, because this module's four cache/inflight maps are
+    // keyed only by what this function names: a field buildRequest sends but
+    // this key omits would let two requests the engine answers differently
+    // share one cached verdict. `summary_only` is the one deliberate exclusion
+    // among fields the engine reads. Both halves are exercised by the two
+    // cache rows in client/src/services/__tests__/deckCompatibility.test.ts;
+    // run `cd client && npx vitest run --coverage.enabled=false
+    // src/services/__tests__/deckCompatibility.test.ts`.
+    draft_set_codes: request.draft_set_codes,
+    min_deck_size: request.min_deck_size ?? null,
   });
 }
 

@@ -327,7 +327,8 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
     const X: u32 = 2;
     let (mut runner, spell, card_id, creatures) = fireball_scenario(3);
     zones::move_to_zone(runner.state_mut(), spell, Zone::Exile, &mut Vec::new());
-    runner.state_mut().players[0].mana_pool.mana = blue_pool(3);
+    runner.state_mut().players[0].mana_pool =
+        engine::types::mana::ManaPool::from_units(blue_pool(3));
     runner
         .state_mut()
         .objects
@@ -347,8 +348,9 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
         CastingPermission::PlayFromExile {
@@ -364,8 +366,9 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
     ];

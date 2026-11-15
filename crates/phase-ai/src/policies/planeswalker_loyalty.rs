@@ -83,6 +83,7 @@ impl TacticalPolicy for PlaneswalkerLoyaltyPolicy {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => (*source_id, *ability_index),
             _ => return na(),
         };
@@ -208,6 +209,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }],
             target: None,
             duration: None,
@@ -244,6 +246,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

@@ -3,7 +3,6 @@ import type {
   ObjectAction,
   ObjectId,
   PlayerId,
-  TurnOrderSlotView,
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
@@ -42,17 +41,13 @@ export type DiceRollPayload =
       /** d-sides (e.g. 20 for the first-player contest, dN for card rolls). */
       sides: number;
       /** One entry per physical die shown. For the contest this is the FINAL
-       *  (decisive) round — kept for the no-rounds fallback and overlay keying. */
-      rolls: { playerId: PlayerId; value: number }[];
+       *  (decisive) round — kept for the no-rounds fallback and overlay keying.
+       *  `ignored` marks a CR 706.6-ignored die (engine `DieRollIgnored` event):
+       *  shown so players see what the lowest roll was, never a rules roll. */
+      rolls: { playerId: PlayerId; value: number; sides?: number; ignored?: boolean }[];
       context: "startingPlayer" | "ability";
-      /** Starting-player contest: the high roller who takes the first turn. */
+      /** Starting-player contest (CR 103.1): the roll-off winner, from the engine's `StartingPlayerContest.winner` — the player who chooses who takes the first turn. */
       winner?: PlayerId;
-      /** Engine-authored opening turn sequence for multiplayer games. The
-       *  overlay renders this directly so every seat can see its first-turn
-       *  position without reconstructing turn order from raw state. */
-      turnOrder?: TurnOrderSlotView[];
-      /** Engine-authored one-based turn position for the current viewer. */
-      viewerTurnNumber?: number;
       /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
        *  is every seat; each later round is the previous round's tied-max group
        *  that rerolled. Rendered round-by-round so the winner is always the high
@@ -214,6 +209,11 @@ interface UiStoreState {
   autoPass: boolean;
   combatMode: "attackers" | "blockers" | null;
   selectedAttackers: ObjectId[];
+  /** The blocker awaiting its next assignment (two-click assignment flow).
+   *  Lifted out of `ActionButton`'s local state so the collapsed-pile picker
+   *  can also read it (`GroupedPermanent.tsx::pickerContext`), which local
+   *  state cannot reach. Reset by `clearCombatSelection`. */
+  pendingBlocker: ObjectId | null;
   /** CR 702.22c: attacking bands declared this combat (each inner array is one
    *  band of attacker ids). Empty when no bands are declared. */
   attackerBands: ObjectId[][];
@@ -224,6 +224,8 @@ interface UiStoreState {
   showTurnBanner: boolean;
   turnBannerText: string;
   turnBannerNumber: number | null;
+  /** Whether the banner announces the local viewer's own turn (drives styling). */
+  turnBannerIsYours: boolean;
   /** Active dice-roll / coin-flip overlay payload, or null when idle. Set by
    *  `flashDiceRoll`, auto-advanced through `diceRollQueue`, then cleared. */
   diceRoll: DiceRollPayload | null;
@@ -344,13 +346,19 @@ interface UiStoreActions {
   setGroupSelectedAttackers: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   selectAllAttackers: (ids: ObjectId[]) => void;
   setAttackerBands: (bands: ObjectId[][]) => void;
+  setPendingBlocker: (id: ObjectId | null) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
   removeBlockerAssignment: (blockerId: ObjectId, attackerId?: ObjectId) => void;
+  /** Replace one blocker's assignments that lie within `groupIds` with
+   *  `attackerIds`, keeping its assignments outside the group untouched, and
+   *  dropping the blocker's key entirely when the result is empty. Mirrors
+   *  `setGroupSelectedAttackers`'s group-scoped replace. */
+  setGroupBlockerAssignments: (blockerId: ObjectId, groupIds: ObjectId[], attackerIds: ObjectId[]) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
   setDragging: (dragging: boolean) => void;
-  flashTurnBanner: (text: string, turnNumber: number) => void;
+  flashTurnBanner: (text: string, turnNumber: number, isYourTurn: boolean) => void;
   /** Show the dice-roll / coin-flip overlay for the engine's already-known
    *  result. No-ops when animation speed is "instant" (0). */
   flashDiceRoll: (payload: DiceRollPayload) => void;
@@ -424,6 +432,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   autoPass: false,
   combatMode: null,
   selectedAttackers: [],
+  pendingBlocker: null,
   attackerBands: [],
   blockerAssignments: new Map(),
   combatClickHandler: null,
@@ -432,6 +441,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   showTurnBanner: false,
   turnBannerText: "",
   turnBannerNumber: null,
+  turnBannerIsYours: false,
   diceRoll: null,
   diceRollQueue: [],
   scryOutcome: null,
@@ -680,6 +690,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
 
   setAttackerBands: (bands) => set({ attackerBands: bands }),
 
+  setPendingBlocker: (id) => set({ pendingBlocker: id }),
+
   assignBlocker: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
@@ -706,10 +718,29 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       return { blockerAssignments: next };
     }),
 
+  setGroupBlockerAssignments: (blockerId, groupIds, attackerIds) =>
+    set((state) => {
+      const groupIdSet = new Set(groupIds);
+      const outsideGroup = new Set(
+        Array.from(state.blockerAssignments.get(blockerId) ?? []).filter(
+          (id) => !groupIdSet.has(id),
+        ),
+      );
+      const next = new Map(state.blockerAssignments);
+      const merged = new Set([...outsideGroup, ...attackerIds]);
+      if (merged.size === 0) {
+        next.delete(blockerId);
+      } else {
+        next.set(blockerId, merged);
+      }
+      return { blockerAssignments: next };
+    }),
+
   clearCombatSelection: () =>
     set({
       combatMode: null,
       selectedAttackers: [],
+      pendingBlocker: null,
       attackerBands: [],
       blockerAssignments: new Map(),
       combatClickHandler: null,
@@ -718,7 +749,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
   setPreviewSticky: (sticky) => set({ previewSticky: sticky }),
   setDragging: (dragging) => set({ isDragging: dragging }),
-  flashTurnBanner: (text, turnNumber) => {
+  flashTurnBanner: (text, turnNumber, isYourTurn) => {
     // Banner duration scales with both the global Animation Speed slider
     // (animationSpeedMultiplier) and the per-category Banner Pacing slider
     // (pacingMultipliers.banners). When animationSpeedMultiplier is 0
@@ -728,7 +759,12 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     if (speed <= 0) return;
     const banner = prefs.pacingMultipliers.banners;
     const duration = TURN_BANNER_DURATION_MS * speed * banner;
-    set({ showTurnBanner: true, turnBannerText: text, turnBannerNumber: turnNumber });
+    set({
+      showTurnBanner: true,
+      turnBannerText: text,
+      turnBannerNumber: turnNumber,
+      turnBannerIsYours: isYourTurn,
+    });
     setTimeout(() => set({ showTurnBanner: false }), duration);
   },
   flashDiceRoll: (payload) => {

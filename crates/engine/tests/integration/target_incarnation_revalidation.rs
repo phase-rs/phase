@@ -44,6 +44,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation announcement must be accepted");
     runner
@@ -57,7 +58,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
             .stack
             .back()
             .and_then(|entry| entry.ability())
-            .map(|ability| ability.selected_target_incarnations.len()),
+            .map(|ability| ability.target_pins.iter().flatten().count()),
         Some(1),
         "the announced target must be pinned on the stack entry"
     );
@@ -66,6 +67,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: blink,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the intervening blink activation must be accepted");
     runner
@@ -153,7 +155,7 @@ fn stale_target_stack() -> (
             .stack
             .back()
             .and_then(|entry| entry.ability())
-            .is_some_and(|ability| ability.selected_target_pin_is_current(target, runner.state())),
+            .is_some_and(|ability| ability.target_occurrence_is_current(0, runner.state())),
         "the round-trip must stale the original selected-target pin"
     );
     (runner, target)
@@ -169,6 +171,7 @@ fn interactive_same_object_id_retarget_refreshes_selected_target_pin() {
     // the compatibility fallback (which routes through a different branch in
     // `apply_retarget` and would leave this row unable to detect H2's defect).
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -183,13 +186,13 @@ fn interactive_same_object_id_retarget_refreshes_selected_target_pin() {
 
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(target)],
+            new_targets: vec![Some(TargetRef::Object(target))],
         })
         .expect("same-ID retarget must be accepted");
 
     let ability = runner.state().stack[0].ability().expect("ability on stack");
     assert!(
-        ability.selected_target_pin_is_current(target, runner.state()),
+        ability.target_occurrence_is_current(0, runner.state()),
         "interactive same-ID retarget must refresh the selected-target pin"
     );
 }
@@ -264,7 +267,7 @@ fn forced_same_object_id_retarget_refreshes_selected_target_pin() {
 
     let ability = runner.state().stack[0].ability().expect("ability on stack");
     assert!(
-        ability.selected_target_pin_is_current(target, runner.state()),
+        ability.target_occurrence_is_current(0, runner.state()),
         "forced same-ID retarget must refresh the selected-target pin"
     );
 }

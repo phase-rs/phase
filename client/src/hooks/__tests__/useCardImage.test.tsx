@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { buildGameObjectWithCoreTypes } from "../../test/factories/gameObjectFactory.ts";
+
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
@@ -18,7 +21,10 @@ function installedSources(src: string) {
   }, { kind: "fallback" as const, src: null }];
 }
 
-function mockNoRemoteScryfall(resolveFaceIndexSync: (...args: unknown[]) => number | null = () => null) {
+function mockNoRemoteScryfall(
+  resolveFaceIndexSync: (...args: unknown[]) => number | null = () => null,
+  isCardImageRotatedSync: (...args: unknown[]) => boolean = () => false,
+) {
   const remoteWork = vi.fn(() => Promise.reject(new Error("remote work must stay idle")));
   vi.doMock("../../services/scryfall.ts", () => ({
     deriveImageUrl: (url: string) => url,
@@ -30,9 +36,10 @@ function mockNoRemoteScryfall(resolveFaceIndexSync: (...args: unknown[]) => numb
     getCardPrintings: remoteWork,
     imageUrlSize: vi.fn(() => null),
     isCardImageFlipLayoutSync: vi.fn(() => false),
-    isCardImageRotatedSync: vi.fn(() => false),
+    isCardImageRotatedSync,
     isLocaleArtReady: vi.fn(() => true),
     loadLocaleArt: remoteWork,
+    loadScryfallData: vi.fn().mockResolvedValue(null),
     resolveFaceIndexSync,
     resolveOracleIdSync: vi.fn(() => null),
     resolvePrintingImageUrl: vi.fn(),
@@ -110,6 +117,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn((printing) => printing.faces[0].normal),
@@ -173,6 +181,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn((printing) => printing.faces[0].normal),
@@ -428,6 +437,7 @@ describe("useCardImage", () => {
       // localization.
       isLocaleArtReady: vi.fn().mockReturnValue(true),
       loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
@@ -487,6 +497,7 @@ describe("useCardImage", () => {
       // reported ready so the background loader never runs here.
       isLocaleArtReady: vi.fn().mockReturnValue(true),
       loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       pickOldestPrinting: vi.fn(),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
@@ -564,6 +575,152 @@ describe("useCardImage", () => {
     await waitFor(() => expect(result.current.src).toBe("https://img.example/morph.jpg"));
   });
 
+  it("shows TTMC #20 through real graveyard image props after the restore ref recovery (#10861 R4-F1)", async () => {
+    // Its corrected-ref input below is the first-viewer-snapshot shape the
+    // engine production-path test
+    // `production_restore_repairs_revealed_smackdown_ref_for_first_viewer_snapshot`
+    // pins (save -> deferred-rehydration restore -> `filter_state_for_viewer`),
+    // so the restore-to-snapshot-to-pixels seam is covered end to end.
+    // A pre-PR save pins Smackdown's ORIGINAL typo'd printing id
+    // (`...b2fb-444-...`, `444` for `4a44`); the restore repair replaces
+    // the whole ref through the stored preset identity, so the projected
+    // graveyard object below carries the CORRECTED ref — the shape the
+    // engine restore test pins. The object carries no abilities,
+    // keywords, or rules text (the Event effect dispatches separately),
+    // so the ordinary graveyard props built by objectImageProps (the
+    // exact call GraveyardPile.TopCard makes) carry hasAbilities:false.
+    // Both sidecars are production-shaped: the token-images table indexes
+    // the CORRECTED printing id plus the oracle id suffixed with the
+    // downcased card name (gen-scryfall-token-images.sh — no bare
+    // `oracle:<id>:` key exists), and scryfall-data carries the `token:`
+    // name entry WITH the printed oracle_text (gen-scryfall-images.sh) —
+    // the text that makes the vanilla-only filter reject a stale ref.
+    // Live Scryfall search cannot supply the image (empty search
+    // results); the art CDN is reachable (sidecar URLs are CDN URLs).
+    const CORRECTED_ID = "fac36345-b2fb-4a44-a499-f68bbe87e736";
+    const PRESET_ID = "f13c9091-91b6-51b4-91d5-214180ff03ee";
+    const ORACLE_ID = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f";
+    const NAME = "Event: Leatherhead's Smackdown";
+    const EXPECTED_ART = `https://cards.scryfall.io/normal/front/f/a/${CORRECTED_ID}.jpg`;
+    const smackdownEntry = {
+      scryfall_id: CORRECTED_ID,
+      oracle_id: ORACLE_ID,
+      face_names: [NAME.toLowerCase()],
+      faces: [{ normal: EXPECTED_ART, art_crop: EXPECTED_ART }],
+      name: NAME,
+      layout: "token",
+    };
+    const staleRef = {
+      scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736",
+      scryfall_oracle_id: ORACLE_ID,
+      preset_id: PRESET_ID,
+    };
+    const correctedRef = {
+      scryfall_id: CORRECTED_ID,
+      scryfall_oracle_id: ORACLE_ID,
+      preset_id: PRESET_ID,
+    };
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          [`scryfall:${CORRECTED_ID}`]: smackdownEntry,
+          [`oracle:${ORACLE_ID}:${NAME.toLowerCase()}`]: smackdownEntry,
+        }));
+      }
+      if (url === "/scryfall-data.json") {
+        return Promise.resolve(jsonResponse({
+          [`token:${NAME.toLowerCase()}`]: {
+            oracle_id: ORACLE_ID,
+            oracle_text: "As a team, the heroes choose a creature with the greatest power among creatures they control. Destroy it. The bosses lose life equal to that creature's power.",
+            face_names: [NAME.toLowerCase()],
+            faces: [{ normal: EXPECTED_ART, art_crop: EXPECTED_ART }],
+            name: NAME,
+            mana_cost: "",
+            cmc: 0,
+            type_line: "Token — Event",
+            colors: [],
+            color_identity: [],
+            keywords: [],
+          },
+        }));
+      }
+      if (url.startsWith("https://api.scryfall.com")) {
+        // Live search yields nothing usable (well-formed empty results,
+        // so no retry backoff): the image must come from the sidecars.
+        return Promise.resolve(jsonResponse({ data: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    // The restored projection shape: Token routing from the repair, the
+    // recovered corrected ref, and no stored abilities for the filter.
+    const restoredEvent = buildGameObjectWithCoreTypes(["Event"], {
+      id: 101,
+      card_id: 101,
+      owner: 1,
+      controller: 1,
+      zone: "Graveyard",
+      name: NAME,
+      power: null,
+      toughness: null,
+      color: [],
+      keywords: [],
+      abilities: [],
+      timestamp: 1,
+      entered_battlefield_turn: null,
+      display_source: "Token",
+      is_token: true,
+      is_horde_deck_token: true,
+      token_image_ref: correctedRef,
+      tapped: false,
+      face_down: false,
+    });
+    const props = objectImageProps(restoredEvent);
+    expect(props.isToken).toBe(true);
+    expect(props.tokenImageRef).toEqual(correctedRef);
+    expect(props.tokenFilters?.hasAbilities).toBe(false);
+
+    // The stale shape still misses both exact rungs against the shipped
+    // key shapes (typo'd id, no face name). Re-adding a bare
+    // `oracle:<id>:` fixture key reddens here.
+    const { fetchTokenImageAssetByRef } = await import("../../services/scryfall.ts");
+    await expect(fetchTokenImageAssetByRef(staleRef, "normal")).resolves.toBeNull();
+
+    // Through the ordinary graveyard image path, the corrected ref
+    // resolves through the exact scryfall rung with no live search: the
+    // supply path is the restore recovery, not a name lookup.
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage(props.cardName, {
+        size: "normal",
+        faceIndex: props.faceIndex,
+        isToken: props.isToken,
+        tokenFilters: props.tokenFilters,
+        tokenImageRef: props.tokenImageRef,
+        oracleId: props.oracleId,
+        faceName: props.faceName,
+      }),
+    );
+    await waitFor(() => expect(result.current.src).toBe(EXPECTED_ART));
+
+    // The same real filters and sidecars recover nothing for a stale ref:
+    // both exact rungs miss, the name rung is vanilla-rejected by the
+    // sidecar's oracle_text, and live search is unavailable. This is why
+    // the restore must correct the ref — and it fails if the
+    // corrected-ref supply above breaks.
+    const { result: staleResult } = renderHook(() =>
+      useCardImage(props.cardName, {
+        size: "normal",
+        faceIndex: props.faceIndex,
+        isToken: props.isToken,
+        tokenFilters: props.tokenFilters,
+        tokenImageRef: staleRef,
+      }),
+    );
+    await waitFor(() => expect(staleResult.current.isLoading).toBe(false));
+    expect(staleResult.current.src).toBeNull();
+  });
+
   it("fetches nothing for a token ref that names no printing — both ids empty (#7550 review)", async () => {
     // A `TokenImageRef` is only a pointer when it carries at least one id.
     // With BOTH `scryfall_id` and `scryfall_oracle_id` empty there is nothing
@@ -586,6 +743,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
       isLocaleArtReady: vi.fn().mockReturnValue(true),
       loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
@@ -894,6 +1052,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: remoteWork,
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1064,6 +1223,104 @@ describe("useCardImage", () => {
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
   });
 
+  it("decides local-source rotation from the engine-resolved face, not the caller's face index (#9502)", async () => {
+    // A battle's front face is printed landscape; its back face is portrait.
+    const battleOracleId = "33333333-3333-4333-8333-333333333333";
+    const resolveFaceIndexSync = vi.fn((_oracleId: unknown, faceName: unknown) =>
+      faceName === "Awaken the Maelstrom" ? 1 : 0);
+    const isCardImageRotatedSync = vi.fn((_oracleId: unknown, _cardName: unknown, faceIndex: unknown) =>
+      faceIndex === 0);
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn().mockResolvedValue({ revision: "0", sources: installedSources("installed-battle") }),
+      },
+    }));
+    const remoteWork = mockNoRemoteScryfall(resolveFaceIndexSync, isCardImageRotatedSync);
+
+    const { useConnectivityStore } = await import("../../stores/connectivityStore.ts");
+    useConnectivityStore.setState({ forcedOffline: true, browserOnline: true });
+    const { useCardImage } = await import("../useCardImage.ts");
+    // `transformed` stays false for the battle's back face, so the caller still passes face 0.
+    const back = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: battleOracleId,
+      faceName: "Awaken the Maelstrom",
+      faceIndex: 0,
+    }));
+    const front = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: battleOracleId,
+      faceName: "Invasion of Alara",
+      faceIndex: 0,
+    }));
+
+    await waitFor(() => expect(back.result.current.src).toBe("installed-battle"));
+    await waitFor(() => expect(front.result.current.src).toBe("installed-battle"));
+    expect(back.result.current.isRotated).toBe(false);
+    expect(front.result.current.isRotated).toBe(true);
+    expect(remoteWork).not.toHaveBeenCalled();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+
+  it("decides printing-override rotation from the engine-resolved face (#9502)", async () => {
+    // A battle's front face is printed landscape; its back face is portrait.
+    const printing = {
+      id: "battle-printing",
+      set: "mom",
+      collector_number: "1",
+      faces: [{ normal: "https://img.example/battle-front.jpg" }, { normal: "https://img.example/battle-back.jpg" }],
+    };
+    vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn().mockResolvedValue({
+        src: "https://img.example/default.jpg",
+        isRotated: false,
+        semantic: { oracleId: "oracle-battle", faceIndex: 1, alias: "invasion of alara" },
+      }),
+      fetchTokenImageAssetByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn((printings: Array<{ id: string }>, id: string) =>
+        printings.find((candidate) => candidate.id === id)),
+      getCardPrintings: vi.fn().mockResolvedValue([printing]),
+      imageUrlSize: vi.fn(() => null),
+      isCardImageFlipLayoutSync: vi.fn(() => false),
+      isCardImageRotatedSync: vi.fn((_oracleId: unknown, _cardName: unknown, faceIndex: unknown) =>
+        faceIndex === 0),
+      isLocaleArtReady: vi.fn(() => true),
+      loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
+      resolveFaceIndexSync: vi.fn((_oracleId: unknown, faceName: unknown) =>
+        faceName === "Awaken the Maelstrom" ? 1 : 0),
+      resolveOracleIdSync: vi.fn(() => null),
+      resolvePrintingImageUrl: vi.fn((entry: typeof printing, faceIndex: number) => entry.faces[faceIndex].normal),
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ allowRemote, remote }: { allowRemote: boolean; remote?: { src: string } }) => ({
+          revision: "0",
+          sources: allowRemote
+            ? [{ kind: "remote" as const, src: remote!.src }, { kind: "fallback" as const, src: null }]
+            : [{ kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    // `transformed` stays false for the battle's back face, so the caller still passes face 0.
+    const { result } = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: "oracle-battle",
+      faceName: "Awaken the Maelstrom",
+      faceIndex: 0,
+      scryfallId: "battle-printing",
+    }));
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/battle-back.jpg"));
+    expect(result.current.isRotated).toBe(false);
+  });
+
   it("uses the resolved MDFC back face and persisted printing override locally", async () => {
     const { decodeCandidateKey } = await import("../../services/visualPacks/candidateKeys.ts");
     const resolveFaceIndexSync = vi.fn(() => 1);
@@ -1217,6 +1474,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt,
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1300,6 +1558,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1378,6 +1637,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1453,6 +1713,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => derivedFaceIndex),
       resolveOracleIdSync: vi.fn(() => derivedOracleId),
       resolvePrintingImageUrl: vi.fn(),
@@ -1527,6 +1788,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1586,6 +1848,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn(() => false),
       isLocaleArtReady: vi.fn(() => true),
       loadLocaleArt: vi.fn(),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn(() => null),
       resolveOracleIdSync: vi.fn(() => null),
       resolvePrintingImageUrl: vi.fn(),
@@ -1857,6 +2120,7 @@ describe("useCardImage", () => {
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
       isLocaleArtReady: vi.fn().mockReturnValue(true),
       loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      loadScryfallData: vi.fn().mockResolvedValue(null),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),

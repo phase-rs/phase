@@ -1,3 +1,4 @@
+import { generateProtocolVersions, protocolGenerationPlugin } from "./protocol-generation";
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,7 +9,10 @@ import wasm from "vite-plugin-wasm";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 import type { Plugin } from "vite";
+
+generateProtocolVersions();
 
 
 
@@ -160,12 +164,23 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // lobby a preview client cannot handshake with.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    // Self-hosted builds may mint short-lived TURN credentials from their own
+    // endpoint. Keep the official endpoint as the compatibility default.
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
     // preview" link on the preview site itself. dev + staging → false (hidden);
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
+    // True only for the preview deploy (deploy.yml stamps ENGINE_FINGERPRINT;
+    // PREVIEW_BUILD is also accepted as an explicit override). Gates showing
+    // the commit hash next to the version in the UI.
+    __IS_PREVIEW_BUILD__: JSON.stringify(
+      process.env.PREVIEW_BUILD === "true" || Boolean(process.env.ENGINE_FINGERPRINT),
+    ),
     // Supabase cloud-sync config. Anon key is public by design (RLS is the
     // access control), so it ships in the bundle. Empty when unset → cloud sync
     // is disabled, leaving file backup as the only data-portability path. This
@@ -234,6 +249,17 @@ function offlineShellMarker(buildHash: string): Plugin {
   };
 }
 
+/** `/build.json`: the deployed build's identity, fetched network-only by the Discord-link version gate. */
+function buildManifest(buildHash: string): Plugin {
+  return {
+    name: "build-manifest",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "build.json", source: JSON.stringify({ build: buildHash }) });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const buildHash = gitHash();
   const offlineShellMarkerFilename = `offline-shell-${buildHash}.json`;
@@ -245,11 +271,12 @@ export default defineConfig(({ mode }) => {
       "@wasm/draft": path.resolve(__dirname, "src/wasm/draft_wasm"),
     },
   },
-  plugins: [
+  plugins: [protocolGenerationPlugin(),
     wasmEnvShim(),
     externalEngineWasm(),
     trimManaFont(),
     offlineShellMarker(buildHash),
+    buildManifest(buildHash),
     react(),
     tailwindcss(),
     wasm(),

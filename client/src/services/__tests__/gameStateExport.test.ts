@@ -2,6 +2,10 @@ import { strFromU8, unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore.ts";
+import {
+  clearAiDecisionDiagnostic,
+  recordAiDecisionDiagnostic,
+} from "../../game/aiDecisionDiagnostics.ts";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory.ts";
 import { buildGameState } from "../../test/factories/gameStateFactory.ts";
 import {
@@ -14,6 +18,7 @@ import { gameStateFromImportText, readImportFile } from "../gameStateImport.ts";
 describe("gameStateExport", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    clearAiDecisionDiagnostic();
     Reflect.deleteProperty(window, "showSaveFilePicker");
   });
 
@@ -34,6 +39,29 @@ describe("gameStateExport", () => {
       waitingFor: { type: "Priority" },
       legalActions: [{ type: "PassPriority" }],
       turnCheckpoints: [{ turn_number: 7 }],
+      clientAiDecision: {
+        stage: "idle",
+        playerId: null,
+        difficulty: null,
+        waitingFor: null,
+      },
+    });
+  });
+
+  it("includes the AI controller stage in a display snapshot", () => {
+    const gameState = buildGameState({ turn_number: 7 });
+    recordAiDecisionDiagnostic({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
+    });
+
+    expect(JSON.parse(serializeGameStateDebugSnapshot(gameState)).clientAiDecision).toEqual({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
     });
   });
 
@@ -122,6 +150,19 @@ describe("gameStateExport", () => {
   it("rejects an incomplete game state import", () => {
     expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
       "JSON does not look like a GameState (missing waiting_for or players)",
+    );
+  });
+
+  it("rejects a display snapshot before the restore path discards it", () => {
+    const displaySnapshot = JSON.stringify({
+      gameState: buildGameState({ turn_number: 7 }),
+      waitingFor: { type: "Priority" },
+      legalActions: [],
+      turnCheckpoints: [],
+    });
+
+    expect(gameStateFromImportText(displaySnapshot)).toBe(
+      "This is a display snapshot, not a restorable game state. Export an Authoritative Game State from the Debug Panel instead.",
     );
   });
 

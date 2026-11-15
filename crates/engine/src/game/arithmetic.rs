@@ -50,6 +50,18 @@ pub fn u32_to_i32_saturating(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+/// Sum `i32` amounts (counters removed, damage dealt, life gained or lost by
+/// one effect), saturating at `i32::MIN` / `i32::MAX` instead of wrapping.
+///
+/// CR 107.1: The only numbers the Magic game uses are integers, and no rule
+/// bounds them, so an aggregate of many large amounts (two permanents that
+/// each lose 2^31 counters) can exceed `i32`. Saturating at the engine's
+/// numeric limit keeps the direction of the total; it is not a rules cap.
+#[inline]
+pub fn sum_saturating_i32(amounts: impl IntoIterator<Item = i32>) -> i32 {
+    amounts.into_iter().fold(0, i32::saturating_add)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +97,19 @@ mod tests {
         assert_eq!(u32_to_i32_saturating(0), 0);
         assert_eq!(u32_to_i32_saturating(1_000), 1_000);
         assert_eq!(u32_to_i32_saturating(u32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn saturating_sum_preserves_normal_math() {
+        assert_eq!(sum_saturating_i32(Vec::<i32>::new()), 0);
+        assert_eq!(sum_saturating_i32([3, 4, -2]), 5);
+    }
+
+    #[test]
+    fn saturating_sum_clamps_both_directions() {
+        assert_eq!(sum_saturating_i32([i32::MAX, i32::MAX]), i32::MAX);
+        assert_eq!(sum_saturating_i32([i32::MAX, 1, 1]), i32::MAX);
+        assert_eq!(sum_saturating_i32([i32::MIN, -1]), i32::MIN);
+        assert_eq!(sum_saturating_i32([-i32::MAX, -i32::MAX]), i32::MIN);
     }
 }

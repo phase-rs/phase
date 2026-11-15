@@ -136,9 +136,11 @@ pub(crate) fn handle_topdeck_choice(
 
 /// CR 608.2c + CR 614.1 + CR 616.1: Complete the pay-or-topdeck instruction
 /// only after every selected Library placement has settled. The pre-batch
-/// affordability check makes an unpayable payment here an internal
+/// affordability check makes an unaffordable payment here an internal
 /// inconsistency; preserve the legacy event-free failure shape in release
-/// builds while asserting it in debug builds.
+/// builds while asserting it in debug builds. A payment whose deduction is
+/// affordable but not representable (life total or lost-this-turn counter
+/// overflow) takes the same event-free return.
 pub(crate) fn complete_topdeck_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -151,8 +153,8 @@ pub(crate) fn complete_topdeck_choice(
     let payment_failed = (0..payment_count)
         .any(|_| pay_life_as_cost(state, player, life_payment, events).is_unpayable());
     debug_assert!(
-        !payment_failed,
-        "pre-validated drawn-this-turn life payment became unpayable after Library delivery"
+        !payment_failed || can_pay_life_cost(state, player, life_payment),
+        "pre-validated drawn-this-turn life payment became unaffordable after Library delivery"
     );
     if payment_failed {
         return;

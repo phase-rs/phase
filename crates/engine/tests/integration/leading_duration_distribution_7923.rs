@@ -62,7 +62,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{TransientContinuousEffect, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
@@ -73,8 +73,12 @@ use engine::types::zones::Zone;
 // ---------------------------------------------------------------------------
 
 const XANATHAR: &str = "At the beginning of your upkeep, choose target opponent. Until end of turn, that player can't cast spells, you may look at the top card of their library any time, you may play the top card of their library, and you may spend mana as though it were mana of any color to cast spells this way.";
-const KIORA: &str = "[+1]: Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.\n[−1]: Draw a card. You may play an additional land this turn.\n[−5]: You get an emblem with \"At the beginning of your end step, create a 9/9 blue Kraken creature token.\"";
-const DOVIN: &str = "Artifact, instant, and sorcery spells your opponents cast cost {1} more to cast.\n[−1]: Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.";
+/// Kiora's and Dovin's printed "dealt to and dealt by target permanent an
+/// opponent controls" is a declared recipient, which the engine cannot scope to
+/// the one chosen permanent and so fails closed. The anaphoric form ("that
+/// permanent", Maze of Ith's shape) lowers to the same two `PreventDamage` links
+/// under the same leading duration, so it carries this test's duration claim.
+const ANAPHORIC_BIDIRECTIONAL_PREVENT: &str = "[-1]: Untap target permanent an opponent controls. Until your next turn, prevent all damage that would be dealt to and dealt by that permanent.";
 const PRISONERS: &str = "Choose one —\n• Break Their Chains — Destroy target artifact.\n• Interrogate Them — Exile the top three cards of target opponent's library. Choose one of them. Until the end of your next turn, you may play that card, and you may spend mana as though it were mana of any color to cast it.";
 const AURELIA: &str = "Flying\nMentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nAt the beginning of combat on your turn, choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
 const GIANT_OYSTER: &str = "You may choose not to untap this creature during your untap step.\n{T}: For as long as this creature remains tapped, target tapped creature doesn't untap during its controller's untap step, and at the beginning of each of your draw steps, put a -1/-1 counter on that creature. When this creature leaves the battlefield or becomes untapped, remove all -1/-1 counters from the creature.";
@@ -89,6 +93,27 @@ const REVENGE: &str = "Until end of turn, target creature gets +6/+6 and gains t
 // ---------------------------------------------------------------------------
 // Chain-walk helpers
 // ---------------------------------------------------------------------------
+
+/// The live transient `GenericEffect` grants of "protection from everything" —
+/// the runtime carrier the embedded-duration repair is asserted against.
+fn protection_from_everything_grants(
+    state: &engine::types::game_state::GameState,
+) -> Vec<&TransientContinuousEffect> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|e| {
+            e.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Everything)
+                    }
+                )
+            })
+        })
+        .collect()
+}
 
 /// Flatten a def's `sub_ability` chain, head first — the same walk
 /// `with_clause_chain_duration` performs.
@@ -286,52 +311,40 @@ fn object_has_static_mode(
 // whose links carry NO duration of their own.
 //
 // SCOPE, stated precisely because the unqualified form is FALSE: the sub-link
-// walk in `with_clause_chain_duration` gates on the link's CARRIER
-// (`def.duration.is_none() || Some(Permanent)`), so a link whose recognizer
-// INJECTED a duration default is indistinguishable from one that printed a
-// window, and the walk declines. Measured at this head, FOUR corpus cards sit in
-// that gap, in TWO distinct shapes:
+// walk in `with_clause_chain_duration` reaches only ONE clause's `sub_ability`
+// chain. A coordinated clause that the clause splitter minted as its own
+// `ClauseIr` (Dovin Baan's "and its activated abilities can't be activated") is
+// outside that walk entirely, so it was assembled with NO window while the head
+// printed one.
 //
-//   * Dovin Baan, Edifice of Authority, Mythos of Vadrok — the "and its/their
-//     activated abilities can't be activated" link is injected `UntilEndOfTurn`
-//     by `oracle_effect/subject.rs`'s prohibition recognizer, so the link's
-//     CARRIER holds a value indistinguishable from a printed window and the walk
-//     declines. Head is `UntilNextTurnOf{Controller}`; the prohibition ends a
-//     full turn early.
+// #7962 closed both halves of that gap:
 //
-//   * Teferi's Protection — a DIFFERENT recognizer and, measured, a DIFFERENT
-//     CAUSE. Its "you gain protection from everything" link carries
-//     `def.duration: None` with an injected `UntilEndOfTurn` on the EMBEDDED
-//     `GenericEffect.duration`, under the same `UntilNextTurnOf{Controller}`
-//     head, so protection from everything expires a turn early.
+//   1. The injected-default class. Every recognizer that defaulted a PARSED
+//      `Option<Duration>` to an `UntilEndOfTurn` byte-identical to a printed one
+//      now emits the parsed value verbatim (`None` = nothing stated), leaving the
+//      fallback to the resolver, which already owned it. Without that, no
+//      distribution seam could tell "printed end of turn" from "we defaulted".
+//   2. The missing distribution. `oracle_effect::assembly` now stamps a
+//      sentence's stated window onto the later clauses of THAT printed sentence
+//      (`stamp_governed_chain_duration`, gated on `duration_governs` and on the
+//      link's unset sentinel). That is the seam which reaches coordinated
+//      clauses, and it closed BOTH shapes below.
 //
-//     Note carefully what this is NOT: a `None` carrier PASSES the sub-link
-//     walk's gate (probed at this head, Abeyance's `AddRestriction` and Kiora's
-//     second `PreventDamage` link both have `None` carriers and both ARE stamped
-//     by that walk). So the carrier gate is not what fails here — the head window
-//     simply never reaches this link. The precise mechanism is NOT diagnosed in
-//     this PR; only the parse state and the symptom above are measured.
-//
-// None of the four is a regression — all are byte-identical at BASE_SHA.
+// The four cards this section used to record as unfixed — Dovin Baan, Edifice of
+// Authority, Mythos of Vadrok, Teferi's Protection — now carry
+// `UntilNextTurnOf { Controller }` on the link that governs the prohibition /
+// protection, so none of them expires a turn early. The rows are
+// `sentence_window_reaches_coordinated_clause_links` and
+// `teferis_protection_survives_into_the_opponents_turn` below, each with the
+// specific failure it prevents re-introduced.
 //
 // The three PROHIBITION cards additionally never reach the severed-conjunct seam
-// this PR adds, because `starts_clause_text_or_conjugated` excludes "its" (explicit
-// list) and "their" (the `ends_with('s')` pre-filter), so those sentences never
-// split. That reasoning does NOT extend to Teferi's Protection: `tag("you ")` IS a
-// clause-start token, so its sentence does split.
-//
-// SCOPING NOTE for whoever picks this up — both halves matter:
-//   1. The `subject.rs` verbatim-emit remedy (the fix
-//      `try_parse_gain_all_activated_abilities_of_target` received here) closes
-//      shape 1 ONLY.
-//   2. Applying that remedy across the injected-default CLASS (~16
-//      `.or(Some(Duration::UntilEndOfTurn))` / `unwrap_or(Duration::UntilEndOfTurn)`
-//      sites in `subject.rs`, `imperative.rs`, `oracle_effect/mod.rs`) is NOT
-//      sufficient for shape 2: leaving the embedded field `None` just moves the
-//      default downstream, where `game/effects/effect.rs` resolves
-//      `ability.duration.or(duration).unwrap_or(UntilEndOfTurn)` to end-of-turn
-//      anyway. Shape 2 needs the printed head window to actually REACH the link,
-//      which is precisely what tasks #138/#144 in `game/effects/effect.rs` track.
+// (`expand_leading_duration_chunks`), because `starts_clause_text_or_conjugated`
+// excludes "its" (explicit list) and "their" (the `ends_with('s')` pre-filter),
+// so those sentences never split. That reasoning does NOT extend to Teferi's
+// Protection: `tag("you ")` IS a clause-start token, so its sentence does split —
+// which is why the sentence-scoped stamp, not the chunk expansion, is what
+// carries the window for all four.
 // ===========================================================================
 
 /// **V-U1a — `[BASE]`, SHAPE.** CR 611.2a.
@@ -386,12 +399,23 @@ fn xanathar_leading_duration_reaches_governed_chain_links() {
          at BASE_SHA it is None and the permission is never pruned"
     );
 
+    // CR 609.4b: the trailing "you may spend mana as though it were mana of
+    // any color to cast spells this way" is a payment concession on the play
+    // permission, folded onto it as `mana_spend_permission` — so the
+    // permission IS the chain leaf, and the duration reaching it is the
+    // duration reaching the last governed link.
     let trailing = links
         .last()
-        .expect("the trailing mana-spend GenericEffect is the chain leaf");
+        .expect("the play permission carrying the mana concession is the chain leaf");
     assert!(
-        matches!(&*trailing.effect, Effect::GenericEffect { .. }),
-        "chain leaf is the mana-spend GenericEffect, got {:?}",
+        matches!(
+            &*trailing.effect,
+            Effect::CastFromZone {
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            }
+        ),
+        "chain leaf is the play permission carrying the any-color concession, got {:?}",
         trailing.effect
     );
     assert_eq!(
@@ -641,85 +665,73 @@ fn temporal_aperture_unevaluable_inner_window_strict_fails() {
 /// `GainActivatedAbilitiesOfTarget` arm), so no guard can rescue it. Both halves are asserted here, so
 /// an added arm turns this test red.
 ///
-/// **SCOPE — THIS TEST MAKES NO RUNTIME CLAIM, DELIBERATELY.** Measured at
-/// BASE_SHA: both of Kiora's prevention shields are hosted on the TARGET OBJECT's
-/// live `replacement_definitions` with `base_replacement_definitions` empty, and
-/// CR 613.1's top-of-pass reset (`layers.rs::seed_live_characteristics_from_base`)
-/// discards BOTH — before the activation turn's own combat damage, and again
-/// across the turn boundary (live 2 → 0; the opponent's 3/3 still deals its full
-/// 3, identical to a paired no-activation control). Neither half survives; they go
-/// together. That observation gap is a SEPARATE, PRE-EXISTING defect this PR does
-/// not touch (`prevent_damage.rs`'s own comment already names it). This change puts
-/// the right value on the right carrier; it cannot fix the flush.
-///
-/// FAILS AT BASE_SHA: there the sub node exports `duration: null`.
+/// **SCOPE — THIS TEST MAKES NO RUNTIME CLAIM, DELIBERATELY.** It pins the parsed
+/// shape only: the printed window rides both prevention links, on the carrier
+/// `prevent_damage::resolve` reads, never on the embedded field. Whether the
+/// resulting shields survive CR 613.1's top-of-pass reset is a separate question
+/// this test does not answer.
 #[test]
-fn kiora_prevention_sibling_carries_printed_window() {
-    for (name, text, subtype, ability_idx) in [
-        ("Kiora, the Crashing Wave", KIORA, "Kiora", 0usize),
-        ("Dovin, Hand of Control", DOVIN, "Dovin", 0usize),
-    ] {
-        let parsed = parse_oracle_text(
-            text,
-            name,
-            &[],
-            &["Legendary".to_string(), "Planeswalker".to_string()],
-            &[subtype.to_string()],
-        );
-        let head = &parsed.abilities[ability_idx];
-        let links = chain(head);
-        assert_no_unimplemented(&links, name);
+fn anaphoric_bidirectional_prevent_sibling_carries_printed_window() {
+    let name = "Anaphoric bidirectional prevent";
+    let parsed = parse_oracle_text(
+        ANAPHORIC_BIDIRECTIONAL_PREVENT,
+        name,
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &["Test".to_string()],
+    );
+    let head = &parsed.abilities[0];
+    let links = chain(head);
+    assert_no_unimplemented(&links, name);
 
-        let printed = Duration::UntilNextTurnOf {
-            player: PlayerScope::Controller,
-        };
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
 
-        // Positive reach guard: the chain did NOT collapse to one node, and the
-        // head already carries the printed window at BASE. Without this, "the sub
-        // carries the window" could be satisfied by a one-node chain.
-        let prevents: Vec<&&AbilityDefinition> = links
-            .iter()
-            .filter(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
-            .collect();
-        assert_eq!(
-            prevents.len(),
-            2,
-            "{name}: `dealt to AND dealt by` must lower to TWO PreventDamage links: {links:#?}"
-        );
-        assert_eq!(
-            prevents[0].duration,
-            Some(printed.clone()),
-            "{name}: the head half carries the printed window at BASE already"
-        );
-        assert_eq!(
-            prevents[1].sub_link,
-            SubAbilityLink::SequentialSibling,
-            "{name}: the second half is a sequential sibling of the first"
-        );
+    // Positive reach guard: the chain did NOT collapse to one node, and the
+    // head already carries the printed window at BASE. Without this, "the sub
+    // carries the window" could be satisfied by a one-node chain.
+    let prevents: Vec<&&AbilityDefinition> = links
+        .iter()
+        .filter(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
+        .collect();
+    assert_eq!(
+        prevents.len(),
+        2,
+        "{name}: `dealt to AND dealt by` must lower to TWO PreventDamage links: {links:#?}"
+    );
+    assert_eq!(
+        prevents[0].duration,
+        Some(printed.clone()),
+        "{name}: the head half carries the printed window at BASE already"
+    );
+    assert_eq!(
+        prevents[1].sub_link,
+        SubAbilityLink::SequentialSibling,
+        "{name}: the second half is a sequential sibling of the first"
+    );
 
-        // THE REVERT-FAILING ASSERTION.
-        assert_eq!(
-            prevents[1].duration,
-            Some(printed),
-            "{name}: CR 611.2a — the `and dealt by` half must carry the printed \
-             `Until your next turn`; at BASE_SHA it is None and the shield is created \
-             with the engine's end-of-turn `is_shield` default instead"
-        );
+    // THE REVERT-FAILING ASSERTION.
+    assert_eq!(
+        prevents[1].duration,
+        Some(printed),
+        "{name}: CR 611.2a — the `and dealt by` half must carry the printed \
+         `Until your next turn`"
+    );
 
-        // B4's other half: the embedded field must stay untouched. An added
-        // `apply_duration_to_effect` arm for `PreventDamage` turns this red.
-        for (i, d) in prevents.iter().enumerate() {
-            match &*d.effect {
-                Effect::PreventDamage {
-                    prevention_duration,
-                    ..
-                } => assert_eq!(
-                    *prevention_duration, None,
-                    "{name}: link {i}'s embedded prevention_duration must stay None — \
-                     `PreventDamage` deliberately has NO apply_duration_to_effect arm"
-                ),
-                other => panic!("{name}: expected PreventDamage, got {other:?}"),
-            }
+    // B4's other half: the embedded field must stay untouched. An added
+    // `apply_duration_to_effect` arm for `PreventDamage` turns this red.
+    for (i, d) in prevents.iter().enumerate() {
+        match &*d.effect {
+            Effect::PreventDamage {
+                prevention_duration,
+                ..
+            } => assert_eq!(
+                *prevention_duration, None,
+                "{name}: link {i}'s embedded prevention_duration must stay None — \
+                 `PreventDamage` deliberately has NO apply_duration_to_effect arm"
+            ),
+            other => panic!("{name}: expected PreventDamage, got {other:?}"),
         }
     }
 }
@@ -773,10 +785,11 @@ fn you_find_some_prisoners_recovers_mana_rider() {
                 },
                 "the grant keeps its printed `Until the end of your next turn`"
             );
-            // THE REVERT-FAILING ASSERTION.
+            // THE REVERT-FAILING ASSERTION. CR 609.4b: "any color" is
+            // `AnyColor` — the rider is folded by the printed word.
             assert_eq!(
                 *mana_spend_permission,
-                Some(ManaSpendPermission::AnyTypeOrColor),
+                Some(ManaSpendPermission::AnyColor),
                 "CR 611.2a + CR 608.2c: the `spend mana as though …` conjunct must be \
                  recovered onto the grant; at BASE_SHA it is silently dropped"
             );
@@ -1161,9 +1174,16 @@ fn gain_all_activated_abilities_yields_to_a_governing_leading_duration() {
 
 /// **V-U2e — `[COVER]`, SHAPE, table-driven.**
 ///
-/// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN — this is OVER-SPLITTING cover.**
-/// Each row asserts its exact post-fix chain shape, which EQUALS its BASE shape;
-/// the row fails only if `severed_prefix_end` becomes over-broad. The
+/// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN — this is OVER-SPLITTING cover —
+/// WITH ONE AMENDED EXCEPTION.** Each row asserts its exact post-fix chain shape,
+/// which EQUALS its BASE shape, and fails only if `severed_prefix_end` becomes
+/// over-broad. **The Arm the Cathars row is the exception:** phase 6 amended its
+/// `links` from 2 to 4, so it does NOT pass at base and its shape is deliberately
+/// NOT the base shape. At base that row pinned a silent DROP of two of the card's
+/// three printed P/T instructions (the chain was `Pump(+3/+3) -> vigilance`); it
+/// now pins the conjunct split. For that row alone, read the per-row
+/// "must be UNCHANGED" message below as "must be UNCHANGED from the amended
+/// value". The
 /// revert-failing content for the predicate lives in
 /// `opportunistic_dragon_riders_bind_stolen_permanent` and
 /// `revenge_of_the_hunted_recovers_lure_conjunct`.
@@ -1212,7 +1232,7 @@ fn leading_duration_merge_cards_unchanged() {
         Row { name: "Sylvan Awakening", text: "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.", types: &["Sorcery"], subtypes: &[], keywords: &["Indestructible"], unimplemented: 0, links: 2, mods: 9 },
         Row { name: "Kitesail Larcenist", text: "Flying, ward {1}\nWhen this creature enters, for each player, choose up to one other target artifact or creature that player controls. For as long as this creature remains on the battlefield, the chosen permanents become Treasure artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color\" and lose all other abilities.", types: &["Creature"], subtypes: &["Human", "Pirate"], keywords: &["Flying", "Ward"], unimplemented: 1, links: 2, mods: 5 },
         Row { name: "Dominaria's Judgment", text: "Until end of turn, creatures you control gain protection from white if you control a Plains, from blue if you control an Island, from black if you control a Swamp, from red if you control a Mountain, and from green if you control a Forest.", types: &["Instant"], subtypes: &[], keywords: &[], unimplemented: 0, links: 1, mods: 5 },
-        Row { name: "Arm the Cathars", text: "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.", types: &["Sorcery"], subtypes: &[], keywords: &[], unimplemented: 0, links: 2, mods: 1 },
+        Row { name: "Arm the Cathars", text: "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.", types: &["Sorcery"], subtypes: &[], keywords: &[], unimplemented: 0, links: 4, mods: 1 },
     ];
 
     for row in rows {
@@ -1329,8 +1349,9 @@ fn leading_duration_merge_cards_unchanged() {
         "Stolen Strategy: the mana-spend rider stays MERGED onto the grant: {ss_links:#?}"
     );
 
-    // Arm the Cathars parses to ONE chunk before the predicate — `sub.len() < 2`
-    // early-returns, so the predicate must never even be reached.
+    // Arm the Cathars reaches the predicate: its conjuncts each parse to their own
+    // targeted node, so `sub.len() < 2` no longer early-returns for this row. The
+    // row's `links` value is what pins that chain, not this comment.
     let cathars = parse_oracle_text(
         "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.",
         "Arm the Cathars", &[], &["Sorcery".to_string()], &[],
@@ -1349,10 +1370,12 @@ fn leading_duration_merge_cards_unchanged() {
         &["Legendary".to_string(), "Creature".to_string()],
         &["Beholder".to_string()],
     );
+    // Four links: the trailing mana rider is folded onto the play permission
+    // (CR 609.4b), not emitted as a fifth link.
     assert_eq!(
         chain(trigger_body(&xan.triggers[0])).len(),
-        5,
-        "Xanathar's chain is the recognizer's own five links — the predicate must not \
+        4,
+        "Xanathar's chain is the recognizer's own four links — the predicate must not \
          re-chunk it"
     );
     let abey = parse_oracle_text(ABEYANCE, "Abeyance", &[], &["Instant".to_string()], &[]);
@@ -1792,6 +1815,182 @@ fn abeyance_prohibitions_bite_and_end_at_the_turn_boundary() {
     );
 }
 
+/// **Issue #7962 — `[BASE]`, SHAPE.** CR 611.2a + CR 608.2c.
+///
+/// A window printed at the head of a sentence governs every coordinated predicate
+/// of THAT sentence, including one the clause splitter minted as its own clause.
+///
+/// FAILS AT BASE_SHA (measured on all four cards): each governed link below is
+/// assembled with no window at all while the head carries
+/// `UntilNextTurnOf { Controller }`, so the effect ends at the NEXT CLEANUP
+/// (CR 514.2) instead of at the beginning of its controller's next turn
+/// (CR 611.2a) — a full turn early.
+///
+/// TWO distinct causes were measured, and the fix closes both:
+///   * the prohibition cards' link carrier was `None` because the sub-link walk
+///     only sees ONE clause's chain (it never reached this coordinated clause), and
+///   * Teferi's Protection's link carrier was also `None` for the same reason —
+///     NOT, as #7959's note supposed, because an injected default blocked a gate:
+///     with the injection gone the carrier is still empty until the sentence stamp
+///     runs.
+///
+/// Text is VERBATIM from MTGJSON (`/card-test`); the `[−1]`/`[−7]` lines are kept so
+/// the planeswalker's ability list is the real one, and each link is found BY SHAPE.
+#[test]
+fn sentence_window_reaches_coordinated_clause_links() {
+    const DOVIN_BAAN: &str = "[+1]: Until your next turn, up to one target creature gets -3/-0 and its activated abilities can't be activated.\n[−1]: You gain 2 life and draw a card.\n[−7]: You get an emblem with \"Your opponents can't untap more than two permanents during their untap steps.\"";
+    const EDIFICE: &str = "{1}, {T}: Target creature can't attack this turn. Put a brick counter on this artifact.\n{1}, {T}: Until your next turn, target creature can't attack or block and its activated abilities can't be activated. Activate only if there are three or more brick counters on this artifact.";
+    const MYTHOS: &str = "Mythos of Vadrok deals 5 damage divided as you choose among any number of target creatures and/or planeswalkers. If {W}{U} was spent to cast this spell, until your next turn, those permanents can't attack or block and their activated abilities can't be activated.";
+    const TEFERIS: &str = "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.";
+
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+
+    for (name, text, types) in [
+        (
+            "Dovin Baan",
+            DOVIN_BAAN,
+            vec!["Legendary".to_string(), "Planeswalker".to_string()],
+        ),
+        (
+            "Edifice of Authority",
+            EDIFICE,
+            vec!["Artifact".to_string()],
+        ),
+        ("Mythos of Vadrok", MYTHOS, vec!["Sorcery".to_string()]),
+        ("Teferi's Protection", TEFERIS, vec!["Instant".to_string()]),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+        // Search ABILITY BY ABILITY so the reach guard below can be scoped to the
+        // chain the governed link actually lives in. Dovin Baan's `[-7]` emblem is a
+        // separate ability and a known `Unimplemented` gap; asserting over every link
+        // of the card would fail on a clause this test is not about.
+        let mut found = None;
+        for ability in &parsed.abilities {
+            let links = chain(ability);
+            let governed = links.iter().copied().find(|d| {
+                statics_of(&d.effect)
+                    .iter()
+                    .any(|s| matches!(&s.mode, StaticMode::CantBeActivated { .. }))
+                    || statics_of(&d.effect).iter().any(|s| {
+                        s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Protection(ProtectionTarget::Everything)
+                                }
+                            )
+                        })
+                    })
+            });
+            if let Some(governed) = governed {
+                found = Some((links, governed));
+                break;
+            }
+        }
+        let Some((links, governed)) = found else {
+            panic!(
+                "{name}: the prohibition / protection link must be built: {:?}",
+                parsed.abilities
+            )
+        };
+        assert_no_unimplemented(&links, name);
+
+        // POSITIVE REACH GUARD: the printed headline window exists on this chain, so
+        // "the link below carries no window" is a real delta rather than an unparsed
+        // clause.
+        assert!(
+            links.iter().any(|d| d.duration.as_ref() == Some(&printed)),
+            "{name}: the printed `Until your next turn` must be on SOME link: {links:#?}"
+        );
+
+        // THE REVERT-FAILING ASSERTION. Both carriers, because the resolver reads
+        // `ability.duration.or(embedded)`: either one being empty is what made the
+        // effect a cleanup-time (end-of-turn) window.
+        assert_eq!(
+            governed.duration.as_ref(),
+            Some(&printed),
+            "{name}: CR 611.2a + CR 608.2c — the sentence's printed window must reach \
+             the coordinated clause's CARRIER; at BASE_SHA it is None and the effect \
+             lapses at the next cleanup instead of on the controller's next turn"
+        );
+        match &*governed.effect {
+            Effect::GenericEffect { duration, .. } => assert_eq!(
+                duration.as_ref(),
+                Some(&printed),
+                "{name}: the EMBEDDED window must agree with the carrier, because \
+                 `effect.rs` resolves `ability.duration.or(embedded)` — an unset \
+                 embedded field at BASE_SHA is the second half of the early expiry"
+            ),
+            other => panic!("{name}: expected GenericEffect, got {other:?}"),
+        }
+    }
+}
+
+/// **Issue #7962 — `[BASE]`, RUNTIME.** CR 611.2a + CR 514.2.
+///
+/// Teferi's Protection's "you gain protection from everything" must last until its
+/// controller's next turn begins — not until the end of the turn it was cast.
+///
+/// FAILS AT BASE_SHA: the installed `TransientContinuousEffect` carries
+/// `UntilEndOfTurn` and is pruned at the cleanup step of the very turn it was cast.
+#[test]
+fn teferis_protection_survives_into_the_opponents_turn() {
+    const TEFERIS: &str = "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, ample_mana());
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Teferi's Protection", true, TEFERIS)
+        .id();
+    for i in 0..10 {
+        scenario.add_card_to_library_top(P0, &format!("MyLib{i}"));
+        scenario.add_card_to_library_top(P1, &format!("OppLib{i}"));
+    }
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).decline_optional().resolve();
+
+    // POSITIVE CONTROL: the grant is INSTALLED, and installed with the printed
+    // window. Without this the survival assertion below would pass on a
+    // resolution that installed nothing.
+    let installed = protection_from_everything_grants(outcome.state());
+    assert_eq!(
+        installed.len(),
+        1,
+        "the `you gain protection from everything` grant must be installed"
+    );
+    assert_eq!(
+        installed[0].duration,
+        Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        },
+        "CR 611.2a: the grant must be installed with the PRINTED window; at \
+         BASE_SHA it is UntilEndOfTurn"
+    );
+
+    // THE REVERT-FAILING ASSERTION: crossing into the opponent's turn (which runs
+    // the cleanup step that ends `UntilEndOfTurn` effects) must NOT end it.
+    cross_turn_boundary(&mut runner);
+    assert_eq!(
+        protection_from_everything_grants(runner.state()).len(),
+        1,
+        "CR 611.2a + CR 514.2: protection from everything lasts until its \
+         controller's next turn begins, so it must survive the end of the turn it \
+         was cast in; at BASE_SHA the cleanup step prunes it a full turn early"
+    );
+
+    // And it does end: at the beginning of its controller's next turn (measured
+    // here so the row cannot pass by installing a merely-longer default).
+    cross_turn_boundary(&mut runner);
+    assert!(
+        protection_from_everything_grants(runner.state()).is_empty(),
+        "CR 611.2a: the grant ends when its controller's next turn begins"
+    );
+}
+
 /// **V-U1d — `[BASE]`, RUNTIME.** CR 611.2a + CR 514.2.
 ///
 /// The `Permanent` sentinel YIELDS to a stated duration. Mondo Gecko's activated
@@ -1829,6 +2028,7 @@ fn stated_duration_yields_to_the_permanent_sentinel() {
         .act(GameAction::ActivateAbility {
             source_id: gecko,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Mondo Gecko");
     // Drive the announced cost and the printed colour choice explicitly. §G1

@@ -4,7 +4,9 @@
 #
 # Existing offenders are frozen in amber — this check only flags *newly
 # added* offending lines in the diff (same mechanism as
-# check-parser-combinators.sh).
+# check-parser-combinators.sh). A line moved within the gate's view (its scope
+# minus SCOPE_EXCLUDES) is not added; the added-line set comes from
+# scripts/lib/added-lines.py.
 #
 # Pattern families:
 #   (A) Raw keyword queries: `.keywords.contains(` / `.keywords.iter(`.
@@ -29,18 +31,42 @@
 #     // allow-raw-authority: <reason>      (A)
 #     // allow-raw-zone: <reason>           (B)
 # Allowed files (the authorities themselves and the layer/copy machinery that
-# must read raw keyword state): see ALLOWED_KEYWORD_FILES below.
+# must read raw keyword state): see SCOPE_EXCLUDES below.
 #
 # Usage:
 #   scripts/check-engine-authorities.sh [base-ref]
 #
 # Default base-ref is the merge-base with origin/main. In CI, pass the PR
 # target branch's SHA explicitly.
+#
+# Exit status:
+#   0  no violation found.
+#   1  a violation found, in any section.
+#   1  the added-line helper's own test suite (scripts/lib/added_lines_tests.py)
+#      failed; no verdict.
+#   2  the added-line helper (scripts/lib/added-lines.py) could not read the
+#      diff; no verdict.
+#   2  the base ref does not resolve to a commit; no verdict.
 
 set -euo pipefail
+# shellcheck source=scripts/lib/added-lines.sh
+. "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
-SCOPE='crates/engine/src'
+added_lines_require_base "$BASE"
+SCOPE=(crates/engine/src crates/phase-ast/src crates/phase-parser/src)
+# Files allowed to touch raw keyword state: the authority module, the layer
+# engine that computes `obj.keywords`, and copy machinery that snapshots
+# characteristics wholesale. These files are outside the gate's view, so a line
+# moved out of one into a checked file is checked.
+SCOPE_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/src/game/keywords.rs'
+    ':(exclude)crates/engine/src/game/layers.rs'
+    ':(exclude)crates/engine/src/game/game_object.rs'
+    ':(exclude)crates/engine/src/game/effects/become_copy.rs'
+    ':(exclude)crates/engine/src/game/effects/token_copy.rs'
+)
 
 # Pre-commit hook mode: only check staged changes (mirrors
 # check-parser-combinators.sh) so another agent's unstaged work isn't flagged.
@@ -51,32 +77,19 @@ fi
 
 # (A) Raw keyword queries.
 FORBIDDEN_KEYWORD_QUERY='\.keywords\.(contains|iter)\('
-# Files allowed to touch raw keyword state: the authority module, the layer
-# engine that computes `obj.keywords`, and copy machinery that snapshots
-# characteristics wholesale.
-ALLOWED_KEYWORD_FILES='game/keywords\.rs|game/layers\.rs|game/game_object\.rs|effects/become_copy\.rs|effects/token_copy\.rs'
 
 FAIL=0
 report_keyword=""
 
 filter_allow_annotation() {
-    local file="$1"
-    local candidates="$2"
-    local added=""
-    while IFS= read -r diff_line; do
-        [ -z "$diff_line" ] && continue
-        local text="${diff_line#*+}"
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-raw-authority'; then
-                continue
-            fi
-        fi
-        if echo "$text" | grep -q 'allow-raw-authority'; then
-            continue
+    local file="$1" candidates="$2" added="" rec ln text prev
+    while IFS= read -r rec; do
+        [ -z "$rec" ] && continue
+        ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
+        case "$text" in *allow-raw-authority*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
+            case "$prev" in *allow-raw-authority*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -86,20 +99,20 @@ filter_allow_annotation() {
 
 # NB: no early exit on an empty diff — section (B) is full-tree and must run
 # even when this change touched no engine source.
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
+if [ -n "$files" ]; then
+    added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
+fi
 
 while IFS= read -r file; do
     [ -f "$file" ] || continue
-    if echo "$file" | grep -qE "$ALLOWED_KEYWORD_FILES"; then
+
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
         continue
     fi
 
-    diff_added=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
-    if [ -z "$diff_added" ]; then
-        continue
-    fi
-
-    keyword_hits=$(echo "$diff_added" | grep -Ev 'allow-raw-authority' | grep -E "$FORBIDDEN_KEYWORD_QUERY" || true)
+    keyword_hits=$(added_lines_grep "$kept" "$FORBIDDEN_KEYWORD_QUERY") || exit 2
     keyword_clean=$(filter_allow_annotation "$file" "$keyword_hits")
     if [ -n "$keyword_clean" ]; then
         report_keyword="${report_keyword}

@@ -33,14 +33,17 @@ use crate::types::zones::Zone;
 ///   id — the set the most recent effect in this chain published — exactly
 ///   as `grant_permission::resolve` binds it. Empty sets are not skipped: an
 ///   empty current set means the preceding effect affected nothing.
+/// - `TriggeringSource` / `EventTarget` with no chosen target → the object
+///   the trigger event names (CR 608.2k), if it is still on the battlefield.
 /// - Any other filter → the ability's chosen targets (object refs only).
-fn tap_untap_target_ids(
+pub(super) fn tap_untap_target_ids(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_target: &TargetFilter,
 ) -> Vec<ObjectId> {
     match effect_target {
-        TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 400.7: empty when the source left and returned before resolution.
+        TargetFilter::SelfRef => ability.self_ref_binding(state).into_iter().collect(),
         // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
         // instruction published" — the ordering argument is written once, on
         // `effects::publish_tracked_set`. Deliberately not routed through
@@ -59,6 +62,27 @@ fn tap_untap_target_ids(
             .get(id)
             .cloned()
             .unwrap_or_default(),
+        // CR 608.2k + CR 603.2: "tap that creature" / "untap it" in a triggered
+        // ability names the object its trigger event referred to (the damage
+        // recipient of "deals combat damage to a creature" — Kashi-Tribe
+        // Warriors), not a declared target, so `ability.targets` is empty.
+        // Resolve the event-subject anaphors through the shared
+        // permanent-referent authority: only the incarnation the event recorded
+        // (CR 400.7), and only while it is a phased-in permanent (CR 110.1 +
+        // CR 701.26a + CR 702.26b). With no published event, both anaphors
+        // name nothing; when a published event names no source object,
+        // `TriggeringSource` names the Aura/Equipment source's attached host
+        // (CR 301.5a + CR 303.4b). Gated on empty
+        // targets so a chosen target keeps priority (CR 608.2b), and so a
+        // delayed trigger whose referents were pinned into `targets`
+        // (CR 603.7c) keeps the pinned-target arm below.
+        filter if ability.targets.is_empty() && super::EVENT_SUBJECT_ANAPHORS.contains(filter) => {
+            crate::game::targeting::resolve_event_referent_permanents(
+                state,
+                filter,
+                ability.source_id,
+            )
+        }
         // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
         // a new object taps nothing. This arm is a RAW read that never reaches
         // `resolved_targets`, so the targeting chokepoint cannot see this pin.
@@ -196,10 +220,11 @@ pub(crate) fn process_one_tap(
                 )
                 .map_err(|_| EffectError::ObjectNotFound(object_id))?
                 {
-                    events.push(GameEvent::PermanentTapped {
+                    events.push(GameEvent::permanent_tapped(
+                        state,
                         object_id,
-                        caused_by: Some(source_id),
-                    });
+                        Some(source_id),
+                    ));
                 }
             }
             Ok(TapUntapOutcome::Complete)
@@ -237,21 +262,13 @@ pub(crate) fn process_one_untap(
                         object_id,
                         &CounterType::Stun,
                     ) {
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        if let Some(count) = obj.counters.get_mut(&CounterType::Stun) {
-                            *count -= 1;
-                            if *count == 0 {
-                                obj.counters.remove(&CounterType::Stun);
-                            }
-                        }
-                        events.push(GameEvent::CounterRemoved {
+                        super::counters::apply_counter_removal(
+                            state,
                             object_id,
-                            counter_type: CounterType::Stun,
-                            count: 1,
-                        });
+                            CounterType::Stun,
+                            1,
+                            events,
+                        );
                     }
                 } else {
                     if crate::game::object_state::resolve_and_apply_object_edit(
@@ -345,6 +362,7 @@ fn prompt_resolution_tap_untap_choice(
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: bounds.max,
@@ -360,12 +378,15 @@ fn prompt_resolution_tap_untap_choice(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: tap/untap selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -374,6 +395,46 @@ fn prompt_resolution_tap_untap_choice(
         duration: None,
     };
     true
+}
+
+/// CR 608.2c: the permanents a mass "tap/untap all ..." instruction selects:
+/// every battlefield permanent its filter matches, whether or not its status
+/// changes. The resolver walks this set, and a following "they" names it.
+fn mass_tap_state_selection(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect()
+}
+
+/// CR 608.2c + CR 701.26a: the population a mass tap/untap instruction is
+/// about to select, read on the board before it acts. Acting can change what
+/// the filter matches (an untap that removes a creature's only stun counter
+/// instead, CR 122.1d), so a following "they" binds this snapshot rather than
+/// a rescan. Empty for every other instruction, whose referents are its events.
+pub(crate) fn selection_before_resolution(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            ..
+        } => mass_tap_state_selection(state, ability, target),
+        _ => Vec::new(),
+    }
 }
 
 /// CR 701.26a (tap) / CR 701.26b (untap): Mass tap/untap of every permanent
@@ -387,18 +448,7 @@ fn resolve_all(
     change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let matching = mass_tap_state_selection(state, ability, target);
 
     for obj_id in matching {
         let outcome = match change {
@@ -457,6 +507,28 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    fn install_stun_duration(state: &mut GameState, object_id: ObjectId) -> u64 {
+        use crate::types::ability::{ContinuousModification, Duration, StaticCondition};
+        use crate::types::counter::CounterMatch;
+        let controller = state.objects[&object_id].controller;
+        state
+            .add_transient_continuous_effect(
+                object_id,
+                controller,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters: CounterMatch::OfType(CounterType::Stun),
+                        minimum: 1,
+                        maximum: None,
+                    },
+                },
+                TargetFilter::SpecificObject { id: object_id },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]
@@ -657,17 +729,19 @@ mod tests {
         );
     }
 
-    /// CR 608.2b: class fence. `TriggeringSource` is an event-context filter
-    /// resolved from `ability.targets`; a `SelfRef`-head → `TriggeringSource`
+    /// CR 608.2b + CR 608.2k: class fence. A `SelfRef`-head → `TriggeringSource`
     /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
-    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot has no
-    /// materialized event object, so per CR 608.2b it must stay an inert no-op —
-    /// it must NOT untap the source.
+    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot resolves
+    /// the anaphor from the published trigger event. Here no event is published,
+    /// so the anaphor names no object
+    /// and per CR 608.2b it must stay an inert no-op — it must NOT untap the
+    /// source.
     ///
     /// Discrimination: any over-broad arm mapping `ParentTarget`/`None`/
     /// `TriggeringSource` to the source on an empty slot would untap the source
-    /// here and emit a spurious event, flipping both assertions red. The `_` arm
-    /// reads `ability.targets` → `[]` → no-op.
+    /// here and emit a spurious event, flipping both assertions red. This is
+    /// the paired negative of
+    /// `untap_triggering_source_reads_published_event_when_unhydrated`.
     #[test]
     fn untap_triggering_source_with_empty_targets_is_noop() {
         let mut state = GameState::new_two_player(42);
@@ -696,13 +770,230 @@ mod tests {
 
         assert!(
             state.objects[&obj_id].tapped,
-            "TriggeringSource with an empty target slot must stay a no-op (source stays tapped)"
+            "TriggeringSource with no published event and no attached host must stay a no-op (source stays tapped)"
         );
         assert!(
             !events
                 .iter()
                 .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
             "no PermanentUntapped event may fire for a TriggeringSource no-op"
+        );
+    }
+
+    /// Fixture for the Kashi-Tribe Warriors shape: a damage source and a
+    /// damage recipient on the battlefield, with distinct incarnations, a
+    /// published combat `DamageDealt` event naming the recipient, and the
+    /// matching `DamageRecord` (same source, source incarnation, amount and
+    /// combat-ness as the event) stamping the recipient's incarnation at
+    /// damage time.
+    fn event_target_damage_fixture() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kashi-Tribe Warriors".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wall of Wood".to_string(),
+            Zone::Battlefield,
+        );
+        // Distinct epochs so the dealer's stamp can never stand in for the
+        // recipient's.
+        for _ in 0..3 {
+            state.objects.get_mut(&source).unwrap().bump_incarnation();
+        }
+        let source_epoch = state.objects[&source].incarnation;
+        let recipient_epoch = state.objects[&recipient].incarnation;
+        assert_ne!(source_epoch, recipient_epoch, "fixture reach guard");
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: source,
+                source_incarnation: Some(source_epoch),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_epoch),
+                amount: 2,
+                is_combat: true,
+                ..Default::default()
+            });
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(recipient),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: Some(source_epoch),
+        });
+        (state, source, recipient)
+    }
+
+    fn event_target_tap_ability(source: ObjectId, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::EventTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn tapped_ids(events: &[GameEvent]) -> Vec<ObjectId> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 608.2k + CR 701.26a: "tap that creature" after "deals combat damage
+    /// to a creature" (Kashi-Tribe Warriors) taps the damage recipient named
+    /// by the trigger event, with no chosen target, and never the source.
+    #[test]
+    fn tap_event_target_with_empty_targets_taps_recipient_not_source() {
+        let (mut state, source, recipient) = event_target_damage_fixture();
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(
+            &mut state,
+            &event_target_tap_ability(source, vec![]),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.objects[&recipient].tapped,
+            "the damage recipient must be tapped"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "the trigger source is not the referent"
+        );
+        assert_eq!(tapped_ids(&events), vec![recipient]);
+    }
+
+    /// CR 400.7: a recipient that left the battlefield and returned before the
+    /// trigger resolved is a new object and is not tapped. The positive
+    /// reach-guard is `tap_event_target_with_empty_targets_taps_recipient_not_source`,
+    /// which shares the fixture.
+    #[test]
+    fn tap_event_target_skips_recipient_that_changed_zones() {
+        let (mut state, source, recipient) = event_target_damage_fixture();
+        let stamped = state.objects[&recipient].incarnation;
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, recipient, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            recipient,
+            Zone::Battlefield,
+            &mut zone_events,
+        );
+        assert_eq!(state.objects[&recipient].zone, Zone::Battlefield);
+        assert_ne!(
+            state.objects[&recipient].incarnation, stamped,
+            "fixture reach guard: the blink must create a new incarnation"
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(
+            &mut state,
+            &event_target_tap_ability(source, vec![]),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            !state.objects[&recipient].tapped,
+            "CR 400.7: the returned permanent is a new object and is not tapped"
+        );
+        assert!(tapped_ids(&events).is_empty(), "{events:?}");
+    }
+
+    /// CR 608.2b: a chosen target keeps priority over the trigger event.
+    #[test]
+    fn tap_event_target_with_chosen_target_ignores_event() {
+        let (mut state, source, recipient) = event_target_damage_fixture();
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(
+            &mut state,
+            &event_target_tap_ability(source, vec![TargetRef::Object(other)]),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(state.objects[&other].tapped, "the chosen target is tapped");
+        assert!(
+            !state.objects[&recipient].tapped,
+            "the event recipient is not tapped when a target was chosen"
+        );
+        assert_eq!(tapped_ids(&events), vec![other]);
+    }
+
+    /// CR 608.2k: an unhydrated `TriggeringSource` ("untap it") with an empty
+    /// slot reads the published trigger event's subject. The paired negative is
+    /// `untap_triggering_source_with_empty_targets_is_noop` (no event).
+    #[test]
+    fn untap_triggering_source_reads_published_event_when_unhydrated() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let tapped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Tapped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+        state.objects.get_mut(&source).unwrap().tapped = true;
+        state.current_trigger_event = Some(GameEvent::PermanentTapped {
+            object_id: tapped,
+            caused_by: None,
+            incarnation: Some(state.objects[&tapped].incarnation),
+        });
+        let ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.objects[&tapped].tapped,
+            "the event's subject must be untapped"
+        );
+        assert!(
+            state.objects[&source].tapped,
+            "the ability source is not the referent"
         );
     }
 
@@ -740,9 +1031,29 @@ mod tests {
         let object = state.objects.get_mut(&faerie).unwrap();
         object.tapped = true;
         object.counters.insert(CounterType::Stun, 2);
+        let duration_id = install_stun_duration(&mut state, faerie);
         let mut events = Vec::new();
 
         resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+
+        let commands = state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+                    && command.counter_type == CounterType::Stun
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count();
+        assert_eq!(
+            commands, 1,
+            "effect untap records exactly one accepted stun removal"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "one remaining stun counter keeps the duration true"
+        );
 
         assert!(state.objects[&faerie].tapped);
         assert_eq!(
@@ -753,6 +1064,126 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == faerie)));
+    }
+
+    #[test]
+    fn effect_untap_blocked_stun_removal_has_no_counter_command() {
+        use crate::types::ability::{ControllerRef, StaticDefinition};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".into(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::CountersCantBeRemoved {
+            counter_type: CounterType::Stun,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::Opponent),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        let faerie = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&faerie).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        let duration_id = install_stun_duration(&mut state, faerie);
+        assert!(
+            crate::game::effects::counters::counter_removal_blocked(
+                &state,
+                faerie,
+                &CounterType::Stun,
+            ),
+            "fixture must activate the counter-removal prohibition"
+        );
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+        assert_eq!(
+            state.objects[&faerie].counters.get(&CounterType::Stun),
+            Some(&1)
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "a prohibited removal cannot expire the duration"
+        );
+        assert!(state.objects[&faerie].tapped);
+        assert!(!events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, .. } if *object_id == faerie)));
+        assert_eq!(state.resolved_rules_journal.entries().iter().filter(|entry| matches!(&entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+        )).count(), 0, "blocked effect untap records no counter command");
+    }
+
+    #[test]
+    fn effect_untap_final_stun_retires_started_duration() {
+        let mut state = GameState::new_two_player(42);
+        let faerie = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stunned Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&faerie).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        let duration_id = install_stun_duration(&mut state, faerie);
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+        assert_eq!(
+            state.objects[&faerie].counters.get(&CounterType::Stun),
+            None
+        );
+        assert_eq!(state.resolved_rules_journal.entries().iter().filter(|entry| matches!(&entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+                    && command.counter_type == CounterType::Stun
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count(), 1);
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.id != duration_id));
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)).count(), 1);
     }
 
     #[test]

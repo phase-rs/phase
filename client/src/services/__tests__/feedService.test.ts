@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("idb-keyval", () => {
   const db = new Map<string, unknown>();
@@ -41,11 +41,19 @@ import {
   STORAGE_KEY_PREFIX,
   ACTIVE_DECK_KEY,
   FEED_SUBSCRIPTIONS_KEY,
+  bumpProfileReplacementGeneration,
 } from "../../constants/storage";
 import { set as idbSet, entries as idbEntries } from "idb-keyval";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import { FEED_REGISTRY } from "../../data/feedRegistry";
 import type { FeedSubscription } from "../../types/feed";
+import {
+  SavedDeckLibraryBusyError,
+  setSavedDeckTxnLockWaitForTests,
+  withSavedDeckLibrary,
+  withSavedDeckLibraryOrSkip,
+} from "../savedDeckTransaction";
+import { installFifoWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 const STARTER_FEED = {
   id: "starter-decks",
@@ -519,6 +527,129 @@ describe("initializeFeeds", () => {
     expect(listSubscriptions()).toHaveLength(1);
     expect(getDeckFeedOrigin("Test Deck")).toBe("starter-decks");
   });
+
+  it("does not resurrect a subscription unsubscribed during the refresh loop's refetch, and does not publish its cache or decks", async () => {
+    await seedFreshBundledSubscriptions([{
+      sourceId: "stale-remote",
+      url: "https://example.com/stale.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    }]);
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("stale.json")) return new Promise((resolve) => { resolveFetch = resolve; });
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(STARTER_FEED) });
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    await unsubscribe("stale-remote");
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: () => Promise.resolve({ ...VALID_FEED, id: "stale-remote", decks: [{ name: "Stale Remote Deck", colors: ["R"], main: [{ count: 4, name: "Shock" }], sideboard: [] }] }),
+    });
+    await initialization;
+
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("stale-remote");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Stale Remote Deck")).toBeNull();
+    expect(getDeckFeedOrigin("Stale Remote Deck")).toBeNull();
+    expect(getCachedFeed("stale-remote")).toBeNull();
+  });
+
+  it("keeps a subscription added during the refresh loop's refetch", async () => {
+    await seedFreshBundledSubscriptions([{
+      sourceId: "stale-remote",
+      url: "https://example.com/stale.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    }]);
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("stale.json")) return new Promise((resolve) => { resolveFetch = resolve; });
+      if (url.includes("other.json")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () => Promise.resolve({ ...VALID_FEED, id: "other-remote", decks: [{ name: "Other Deck", colors: ["U"], main: [{ count: 4, name: "Counterspell" }], sideboard: [] }] }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(STARTER_FEED) });
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    await subscribe("https://example.com/other.json");
+
+    resolveFetch({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({ ...VALID_FEED, id: "stale-remote" }) });
+    await initialization;
+
+    expect(listSubscriptions().map((s) => s.sourceId)).toEqual(
+      expect.arrayContaining(["stale-remote", "other-remote"]),
+    );
+  });
+
+  it("leaves one subscription when the same bundled feed is subscribed concurrently with its own auto-subscribe fetch", async () => {
+    const starter = FEED_REGISTRY.find((source) => source.type === "bundled")!;
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === starter.url) return new Promise((resolve) => { resolveFetch = resolve; });
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(STARTER_FEED) });
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    vi.mocked(fetch).mockImplementationOnce(() =>
+      Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({ ...STARTER_FEED, id: starter.id }) }) as never,
+    );
+    await subscribe(starter.id);
+
+    resolveFetch({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({ ...STARTER_FEED, id: starter.id }) });
+    await initialization;
+
+    expect(listSubscriptions().filter((s) => s.sourceId === starter.id)).toHaveLength(1);
+  });
+
+  it("keeps a subscription added while a bundled feed's auto-subscribe fetch is still pending", async () => {
+    const starter = FEED_REGISTRY.find((source) => source.type === "bundled")!;
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === starter.url) return new Promise((resolve) => { resolveFetch = resolve; });
+      if (url.includes("other.json")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () => Promise.resolve({ ...VALID_FEED, id: "other-remote", decks: [{ name: "Other Deck", colors: ["U"], main: [{ count: 4, name: "Counterspell" }], sideboard: [] }] }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(STARTER_FEED) });
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    await subscribe("https://example.com/other.json");
+
+    resolveFetch({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({ ...STARTER_FEED, id: starter.id }) });
+    await initialization;
+
+    expect(listSubscriptions().some((s) => s.sourceId === "other-remote")).toBe(true);
+  });
 });
 
 describe("subscribe", () => {
@@ -632,7 +763,7 @@ describe("manual feed actions while offline", () => {
     expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(beforeSubscriptions);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBe(beforeDeck);
 
-    unsubscribe("test-feed");
+    await unsubscribe("test-feed");
 
     expect(listSubscriptions()).toEqual([]);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
@@ -648,7 +779,7 @@ describe("unsubscribe", () => {
     // Verify decks exist
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
 
-    unsubscribe("test-feed");
+    await unsubscribe("test-feed");
 
     // Decks removed
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
@@ -669,7 +800,7 @@ describe("unsubscribe", () => {
     await subscribe("https://example.com/feed.json");
     localStorage.setItem(ACTIVE_DECK_KEY, "Test Deck");
 
-    unsubscribe("test-feed");
+    await unsubscribe("test-feed");
 
     expect(localStorage.getItem(ACTIVE_DECK_KEY)).toBeNull();
   });
@@ -719,6 +850,638 @@ describe("refreshFeed", () => {
     const subs = listSubscriptions();
     expect(subs[0].error).toBeTruthy();
   });
+
+  it("keeps a subscription added while refreshFeed's fetch is still pending", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("feed.json") && !url.includes("other")) {
+        return new Promise((resolve) => {
+          resolveFetch = resolve;
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () => Promise.resolve(makeMtgGoldfishFeed("other-feed", "Modern")),
+      });
+    });
+
+    const refreshing = refreshFeed("test-feed");
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    await subscribe("https://example.com/other-feed.json");
+    expect(listSubscriptions().map((s) => s.sourceId)).toContain("other-feed");
+
+    resolveFetch({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(VALID_FEED) });
+    await refreshing;
+
+    // Neither subscription was dropped by refreshFeed writing back a snapshot of the
+    // subscription list taken before subscribe() committed its own entry.
+    expect(listSubscriptions().map((s) => s.sourceId)).toEqual(
+      expect.arrayContaining(["test-feed", "other-feed"]),
+    );
+  });
+
+  it("does not resurrect a subscription unsubscribed while its fetch was pending, and does not publish its decks", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+
+    let resolveFetch!: (v: unknown) => void;
+    global.fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+
+    const refreshing = refreshFeed("test-feed");
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+
+    await unsubscribe("test-feed");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+
+    const updatedFeed = {
+      ...VALID_FEED,
+      decks: [{ name: "Resurrected Deck", colors: ["R"], main: [{ count: 4, name: "Shock" }], sideboard: [] }],
+    };
+    resolveFetch({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve(updatedFeed) });
+    await refreshing;
+
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("test-feed");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Resurrected Deck")).toBeNull();
+  });
+
+  it("does not resurrect a subscription unsubscribed while its fetch was pending, when the fetch then rejects", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+
+    let rejectFetch!: (e: unknown) => void;
+    global.fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    );
+
+    const refreshing = refreshFeed("test-feed").catch((err: unknown) => err);
+    await vi.waitFor(() => expect(rejectFetch).toBeDefined());
+
+    await unsubscribe("test-feed");
+    rejectFetch(new Error("network down"));
+    await refreshing;
+
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("test-feed");
+  });
+});
+
+describe("cross-tab saved-deck transactions", () => {
+  beforeEach(() => {
+    installFifoWebLocks();
+  });
+  afterEach(() => {
+    uninstallWebLocks();
+  });
+
+  async function heldLock(): Promise<{ release: () => void; holder: Promise<void> }> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = withSavedDeckLibrary(() => held);
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+    return { release, holder };
+  }
+
+  async function pendingLocks(count: number): Promise<void> {
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).pending).toHaveLength(count);
+    });
+  }
+
+  it("refreshFeed refused by a busy library does not record a feed error", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+    await expect(refreshFeed("test-feed")).rejects.toBeInstanceOf(SavedDeckLibraryBusyError);
+    expect(listSubscriptions()[0].error).toBeUndefined();
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    release();
+    await holder;
+  });
+
+  it("refreshAllFeeds stops at a busy library", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    mockFetch(makeMtgGoldfishFeed("second-feed", "Modern"));
+    await subscribe("https://example.com/second-feed.json");
+
+    const fetchSpy = vi.spyOn(global, "fetch");
+    fetchSpy.mockClear();
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+    await expect(refreshAllFeeds()).rejects.toBeInstanceOf(SavedDeckLibraryBusyError);
+    // Only the first subscription's fetch (from refreshFeed, before the busy rejection) ran.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    release();
+    await holder;
+  });
+
+  it("initializeFeeds skips a busy library and syncs on its next run", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    localStorage.removeItem(STORAGE_KEY_PREFIX + "Test Deck");
+    localStorage.removeItem(STORAGE_KEY_PREFIX + "Another Deck");
+
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+    await initializeFeeds({ allowRefresh: false });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+    release();
+    await holder;
+
+    await initializeFeeds({ allowRefresh: false });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+  });
+
+  function bundledSubs(): FeedSubscription[] {
+    return FEED_REGISTRY.filter((source) => source.type === "bundled").map((source) => ({
+      sourceId: source.id,
+      url: source.url,
+      type: source.type,
+      subscribedAt: 1,
+      lastRefreshedAt: Date.now(),
+      lastVersion: 1,
+    }));
+  }
+
+  it("aborts a cached-only sync without writing the deck when the abort lands while it waits for the saved-deck lock", async () => {
+    await setCachedFeed("cached", { ...VALID_FEED, id: "cached" });
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+      sourceId: "cached", url: "https://example.com/cached.json", type: "remote",
+      subscribedAt: 1, lastRefreshedAt: Date.now(), lastVersion: 1,
+    }]));
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ allowRefresh: false, signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+  });
+
+  it("aborts a first-run bundled feed fetch without writing the deck or its subscription when the abort lands while it waits for the saved-deck lock", async () => {
+    mockFetchByUrl(ALL_BUNDLED_FEEDS);
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(listSubscriptions()).toEqual([]);
+  });
+
+  it("aborts a fresh cached subscription sync without writing the deck when the abort lands while it waits for the saved-deck lock", async () => {
+    const cached = { ...VALID_FEED, id: "fresh-remote" };
+    await setCachedFeed("fresh-remote", cached);
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([
+      { sourceId: "fresh-remote", url: "https://example.com/fresh.json", type: "remote",
+        subscribedAt: 1, lastRefreshedAt: Date.now(), lastVersion: 1 },
+      ...bundledSubs(),
+    ]));
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+  });
+
+  it("aborts a refetched subscription sync without writing the deck when the abort lands while it waits for the saved-deck lock", async () => {
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([
+      { sourceId: "stale-remote", url: "https://example.com/stale.json", type: "remote",
+        subscribedAt: 1, lastRefreshedAt: 0, lastVersion: 1 },
+      ...bundledSubs(),
+    ]));
+    mockFetchByUrl({ "stale.json": VALID_FEED });
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+  });
+
+  it("aborts a cached fallback sync after a failed refetch without writing the deck when the abort lands while it waits for the saved-deck lock", async () => {
+    const cached = { ...VALID_FEED, id: "cached-remote" };
+    await setCachedFeed("cached-remote", cached);
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([
+      { sourceId: "cached-remote", url: "https://example.com/cached-remote.json", type: "remote",
+        subscribedAt: 1, lastRefreshedAt: 0, lastVersion: 1 },
+      ...bundledSubs(),
+    ]));
+    mockFetch({}, false);
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+  });
+
+  it("skips a feed sync superseded by a profile replacement that lands while it waits for the saved-deck lock", async () => {
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([
+      { sourceId: "stale-remote", url: "https://example.com/stale.json", type: "remote",
+        subscribedAt: 1, lastRefreshedAt: 0, lastVersion: 0 },
+      ...bundledSubs(),
+    ]));
+    mockFetchByUrl({
+      "stale.json": {
+        ...VALID_FEED,
+        id: "stale-remote",
+        decks: [{ ...VALID_FEED.decks[0], name: "Stale Remote Deck" }],
+      },
+    });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const restoredSubs = bundledSubs();
+    // Shaped like cloudSyncStore.ts::applyRemote: holds the lock, then overwrites the
+    // subscription list and bumps the profile-replacement generation from inside its body.
+    const applyHolder = withSavedDeckLibraryOrSkip((txn) => {
+      return held.then(() => {
+        localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(restoredSubs));
+        bumpProfileReplacementGeneration(txn);
+      });
+    }, "run-unguarded");
+    await vi.waitFor(async () => expect((await navigator.locks.query()).held).toHaveLength(1));
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    release();
+    await applyHolder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Stale Remote Deck")).toBeNull();
+    const subs = JSON.parse(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)!) as FeedSubscription[];
+    expect(subs.map((s) => s.sourceId)).not.toContain("stale-remote");
+  });
+
+  const OLD_CACHED_FEED = {
+    id: "stale-remote",
+    name: "Stale Remote",
+    version: 1,
+    updated: "2026-01-01T00:00:00Z",
+    decks: [{ name: "Old Deck", colors: ["R"], main: [{ count: 1, name: "Lightning Bolt" }], sideboard: [] }],
+  };
+  const NEWER_FEED = {
+    id: "stale-remote",
+    name: "Stale Remote",
+    version: 2,
+    updated: "2026-03-20T00:00:00Z",
+    decks: [{ name: "New Deck", colors: ["U"], main: [{ count: 1, name: "Counterspell" }], sideboard: [] }],
+  };
+
+  async function seedRefetch() {
+    await setCachedFeed("stale-remote", OLD_CACHED_FEED);
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([
+      { sourceId: "stale-remote", url: "https://example.com/stale.json", type: "remote",
+        subscribedAt: 1, lastRefreshedAt: 0, lastVersion: 1 },
+      ...bundledSubs(),
+    ]));
+    mockFetchByUrl({ "stale.json": NEWER_FEED });
+  }
+
+  afterEach(() => {
+    setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+  });
+
+  it("a first-run bundled feed aborted while it waits for the saved-deck lock publishes neither its cache, decks nor subscription", async () => {
+    mockFetchByUrl(ALL_BUNDLED_FEEDS);
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("starter-decks")).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(listSubscriptions()).toEqual([]);
+  });
+
+  it("a refetched subscription aborted while it waits for the saved-deck lock keeps its previous cache and refresh metadata", async () => {
+    await seedRefetch();
+    const { release, holder } = await heldLock();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    controller.abort();
+    release();
+    await holder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("stale-remote")).toMatchObject({ version: 1 });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "New Deck")).toBeNull();
+    const subs = listSubscriptions();
+    expect(subs.find((s) => s.sourceId === "stale-remote")?.lastVersion).toBe(1);
+  });
+
+  it("a refetched subscription superseded by a profile replacement while it waits keeps its previous cache", async () => {
+    await seedRefetch();
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const restoredSubs = bundledSubs();
+    // Shaped like the existing profile-replacement test: holds the lock, then overwrites the
+    // subscription list and bumps the profile-replacement generation from inside its body.
+    const applyHolder = withSavedDeckLibraryOrSkip((txn) => {
+      return held.then(() => {
+        localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(restoredSubs));
+        bumpProfileReplacementGeneration(txn);
+      });
+    }, "run-unguarded");
+    await vi.waitFor(async () => expect((await navigator.locks.query()).held).toHaveLength(1));
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(async () => expect((await navigator.locks.query()).pending).toHaveLength(1));
+
+    release();
+    await applyHolder;
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("stale-remote")).toMatchObject({ version: 1 });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "New Deck")).toBeNull();
+  });
+
+  it("a first-run bundled feed refused by a busy library publishes neither its cache, decks nor subscription", async () => {
+    mockFetchByUrl(ALL_BUNDLED_FEEDS);
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+
+    await initializeFeeds();
+
+    release();
+    await holder;
+
+    expect(getCachedFeed("starter-decks")).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(listSubscriptions()).toEqual([]);
+  });
+
+  it("a refetched subscription refused by a busy library keeps its previous cache, decks and refresh metadata", async () => {
+    await seedRefetch();
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+
+    await initializeFeeds();
+
+    release();
+    await holder;
+
+    expect(getCachedFeed("stale-remote")).toMatchObject({ version: 1 });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "New Deck")).toBeNull();
+    const subs = listSubscriptions();
+    expect(subs.find((s) => s.sourceId === "stale-remote")?.lastVersion).toBe(1);
+  });
+
+  it("publishes a first-run feed's decks and subscription without holding the saved-deck lock until its cache write settles", async () => {
+    mockFetchByUrl(ALL_BUNDLED_FEEDS);
+    vi.mocked(idbSet).mockClear();
+    const persisting = deferred<void>();
+    // Defer only the feed-cache write; the barrier's own "generation" write must keep the real
+    // implementation.
+    vi.mocked(idbSet).mockImplementation((key: unknown, value: unknown) => {
+      if (key === "starter-decks") return persisting.promise;
+      getIdbDb().set(key as string, value);
+      return Promise.resolve();
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() =>
+      expect(vi.mocked(idbSet)).toHaveBeenCalledWith("starter-decks", expect.anything(), expect.anything()),
+    );
+
+    await expect(withSavedDeckLibrary(() => "next")).resolves.toBe("next");
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(listSubscriptions().map((s) => s.sourceId)).toContain("starter-decks");
+
+    persisting.resolve();
+    await initialization;
+  });
+
+  it("subscribe refused by a busy library leaves no cached feed or subscription", async () => {
+    mockFetch(VALID_FEED);
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+
+    await expect(subscribe("https://example.com/feed.json")).rejects.toBeInstanceOf(SavedDeckLibraryBusyError);
+
+    release();
+    await holder;
+
+    expect(getCachedFeed("test-feed")).toBeNull();
+    expect(listSubscriptions()).toEqual([]);
+  });
+
+  it("refreshFeed refused by a busy library keeps the previous cached feed and refresh metadata", async () => {
+    await seedRefetch();
+    setSavedDeckTxnLockWaitForTests(20);
+    const { release, holder } = await heldLock();
+
+    await expect(refreshFeed("stale-remote")).rejects.toBeInstanceOf(SavedDeckLibraryBusyError);
+
+    release();
+    await holder;
+
+    expect(getCachedFeed("stale-remote")).toMatchObject({ version: 1 });
+    const subs = listSubscriptions();
+    expect(subs.find((s) => s.sourceId === "stale-remote")?.lastVersion).toBe(1);
+  });
+
+  it("refreshFeed with the library free publishes the refetched feed and its decks", async () => {
+    await seedRefetch();
+
+    await refreshFeed("stale-remote");
+
+    expect(getCachedFeed("stale-remote")).toMatchObject({ version: 2 });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "New Deck")).not.toBeNull();
+  });
+
+  it("subscribe records the new subscription before its cache write to IndexedDB settles", async () => {
+    mockFetch(VALID_FEED);
+    vi.mocked(idbSet).mockClear();
+    const persisting = deferred<void>();
+    vi.mocked(idbSet).mockImplementation((key: unknown, value: unknown) => {
+      if (key === "test-feed") return persisting.promise;
+      getIdbDb().set(key as string, value);
+      return Promise.resolve();
+    });
+
+    const subscribing = subscribe("https://example.com/feed.json");
+    await vi.waitFor(() =>
+      expect(vi.mocked(idbSet)).toHaveBeenCalledWith("test-feed", expect.anything(), expect.anything()),
+    );
+
+    expect(listSubscriptions().map((s) => s.sourceId)).toContain("test-feed");
+
+    persisting.resolve();
+    await subscribing;
+  });
+
+  it("refreshFeed updates its refresh metadata before its cache write to IndexedDB settles", async () => {
+    await seedRefetch();
+    vi.mocked(idbSet).mockClear();
+    const persisting = deferred<void>();
+    vi.mocked(idbSet).mockImplementation((key: unknown, value: unknown) => {
+      if (key === "stale-remote") return persisting.promise;
+      getIdbDb().set(key as string, value);
+      return Promise.resolve();
+    });
+
+    const refreshing = refreshFeed("stale-remote");
+    await vi.waitFor(() =>
+      expect(vi.mocked(idbSet)).toHaveBeenCalledWith("stale-remote", expect.anything(), expect.anything()),
+    );
+
+    expect(listSubscriptions().find((s) => s.sourceId === "stale-remote")?.lastVersion).toBe(2);
+
+    persisting.resolve();
+    await refreshing;
+  });
+
+  it("does not publish a cached-only allowRefresh:false sync's decks for a feed unsubscribed while the sync is queued behind a busy library", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+
+    const { release, holder } = await heldLock();
+    const unsubscribing = unsubscribe("test-feed");
+    await pendingLocks(1);
+
+    const initialization = initializeFeeds({ allowRefresh: false });
+    await pendingLocks(2);
+
+    release();
+    await holder;
+    await unsubscribing;
+    await initialization;
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBeNull();
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("test-feed");
+  });
+
+  it("does not publish a fresh cached remote sync's decks for a feed unsubscribed while the sync is queued behind a busy library", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    const subs = JSON.parse(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)!) as FeedSubscription[];
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([...subs, ...bundledSubs()]));
+    // The bundled feeds are already-subscribed, so their own refetch below must not resolve to
+    // the "Test Deck" / "Another Deck" fixture.
+    mockFetchByUrl({
+      ...ALL_BUNDLED_FEEDS,
+      "starter-decks": { ...STARTER_FEED, decks: [{ ...STARTER_FEED.decks[0], name: "Bundled Starter Deck" }] },
+    });
+
+    const { release, holder } = await heldLock();
+    const unsubscribing = unsubscribe("test-feed");
+    await pendingLocks(1);
+
+    const initialization = initializeFeeds();
+    await pendingLocks(2);
+
+    release();
+    await holder;
+    await unsubscribing;
+    await initialization;
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBeNull();
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("test-feed");
+  });
+
+  it("does not publish a cached fallback's decks for a feed unsubscribed while its failed-refetch sync is queued behind a busy library", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    const subs = JSON.parse(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)!) as FeedSubscription[];
+    subs[0].lastRefreshedAt = 0;
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([...subs, ...bundledSubs()]));
+
+    // The bundled feeds are already-subscribed, so their own refetch below must not resolve to
+    // the "Test Deck" / "Another Deck" fixture.
+    const bundledFeeds: Record<string, unknown> = {
+      ...ALL_BUNDLED_FEEDS,
+      "starter-decks": { ...STARTER_FEED, decks: [{ ...STARTER_FEED.decks[0], name: "Bundled Starter Deck" }] },
+    };
+    let rejectFetch!: (e: unknown) => void;
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("feed.json")) {
+        return new Promise((_resolve, reject) => {
+          rejectFetch = reject;
+        });
+      }
+      const data = Object.entries(bundledFeeds).find(([pattern]) => url.includes(pattern))?.[1];
+      return Promise.resolve({ ok: !!data, status: data ? 200 : 404, statusText: data ? "OK" : "Not Found", json: () => Promise.resolve(data ?? {}) });
+    });
+
+    const initialization = initializeFeeds();
+    await vi.waitFor(() => expect(rejectFetch).toBeDefined());
+
+    const { release, holder } = await heldLock();
+    const unsubscribing = unsubscribe("test-feed");
+    await pendingLocks(1);
+
+    rejectFetch(new Error("network down"));
+    await pendingLocks(2);
+
+    release();
+    await holder;
+    await unsubscribing;
+    await initialization;
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBeNull();
+    expect(listSubscriptions().map((s) => s.sourceId)).not.toContain("test-feed");
+  });
 });
 
 describe("adoptFeedDeck", () => {
@@ -728,7 +1491,7 @@ describe("adoptFeedDeck", () => {
 
     expect(getDeckFeedOrigin("Test Deck")).toBe("test-feed");
 
-    adoptFeedDeck("Test Deck");
+    await adoptFeedDeck("Test Deck");
 
     expect(getDeckFeedOrigin("Test Deck")).toBeNull();
     // Deck data still exists
@@ -739,7 +1502,7 @@ describe("adoptFeedDeck", () => {
     mockFetch(VALID_FEED);
     await subscribe("https://example.com/feed.json");
 
-    const result = adoptFeedDeck("Test Deck", "My Copy");
+    const result = await adoptFeedDeck("Test Deck", "My Copy");
 
     expect(result).toBe("My Copy");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "My Copy")).not.toBeNull();

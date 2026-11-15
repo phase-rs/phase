@@ -16,6 +16,7 @@ docs/superpowers/
 # MTG Comprehensive Rules — © Wizards of the Coast, not redistributed here.
 # Run ./scripts/fetch-comp-rules.sh to download a local copy for dev reference.
 docs/MagicCompRules.txt
+docs/MagicCompRules.txt.tmp.*
 
 # WASM output (generated — keep .d.ts for CI type-checking)
 client/src/wasm/*.js
@@ -28,9 +29,13 @@ client/src/wasm/*.wasm.d.ts
 .claude/projects/
 .pr-review/
 
+# Generated protocol constants
+/client/src/generated/protocol-versions.ts
+
 # Build output
 client/dist/
 client/bootstrap/dist/
+client/storybook-static/
 
 # Locally-generated SSL certs (./scripts/setup-ssl.sh) — per-machine, never committed.
 certs/

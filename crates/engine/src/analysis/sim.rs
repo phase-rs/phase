@@ -16,9 +16,8 @@
 //! has *both* halves populated — the measurement a CR 732.2a net-progress
 //! detector (PR-2) consumes.
 //!
-//! It is **purely offline / additive**: it only *observes* the runner. It never
-//! mutates game state, never alters resolution, SBAs, or the reducer, and emits
-//! no game events of its own. The detector hook itself is PR-2.
+//! It drives the runner only through [`LoopProbe::act`], reading each action's events and
+//! the boundary snapshots, and emits no game events of its own.
 
 use crate::analysis::resource::{ResourceVector, TriggerKind};
 use crate::game::engine::EngineError;
@@ -158,9 +157,8 @@ pub fn accumulate_events(acc: &mut ResourceVector, events: &[GameEvent]) {
 /// iteration* — already a per-iteration quantity — so they are taken verbatim, not
 /// differenced. (Differencing them would cancel a steady per-cycle gain to zero.)
 ///
-/// CR 732.2a: this is exactly the per-cycle measurement a net-progress shortcut
-/// detector reads. The probe itself takes no game decisions and changes no game
-/// state; it only observes the runner.
+/// The probe takes no game decisions: it applies only the actions its caller passes to
+/// [`LoopProbe::act`].
 pub struct LoopProbe<'r> {
     runner: &'r mut GameRunner,
     /// State-readable resources at the most recent iteration boundary (event-fed
@@ -257,8 +255,8 @@ mod tests {
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::EffectKind;
     use crate::types::game_state::{CastPaymentMode, WaitingFor, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::phase::Phase;
+    use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
+    use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
 
     fn zone_change(from: Option<Zone>, to: Zone, core_types: Vec<CoreType>) -> GameEvent {
@@ -286,11 +284,13 @@ mod tests {
                 amount: 2,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(9), 3)],
                 total_damage: 3,
+                source_incarnations: vec![],
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(20),
@@ -588,7 +588,7 @@ mod tests {
     /// arm counted, so this fixture is non-vacuous: against the deleted code
     /// `delta.combat_phases` would be 1. With the fix it is 0, because a natural
     /// combat is not an *extra* combat (the state-readable snapshot only counts
-    /// `combat_phases_started_this_turn - 1`, i.e. zero extra combats here).
+    /// the tally's `count(Phase::BeginCombat) - 1`, i.e. zero extra combats here).
     #[test]
     fn natural_begin_combat_is_not_extra_combat() {
         let mut scenario = GameScenario::new();
@@ -732,7 +732,7 @@ mod tests {
     }
 
     /// P2 — the combat-phase axis is fed by `snapshot` from `state.extra_phases`:
-    /// one queued `ExtraPhase{phase: BeginCombat}` (anchor irrelevant) is counted
+    /// one queued `ExtraPhase{segment: Phase(Combat)}` (anchor irrelevant) is counted
     /// as one extra combat, with the natural combat tally at its baseline (1, the
     /// single natural combat already entered).
     #[test]
@@ -741,13 +741,14 @@ mod tests {
 
         let mut state = GameState::new_two_player(7);
         // CR 506.1: the one natural combat already entered this turn.
-        state.combat_phases_started_this_turn = 1;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         // CR 500.8: one queued extra combat (Aurelia-style "after this phase").
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -766,13 +767,15 @@ mod tests {
         use crate::types::game_state::{ExtraPhase, GameState};
 
         let mut state = GameState::new_two_player(7);
-        state.combat_phases_started_this_turn = 1; // one natural combat
+        // one natural combat
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         for _ in 0..3 {
             state.extra_phases.push(ExtraPhase {
                 anchor: Phase::EndCombat,
-                phase: Phase::BeginCombat,
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
                 attacker_restriction: None,
                 attacker_restriction_source: None,
+                id: ExtraPhaseId::default(),
             });
         }
 
@@ -796,7 +799,8 @@ mod tests {
         use crate::types::game_state::GameState;
 
         let mut state = GameState::new_two_player(7);
-        state.combat_phases_started_this_turn = 1; // only the natural combat
+        // only the natural combat
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         debug_assert!(state.extra_phases.is_empty());
 
         let v = ResourceVector::snapshot(&state);
@@ -814,12 +818,13 @@ mod tests {
         use crate::types::game_state::{ExtraPhase, GameState};
 
         let mut state = GameState::new_two_player(7);
-        state.combat_phases_started_this_turn = 1;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::Upkeep,
-            phase: Phase::Upkeep,
+            segment: TurnSegment::Step(Phase::Upkeep),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -841,7 +846,9 @@ mod tests {
         let mut state = GameState::new_two_player(7);
         // One natural + one extra combat ENTERED; the extra phase was removed from
         // the queue when `advance_phase` consumed it (turns.rs:58 before enter).
-        state.combat_phases_started_this_turn = 2;
+        for _ in 0..2 {
+            state.steps_started_this_turn.record(Phase::BeginCombat);
+        }
         debug_assert!(state.extra_phases.is_empty());
 
         let v = ResourceVector::snapshot(&state);

@@ -12,7 +12,10 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardBackImage: vi.fn(() => ({ src: "installed-back.png", isLoading: false })),
   useCardImage: vi.fn(),
 }));
-vi.mock("../../../hooks/useEngineCardData.ts", () => ({ useEngineCardData: () => null }));
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useEngineCardData: () => null,
+  useLocalizedCardName: (name: string | null) => name,
+}));
 
 const mockUseCardImage = vi.mocked(useCardImage);
 const mockUseCardBackImage = vi.mocked(useCardBackImage);

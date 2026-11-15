@@ -75,43 +75,21 @@ pub async fn admin_delete_draft(
     if !is_valid_draft_code(&code) {
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
     }
-    let mut drafts = app_state.draft_sessions.lock().await;
-    match drafts.remove_draft(&code) {
+    let removed = app_state.draft_sessions.lock().await.remove_draft(&code);
+    match removed {
         Some(session) => {
-            drop(drafts);
-            // Remove active game sessions spawned by this draft (Pitfall 4 mitigation)
-            let match_codes: Vec<String> = session.active_matches.values().cloned().collect();
-            if !match_codes.is_empty() {
-                let mut sessions = app_state.sessions.lock().await;
-                for game_code in &match_codes {
-                    sessions.remove_game(game_code);
-                }
-            }
-            // A destroyed subject leaves no orphaned routing behind: the
-            // abandon teardown clears connections, spectators and the lobby
-            // entry, and a force-delete destroys the same kinds of subject.
-            {
-                let mut conns = app_state.connections.lock().await;
-                conns.remove(&code);
-                for game_code in &match_codes {
-                    conns.remove(game_code);
-                }
-            }
-            app_state.draft_spectators.lock().await.remove(&code);
-            {
-                let mut specs = app_state.game_spectators.lock().await;
-                for game_code in &match_codes {
-                    specs.remove(game_code);
-                }
-            }
-            crate::delist_and_announce(
+            crate::teardown_removed_draft(
+                &app_state.sessions,
+                &app_state.connections,
+                &app_state.draft_spectators,
+                &app_state.game_spectators,
                 &app_state.lobby,
                 &app_state.lobby_subscribers,
-                std::iter::once(code.as_str()),
+                &app_state.game_db,
+                &code,
+                session,
             )
             .await;
-            // Delete from persistence
-            let _ = app_state.game_db.delete_draft_session(&code);
             info!(draft = %code, "admin force-deleted draft session");
             (StatusCode::OK, "Deleted").into_response()
         }
@@ -259,7 +237,7 @@ mod tests {
     use lobby_broker::{Broker, BrokerEnv};
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
 
     use crate::{draft_pools, persistence, AppState, PlayerId, ServerContext, ServerMode};
 
@@ -278,6 +256,9 @@ mod tests {
 
     fn draft_config() -> DraftConfig {
         DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -341,7 +322,7 @@ mod tests {
             draft_code
         };
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         state.connections.lock().await.insert(
             draft_code.clone(),
             HashMap::from([(PlayerId(0), tx.clone())]),
@@ -384,6 +365,17 @@ mod tests {
             .contains_key(&draft_code));
         assert!(state.game_spectators.lock().await.contains_key(&match_code));
         assert!(state.lobby.lock().await.lobby_mut().has_game(&draft_code));
+        let snapshot = {
+            let mut drafts = state.draft_sessions.lock().await;
+            drafts.handle_disconnect(&draft_code, 0, std::time::Instant::now());
+            assert!(drafts.reconnect.is_disconnected(&draft_code, PlayerId(0)));
+            drafts.sessions[&draft_code].to_persisted()
+        };
+        state
+            .game_db
+            .save_draft_session(&draft_code, &serde_json::to_string(&snapshot).unwrap())
+            .unwrap();
+        assert!(draft_rows(&state).contains(&draft_code));
 
         let response = super::admin_delete_draft(State(state.clone()), Path(draft_code.clone()))
             .await
@@ -405,5 +397,228 @@ mod tests {
             .contains_key(&draft_code));
         assert!(!state.game_spectators.lock().await.contains_key(&match_code));
         assert!(!state.lobby.lock().await.lobby_mut().has_game(&draft_code));
+        assert!(!draft_rows(&state).contains(&draft_code));
+        assert!(!state
+            .draft_sessions
+            .lock()
+            .await
+            .reconnect
+            .is_disconnected(&draft_code, PlayerId(0)));
+    }
+
+    fn draft_rows(state: &AppState) -> Vec<String> {
+        state
+            .game_db
+            .load_all_drafts()
+            .expect("load rows")
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect()
+    }
+
+    /// Persists queued behind a busy blocking pool land after a force-delete
+    /// and a reap; neither removed pod's row may come back.
+    #[test]
+    fn a_queued_persist_cannot_resurrect_a_removed_draft() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let state = app_state(&temp_dir);
+            let (deleted, kept, reaped) = {
+                let mut drafts = state.draft_sessions.lock().await;
+                let (a, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                let (b, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                let (c, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
+                drafts.reconnect.grace_period = std::time::Duration::ZERO;
+                drafts.handle_disconnect(&c, 0, std::time::Instant::now());
+                (a, b, c)
+            };
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                gate_rx.recv().unwrap();
+            });
+            started_rx.recv().unwrap();
+            for code in [&deleted, &kept, &reaped] {
+                crate::persist_draft_session_async(&state.game_db, code, &state.draft_sessions)
+                    .await;
+            }
+            let response = super::admin_delete_draft(State(state.clone()), Path(deleted.clone()))
+                .await
+                .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            crate::sweep_draft_seat_expiry(
+                &state.draft_sessions,
+                &state.sessions,
+                &state.connections,
+                &state.draft_spectators,
+                &state.game_spectators,
+                &state.lobby,
+                &state.lobby_subscribers,
+                &state.game_db,
+            )
+            .await;
+            assert!(!state
+                .draft_sessions
+                .lock()
+                .await
+                .sessions
+                .contains_key(&reaped));
+            gate_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+
+            let rows = draft_rows(&state);
+            assert!(rows.contains(&kept), "the queued save ran");
+            assert!(!rows.contains(&deleted));
+            assert!(!rows.contains(&reaped));
+        });
+    }
+
+    /// Contract with the P2P draft host client (`hostDraftCode` in
+    /// client/src/adapter/p2p-draft-host.ts). `G37RUJ` is what the client's
+    /// code draw yields for the pinned draw 0xbbbbbbbb
+    /// (p2pDraftHostPublicCode.test.ts asserts the same literal); `draft-bbbbbbbb`
+    /// is the `draft-` + 8 hex identifier the host sent before that fix. The
+    /// production handler must store the first and reject the second before
+    /// storage (HTTP 400).
+    #[tokio::test]
+    async fn p2p_backup_store_accepts_client_draft_code_and_rejects_legacy_shape() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let request = |draft_code: &str| super::P2pBackupRequest {
+            draft_code: draft_code.to_string(),
+            host_peer_id: "host-peer-abc".to_string(),
+            snapshot_json: r#"{"draftStarted":true}"#.to_string(),
+        };
+
+        let accepted = super::p2p_backup_store(State(state.clone()), axum::Json(request("G37RUJ")))
+            .await
+            .into_response();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+        assert!(state
+            .game_db
+            .load_p2p_backup("G37RUJ")
+            .expect("load")
+            .is_some());
+
+        let rejected =
+            super::p2p_backup_store(State(state.clone()), axum::Json(request("draft-bbbbbbbb")))
+                .await
+                .into_response();
+        assert_eq!(rejected.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state
+            .game_db
+            .load_p2p_backup("draft-bbbbbbbb")
+            .expect("load")
+            .is_none());
+    }
+
+    /// A submitted deck is private to its seat until its match launches it, and
+    /// the backup row is readable by any pod guest who can derive the host peer
+    /// id. Posts a snapshot that carries EVERY retained copy of a deck (as an
+    /// older or hostile client would send it, unredacted) through the production
+    /// store handler, then reads it back through the production GET handler:
+    /// neither the stored row nor the response may contain a deck marker. The
+    /// client projection half is `p2pDraftHostBackupDeckPrivacy.test.ts`.
+    /// Synthetic marker card names; no printed card's text is involved.
+    #[tokio::test]
+    async fn p2p_backup_get_never_returns_submitted_decks() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let markers = [
+            "Marker Submitted",
+            "Marker Sideboard",
+            "Marker Launch",
+            "Marker Guest Launch",
+            "Marker Bo3",
+            "Marker Command",
+            "Marker Workspace",
+            "Marker Fingerprint",
+            "dmarker0001",
+            "dmarker0002",
+            "dmarker0003",
+        ];
+        let session = serde_json::json!({
+            "submitted_decks": { "1": { "seat": 1, "main_deck": [markers[0]], "commanders": [] } },
+            "pools": [[]],
+        });
+        let launch_decks = serde_json::json!({
+            "player": { "main_deck": [markers[2]], "sideboard": [markers[1]], "commander": [] },
+            "opponent": { "main_deck": [markers[2]], "sideboard": [], "commander": [] },
+            "ai_decks": [],
+        });
+        let snapshot = serde_json::json!({
+            "draftStarted": true,
+            "draftSessionJson": session.to_string(),
+            "deckSubmissionReceipts": [
+                { "seat": 1, "submissionId": "s1", "payloadFingerprint": markers[7] }
+            ],
+            "matchLaunches": [
+                { "matchId": "m1", "seat": 0, "launch": { "type": "HumanHost", "deckPayload": launch_decks } },
+                { "matchId": "m1", "seat": 1, "launch": { "type": "HumanGuest", "localDeck": { "main_deck": [markers[3]] } } }
+            ],
+            "bo3State": [
+                { "matchId": "m1", "gameNumber": 1, "decks": [{ "seat": 1, "main": [{ "name": markers[4], "count": 4 }], "sideboard": [] }] }
+            ],
+            "intergameCommands": [{
+                "commandId": "c1",
+                "payload": { "type": "SubmitSideboard", "main": [{ "name": markers[5], "count": 4 }], "sideboard": [] },
+                "launchPayload": { "deckPayload": launch_decks },
+                "launchDigest": markers[8],
+                "payloadDigest": markers[9],
+            }],
+            "launchDigests": [{ "matchId": "m1", "seat": 1, "digest": markers[10] }],
+            "perSeatWorkspaceSnapshots": { "1": { "virtualBasics": [{ "name": markers[6] }] } },
+        });
+
+        let stored = super::p2p_backup_store(
+            State(state.clone()),
+            axum::Json(super::P2pBackupRequest {
+                draft_code: "G37RUJ".to_string(),
+                host_peer_id: "host-peer-abc".to_string(),
+                snapshot_json: snapshot.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), axum::http::StatusCode::OK);
+
+        let (_, row, _) = state
+            .game_db
+            .load_p2p_backup("G37RUJ")
+            .expect("load")
+            .expect("row stored");
+        for marker in markers {
+            assert!(!row.contains(marker), "stored row leaks {marker}");
+        }
+
+        // A pod guest knows the host peer id and the draft code.
+        let response = super::p2p_backup_get(
+            State(state.clone()),
+            Path("G37RUJ".to_string()),
+            axum::extract::Query(super::P2pBackupGetQuery {
+                host_peer_id: "host-peer-abc".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8");
+        // Reach guard: a real snapshot came back.
+        assert!(body.contains("draftStarted"));
+        for marker in markers {
+            assert!(!body.contains(marker), "GET response leaks {marker}");
+        }
+        assert!(!body.contains("payloadFingerprint"));
     }
 }

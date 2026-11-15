@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DialogHost } from "../DialogHost.tsx";
+import { DialogHost, isClickThroughWaitingFor } from "../DialogHost.tsx";
 import { DialogShell } from "../DialogShell.tsx";
 import { GAME_Z_LAYER } from "../../../constants/ui.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
@@ -326,6 +326,45 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
+  it("leaves single-pick object selection click-through and keeps multi-pick selection interactive", () => {
+    // CR 608.2d: a single-pick resolution choice (`max: 1`) is a board pick, so the
+    // host must let board and HUD clicks through. A multi-pick selection renders
+    // ProliferateModal, whose toggles and Confirm need the host's pointer events.
+    const selection = (max: number | undefined): WaitingFor => ({
+      type: "ChooseObjectsSelection",
+      data: {
+        player: 0,
+        eligible: [{ Object: 7 }, { Player: 1 }],
+        min: 1,
+        ...(max === undefined ? {} : { max }),
+      },
+    });
+
+    expect(isClickThroughWaitingFor(selection(1))).toBe(true);
+    setWaitingFor(selection(1));
+    const single = render(
+      <DialogHost>
+        <div data-testid="object-selection" />
+      </DialogHost>,
+    );
+    const singleWrapper = single.container.firstElementChild as HTMLElement | null;
+    expect(singleWrapper?.style.pointerEvents).toBe("none");
+    single.unmount();
+
+    for (const max of [2, undefined]) {
+      expect(isClickThroughWaitingFor(selection(max)), `max ${max}`).toBe(false);
+      setWaitingFor(selection(max));
+      const multi = render(
+        <DialogHost>
+          <div data-testid="object-selection" />
+        </DialogHost>,
+      );
+      const multiWrapper = multi.container.firstElementChild as HTMLElement | null;
+      expect(multiWrapper?.style.pointerEvents, `max ${max}`).not.toBe("none");
+      multi.unmount();
+    }
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
     setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(
@@ -357,5 +396,52 @@ describe("DialogHost", () => {
     );
     const wrapper = container.firstElementChild as HTMLElement | null;
     expect(wrapper?.style.transform ?? "").toBe("");
+  });
+
+  it("treats every in-scope cancel flow as click-through so GamePage mounts TargetingOverlay", () => {
+    // Cancel-01: GamePage mounts <TargetingOverlay /> iff isClickThroughWaitingFor
+    // is true (GamePage.tsx). Each in-scope flow keeps its Cancel button in that
+    // overlay, so a flow missing from the predicate renders no prompt and no Cancel
+    // in production - while TargetingOverlay.test.tsx stays green because it mounts
+    // the overlay directly. EquipTarget and spell targeting reach the predicate via
+    // CLICK_THROUGH set membership; crew/saddle/station via getBoardChoiceView.
+    const inScopeWaitingStates: WaitingFor[] = [
+      { type: "EquipTarget", data: { player: 0, equipment_id: 10, valid_targets: [21] } },
+      {
+        type: "CrewVehicle",
+        data: { player: 0, vehicle_id: 20, crew_power: 2, eligible_creatures: [21] },
+      },
+      {
+        type: "SaddleMount",
+        data: { player: 0, mount_id: 40, saddle_power: 2, eligible_creatures: [21] },
+      },
+      {
+        type: "StationTarget",
+        data: { player: 0, spacecraft_id: 30, eligible_creatures: [21] },
+      },
+      { type: "TargetSelection", data: { player: 0 } } as never,
+    ];
+    for (const waitingFor of inScopeWaitingStates) {
+      expect(isClickThroughWaitingFor(waitingFor), waitingFor.type).toBe(true);
+    }
+  });
+
+  it("anchors equip target selection but leaves it click-through so board picks and Cancel stay reachable", () => {
+    // Cancel-01: without CLICK_THROUGH membership the host anchors a `fixed inset-0`
+    // overlay with pointer events enabled that swallows the board taps the equip
+    // pick needs - and GamePage never mounts the overlay carrying the prompt and
+    // the engine-gated Cancel. (Reverting the set entry flips pointerEvents to "" here.)
+    setWaitingFor({
+      type: "EquipTarget",
+      data: { player: 0, equipment_id: 10, valid_targets: [21] },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
   });
 });

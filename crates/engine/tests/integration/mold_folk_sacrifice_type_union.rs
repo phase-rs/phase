@@ -244,6 +244,7 @@ fn mold_folk_cannot_sacrifice_itself_while_it_is_only_a_creature() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: source,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),

@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LobbyGame } from "../../adapter/types";
+import { refuseRealWebSockets } from "../../test/helpers/refusingWebSocket";
 
 /**
  * The join/spectate origin the lobby produced must ride all the way onto the
@@ -152,12 +153,15 @@ function navigatedParams(): { path: string; params: URLSearchParams } {
 }
 
 describe("MultiplayerPage join origin", () => {
+  let socketUrls: string[] = [];
+
   beforeEach(() => {
     vi.clearAllMocks();
     // `clearAllMocks` drops calls but keeps queued implementations.
     storeMocks.findLobbyGameByCode.mockReset();
     harness.lobbyAction = null;
     localStorage.setItem("active-deck", "Test Deck");
+    socketUrls = refuseRealWebSockets();
     lookupJoinTarget.mockResolvedValue({
       ok: true,
       info: { is_p2p: false, format_config: null },
@@ -174,7 +178,12 @@ describe("MultiplayerPage join origin", () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    const opened = [...socketUrls];
+    cleanup();
+    vi.unstubAllGlobals();
+    expect(opened).toEqual([]);
+  });
 
   function toastMessages(): string[] {
     return [...useMultiplayerStore.getState().toasts.values()].map((t) => t.message);

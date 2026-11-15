@@ -21,6 +21,7 @@ pub fn filter_events_for_player(
 
 #[cfg(test)]
 mod tests {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use super::*;
@@ -38,6 +39,7 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
+    use engine::types::match_config::MatchScore;
     use engine::types::resolution::PendingProliferateActions;
     use engine::types::zones::Zone;
     use proptest::prelude::*;
@@ -277,11 +279,43 @@ mod tests {
             .iter()
             .find(|pool| pool.player == PlayerId(1))
             .unwrap();
-        assert!(!own.registered_main.is_empty());
+        // Outside the sideboarding prompt the viewer's own pool is registration
+        // data nothing reads, so it is blanked alongside every opponent's.
+        assert!(own.registered_main.is_empty());
+        assert!(own.registered_sideboard.is_empty());
+        assert!(own.current_main.is_empty());
         assert!(opp.registered_main.is_empty());
         assert!(opp.registered_sideboard.is_empty());
         assert!(opp.current_main.is_empty());
         assert!(opp.current_sideboard.is_empty());
+
+        // CR 100.4: while this player's own between-games sideboarding prompt is
+        // live, their pool survives the projection — it is what the prompt is
+        // answered from — and every other seat's stays blank.
+        state.waiting_for = WaitingFor::BetweenGamesSideboard {
+            player: PlayerId(0),
+            game_number: 2,
+            score: MatchScore::default(),
+            min_main_deck_size: 0,
+            max_sideboard_size: Some(15),
+        };
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+        let own = filtered
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == PlayerId(0))
+            .unwrap();
+        let opp = filtered
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == PlayerId(1))
+            .unwrap();
+        assert!(!own.registered_main.is_empty());
+        assert!(!own.registered_sideboard.is_empty());
+        assert!(!own.current_main.is_empty());
+        assert!(opp.registered_main.is_empty());
+        assert!(opp.registered_sideboard.is_empty());
+        assert!(opp.current_main.is_empty());
     }
 
     #[test]
@@ -362,6 +396,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 1,
@@ -377,12 +412,15 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             enters_modified_if: None,
             duration: None,
@@ -401,6 +439,63 @@ mod tests {
         assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
     }
 
+    /// CR 608.2c: who performs the chosen move is a public effect parameter,
+    /// like the move's duration, so every viewer's projection keeps it while an
+    /// opponent's projection still hides which hand cards are offered.
+    #[test]
+    fn effect_zone_choice_projection_keeps_the_performer() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Held".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
+            performed_by: Some(PlayerId(1)),
+            player: PlayerId(1),
+            cards: vec![card],
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: engine::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Exile),
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            with_entry_effect: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            is_cost_payment: false,
+            library_position: None,
+            mass_library_order: None,
+            enters_modified_if: None,
+            duration: None,
+        };
+        for (viewer, offered) in [(PlayerId(1), card), (PlayerId(0), ObjectId(0))] {
+            match filter_state_for_player(&state, viewer).waiting_for {
+                WaitingFor::EffectZoneChoice {
+                    cards,
+                    performed_by,
+                    ..
+                } => {
+                    assert_eq!(cards, vec![offered], "viewer {viewer:?}");
+                    assert_eq!(performed_by, Some(PlayerId(1)), "viewer {viewer:?}");
+                }
+                other => panic!("Expected EffectZoneChoice, got {other:?}"),
+            }
+        }
+    }
     #[test]
     fn mass_library_order_choice_redacts_cards_and_provenance_for_opponent() {
         let mut state = GameState::new_two_player(42);
@@ -441,6 +536,7 @@ mod tests {
             .collect();
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 2,
@@ -456,20 +552,24 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(LibraryPosition::Bottom),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: Some(MassLibraryOrderBatch {
                 owner: PlayerId(0),
                 members,
+                arranger: None,
             }),
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
         };
-        state.pending_mass_library_order_choice = Some(PendingMassLibraryOrderChoice {
+        state.pending_mass_library_order_choice = Some(Box::new(PendingMassLibraryOrderChoice {
             source_id: ObjectId(100),
             library_position: LibraryPosition::Bottom,
             track_exiled_by_source: false,
@@ -483,8 +583,19 @@ mod tests {
                         origin: Zone::Library,
                     })
                     .collect(),
+                arranger: None,
             }]),
-        });
+            arranged_batches: vec![MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::from_object(&state.objects[&card_a]),
+                    origin: Zone::Library,
+                }],
+                arranger: None,
+            }],
+            resolving_entry: Some(ObjectId(1)),
+            arranger_election: None,
+        }));
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
         match filtered.waiting_for {

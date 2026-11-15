@@ -67,10 +67,7 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
         "accepting Kentaro's alternative must complete casting without another X prompt"
     );
     assert!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .mana
-            .is_empty(),
+        runner.state().players[P0.0 as usize].mana_pool.is_empty(),
         "the alternative cost must consume the Samurai spell's mana value"
     );
 }

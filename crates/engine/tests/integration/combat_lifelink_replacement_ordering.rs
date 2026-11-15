@@ -276,9 +276,9 @@ fn positive_life_changes(events: &[GameEvent], player: PlayerId) -> Vec<i32> {
     events
         .iter()
         .filter_map(|event| match event {
-            GameEvent::LifeChanged { player_id, amount } if *player_id == player && *amount > 0 => {
-                Some(*amount)
-            }
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == player && *amount > 0 => Some(*amount),
             _ => None,
         })
         .collect()
@@ -1684,6 +1684,8 @@ fn seed_loop_detect_ring(runner: &mut GameRunner) {
         .push_back(std::sync::Arc::new(LoopDetectSample {
             normalized: snapshot.clone(),
             live: snapshot,
+            tally: Default::default(),
+            trace_at: None,
         }));
 }
 

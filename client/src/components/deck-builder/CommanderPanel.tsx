@@ -262,7 +262,7 @@ export function CommanderPanel({
         </div>
       )}
 
-      {companionCandidates !== null && (
+      {(companion || (companionCandidates !== null && companionCandidates.length > 0)) && (
         <div className="space-y-2 border-t border-white/10 pt-3">
           <h5 className="text-xs font-semibold uppercase text-gray-500">
             {t("commanderPanel.companion.heading")}
@@ -283,7 +283,7 @@ export function CommanderPanel({
           ) : (
             <p className="text-xs text-gray-500">{t("commanderPanel.companion.noCompanion")}</p>
           )}
-          {!companion && companionCandidates.map((name) => (
+          {!companion && companionCandidates?.map((name) => (
             <button
               key={name}
               onClick={() => onSetCompanion(name)}
@@ -301,7 +301,10 @@ export function CommanderPanel({
         <div
           className={`text-xs ${deckSizeSatisfied(deckSizeRule, totalCards) ? "text-green-400" : "text-yellow-400"}`}
         >
-          {t("commanderPanel.cardCount", { count: totalCards, expected: deckSizeRule.data })}
+          {/* `Minimum(0)` refuses no count, so it is not shown as an expected size. */}
+          {deckSizeRule.type === "Minimum" && deckSizeRule.data === 0
+            ? t("commanderPanel.cardCountNoMinimum", { count: totalCards })
+            : t("commanderPanel.cardCount", { count: totalCards, expected: deckSizeRule.data })}
         </div>
         {formatValidationReasons.map((reason) => (
           <div key={reason} className="text-xs text-red-400">

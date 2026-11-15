@@ -216,6 +216,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
 }
@@ -355,6 +356,7 @@ fn cross_controller_copy_scenario(p0_creature: Option<&str>) -> (GameRunner, Obj
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: Vec::new(),
@@ -622,6 +624,7 @@ fn effect_specified_host_raises_no_prompt() {
                 TypedFilter::creature().controller(ControllerRef::You),
             )),
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -667,6 +670,7 @@ fn aura_creature_copy_is_created_then_swept() {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: Vec::new(),
@@ -810,6 +814,7 @@ fn two_copies_each_choose_their_own_host() {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 2 },
             extra_keywords: Vec::new(),
@@ -980,6 +985,7 @@ fn fylgja_copy_scenario_with(
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: count },
             extra_keywords: Vec::new(),
@@ -1278,6 +1284,7 @@ fn recolored_fylgja_scenario(
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: Vec::new(),
@@ -1417,6 +1424,7 @@ fn chosen_player_host_resume_survives_the_color_exception() {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: Vec::new(),

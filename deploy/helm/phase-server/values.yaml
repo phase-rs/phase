@@ -25,8 +25,13 @@ server:
   # clients their join URL. Defaults to https://<ingress.host> when the ingress
   # is enabled; required otherwise.
   publicUrl: ""
-  # Sets PHASE_DATA_MANIFEST_URL. Only needed if the image was built without
-  # PHASE_CHANNEL (e.g. upstream :preview images); release builds derive it.
+  # Sets PHASE_DATA_MANIFEST_URL. Empty: the binary derives it from its embedded
+  # channel, which serves release images and preview images whose fingerprint
+  # preview-server.json still lists. That manifest keeps only the current and
+  # previous fingerprints, and publications that push no image still rotate it,
+  # so any preview image, `:preview` included, can drop out. Set this, or
+  # pre-provision the data dir, for such an image or one built without
+  # PHASE_CHANNEL.
   dataManifestUrl: ""
   # Refuse to download card data at startup (data dir must be pre-provisioned).
   noDataDownload: false
@@ -157,6 +162,14 @@ web:
   # (the official lobby, which brokers browser-hosted P2P games). Set this to
   # this release's own public /ws endpoint to make server-run games the default.
   defaultMultiplayerServerUrl: ""
+  # Where a release build's "Try Preview" badge points, as an http:// or
+  # https:// URL: typically this site's own preview deployment. Rendered into
+  # /config.js like defaultMultiplayerServerUrl, and the render fails on an
+  # address the client would ignore. Empty = leave the image's build-time
+  # preview site. Only release-built images show the badge, and one built
+  # before this setting existed shows it but opens its built-in preview site
+  # whatever this holds.
+  previewSiteUrl: ""
   # Traefik rate limiting for the SPA route. The game API's limiter is sized for
   # API calls (20 req/s), and a cold SPA load is tens of asset requests at once,
   # so the web route deliberately does not share that bucket. Leave disabled
@@ -207,7 +220,7 @@ ingress:
   enabled: true
   className: traefik
   host: phase.example.com
-  # Only /ws, /health, /info and /p2p-draft-backup are routed; /admin never is.
+  # Only /ws, /health, /info, /p2p-draft-backup and /jev are routed; /admin never is.
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"

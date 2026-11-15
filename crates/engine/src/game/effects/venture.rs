@@ -115,7 +115,7 @@ fn enter_new_dungeon(
     source: VentureSource,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let options = available_dungeons(source);
+    let options = available_dungeons(source, &state.format_config);
 
     if options.len() == 1 {
         // Auto-select: only one dungeon available (e.g., initiative → Undercity).
@@ -238,6 +238,11 @@ fn queue_room_trigger(
     let (room_ability, target_constraints) =
         dungeon::room_effects(dungeon, room, source_id, player);
 
+    // CR 601.2d + CR 603.3d: dividing rooms (Baldur's Gate Wilderness
+    // "Githyanki Crèche") announce their division while the trigger goes on
+    // the stack. The stack pipeline reads the unit off the pending trigger,
+    // so propagate it from the built ability like card triggers do.
+    let distribute = room_ability.distribute.clone();
     let pending = crate::game::triggers::PendingTrigger {
         source_id,
         controller: player,
@@ -245,7 +250,7 @@ fn queue_room_trigger(
         ability: Box::new(room_ability),
         timestamp: 0,
         target_constraints,
-        distribute: None,
+        distribute,
         trigger_event: Some(GameEvent::RoomEntered {
             player_id: player,
             dungeon,

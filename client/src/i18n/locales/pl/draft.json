@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "pickEnhancements": {
+      "label": "Użyj wbudowanej SI z ulepszeniami wyborów w draftcie",
+      "hint": "Boty stosują pisemny przewodnik kolejności wyborów w formatach, które go mają (obecnie Mirrodin, Darksteel i Fifth Dawn). Działa od średniego poziomu trudności."
+    },
     "difficultyLevels": {
       "VeryEasy": "Bardzo łatwy",
       "Easy": "Łatwy",
@@ -132,6 +136,12 @@
     "packOrder": "Kolejność boosterów",
     "candidateSets": "Dodatki kandydujące",
     "clearPacks": "Wyczyść",
+    "randomSet": "Losowy dodatek",
+    "randomSetHint": "Wypełnij wszystkie boostery jednym losowo wybranym dodatkiem",
+    "randomPacks": "Losowe boostery",
+    "randomPacksHint": "Przydziel każdemu boosterowi osobny, losowo wybrany dodatek",
+    "randomCandidates": "Losowe dodatki",
+    "randomCandidatesHint": "Wybierz losowo różne dodatki kandydujące",
     "emptyPacks_one": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} booster — powtórz dodatek lub połącz kilka.",
     "emptyPacks_other": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} boostery — powtórz dodatek lub połącz kilka, aby draftować blok.",
     "emptyPacksFixed_one": "Sealed otwiera dokładnie {{count}} booster. Wybierz dla niego dodatek.",
@@ -156,6 +166,7 @@
     "startSealed": "Rozpocznij sealed"
   },
   "pack": {
+    "label": "Booster draftu",
     "confirmPick": "Potwierdź wybór",
     "selected": "Wybrano",
     "draftEffects": "Efekty draftu:",
@@ -183,6 +194,7 @@
     "packProgress": "Booster {{current}} z {{total}}",
     "openPack": "Otwórz booster",
     "openPackArt": "Otwórz grafikę boostera",
+    "openAllPacks": "Otwórz wszystkie boostery",
     "pulls": "Twoje karty",
     "nextPack": "Następny booster",
     "viewPool": "Zobacz swoją pulę",
@@ -360,6 +372,9 @@
     "moreNeeded": "potrzeba jeszcze {{count}}",
     "commanderRequired": "Wyznacz dowódcę ze swojej puli, aby przesłać talię.",
     "commanderUnavailable": "Wyznaczanie dowódcy jest w tej chwili niedostępne — nie udało się wczytać bazy kart.",
+    "companionMet": "Warunek towarzysza spełniony",
+    "companionUnmet": "Warunek towarzysza niespełniony",
+    "setCompanion": "Ustaw jako towarzysza",
     "compatibilityPending": "Sprawdzanie zgodności talii...",
     "compatibilityUnavailable": "Sprawdzanie zgodności talii jest teraz niedostępne — spróbuj ponownie przed zatwierdzeniem.",
     "grantedFiller": "Twoja pula zawiera także do {{maximum}} × {{name}}, do użycia wyłącznie jako dowódca."
@@ -485,6 +500,10 @@
     "upNext": "Następny — Mecz {{number}}",
     "nextMatch": "Następny mecz",
     "endRun": "Zakończ bieg",
+    "retryEndRun": "Ponów zakończenie biegu",
+    "retryResume": "Ponów wznawianie",
+    "startUnavailable": "Nie udało się rozpocząć meczu draftu.",
+    "resumeUnavailable": "Ten bieg draftu jest niedostępny. Zakończ go, aby zacząć od nowa.",
     "done": "Gotowe",
     "perfectRun": "Idealny bieg",
     "runComplete": "Bieg zakończony",
@@ -551,9 +570,11 @@
     "tournamentEliminationDesc": "Gracze odpadają po przegranym meczu, aż pozostanie jeden zwycięzca.",
     "podPolicy": "Zasady grupy",
     "policyCompetitive": "Wyczynowe",
-    "policyCompetitiveDesc": "Wybory na czas, automatyczne wybory po upływie czasu i automatyczne przechodzenie do kolejnych rund.",
+    "policyCompetitiveDesc": "Wybory na czas, automatyczne wybory po upływie czasu i automatyczne przechodzenie do kolejnych rund. Zatwierdzone talie są ostateczne; karty boczne możesz wymieniać tylko między grami meczu.",
+    "policyCompetitiveNoRoundsDesc": "Wybory na czas i automatyczne wybory po upływie czasu.",
     "policyCasual": "Swobodne",
-    "policyCasualDesc": "Wybory bez limitu czasu, ręczne przechodzenie do kolejnych rund i narzędzia gospodarza do rozwiązywania problemów.",
+    "policyCasualDesc": "Wybory bez limitu czasu, ręczne przechodzenie do kolejnych rund, narzędzia gospodarza do rozwiązywania problemów i zmiany talii między rundami.",
+    "policyCasualNoRoundsDesc": "Wybory bez limitu czasu i narzędzia gospodarza do rozwiązywania problemów.",
     "podSize": "Rozmiar grupy",
     "podSizeDesc": "Łącznie {{count}} miejsc. Puste miejsca można wypełnić botami z poczekalni przed rozpoczęciem draftu.",
     "playerCount": "{{count}} graczy",
@@ -571,7 +592,20 @@
     "tabs": {
       "set": "Dodatek",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Nie udało się połączyć z poczekalnią, aby wystawić ten pod. Wyłącz „$t(draft:podSetup.listInLobby)”, aby hostować za pomocą kodu pokoju.",
+    "listingHostNameTooLong": "Aby wystawić ten pod w poczekalni, użyj wyświetlanej nazwy o długości maksymalnie {{max}} znaków.",
+    "listingRoomNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy pokoju o długości maksymalnie {{max}} znaków.",
+    "listingCubeNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy Cube'a o długości maksymalnie {{max}} znaków.",
+    "listingPasswordTooLong": "Aby wystawić ten pod w poczekalni, użyj krótszego hasła.",
+    "listInLobby": "Wyświetl w poczekalni",
+    "listingSeatLimit": "Lista poczekalni obsługuje pody liczące do {{max}} graczy.",
+    "setPassword": "Ustaw hasło",
+    "passwordPlaceholder": "Hasło poda",
+    "roomName": "Nazwa pokoju",
+    "optional": "(opcjonalnie)",
+    "roomNameHelp": "Wyświetlana graczom przeglądającym poczekalnię.",
+    "roomNamePlaceholder": "np. Piątkowy wieczór Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",
@@ -586,11 +620,21 @@
     "roundComplete": "Runda zakończona",
     "waitingNextRound": "Oczekiwanie, aż gospodarz rozpocznie następną rundę...",
     "nextRoundShortly": "Następna runda rozpocznie się wkrótce...",
+    "editDeck": "Edytuj talię",
+    "backToStandings": "Wróć do klasyfikacji",
+    "editDeckHint": "Pod swobodny: możesz zmienić talię przed rozpoczęciem następnej rundy.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Zatwierdzić tę talię?",
+    "confirm": "Potwierdź zatwierdzenie",
+    "competitive": "To jest pod wyczynowy: zatwierdzona talia jest ostateczna na wszystkie rundy. Między grami meczu Bo3 nadal możesz wymieniać karty boczne.",
+    "casual": "Między rundami nadal możesz zmieniać swoją talię.",
+    "final": "Zatwierdzona talia jest ostateczna."
   },
   "betweenGames": {
     "game": "Gra {{number}}",
@@ -625,6 +669,7 @@
     "kicked": "Zostałeś wyrzucony z grupy",
     "hostLeft": "Gospodarz opuścił draft",
     "connection": "Błąd połączenia",
+    "incompatible": "Ten draft nie jest zgodny z twoją wersją protokołu.",
     "retry": "Spróbuj połączyć ponownie"
   },
   "winston": {
@@ -654,6 +699,8 @@
     "takeAria": "Weź kupkę {{index}}",
     "decline": "Odrzuć",
     "declineAria": "Odrzuć kupkę {{index}}",
+    "spreadPile": "Rozłóż kupkę {{index}}",
+    "stackPile": "Spiętrz kupkę {{index}}",
     "refusal": {
       "PileNotActive": "Nie podejmujesz decyzji o tej kupce.",
       "PileEmpty": "Ta kupka jest pusta, nie ma czego brać.",
@@ -705,5 +752,23 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Autozapis] {{format}}",
+    "slotQuick": "Szybki draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Draft kostki",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradycyjny",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Draftujący AI",
+    "picking": "Wybiera",
+    "ready": "Wybrano",
+    "fallback": "Wybór silnika",
+    "waiting": "Czekanie, aż wszyscy gracze wybiorą…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }
