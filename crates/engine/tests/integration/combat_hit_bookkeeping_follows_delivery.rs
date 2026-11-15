@@ -408,3 +408,252 @@ fn redirected_leg_yields_its_next_choice_to_an_earlier_seats_outstanding_choice(
         "the host takes P2's own answer, once"
     );
 }
+
+const P3: PlayerId = PlayerId(3);
+const SOLITARY_CONFINEMENT_ORACLE: &str = "At the beginning of your upkeep, sacrifice this enchantment unless you discard a card.\nSkip your draw step.\nYou have shroud. (You can't be the target of spells or abilities.)\nPrevent all damage that would be dealt to you.";
+
+/// One replacement prompt as a player sees it: who chooses and the source names.
+fn replacement_prompt(runner: &GameRunner) -> Option<(PlayerId, Vec<String>)> {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => Some((
+            *player,
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_name.clone())
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
+fn choose_by_name(runner: &mut GameRunner, names: &[String], want: &str) {
+    let index = names
+        .iter()
+        .position(|name| name == want)
+        .unwrap_or_else(|| panic!("{want} not among {names:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer replacement choice");
+}
+
+/// CR 616.2 + CR 616.1 + CR 101.4: a replacement can become applicable to an
+/// event once another replacement has modified it, so the player who owes a
+/// leg's first choice is known only after its choice-free steps. P0 attacks
+/// P1 with a red Goblin Piker and P2 with a green Centaur Courser:
+/// - the Piker's hit on P1 is Torbran's (plus 2) or Solitary Confinement's
+///   (prevent), and P1 chooses between them;
+/// - the Courser's hit on P2 is redirected by P2's Pariah onto P0's creature,
+///   where P0 (not P2, not P1) chooses between Vigor and the creature's shield
+///   counter.
+///
+/// The redirect is mandatory and choice-free, so P0's choice is discovered
+/// before any prompt is published, and APNAP order puts P0 ahead of P1.
+#[test]
+fn redirect_reveals_the_earlier_seats_choice_before_a_later_seats_prompt_is_published() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let piker = scenario
+        .add_creature(P0, "Goblin Piker", 2, 1)
+        .with_color(vec![engine::types::mana::ManaColor::Red])
+        .id();
+    let courser = scenario
+        .add_creature(P0, "Centaur Courser", 3, 3)
+        .with_color(vec![engine::types::mana::ManaColor::Green])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Torbran, Thane of Red Fell", TORBRAN_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Vigor", 6, 6, VIGOR_ORACLE);
+    let host = scenario.add_creature(P0, "Pariah Host", 0, 20).id();
+    scenario.with_counter(host, engine::types::counter::CounterType::Shield, 1);
+    scenario.add_enchantment_from_oracle(P1, "Solitary Confinement", SOLITARY_CONFINEMENT_ORACLE);
+    let pariah = scenario
+        .add_creature(P2, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, host);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (piker, AttackTarget::Player(P1)),
+            (courser, AttackTarget::Player(P2)),
+        ])
+        .expect("declare attackers");
+
+    let mut prompts: Vec<(PlayerId, Vec<String>)> = Vec::new();
+    for _ in 0..64 {
+        let past_combat = matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        );
+        if past_combat && runner.state().stack.is_empty() {
+            break;
+        }
+        if let Some((player, names)) = replacement_prompt(&runner) {
+            let want = match player {
+                P0 => "Vigor",
+                _ => "Solitary Confinement",
+            };
+            choose_by_name(&mut runner, &names, want);
+            prompts.push((player, names));
+            continue;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    let seats: Vec<PlayerId> = prompts.iter().map(|(player, _)| *player).collect();
+    assert_eq!(
+        seats,
+        vec![P0, P1],
+        "CR 616.1 + CR 101.4: P0 chooses for the redirected hit before P1 does"
+    );
+    assert!(
+        prompts[0].1.iter().any(|name| name == "Vigor"),
+        "P0's prompt is the redirected leg's: {:?}",
+        prompts[0].1
+    );
+    assert!(
+        prompts[1]
+            .1
+            .iter()
+            .any(|name| name == "Torbran, Thane of Red Fell"),
+        "P1's prompt is Torbran against Solitary Confinement: {:?}",
+        prompts[1].1
+    );
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Solitary Confinement prevented the hit"
+    );
+    assert_eq!(runner.life(P2), 20, "Pariah redirected the hit");
+    let host = &runner.state().objects[&host];
+    assert_eq!(host.damage_marked, 0, "Vigor prevented the redirected hit");
+    assert_eq!(
+        host.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(3),
+        "Vigor put a counter for each damage prevented"
+    );
+}
+
+/// CR 616.1f + CR 800.4a: a parked replacement choice is reevaluated against
+/// the effects that would now be applicable. P0 attacks with two red 3/3s
+/// under Torbran, P3 owns Furnace of Rath, P1 wears Pariah on P2's creature
+/// (P2 controls Vigor) and owns Karn Liberated:
+/// - the first hit goes to P1, who chooses Pariah, which parks P2's choice
+///   among Torbran, Furnace of Rath and Vigor;
+/// - the second hits Karn, and P1 is asked to choose between Torbran and
+///   Furnace of Rath.
+///
+/// P3 concedes during P1's Karn prompt, so Furnace of Rath leaves the game.
+/// P2's parked choice must not offer it, and neither hit is doubled: Karn
+/// takes 3 + 2 and the host receives Torbran's 5 as counters, never the 8 that
+/// Furnace of Rath, Torbran and Vigor would give.
+#[test]
+fn parked_choice_drops_a_replacement_whose_owner_conceded() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let red = vec![engine::types::mana::ManaColor::Red];
+    let to_player = scenario
+        .add_creature(P0, "Redirected Attacker", 3, 3)
+        .with_color(red.clone())
+        .id();
+    let to_karn = scenario
+        .add_creature(P0, "Karn Attacker", 3, 3)
+        .with_color(red)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Torbran, Thane of Red Fell", TORBRAN_ORACLE);
+    scenario.add_enchantment_from_oracle(P3, "Furnace of Rath", FURNACE_ORACLE);
+    let karn = scenario
+        .add_planeswalker_from_oracle(P1, "Karn Liberated", "Karn", 14, KARN_ORACLE)
+        .id();
+    let host = scenario.add_creature(P2, "Pariah Host", 0, 20).id();
+    scenario.add_creature_from_oracle(P2, "Vigor", 6, 6, VIGOR_ORACLE);
+    let pariah = scenario
+        .add_creature(P1, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, host);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (to_player, AttackTarget::Player(P1)),
+            (to_karn, AttackTarget::Planeswalker(karn)),
+        ])
+        .expect("declare attackers");
+
+    let mut prompts: Vec<(PlayerId, Vec<String>)> = Vec::new();
+    for _ in 0..64 {
+        let past_combat = matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        );
+        if past_combat && runner.state().stack.is_empty() {
+            break;
+        }
+        if let Some((player, names)) = replacement_prompt(&runner) {
+            prompts.push((player, names.clone()));
+            let want = match (player, prompts.len()) {
+                (P1, 1) => "Pariah",
+                (P1, _) => {
+                    // P1's Karn prompt is the second one: Furnace of Rath's owner
+                    // concedes while it is open, and P1 then finishes it.
+                    runner
+                        .act(GameAction::Concede { player_id: P3 })
+                        .expect("P3 concedes");
+                    "Torbran, Thane of Red Fell"
+                }
+                _ => "Torbran, Thane of Red Fell",
+            };
+            choose_by_name(&mut runner, &names, want);
+            continue;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    let seats: Vec<PlayerId> = prompts.iter().map(|(player, _)| *player).collect();
+    assert_eq!(
+        seats,
+        vec![P1, P1, P2],
+        "P1's Pariah, then P1's Karn prompt, then P2's redirected leg"
+    );
+    assert!(
+        prompts[1].1.iter().any(|name| name == "Furnace of Rath"),
+        "the Karn prompt was raised while Furnace of Rath was still in the game"
+    );
+    let p2_prompt = &prompts[2].1;
+    assert!(
+        !p2_prompt.iter().any(|name| name == "Furnace of Rath"),
+        "CR 800.4a: P3's Furnace of Rath left the game, so P2 is not offered it: {p2_prompt:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&karn].loyalty,
+        Some(14 - 5),
+        "Karn takes Torbran's 3 + 2 and no doubling"
+    );
+    let host = &runner.state().objects[&host];
+    assert_eq!(
+        host.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(5),
+        "Torbran's 5, prevented by Vigor, with no Furnace of Rath doubling"
+    );
+}
