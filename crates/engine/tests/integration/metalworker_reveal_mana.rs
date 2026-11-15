@@ -1257,7 +1257,7 @@ fn activated_count(events: &[GameEvent]) -> usize {
 /// ({3}) mid-way through a manual cast. Returns the runner at the payment prompt.
 fn autogenerator_mid_payment(
     counters: u32,
-    constrictor: bool,
+    constrictors: usize,
     season: bool,
 ) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -1269,7 +1269,7 @@ fn autogenerator_mid_payment(
             EMPOWERED_AUTOGENERATOR_ORACLE,
         )
         .id();
-    if constrictor {
+    for _ in 0..constrictors {
         scenario.add_creature_from_oracle(
             P0,
             "Winding Constrictor",
@@ -1312,7 +1312,7 @@ fn autogenerator_mid_payment(
 /// resolves immediately after it is activated).
 #[test]
 fn autogenerator_activation_is_published_once_before_its_counter() {
-    let (mut runner, autogenerator) = autogenerator_mid_payment(0, false, false);
+    let (mut runner, autogenerator) = autogenerator_mid_payment(0, 0, false);
     let result = runner
         .act(GameAction::ActivateAbility {
             source_id: autogenerator,
@@ -1346,7 +1346,7 @@ fn autogenerator_activation_is_published_once_before_its_counter() {
 /// pause — and the resume neither repeats nor drops it.
 #[test]
 fn autogenerator_activation_is_published_before_a_replacement_choice_and_not_repeated() {
-    let (mut runner, autogenerator) = autogenerator_mid_payment(0, true, true);
+    let (mut runner, autogenerator) = autogenerator_mid_payment(0, 1, true);
     let result = runner
         .act(GameAction::ActivateAbility {
             source_id: autogenerator,
@@ -1392,7 +1392,7 @@ fn autogenerator_activation_is_published_before_a_replacement_choice_and_not_rep
 /// the X announcement and the announced maximum.
 fn ballista_with_autogenerator(
     counters: u32,
-    constrictor: bool,
+    constrictors: usize,
     season: bool,
 ) -> (GameRunner, ObjectId, ObjectId, u32) {
     use engine::types::mana::ManaCostShard;
@@ -1405,7 +1405,7 @@ fn ballista_with_autogenerator(
             EMPOWERED_AUTOGENERATOR_ORACLE,
         )
         .id();
-    if constrictor {
+    for _ in 0..constrictors {
         scenario.add_creature_from_oracle(
             P0,
             "Winding Constrictor",
@@ -1455,7 +1455,7 @@ fn ballista_with_autogenerator(
 /// is not admitted.
 #[test]
 fn announced_x_ceiling_counts_the_autogenerator_counter_its_activation_adds() {
-    let (mut runner, autogenerator, ballista, max) = ballista_with_autogenerator(1, false, false);
+    let (mut runner, autogenerator, ballista, max) = ballista_with_autogenerator(1, 0, false);
     assert_eq!(max, 1, "one counter + the new one = two mana = X=1");
     assert!(
         runner.act(GameAction::ChooseX { value: 2 }).is_err(),
@@ -1489,7 +1489,7 @@ fn announced_x_ceiling_counts_the_autogenerator_counter_its_activation_adds() {
 /// into two, so two held counters yield 2 + 2 = 4 mana (X=2), not 3 (X=1).
 #[test]
 fn announced_x_ceiling_applies_counter_replacements_to_the_preamble() {
-    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, false, true);
+    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, 0, true);
     assert_eq!(max, 2);
 }
 
@@ -1499,6 +1499,183 @@ fn announced_x_ceiling_applies_counter_replacements_to_the_preamble() {
 /// double-then-add 2 + 3 = 5 mana (X=2).
 #[test]
 fn announced_x_ceiling_uses_the_best_replacement_ordering() {
-    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, true, true);
+    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, 1, true);
     assert_eq!(max, 3);
+}
+
+/// CR 616.1f + CR 614.5: the ordering choice repeats until no replacement is
+/// left, and each applies at most once, so the chain is as long as the number of
+/// applicable replacements, not a fixed few. Zero counters, Doubling Season and
+/// five Winding Constrictors: choosing every Constrictor before the doubling
+/// gives (1 + 5) x 2 = 12 mana, so Walking Ballista X=6 is announced and paid.
+#[test]
+fn five_constrictors_and_doubling_season_offer_and_pay_x_six() {
+    let started = std::time::Instant::now();
+    let (mut runner, autogenerator, ballista, max) = ballista_with_autogenerator(0, 5, true);
+    eprintln!(
+        "five-constrictor X projection (cast to announcement): {:?}",
+        started.elapsed()
+    );
+    assert_eq!(max, 6, "(1 + 5) x 2 = 12 mana = X=6");
+
+    runner
+        .act(GameAction::ChooseX { value: 6 })
+        .expect("announcing X=6 is legal");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+
+    // Answer every ordering prompt with a Constrictor, leaving the doubling last.
+    let mut answers = 0;
+    while let Some(pending) = runner.state().pending_replacement.clone() {
+        let index = pending
+            .candidates
+            .iter()
+            .position(|rid| runner.state().objects[&rid.source].name == "Winding Constrictor")
+            .unwrap_or(0);
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("ordering choice is legal");
+        answers += 1;
+        assert!(answers <= 6, "no more answers than replacements");
+    }
+    assert!(
+        answers >= 5,
+        "five Constrictors are ordered before the doubling"
+    );
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Blue),
+        12
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&ballista].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+}
+
+/// CR 605.4a: Kinnan's triggered mana ability resolves immediately after the
+/// mana ability that triggered it, so a zero-counter Autogenerator (one mana)
+/// with Kinnan out makes two: Walking Ballista X=1 is announced and completes.
+#[test]
+fn kinnan_lets_a_fresh_autogenerator_pay_walking_ballista_x_one() {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Empowered Autogenerator",
+            EMPOWERED_AUTOGENERATOR_ORACLE,
+        )
+        .id();
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    let ballista = scenario
+        .add_creature_to_hand(P0, "Walking Ballista", 0, 0)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&ballista].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ballista,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("casting reaches the X announcement");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => assert_eq!(*max, 1, "1 + Kinnan's 1 = X=1"),
+        other => panic!("expected the X announcement, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseX { value: 1 })
+        .expect("announcing X=1 is legal");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&ballista].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+}
+
+/// CR 605.4a + CR 107.1c: with Kinnan out, one revealed artifact makes
+/// {C}{C} + Kinnan's {C}, which pays Matter Reshaper ({2}{C}) from an empty
+/// pool; the reveal stays with the payer.
+#[test]
+fn kinnan_lets_a_one_artifact_metalworker_pay_matter_reshaper() {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    let artifact = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Matter Reshaper", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Kinnan's mana makes the cast payable");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "Auto hands the payment to the payer, got {:?}",
+        runner.state().waiting_for
+    );
+    activate(&mut runner, metalworker);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![artifact],
+        })
+        .expect("reveal selection is legal");
+    assert_eq!(colorless(&runner), 3);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
 }

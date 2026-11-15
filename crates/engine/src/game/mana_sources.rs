@@ -2719,6 +2719,8 @@ fn usable_mana_ability_net(
         // leaves, and the best one bounds the capacity.
         if crate::types::ability::inline_mana_preamble(ability).is_some() {
             let production = mana_abilities::ability_from_mana_production(ability);
+            let repeated_type_bonus =
+                taps_for_mana_repeated_type_bonus(state, object_id, controller);
             return mana_abilities::inline_preamble_outcomes(state, object_id, controller, ability)
                 .iter()
                 .filter_map(|after| {
@@ -2731,14 +2733,16 @@ fn usable_mana_ability_net(
                         casting_spell,
                     )
                 })
-                .max();
+                .max()
+                .map(|net| net + repeated_type_bonus);
         }
         let shape = reveal_then_mana_shape(ability)?;
         let gross =
             reveal_then_mana_gross(state, object_id, controller, ability, &shape, casting_spell);
         let activation_cost =
             mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
-        return Some(gross.saturating_sub(activation_cost));
+        let repeated_type_bonus = taps_for_mana_repeated_type_bonus(state, object_id, controller);
+        return Some((gross + repeated_type_bonus).saturating_sub(activation_cost));
     };
     let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
     if capacity_use == CapacityUse::XCeiling
@@ -2860,6 +2864,51 @@ enum ActivatableManaProfileKind {
 }
 
 impl ActivatableManaProfileKind {
+    /// CR 605.4a: this kind once `bonus` triggered mana abilities that add "one
+    /// mana of any type that permanent produced" (Kinnan, Bonder Prodigy) have
+    /// resolved after the tap. Each adds one mana repeating a type the tap made,
+    /// so a kind with several producible types becomes one alternative per type
+    /// the extra mana could repeat. A kind of combinations is returned as is: its
+    /// extra mana is sized by the activation's capacity.
+    fn with_repeated_type_bonus(self, bonus: u32) -> Vec<Self> {
+        (0..bonus).fold(vec![self], |kinds, _| {
+            kinds
+                .into_iter()
+                .flat_map(|kind| match kind {
+                    Self::Exact(types) => {
+                        let mut repeated: Vec<ManaType> = Vec::new();
+                        for mana_type in &types {
+                            if !repeated.contains(mana_type) {
+                                repeated.push(*mana_type);
+                            }
+                        }
+                        repeated
+                            .into_iter()
+                            .map(|mana_type| {
+                                let mut extended = types.clone();
+                                extended.push(mana_type);
+                                Self::Exact(extended)
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    Self::AnyOneColor { options } => vec![Self::AnyOneColor {
+                        options: options
+                            .into_iter()
+                            .map(|(mana_type, count)| (mana_type, count + 1))
+                            .collect(),
+                    }],
+                    Self::AnyCombination { count, options } => {
+                        vec![Self::AnyCombination {
+                            count: count + 1,
+                            options,
+                        }]
+                    }
+                    Self::CombinationChoices(options) => vec![Self::CombinationChoices(options)],
+                })
+                .collect()
+        })
+    }
+
     /// `count` mana of any one of `options`.
     fn any_one_color(count: u32, options: Vec<ManaType>) -> Self {
         Self::AnyOneColor {
@@ -3099,6 +3148,8 @@ fn activatable_mana_profiles_for_object(
                 ) {
                     capacity = capacity.max(net);
                 }
+                let repeated_type_bonus =
+                    taps_for_mana_repeated_type_bonus(state, object_id, controller);
                 if let Effect::Mana { produced, .. } = &*production.effect {
                     for after in mana_abilities::inline_preamble_outcomes(
                         state, object_id, controller, ability,
@@ -3109,9 +3160,11 @@ fn activatable_mana_profiles_for_object(
                                 profile_kind_from_production(
                                     &after, object_id, controller, produced, resolved,
                                 )
-                                .and_then(|kind| {
-                                    profile_kind_allowed_for_context(kind, payment_context)
-                                })
+                                .map(|kind| kind.with_repeated_type_bonus(repeated_type_bonus))
+                            })
+                            .flatten()
+                            .filter_map(|kind| {
+                                profile_kind_allowed_for_context(kind, payment_context)
                             })
                         {
                             if !kinds.contains(&kind) {
@@ -3139,11 +3192,13 @@ fn activatable_mana_profiles_for_object(
                 ) {
                     capacity = capacity.max(net);
                 }
-                kinds.extend(
-                    revealed
+                let repeated_type_bonus =
+                    taps_for_mana_repeated_type_bonus(state, object_id, controller);
+                kinds.extend(revealed.into_iter().flat_map(|kind| {
+                    kind.with_repeated_type_bonus(repeated_type_bonus)
                         .into_iter()
-                        .filter_map(|kind| profile_kind_allowed_for_context(kind, payment_context)),
-                );
+                        .filter_map(|kind| profile_kind_allowed_for_context(kind, payment_context))
+                }));
             }
             continue;
         };
@@ -4328,6 +4383,65 @@ pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> 
         .collect()
 }
 
+/// CR 605.1b + CR 603.2: the active `TapsForMana` triggers of `obj` that fire
+/// when `tapped_id` is tapped for mana by `controller`, through the card and
+/// player matcher authorities the trigger resolver uses, so planning and firing
+/// cannot drift.
+fn firing_taps_for_mana_triggers<'a>(
+    state: &'a GameState,
+    obj: &'a crate::game::game_object::GameObject,
+    tapped_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<(TriggerDefinitionRef, &'a TriggerDefinition)> {
+    let source_context = trigger_source_context_for_latch(state, obj);
+    super::functioning_abilities::active_trigger_definitions(state, obj)
+        .filter(|active| active.definition.mode == TriggerMode::TapsForMana)
+        .filter(|active| {
+            super::trigger_matchers::taps_for_mana_card_matches(
+                active.definition,
+                state,
+                tapped_id,
+                &source_context,
+            ) && super::trigger_matchers::valid_player_matches(
+                active.definition,
+                state,
+                controller,
+                &source_context,
+            )
+        })
+        .map(|active| (active.definition_ref, active.definition))
+        .collect()
+}
+
+/// CR 605.4a + CR 106.12a: mana a triggered mana ability adds, one unit per
+/// firing, when `tapped_id` is tapped for mana by `controller` and the added
+/// mana repeats the type that tap produced (Kinnan, Bonder Prodigy;
+/// `TriggerEventManaType`). It resolves immediately after the mana ability that
+/// triggered it, so it is part of what the tap can pay with. Complements
+/// `taps_for_mana_aura_bonus`, which sizes the typed (Aura) bonuses.
+pub(crate) fn taps_for_mana_repeated_type_bonus(
+    state: &GameState,
+    tapped_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    taps_for_mana_trigger_sources(state)
+        .into_iter()
+        .filter_map(|source_id| state.objects.get(&source_id))
+        .flat_map(|obj| firing_taps_for_mana_triggers(state, obj, tapped_id, controller))
+        .filter(|(_, trigger)| {
+            trigger.execute.as_deref().is_some_and(|execute| {
+                matches!(
+                    &*execute.effect,
+                    Effect::Mana {
+                        produced: ManaProduction::TriggerEventManaType,
+                        ..
+                    }
+                )
+            })
+        })
+        .count() as u32
+}
+
 pub(crate) fn taps_for_mana_aura_bonus(
     state: &GameState,
     land_id: ObjectId,
@@ -4358,32 +4472,13 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
-        let source_context = trigger_source_context_for_latch(state, obj);
         // Intentionally NOT filtering by obj.controller: an opponent can
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
         // tapped. `taps_for_mana_card_matches` handles the attachment check.
-        for active in super::functioning_abilities::active_trigger_definitions(state, obj) {
-            let trigger = active.definition;
-            if trigger.mode != TriggerMode::TapsForMana {
-                continue;
-            }
-            if !super::trigger_matchers::taps_for_mana_card_matches(
-                trigger,
-                state,
-                land_id,
-                &source_context,
-            ) {
-                continue;
-            }
-            if !super::trigger_matchers::valid_player_matches(
-                trigger,
-                state,
-                controller,
-                &source_context,
-            ) {
-                continue;
-            }
+        for (definition_ref, trigger) in
+            firing_taps_for_mana_triggers(state, obj, land_id, controller)
+        {
             let Some(execute) = trigger.execute.as_deref() else {
                 continue;
             };
@@ -4395,7 +4490,7 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
             // `mana_options_from_production` already does this enumeration.
             let choices = mana_options_from_production(state, controller, object_id, produced);
             if !choices.is_empty() {
-                per_aura.push((active.definition_ref, choices));
+                per_aura.push((definition_ref, choices));
             }
         }
     }
