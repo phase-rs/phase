@@ -9885,8 +9885,9 @@ fn pt_value_is_fixed(value: &PtValue) -> bool {
 /// own, so it refers to nothing beyond its mode, its modifications and its
 /// `affected` filter, which each caller audits. The one classification of
 /// every field of `StaticDefinition`: a new field is a compile error until it
-/// is classified.
-fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
+/// is classified. `host_zones` are the zones the static's host functions from
+/// by rule, so declaring them states no zone scope of the static's own.
+fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) -> bool {
     let StaticDefinition {
         // Audited by each caller.
         mode: _,
@@ -9911,7 +9912,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && per_player_condition.is_none()
         && affected_zone.is_none()
         && effect_zone.is_none()
-        && active_zones.is_empty()
+        && active_zones.iter().all(|zone| host_zones.contains(zone))
         && !characteristic_defining
         && attack_defended.is_none()
         && source_controller.is_none()
@@ -9935,7 +9936,7 @@ fn static_grant_referent(static_ability: &StaticDefinition) -> Option<&TargetFil
                 ContinuousModification::AddStaticMode { mode } if static_mode_names_no_referent(mode)
             )
         })
-        && static_binds_nothing(static_ability);
+        && static_binds_nothing(static_ability, &[]);
     if referent_free {
         static_ability.affected.as_ref()
     } else {
@@ -9965,7 +9966,9 @@ fn static_mode_names_no_referent(mode: &StaticMode) -> bool {
 fn emblem_static_names_no_referent(static_ability: &StaticDefinition) -> bool {
     matches!(static_ability.mode, StaticMode::NoMaximumHandSize)
         && static_ability.modifications.is_empty()
-        && static_binds_nothing(static_ability)
+        // CR 114.4: an emblem's statics function in the command zone; declaring it
+        // (parser + grant_emblem) names the emblem's own zone, not a scope.
+        && static_binds_nothing(static_ability, &[Zone::Command])
 }
 
 /// CR 608.2c + CR 400.7: whether the object or player `filter` names exists
