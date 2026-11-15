@@ -1525,6 +1525,14 @@ pub enum GameEvent {
         source: ObjectIdentityBinding,
         returns: ObjectIdentityBinding,
     },
+    /// Un-card touch (no CR entry): `player` touched `object_id` (the client
+    /// reports the player's cursor entering the card). Consumed by
+    /// `TriggerMode::Touched` — "Whenever a player's skin or fingernail touches
+    /// this creature" (Vile Bile).
+    ObjectTouched {
+        player: PlayerId,
+        object_id: ObjectId,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,

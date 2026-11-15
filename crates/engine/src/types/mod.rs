@@ -112,3 +112,13 @@ pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};
 pub use zones::Zone;
+
+#[cfg(test)]
+mod test_trigger_mode {
+    use crate::types::triggers::TriggerMode;
+
+    #[test]
+    fn test_touched() {
+        let _ = TriggerMode::Touched;
+    }
+}
