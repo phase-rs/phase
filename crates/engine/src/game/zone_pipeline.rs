@@ -2883,6 +2883,16 @@ pub(crate) fn attach_chosen_entering_aura_host(
         .take()
         .filter(|authority| authority.aura_id == aura_id)
         .map(|authority| EnteringAuraEntrant::Projected(authority.entrant));
+    // CR 101.2 + CR 603.2g: defense in depth for the delivered-entry gate — an
+    // Aura that did not actually enter the battlefield (a refused "can't enter"
+    // return) is never attached, so no graph edit or `Attached` event occurs.
+    if !state
+        .objects
+        .get(&aura_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+    {
+        return false;
+    }
     let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
     crate::game::effects::attach::attach_target_with_authority_and_events(
         state,
@@ -5265,11 +5275,19 @@ fn execute_zone_move_with_applied_terminal(
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {
-                        debug_assert_eq!(
-                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
-                            ZoneMoveCompletion::Moved,
-                            "an Aura host choice follows a completed battlefield entry"
-                        );
+                        // CR 101.2 + CR 614.17: a "can't enter the battlefield"
+                        // effect (Weathered Runestone, Grafdigger's Cage) takes
+                        // precedence, so the delivery can complete with the Aura
+                        // still in its origin zone. The host choice is only
+                        // offered for an Aura that actually entered: a refused
+                        // return settles here with no prompt, attachment, or
+                        // `Attached` event (CR 603.2g: nothing occurred to
+                        // trigger observers).
+                        let completion =
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]);
+                        if completion != ZoneMoveCompletion::Moved {
+                            return ZoneMoveTerminalResult::Completed(completion);
+                        }
                     }
                     ZoneDeliveryResult::NeedsChoice(player) => {
                         return ZoneMoveTerminalResult::NeedsChoice(player);

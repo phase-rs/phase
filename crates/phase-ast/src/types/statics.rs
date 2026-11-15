@@ -4647,6 +4647,21 @@ where
                     filter: block_only_creatures_with_flying_filter(),
                 });
             }
+            // CR 702.18a + CR 115.1: released writers persisted the blanket
+            // targeting prohibition as the bare unit string "CantBeTargeted",
+            // which the struct variant's derive cannot read. Restore it as the
+            // blanket (`AllPlayers`) prohibition it always meant so a saved
+            // copy token keeps an executable restriction instead of an inert
+            // `Other`. The persisted `affected` filter is deliberately NOT
+            // re-derived: a saved token's characteristics are serialized
+            // copiable values (CR 707.2), so the restored rule binds exactly
+            // the subject the released engine bound (an old copy of Silent
+            // Gravestone therefore protects only itself, as it did when saved).
+            if s == "CantBeTargeted" {
+                return Ok(StaticMode::CantBeTargeted {
+                    who: ProhibitionScope::AllPlayers,
+                });
+            }
             // Try the derived deserializer so all known unit variants
             // (e.g. "CantTap", "Flying", …) round-trip correctly. Struct/
             // parameterized variants (e.g. the now-struct `SpendManaAsAnyColor`)
@@ -4831,6 +4846,26 @@ mod tests {
                 filter: block_only_creatures_with_flying_filter(),
             }
         );
+    }
+
+    /// CR 702.18a: the bare unit string a released writer persisted for the
+    /// blanket targeting prohibition restores as the executable struct variant
+    /// (not `Other`), preserving the persisted `affected` filter.
+    #[test]
+    fn legacy_cant_be_targeted_unit_string_restores_blanket_prohibition() {
+        use super::super::ability::StaticDefinition;
+
+        let def: StaticDefinition = serde_json::from_str(
+            r#"{"mode":"CantBeTargeted","modifications":[],"affected":{"type":"SelfRef"}}"#,
+        )
+        .expect("released unit-form CantBeTargeted");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::AllPlayers,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
 
     #[test]

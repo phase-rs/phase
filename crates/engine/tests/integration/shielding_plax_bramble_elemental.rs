@@ -1930,3 +1930,99 @@ fn ground_seal_does_not_protect_battlefield_creatures() {
         "battlefield creature: {legal:?}"
     );
 }
+
+/// Rewrites every serialized `CantBeTargeted` static mode to the bare unit
+/// string a v0.125.0 writer persisted, leaving the persisted `affected` filter
+/// as is. Returns how many modes were rewritten.
+fn downgrade_cant_be_targeted_to_released_unit_form(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut rewritten = 0;
+            if let Some(mode) = map.get_mut("mode") {
+                if mode
+                    .as_object()
+                    .is_some_and(|inner| inner.len() == 1 && inner.contains_key("CantBeTargeted"))
+                {
+                    *mode = serde_json::Value::String("CantBeTargeted".to_string());
+                    rewritten += 1;
+                }
+            }
+            rewritten
+                + map
+                    .values_mut()
+                    .map(downgrade_cant_be_targeted_to_released_unit_form)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(downgrade_cant_be_targeted_to_released_unit_form)
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// CR 702.18a + CR 707.2: a save written by v0.125.0 (a Mirrorworks copy of
+/// Silent Gravestone persisted with the bare unit-form `CantBeTargeted` and the
+/// subject the released parser bound, the copy itself) restores as the
+/// executable blanket prohibition, not an inert `Other`. The persisted subject
+/// is preserved (token characteristics are serialized copiable values), so the
+/// copy still cannot be targeted by Naturalize-class removal — exactly the
+/// released behavior — while cards in graveyards stay targetable (Raise Dead
+/// control), as they were when the save was written.
+#[test]
+fn released_unit_form_cant_be_targeted_save_restores_executable_restriction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gravestone = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Silent Gravestone",
+            "Silent Gravestone can't be the target of spells or abilities.",
+        )
+        .id();
+    let dead_bear = scenario
+        .add_creature_to_graveyard(P0, "Dead Bear", 2, 2)
+        .id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P1, "Naturalize", true, "Destroy target artifact.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let raise_dead = scenario
+        .add_spell_to_hand_from_oracle(P1, "Raise Dead", true, GRAVEYARD_RETURN)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let runner = scenario.build();
+
+    let mut saved = serde_json::to_value(runner.state()).expect("state serializes");
+    assert!(
+        downgrade_cant_be_targeted_to_released_unit_form(&mut saved) > 0,
+        "the fixture must contain the CantBeTargeted static it downgrades"
+    );
+    let restored: engine::types::game_state::GameState =
+        serde_json::from_value(saved).expect("a released-writer save restores");
+    assert!(
+        restored.objects[&gravestone]
+            .static_definitions
+            .iter_unchecked()
+            .any(|def| matches!(
+                def.mode,
+                StaticMode::CantBeTargeted {
+                    who: ProhibitionScope::AllPlayers
+                }
+            )),
+        "the unit-form mode restores as the executable blanket prohibition"
+    );
+
+    let mut runner = GameRunner::from_state(restored);
+    let legal = cast_legal_targets(&mut runner, P1, removal);
+    assert!(
+        !legal.contains(&gravestone),
+        "restored restriction is enforced: {legal:?}"
+    );
+    let mut runner_for_raise = runner;
+    let graveyard_legal = cast_legal_targets(&mut runner_for_raise, P1, raise_dead);
+    assert!(
+        graveyard_legal.contains(&dead_bear),
+        "the persisted subject is not re-derived: graveyard cards stay targetable: {graveyard_legal:?}"
+    );
+}

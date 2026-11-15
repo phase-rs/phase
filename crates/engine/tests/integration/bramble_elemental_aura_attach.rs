@@ -419,3 +419,96 @@ fn refused_graveyard_aura_entry_does_not_attach_or_notify_observers() {
     assert_eq!(attached_events(&events, smoke_shroud), 0);
     assert_eq!(saproling_tokens(&runner).len(), 0);
 }
+
+const REPLENISH_ORACLE: &str =
+    "Return all enchantment cards from your graveyard to the battlefield.";
+const SHIELDING_PLAX_ORACLE: &str = "Enchant creature\nWhen this Aura enters, draw a card.\nEnchanted creature can't be the target of spells or abilities your opponents control.";
+const WEATHERED_RUNESTONE_ORACLE: &str = "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.";
+
+/// Replenish returns Shielding Plax from P0's graveyard while Bramble Elemental
+/// and a second creature are both legal hosts (so the controller would be asked
+/// to choose). `runestone` adds Weathered Runestone. Returns the runner, the Aura,
+/// Bramble Elemental, and the events of the resolution.
+fn replenish_returns_shielding_plax(
+    runestone: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    Vec<engine::types::events::GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 3, 2, BRAMBLE_ELEMENTAL_ORACLE)
+        .id();
+    scenario.add_creature(P0, "Other Bear", 2, 2);
+    if runestone {
+        scenario.add_artifact_from_oracle(P0, "Weathered Runestone", WEATHERED_RUNESTONE_ORACLE);
+    }
+    // Plax's enter trigger draws a card; keep the library non-empty.
+    scenario.add_card_to_library_top(P0, "Filler One");
+    scenario.add_card_to_library_top(P0, "Filler Two");
+    let plax = scenario
+        .add_spell_to_graveyard(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX_ORACLE)
+        .id();
+    let replenish = scenario
+        .add_spell_to_hand_from_oracle(P0, "Replenish", false, REPLENISH_ORACLE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(replenish).resolve();
+    let events = outcome.events().to_vec();
+    drop(outcome);
+    (runner, plax, bramble, events)
+}
+
+/// CR 101.2 + CR 614.17 + CR 603.2g: Weathered Runestone refuses Replenish's
+/// return of Shielding Plax, so no host choice is offered even with several
+/// legal hosts; the Aura stays in the graveyard, nothing attaches, no
+/// `Attached` event is published, and Bramble Elemental never triggers.
+#[test]
+fn refused_replenish_aura_return_with_multiple_hosts_opens_no_prompt() {
+    let (mut runner, plax, bramble, events) = replenish_returns_shielding_plax(true);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a refused return must not prompt: {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    let aura = &runner.state().objects[&plax];
+    assert_eq!(aura.zone, Zone::Graveyard, "Runestone refuses the entry");
+    assert_eq!(aura.attached_to, None);
+    assert!(runner.state().objects[&bramble].attachments.is_empty());
+    assert_eq!(attached_events(&events, plax), 0);
+    assert_eq!(saproling_tokens(&runner).len(), 0);
+}
+
+/// Control: the same board without Runestone prompts for the host; choosing
+/// Bramble Elemental attaches Plax once and Bramble triggers once.
+#[test]
+fn replenish_aura_return_with_multiple_hosts_prompts_and_attaches_once() {
+    let (mut runner, plax, bramble, mut events) = replenish_returns_shielding_plax(false);
+    let WaitingFor::ReturnAsAuraTarget { legal_targets, .. } = &runner.state().waiting_for else {
+        panic!(
+            "two legal hosts: the controller chooses, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(legal_targets.contains(&TargetRef::Object(bramble)));
+    let result = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bramble)),
+        })
+        .expect("Bramble Elemental is an offered host");
+    events.extend(result.events);
+    runner.advance_until_stack_empty();
+    let aura = &runner.state().objects[&plax];
+    assert_eq!(aura.zone, Zone::Battlefield);
+    assert_eq!(aura.attached_to, Some(AttachTarget::Object(bramble)));
+    assert_eq!(attached_events(&events, plax), 1);
+    assert_eq!(saproling_tokens(&runner).len(), 2);
+}
