@@ -28148,7 +28148,14 @@ fn trigger_batched_and_threshold_counter_removal_forms_are_unchanged() {
     );
     assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
 
-    let rows: [(&str, &str, &str, fn(&Effect) -> bool); 4] = [
+    // (card name, printed trigger line, expected Unknown payload, body-effect check)
+    type BatchedRow = (
+        &'static str,
+        &'static str,
+        &'static str,
+        fn(&Effect) -> bool,
+    );
+    let rows: [BatchedRow; 4] = [
         (
             "Chandra, Fire Artisan",
             "Whenever one or more loyalty counters are removed from Chandra, she deals that much damage to target opponent or planeswalker.",
