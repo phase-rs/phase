@@ -1721,6 +1721,9 @@ struct TargetSlotSpec {
     group: Option<crate::types::ability::ChosenGroupId>,
     /// Typed origin of the declaring instruction, relative to the targeting root.
     path: Vec<ChainStep>,
+    /// CR 109.4 + CR 608.2c: for a per-opponent repeat fanout, the opponent the
+    /// slot's `You` controller is bound to during legality recomputation.
+    bound_player: Option<PlayerId>,
 }
 
 impl TargetSlotSpec {
@@ -2571,7 +2574,10 @@ pub fn assign_targets_in_chain(
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
 ) -> Result<(), EngineError> {
-    if is_per_opponent_target_fanout(ability) || !chain_has_target_sink(ability) {
+    if is_per_opponent_target_fanout(ability)
+        || is_repeat_for_opponent_target_fanout(ability)
+        || !chain_has_target_sink(ability)
+    {
         ability.set_unpinned_targets(targets.to_vec());
         record_root_target_slots(ability);
         ability.capture_target_incarnations_recursive(state);
@@ -2686,7 +2692,10 @@ pub fn assign_selected_slots_in_chain(
     selected_slots: &[Option<TargetRef>],
 ) -> Result<(), EngineError> {
     let chosen: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
-    if is_per_opponent_target_fanout(ability) || !chain_has_target_sink(ability) {
+    if is_per_opponent_target_fanout(ability)
+        || is_repeat_for_opponent_target_fanout(ability)
+        || !chain_has_target_sink(ability)
+    {
         ability.set_unpinned_targets(chosen);
         record_root_target_slots(ability);
         ability.capture_target_incarnations_recursive(state);
@@ -4046,7 +4055,11 @@ fn validate_targets_in_chain_inner(
     // declared view and the fizzle stamp are each derived from the verdicts.
     let occurrence_count = validated.targets.len();
     let announced_player_positions = declared_player_positions(&validated);
-    let node_validation = if is_per_opponent_target_fanout(&validated) {
+    let node_validation = if is_repeat_for_opponent_target_fanout(&validated) {
+        NodeValidation::Verdicts(validate_repeat_for_opponent_target_fanout_targets(
+            state, &validated,
+        ))
+    } else if is_per_opponent_target_fanout(&validated) {
         NodeValidation::Verdicts(validate_per_opponent_target_fanout_targets(
             state, &validated,
         ))
@@ -4738,24 +4751,19 @@ fn validate_targets_in_chain_inner(
     // (stored domain, `declared_to_stored`).
     let verdicts = match node_validation {
         NodeValidation::Verdicts(verdicts) => {
-            let stored_by_declared: Vec<Option<usize>> =
-                super::target_occurrences::declared_to_stored(&verdicts)
-                    .into_iter()
-                    .map(|stored| stored.map(|super::target_occurrences::StoredIndex(index)| index))
-                    .collect();
-            validated.retain_target_occurrences(&verdicts);
-            // The storage projection crosses domains only through
-            // `declared_to_stored`: each stored occurrence is its declared
-            // occurrence, pin included.
+            let stored_by_declared = validated.retain_target_occurrences(&verdicts);
+            // The storage projection crosses domains only through the mapping
+            // `retain_target_occurrences` returns: each stored occurrence is its
+            // declared occurrence, pin included.
             #[cfg(debug_assertions)]
-            for (declared, stored) in super::target_occurrences::declared_to_stored(&verdicts)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(super::target_occurrences::StoredIndex(stored)) = stored {
-                    debug_assert_eq!(validated.targets.get(stored), ability.targets.get(declared));
+            for (declared, stored) in stored_by_declared.iter().enumerate() {
+                if let Some(stored) = stored {
                     debug_assert_eq!(
-                        validated.target_pin_at(stored),
+                        validated.targets.get(*stored),
+                        ability.targets.get(declared)
+                    );
+                    debug_assert_eq!(
+                        validated.target_pin_at(*stored),
                         ability.target_pin_at(declared)
                     );
                 }
@@ -5672,6 +5680,10 @@ fn collect_target_slots_inner(
             );
         }
     } else {
+        if is_repeat_for_opponent_target_fanout(ability) {
+            collect_repeat_for_opponent_target_fanout_slots(state, ability, acc)?;
+            return collect_sub_chain_slots(state, ability, acc);
+        }
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_slots(state, ability, acc)?;
             return collect_sub_chain_slots(state, ability, acc);
@@ -6973,6 +6985,7 @@ fn collect_attach_attachment_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
         }
@@ -6985,6 +6998,7 @@ fn collect_attach_attachment_target_slot_specs(
             instance: id,
             group: ability.declares_chosen_group,
             path: Vec::new(),
+            bound_player: None,
         });
     }
 }
@@ -7604,6 +7618,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
@@ -7615,6 +7630,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
     }
@@ -7636,6 +7652,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
         collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
@@ -7655,6 +7672,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
         collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
@@ -7678,6 +7696,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
         }
@@ -7697,6 +7716,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
     } else if let Effect::Attach {
@@ -7724,6 +7744,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
         }
@@ -7754,6 +7775,7 @@ fn collect_target_slot_specs(
                             instance: id,
                             group: ability.declares_chosen_group,
                             path: Vec::new(),
+                            bound_player: None,
                         });
                     }
                 }
@@ -7766,6 +7788,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
             // CR 115.4 + CR 601.2c: group-B spec — its OWN instance, between the
@@ -7781,6 +7804,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
             let id = TargetInstanceId(*next_instance);
@@ -7791,9 +7815,15 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
     } else {
+        if is_repeat_for_opponent_target_fanout(ability) {
+            collect_repeat_for_opponent_target_fanout_specs(state, ability, specs, next_instance);
+            collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
+            return;
+        }
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_specs(state, ability, specs, next_instance);
             collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
@@ -7813,6 +7843,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7829,6 +7860,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7842,6 +7874,7 @@ fn collect_target_slot_specs(
                 instance: id,
                 group: ability.declares_chosen_group,
                 path: Vec::new(),
+                bound_player: None,
             });
         }
         // CR 115.1 + CR 601.2c: EXACT MIRROR of the `BecomeCopy` recipient slot
@@ -7868,6 +7901,7 @@ fn collect_target_slot_specs(
                     instance: id,
                     group: ability.declares_chosen_group,
                     path: Vec::new(),
+                    bound_player: None,
                 });
             }
         }
@@ -7893,6 +7927,7 @@ fn collect_target_slot_specs(
                                 instance: id,
                                 group: ability.declares_chosen_group,
                                 path: Vec::new(),
+                                bound_player: None,
                             });
                         }
                     }
@@ -7905,6 +7940,7 @@ fn collect_target_slot_specs(
                         instance: id,
                         group: ability.declares_chosen_group,
                         path: Vec::new(),
+                        bound_player: None,
                     });
                 }
             }
@@ -8359,6 +8395,187 @@ fn attach_host_enchant_filter(
     Some((filter, attachment_id, controller))
 }
 
+/// CR 601.2c + CR 115.1: "For each opponent, choose up to one target permanent
+/// that opponent controls" is one declared target PER opponent, even though the
+/// parser stores it as a single `TargetOnly` with `multi_target.max = 1` and a
+/// `repeat_for: PlayerCount { Opponent }` loop. The existing per-opponent
+/// fanout covers the sibling shape whose filter names a controller
+/// (`TargetPlayer`); this one has an unbound controller that the iterated
+/// opponent supplies.
+fn is_repeat_for_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
+    if ability.target_choice_timing != TargetChoiceTiming::Stack
+        || is_per_opponent_target_fanout(ability)
+    {
+        return false;
+    }
+    let per_opponent_repeat = matches!(
+        ability.repeat_for.as_ref(),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent
+            }
+        })
+    );
+    let one_target = matches!(
+        ability
+            .multi_target
+            .as_ref()
+            .and_then(|spec| spec.max.as_ref()),
+        Some(QuantityExpr::Fixed { value: 1 })
+    );
+    per_opponent_repeat
+        && one_target
+        && ability
+            .effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+}
+
+/// CR 109.4 + CR 115.1: the iterated opponent supplies the unbound controller
+/// for this slot's object filter, so the slot enumerates only that opponent's
+/// permanents.
+fn scope_unbound_filter_controller(
+    filter: &TargetFilter,
+    controller: ControllerRef,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            let mut typed = typed.clone();
+            if typed.controller.is_none() {
+                typed.controller = Some(controller);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|filter| scope_unbound_filter_controller(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|filter| scope_unbound_filter_controller(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(scope_unbound_filter_controller(filter, controller)),
+        },
+        other => other.clone(),
+    }
+}
+
+fn repeat_for_opponent_object_filter(ability: &ResolvedAbility) -> Option<TargetFilter> {
+    let mut filter = ability.effect.target_filter()?.clone();
+    if !super::filter::bind_declaring_owner_authority(&mut filter, ability.controller) {
+        return None;
+    }
+    let filter = rewrite_declared_target_player(&filter, ControllerRef::You);
+    Some(scope_unbound_filter_controller(&filter, ControllerRef::You))
+}
+
+fn repeat_for_opponent_legal_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    opponent: PlayerId,
+) -> Vec<TargetRef> {
+    let Some(filter) = repeat_for_opponent_object_filter(ability) else {
+        return Vec::new();
+    };
+    targeting::find_legal_object_targets_for_ability_with_filter_controller(
+        state, &filter, ability, opponent,
+    )
+}
+
+fn collect_repeat_for_opponent_target_fanout_slots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    acc: &mut SlotAccumulator,
+) -> Result<(), EngineError> {
+    let Some(filter) = repeat_for_opponent_object_filter(ability) else {
+        return Err(no_legal_target_slots().into());
+    };
+    for opponent in per_opponent_fanout_players(state, ability.controller) {
+        let legal_targets = repeat_for_opponent_legal_object_targets(state, ability, opponent);
+        if legal_targets.is_empty() {
+            if ability.targeting_is_optional() {
+                continue;
+            }
+            return Err(no_legal_target_slots().into());
+        }
+        acc.push(
+            &filter,
+            TargetSelectionSlot {
+                legal_targets,
+                optional: ability.targeting_is_optional(),
+                chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn collect_repeat_for_opponent_target_fanout_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &mut Vec<TargetSlotSpec>,
+    next_instance: &mut usize,
+) {
+    let Some(filter) = repeat_for_opponent_object_filter(ability) else {
+        return;
+    };
+    for opponent in per_opponent_fanout_players(state, ability.controller) {
+        if ability.targeting_is_optional()
+            && repeat_for_opponent_legal_object_targets(state, ability, opponent).is_empty()
+        {
+            continue;
+        }
+        let instance = TargetInstanceId(*next_instance);
+        *next_instance += 1;
+        specs.push(TargetSlotSpec {
+            filter: filter.clone(),
+            optional: ability.targeting_is_optional(),
+            instance,
+            group: ability.declares_chosen_group,
+            path: Vec::new(),
+            bound_player: Some(opponent),
+        });
+    }
+}
+
+fn validate_repeat_for_opponent_target_fanout_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<OccurrenceVerdict> {
+    let Some(_) = repeat_for_opponent_object_filter(ability) else {
+        return vec![OccurrenceVerdict::Dropped; ability.targets.len()];
+    };
+    let mut targets = ability.targets.iter().enumerate();
+    let mut verdicts = Vec::with_capacity(ability.targets.len());
+    for opponent in per_opponent_fanout_players(state, ability.controller) {
+        let legal_targets = repeat_for_opponent_legal_object_targets(state, ability, opponent);
+        if legal_targets.is_empty() && ability.targeting_is_optional() {
+            continue;
+        }
+        let Some((position, target)) = targets.next() else {
+            break;
+        };
+        verdicts.push(match target {
+            TargetRef::Object(id) => legal_or_dropped(
+                legal_targets.contains(&TargetRef::Object(*id))
+                    && target_is_current_at(ability, position, state),
+            ),
+            TargetRef::Player(_) => OccurrenceVerdict::Dropped,
+        });
+    }
+    for _ in targets {
+        verdicts.push(OccurrenceVerdict::Dropped);
+    }
+    verdicts
+}
+
 pub(crate) fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
     if ability.target_choice_timing != TargetChoiceTiming::Stack {
         return false;
@@ -8529,6 +8746,7 @@ fn collect_per_opponent_target_fanout_specs(
             instance: player_id,
             group: None,
             path: Vec::new(),
+            bound_player: None,
         });
         specs.push(TargetSlotSpec {
             filter: object_filter.clone(),
@@ -8536,6 +8754,7 @@ fn collect_per_opponent_target_fanout_specs(
             instance: object_id,
             group: None,
             path: Vec::new(),
+            bound_player: None,
         });
     }
 }
@@ -8815,6 +9034,14 @@ fn legal_targets_for_selected_slot(
     } else {
         None
     };
+    let repeat_for_opponent_object_targets = if is_repeat_for_opponent_target_fanout(declaring_node)
+    {
+        spec.bound_player.map(|opponent| {
+            repeat_for_opponent_legal_object_targets(state, declaring_node, opponent)
+        })
+    } else {
+        None
+    };
 
     let mut legal: Vec<TargetRef> = if matches!(declaring_node.effect, Effect::PairWith { .. }) {
         pair_with_legal_choices(state, declaring_node, &spec.filter)
@@ -8830,6 +9057,8 @@ fn legal_targets_for_selected_slot(
     } else if let Some(targets) = per_opponent_fanout_targets {
         targets
     } else if let Some(targets) = per_opponent_fanout_object_targets {
+        targets
+    } else if let Some(targets) = repeat_for_opponent_object_targets {
         targets
     } else {
         // CR 109.5 + CR 108.3: preserve original Your ownership before a
@@ -23950,6 +24179,188 @@ mod tests {
             },
         ));
         ability
+    }
+
+    /// The parser's `Choose`-family lowering of "for each opponent, choose up
+    /// to one target `<type>` that player controls": a `TargetOnly` declaration
+    /// with `multi_target.max = 1` and a `repeat_for: PlayerCount(Opponent)`
+    /// loop (The Doctor's Childhood Barn, Mega Flare). The filter's controller
+    /// is supplied by the iterated opponent, not by the ability's controller.
+    fn repeat_for_opponent_target_only_ability(
+        target: TargetFilter,
+        timing: TargetChoiceTiming,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly { target },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Fixed { value: 1 },
+        ));
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        });
+        ability.target_choice_timing = timing;
+        ability
+    }
+
+    /// CR 608.2c + CR 115.1: "for each opponent, choose up to one target
+    /// nonland permanent that opponent controls" declares one slot PER
+    /// opponent, and each slot offers only that opponent's permanents. An
+    /// unbound parsed controller is supplied by the iterated opponent.
+    #[test]
+    fn repeat_for_opponent_fanout_scopes_an_unbound_controller_to_each_opponent() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller_permanent =
+            create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
+        let opp_one_permanent = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opp_two_permanent = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        let ability = repeat_for_opponent_target_only_ability(
+            TargetFilter::Typed(TypedFilter::permanent()),
+            TargetChoiceTiming::Stack,
+        );
+        assert!(is_repeat_for_opponent_target_fanout(&ability));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "one declared slot per opponent, not one slot for the repeat loop"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(opp_one_permanent)],
+            "the first slot is opponent one's permanents only"
+        );
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opp_two_permanent)],
+            "the second slot is opponent two's permanents only"
+        );
+        assert!(
+            slots.iter().all(|slot| !slot
+                .legal_targets
+                .contains(&TargetRef::Object(controller_permanent))),
+            "the controller's own permanents are never offered by an opponent's slot"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2c: the `Choose` lowering stores the anaphoric "that
+    /// player controls" as `ControllerRef::You`; the iterated opponent must
+    /// still supply the controller. Binding the ability's controller instead
+    /// would offer the caster's own permanents (Mega Flare, Shellshock,
+    /// Tolarian Contempt).
+    #[test]
+    fn repeat_for_opponent_fanout_rebinds_a_parsed_you_controller_to_the_iterated_opponent() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller_creature =
+            create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        let ability = repeat_for_opponent_target_only_ability(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            TargetChoiceTiming::Stack,
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(opp_one_creature)],
+            "`You` is the iterated opponent in this fanout, never the caster"
+        );
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opp_two_creature)]
+        );
+        assert!(
+            slots.iter().all(|slot| !slot
+                .legal_targets
+                .contains(&TargetRef::Object(controller_creature))),
+            "the caster's creature must not be offered"
+        );
+    }
+
+    /// CR 115.10a + CR 608.2c: a resolution-time "for each opponent, tap up to
+    /// one untapped creature YOU control" (Nihiloor) names the caster's
+    /// creatures, so it must keep ordinary single-slot enumeration. The
+    /// per-opponent fanout is gated on stack-time target choice; at Resolution
+    /// timing no per-opponent slots are declared at all.
+    #[test]
+    fn repeat_for_opponent_fanout_ignores_a_resolution_timed_you_control_choice() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller_creature =
+            create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        let ability = repeat_for_opponent_target_only_ability(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            TargetChoiceTiming::Resolution,
+        );
+        assert!(!is_repeat_for_opponent_target_fanout(&ability));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            0,
+            "a printed `you control` at resolution time declares no per-opponent slot"
+        );
+        assert!(
+            !slots.iter().any(|slot| slot
+                .legal_targets
+                .contains(&TargetRef::Object(controller_creature))),
+            "the caster's creature is not offered"
+        );
+        assert!(
+            !slots.iter().any(|slot| slot
+                .legal_targets
+                .contains(&TargetRef::Object(opp_one_creature))),
+            "opponent one's creature is not offered"
+        );
+        assert!(
+            !slots.iter().any(|slot| slot
+                .legal_targets
+                .contains(&TargetRef::Object(opp_two_creature))),
+            "opponent two's creature is not offered"
+        );
+    }
+
+    /// CR 608.2b: resolution validation re-checks each chosen object against
+    /// the opponent whose slot declared it, so an object controlled by a
+    /// different opponent is dropped rather than affected.
+    #[test]
+    fn repeat_for_opponent_fanout_validates_each_object_against_its_own_opponent() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        let mut ability = repeat_for_opponent_target_only_ability(
+            TargetFilter::Typed(TypedFilter::permanent()),
+            TargetChoiceTiming::Stack,
+        );
+        ability.targets = vec![
+            TargetRef::Object(opp_one_creature),
+            TargetRef::Object(opp_two_creature),
+        ];
+        assert_eq!(
+            validate_repeat_for_opponent_target_fanout_targets(&state, &ability),
+            vec![OccurrenceVerdict::Legal, OccurrenceVerdict::Legal],
+            "each object is legal for the opponent whose slot declared it"
+        );
+
+        ability.targets = vec![
+            TargetRef::Object(opp_two_creature),
+            TargetRef::Object(opp_one_creature),
+        ];
+        assert_eq!(
+            validate_repeat_for_opponent_target_fanout_targets(&state, &ability),
+            vec![OccurrenceVerdict::Dropped, OccurrenceVerdict::Dropped],
+            "an object controlled by the wrong opponent is not legal for that slot"
+        );
     }
 
     /// CR 601.2d building-block (AST-shape) test: a division is announced only

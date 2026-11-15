@@ -1016,6 +1016,7 @@ fn forwarded_zone_result_from_events<'a>(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: arrivals,
+        phase_population: false,
     }
 }
 
@@ -1467,6 +1468,7 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
             child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
     }
@@ -1671,6 +1673,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
         let enclosing_die_publication = state.die_result_publication.take();
@@ -5382,6 +5385,21 @@ pub(crate) fn apply_parent_chain_context(
     };
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    // CR 608.2c: a phase action's resolved population is a one-hop input to
+    // the application-filter consumer the phase branch bound it to. It is not
+    // a producer's `forward_result` antecedent for the rest of the chain: a
+    // later instruction owns its own declarations, and a numbered
+    // `ParentTargetSlot` keeps indexing the DECLARED slots rather than the
+    // population. A zone-move `forward_result` context, by contrast,
+    // intentionally stays readable by later instructions.
+    if child
+        .context
+        .forwarded_result_context
+        .as_ref()
+        .is_some_and(|result| result.phase_population)
+    {
+        child.context.forwarded_result_context = None;
+    }
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
             child.context.duration_events.push(event);
@@ -16917,9 +16935,30 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
 /// population itself, not an object population that merely reads the parent
 /// referent through a controller/owner qualifier.
 fn is_phase_population_referent(filter: &TargetFilter) -> bool {
+    // CR 608.2c: only the broad `ParentTarget` anaphor names the producer's
+    // forwarded result as a population. A `ParentTargetSlot { index }` is a
+    // NUMBERED declared slot of the resolving chain: it is owned by the later
+    // declaration that created it, so a phase result must never replace it.
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
+/// CR 608.2c: True when `effect` is the population-shaped continuous rider
+/// that consumes a preceding phase action's result. An independently targeted
+/// rider is excluded even when its controller qualifier names the parent.
+fn phase_rider_reads_phase_population(effect: &Effect) -> bool {
     matches!(
-        filter,
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } if target.as_ref().is_none_or(is_phase_population_referent)
+            && static_abilities.iter().any(|static_def| {
+                static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(is_phase_population_referent)
+            })
     )
 }
 
@@ -16936,23 +16975,6 @@ fn phase_result_objects(
 ) -> Vec<ObjectId> {
     match &ability.effect {
         Effect::PhaseOut { .. } | Effect::PhaseIn { .. } => {
-            // CR 115.1 + CR 702.26b: the phase handler publishes the objects it
-            // actually changed phase status for. A selected attachment that
-            // phased out indirectly with its selected host still has its own
-            // event; a stale pinned target that the handler dropped (CR 400.7)
-            // has none, so the raw declared ID must not be repinned downstream.
-            let actual: HashSet<ObjectId> = effect_events
-                .iter()
-                .filter_map(|event| match (&ability.effect, event) {
-                    (Effect::PhaseOut { .. }, GameEvent::PermanentPhasedOut { object_id, .. }) => {
-                        Some(*object_id)
-                    }
-                    (Effect::PhaseIn { .. }, GameEvent::PermanentPhasedIn { object_id }) => {
-                        Some(*object_id)
-                    }
-                    _ => None,
-                })
-                .collect();
             let declared_explicit: Vec<ObjectId> = ability
                 .targets
                 .iter()
@@ -16983,6 +17005,25 @@ fn phase_result_objects(
                     })
                     .collect()
             } else {
+                // CR 115.1 + CR 702.26b: the phase handler publishes the
+                // objects it actually changed phase status for. A selected
+                // attachment that phased out indirectly with its selected host
+                // still has its own event; a stale pinned target that the
+                // handler dropped (CR 400.7) has none, so the raw declared ID
+                // must not be repinned downstream.
+                let actual: HashSet<ObjectId> = effect_events
+                    .iter()
+                    .filter_map(|event| match (&ability.effect, event) {
+                        (
+                            Effect::PhaseOut { .. },
+                            GameEvent::PermanentPhasedOut { object_id, .. },
+                        ) => Some(*object_id),
+                        (Effect::PhaseIn { .. }, GameEvent::PermanentPhasedIn { object_id }) => {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 // CR 400.7 + CR 603.7c: membership is the SELECTED occurrence
                 // as it exists now, not the bare storage id. A stale selected
                 // occurrence must not be re-admitted just because a new
@@ -28511,11 +28552,17 @@ fn resolve_chain_body(
         vec![]
     };
     let effect_events = &events[events_before..];
-    // CR 608.2c: phase-out/phase-in affect a resolved population, not a
-    // declared object target. Publish the actual set so a following
-    // `ParentTarget` rider ("until end of turn, they can't phase in") binds the
-    // creatures that changed status rather than the player-only anchor.
-    let phase_affected_objects = phase_result_objects(state, ability, effect_events);
+    // CR 608.2c: collect the phase population only when the immediate rider
+    // actually consumes it. The owned vector ends the borrow of `events` before
+    // later resolution steps mutate the event log.
+    let phase_result_for_rider = (matches!(
+        &ability.effect,
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+    ) && ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| phase_rider_reads_phase_population(&sub.effect)))
+    .then(|| phase_result_objects(state, ability, effect_events));
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -29955,20 +30002,7 @@ fn resolve_chain_body(
         // the parent's phase result the rider's antecedent. Only a pure
         // `ParentTarget`/`ParentTargetSlot` referent on both the instruction and
         // its application filter forwards the phase population.
-        let phase_rider_reads_population = matches!(
-            &sub.effect,
-            Effect::GenericEffect {
-                static_abilities,
-                target,
-                ..
-            } if target.as_ref().is_none_or(is_phase_population_referent)
-                && static_abilities.iter().any(|static_def| {
-                    static_def
-                        .affected
-                        .as_ref()
-                        .is_some_and(is_phase_population_referent)
-                })
-        );
+        let phase_rider_reads_population = phase_rider_reads_phase_population(&sub.effect);
 
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
@@ -30122,12 +30156,13 @@ fn resolve_chain_body(
         {
             // CR 608.2c: a phase instruction's resolved population is the
             // antecedent for a following `ParentTarget` continuous rider.
-            // Forward the actual objects through the same result-binding
-            // authority a forward-result producer uses; `effect.rs`'s
-            // inherited-target path then binds one transient effect per phased
-            // permanent. Install the context even when the set is EMPTY: a
-            // completed zero-object phase action must bind no rider, not fall
-            // back to the player-only parent target.
+            // Forward the actual objects through the result-binding authority
+            // a producer uses, marked as a phase population so the hand-off
+            // below keeps it scoped to this application-filter consumer.
+            // `effect.rs`'s inherited-target path then binds one transient
+            // effect per phased permanent. Install the context even when the
+            // set is EMPTY: a completed zero-object phase action must bind no
+            // rider, not fall back to the player-only parent target.
             let mut sub_with_context = sub.as_ref().clone();
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -30135,9 +30170,14 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            sub_with_context.context.forwarded_result_context = Some(Box::new(
-                ForwardedResultContext::from_object_ids(state, &phase_affected_objects),
-            ));
+            // CR 608.2c: phase-out/phase-in affect a resolved population, not a
+            // declared object target. The vector was collected only because
+            // this immediate rider was recognized as its consumer.
+            sub_with_context.context.forwarded_result_context =
+                Some(Box::new(ForwardedResultContext::phase_population(
+                    state,
+                    phase_result_for_rider.as_deref().unwrap_or(&[]),
+                )));
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -33701,6 +33741,7 @@ mod tests {
                                         Some(Box::new(ForwardedResultContext {
                                             targets: vec![],
                                             object_incarnations: vec![],
+                                            phase_population: false,
                                         }));
                                 }
                                 "detached-tail" => {
@@ -51046,6 +51087,337 @@ mod tests {
             bound.affected,
             TargetFilter::SpecificObject { id: rider_target },
             "the rider must bind its independently declared target, not the phased object"
+        );
+    }
+
+    /// CR 608.2c + CR 702.26b: a phase action's resolved population is scoped to
+    /// the immediate application-filter consumer. The grant that consumes the
+    /// population binds the object the phase action changed; a following
+    /// numbered `ParentTargetSlot` still indexes the DECLARED slots and must not
+    /// read the phase result in the population grant's place.
+    #[test]
+    fn phase_population_stays_with_its_rider_and_a_numbered_slot_keeps_its_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        ));
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(population_grant),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population grant must bind the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: declared },
+            "the numbered slot must index the declared slot, not the phase population"
+        );
+    }
+
+    /// CR 608.2c + CR 115.1: a numbered-slot rider is not a phase-population
+    /// consumer. Directly following the phase action, it binds the slot declared
+    /// before the phase action rather than indexing the phase result by number.
+    #[test]
+    fn phase_population_is_not_forwarded_to_a_numbered_slot_rider() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the slot rider must still install its grant"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: declared },
+            "slot 0 names the declaration before the phase action, not the phase result"
+        );
+    }
+
+    /// CR 608.2c: a phase population is consumed by its application-filter
+    /// rider and is spent there. A later instruction that declares its own B
+    /// owns that referent, so a grant riding it binds B — never the phased A
+    /// the earlier rider consumed.
+    #[test]
+    fn phase_population_is_not_reused_by_a_later_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let newly_declared = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Newly Declared B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, newly_declared] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(
+            // The newly declared B: an instruction that owns its own referent.
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(newly_declared)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            P0,
+        )
+        .sub_ability(population_rider);
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population rider binds the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: newly_declared },
+            "a later declaration owns its referent; the phase population must not be reused"
         );
     }
 

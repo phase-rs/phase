@@ -463,14 +463,26 @@ impl ResolvedAbility {
     /// occurrences whose verdict is stored (`Legal`, `IllegalRetained`,
     /// `PassThrough`), removing `Dropped` ones from targets and pins
     /// together. `verdicts` is aligned with the node's announced occurrences.
-    pub(crate) fn retain_target_occurrences(&mut self, verdicts: &[OccurrenceVerdict]) {
+    ///
+    /// Returns the declared-to-stored mapping the projection used, so callers
+    /// that must stamp declared positions (`stamp_declared_player_target_slots`)
+    /// never rebuild it.
+    pub(crate) fn retain_target_occurrences(
+        &mut self,
+        verdicts: &[OccurrenceVerdict],
+    ) -> Vec<Option<usize>> {
         debug_assert_eq!(verdicts.len(), self.targets.len());
-        let positions: Vec<usize> = declared_to_stored(verdicts)
-            .into_iter()
+        let stored_by_declared = declared_to_stored(verdicts);
+        let positions: Vec<usize> = stored_by_declared
+            .iter()
             .enumerate()
             .filter_map(|(declared, stored)| stored.map(|_| declared))
             .collect();
         self.project_target_occurrences(&positions);
+        stored_by_declared
+            .into_iter()
+            .map(|stored| stored.map(|StoredIndex(index)| index))
+            .collect()
     }
 
     /// Keep exactly the occurrences at `positions` (in that order), moving

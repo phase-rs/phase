@@ -1798,6 +1798,14 @@ pub struct ForwardedResultContext {
     /// reused the same storage `ObjectId`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: True when this result is the population a phase action
+    /// actually changed. A phase population is a resolution-local input to the
+    /// immediately following application-filter consumer; the general context
+    /// hand-off ([`crate::game::effects::apply_parent_chain_context`]) never
+    /// carries it into a later instruction, whose own declarations and numbered
+    /// `ParentTargetSlot` referents stay authoritative.
+    #[serde(default)]
+    pub phase_population: bool,
 }
 
 impl ForwardedResultContext {
@@ -1812,6 +1820,20 @@ impl ForwardedResultContext {
                 .iter()
                 .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
                 .collect(),
+            phase_population: false,
+        }
+    }
+
+    /// CR 608.2c: Capture a phase action's resolved population. Marked as a
+    /// phase population so it is consumed by the immediate rider and never
+    /// inherited by a later instruction.
+    pub fn phase_population(
+        state: &crate::types::game_state::GameState,
+        object_ids: &[ObjectId],
+    ) -> Self {
+        Self {
+            phase_population: true,
+            ..Self::from_object_ids(state, object_ids)
         }
     }
 
@@ -6718,6 +6740,7 @@ mod tests {
             Some(Box::new(ForwardedResultContext {
                 targets: vec![],
                 object_incarnations: vec![],
+                phase_population: false,
             }))
         );
 

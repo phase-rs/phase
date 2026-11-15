@@ -339,52 +339,54 @@ const DOCTORS_CHILDHOOD_BARN: &str = "Creatures enter tapped.\nWhenever chaos en
      permanents. They phase out. They can't phase in for as long as The Doctor's Childhood Barn \
      remains face up. When a player planeswalks, those permanents phase in.";
 
-/// CR 702.26g/h + CR 608.2c: the printed Barn chaos ability resolves through the
-/// engine with a chosen host, a chosen Pacifism controlled by another opponent,
-/// and an incidental Equipment attached to that host. Both chosen objects must
-/// bind the can't-phase-in restriction and the delayed phase-in; the incidental
-/// attachment must not be added to that forwarded population.
+/// Shuko (CHK 159) — verbatim Oracle text. Printed Equipment used as the
+/// incidental attachment: it phases out indirectly with its host and phases
+/// back in only along with that host (CR 702.26g).
+const SHUKO: &str = "Equipped creature gets +1/+0.\nEquip {0}";
+
+/// Pacifism — verbatim Oracle text.
+const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
+
+/// CR 702.26g/h + CR 115.1 + CR 608.2c: the printed Barn chaos ability resolves
+/// through the engine's normal entry points — the "for each opponent" target
+/// prompt, real target submission, and a real planeswalk. One opponent's choice
+/// is a host with printed Shuko attached; the other opponent's choice is a
+/// Pacifism attached to that same host. Both chosen permanents bind the
+/// can't-phase-in restriction and the delayed phase-in. The Pacifism phases out
+/// indirectly with the host (CR 702.26h); the incidental Shuko is never added
+/// to the delayed population and stays phased out until its host phases in.
 #[test]
 fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
     use engine::database::synthesis::synthesize_planechase;
-    use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::deck_loading::create_planar_deck_card;
     use engine::game::effects::phase_out::resolve_phase_in;
-    use engine::game::planechase::{chaos_ensues, restamp_planar_objects_to_controller};
-    use engine::game::scenario::GameRunner;
-    use engine::game::triggers::check_delayed_triggers;
+    use engine::game::planechase::{
+        chaos_ensues, restamp_planar_objects_to_controller, PlanarDieFace,
+    };
     use engine::game::triggers::process_triggers;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::card::CardFace;
     use engine::types::card_type::CoreType;
     use engine::types::events::GameEvent;
     use engine::types::format::FormatConfig;
+    use engine::types::game_state::{GameRng, RandomDraw};
     use engine::types::player::PlayerId;
-    use engine::types::triggers::TriggerMode;
+    use rand::Rng;
 
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 3, 11);
     scenario.at_phase(Phase::PreCombatMain);
 
-    // P1 controls the chosen host. P2 controls the chosen Aura attached to it,
-    // so the selected Aura phases out indirectly with its selected host
-    // (CR 702.26h). P1's incidental Equipment is attached to the same host but
-    // is not selected.
+    // P1 controls the chosen host and the incidental printed Shuko attached to
+    // it. P2 controls the chosen Pacifism, also attached to the host, so the
+    // host's phase-out cascades it (CR 702.26h).
     let chosen_host = scenario.add_creature(P1, "Chosen Host", 3, 3).id();
     let chosen_aura = scenario
-        .add_enchantment_from_oracle(
-            p2,
-            "Pacifism",
-            "Enchant creature\nEnchanted creature can't attack or block.",
-        )
+        .add_enchantment_from_oracle(p2, "Pacifism", PACIFISM)
         .with_subtypes(vec!["Aura"])
         .id();
     let incidental_equipment = scenario
-        .add_artifact_from_oracle(
-            P1,
-            "Incidental Equipment",
-            "Equipped creature gets +0/+1.\nEquip {0}",
-        )
+        .add_artifact_from_oracle(P1, "Shuko", SHUKO)
         .with_subtypes(vec!["Equipment"])
         .id();
 
@@ -408,7 +410,7 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
     synthesize_planechase(&mut face);
 
     let mut runner = scenario.build();
-    let barn = {
+    let (barn, departure_plane) = {
         let state = runner.state_mut();
         state.objects.get_mut(&chosen_aura).unwrap().attached_to = Some(chosen_host.into());
         state
@@ -431,115 +433,168 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
         engine::game::layers::mark_layers_full(state);
 
         let barn = create_planar_deck_card(state, &face, P0);
+        // The active plane lives face up in the command zone; the rest of the
+        // planar deck is a separate face-down stack. A second plane keeps the
+        // planeswalk below from being a self-planeswalk.
         state.planar_deck.retain(|id| *id != barn);
         state.objects.get_mut(&barn).unwrap().face_down = false;
         state.command_zone.push_back(barn);
         state.planar_controller = Some(P0);
-        restamp_planar_objects_to_controller(state);
-        barn
-    };
 
-    // The printed trigger/target-slot wiring must still offer the chosen
-    // permanents. This runs on a clone so the direct-resolution fixture below
-    // can supply both opponents' choices explicitly.
-    {
-        let mut prompt_runner = GameRunner::from_state(runner.state().clone());
-        let mut prompt_events = Vec::new();
-        chaos_ensues(prompt_runner.state_mut(), &mut prompt_events);
-        process_triggers(prompt_runner.state_mut(), &prompt_events);
-        let mut offered = None;
-        for _ in 0..20 {
-            match prompt_runner.state().waiting_for.clone() {
-                WaitingFor::TriggerTargetSelection { target_slots, .. } => {
-                    offered = Some(
-                        target_slots
-                            .iter()
-                            .flat_map(|slot| slot.legal_targets.iter())
-                            .filter_map(|target| match target {
-                                TargetRef::Object(id) => Some(*id),
-                                TargetRef::Player(_) => None,
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                    break;
-                }
-                WaitingFor::Priority { .. } => {
-                    prompt_runner
-                        .act(GameAction::PassPriority)
-                        .expect("pass priority toward Barn's target prompt");
-                }
-                other => panic!("unexpected prompt before Barn target selection: {other:?}"),
+        let mut departure = CardFace {
+            name: "Quiet Departure".to_string(),
+            card_type: engine::types::card_type::CardType {
+                core_types: vec![CoreType::Plane],
+                ..Default::default()
+            },
+            ..CardFace::default()
+        };
+        synthesize_planechase(&mut departure);
+        let departure_plane = create_planar_deck_card(state, &departure, P0);
+        restamp_planar_objects_to_controller(state);
+        (barn, departure_plane)
+    };
+    assert!(
+        runner.state().planar_deck.contains(&departure_plane),
+        "the second plane must be waiting in the planar deck"
+    );
+
+    // CR 901.9b: chaos ensues and the printed trigger raises its target prompt.
+    let mut events = Vec::new();
+    chaos_ensues(runner.state_mut(), &mut events);
+    process_triggers(runner.state_mut(), &events);
+
+    let mut prompted_slots = None;
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                prompted_slots = Some(target_slots);
+                break;
             }
+            WaitingFor::Priority { .. } => {
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass priority toward Barn's target prompt")
+                        .events,
+                );
+            }
+            other => panic!("unexpected prompt before Barn target selection: {other:?}"),
         }
-        let offered = offered.expect("Barn's chaos trigger must raise a target prompt");
+    }
+    let target_slots = prompted_slots.expect("Barn's chaos trigger must raise a target prompt");
+
+    // CR 601.2c + CR 115.1: "for each opponent, choose up to one target nonland
+    // permanent that opponent controls" declares one target per opponent.
+    assert_eq!(
+        target_slots.len(),
+        2,
+        "Barn must declare one target slot per opponent, got {target_slots:?}"
+    );
+    let objects = |slot: &engine::types::game_state::TargetSelectionSlot| {
+        slot.legal_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_slot = objects(&target_slots[0]);
+    let second_slot = objects(&target_slots[1]);
+    assert!(
+        first_slot.contains(&chosen_host) && first_slot.contains(&incidental_equipment),
+        "the first opponent's slot must offer its host and incidental Shuko, got {first_slot:?}"
+    );
+    assert_eq!(
+        second_slot,
+        vec![chosen_aura],
+        "the second opponent's slot must offer its Pacifism"
+    );
+
+    // Submit both choices through the real prompt.
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Object(chosen_host),
+                    TargetRef::Object(chosen_aura),
+                ],
+            })
+            .expect("Barn accepts one permanent from each opponent")
+            .events,
+    );
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
         assert!(
-            offered.contains(&chosen_host) && offered.contains(&chosen_aura),
-            "Barn's target prompt must offer the chosen host and Pacifism, got {offered:?}"
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while Barn's chaos ability resolves: {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Barn's chaos ability")
+                .events,
         );
     }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Barn's chaos ability must resolve"
+    );
 
-    let execute = face
-        .triggers
-        .iter()
-        .find(|trigger| matches!(trigger.mode, TriggerMode::ChaosEnsues))
-        .and_then(|trigger| trigger.execute.as_ref())
-        .expect("printed Barn chaos trigger");
-    let mut ability = build_resolved_from_def(execute, barn, P0);
-    ability.targets = vec![
-        TargetRef::Object(chosen_host),
-        TargetRef::Object(chosen_aura),
-    ];
-    let mut events = Vec::new();
-    engine::game::effects::resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
-        .expect("Barn's printed chaos ability resolves");
+    let phased_out = |object_id: ObjectId| {
+        events.iter().find_map(|event| match event {
+            GameEvent::PermanentPhasedOut {
+                object_id: event_id,
+                indirect,
+            } if *event_id == object_id => Some(*indirect),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        phased_out(chosen_host),
+        Some(false),
+        "the chosen host phases out directly"
+    );
+    assert_eq!(
+        phased_out(chosen_aura),
+        Some(true),
+        "the chosen Pacifism phases out indirectly with the host (CR 702.26h)"
+    );
+    assert_eq!(
+        phased_out(incidental_equipment),
+        Some(true),
+        "the incidental Shuko phases out indirectly with its host (CR 702.26g)"
+    );
 
     {
         let state = runner.state();
-        for (object_id, label) in [
-            (chosen_host, "chosen host"),
-            (chosen_aura, "chosen Aura"),
-            (incidental_equipment, "incidental Equipment"),
-        ] {
-            assert!(
-                state.objects[&object_id].is_phased_out(),
-                "{label} must phase out"
-            );
-        }
-        let delayed_with_selection = state.delayed_triggers.iter().any(|trigger| {
-            let targets: Vec<ObjectId> = trigger
-                .ability
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
-            targets.contains(&chosen_host) && targets.contains(&chosen_aura)
-        });
+        let delayed_targets: Vec<ObjectId> = state
+            .delayed_triggers
+            .iter()
+            .flat_map(|trigger| trigger.ability.targets.iter())
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
         assert!(
-            delayed_with_selection,
-            "a delayed phase-in must bind both selected objects"
+            delayed_targets.contains(&chosen_host) && delayed_targets.contains(&chosen_aura),
+            "the delayed phase-in must bind both chosen permanents, got {delayed_targets:?}"
         );
-        for delayed in &state.delayed_triggers {
-            let targets: Vec<ObjectId> = delayed
-                .ability
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
-            assert!(
-                !targets.contains(&incidental_equipment),
-                "a delayed phase-in must not add the incidental attachment, got {targets:?}"
-            );
-        }
+        assert!(
+            !delayed_targets.contains(&incidental_equipment),
+            "the delayed phase-in must not bind the incidental Shuko, got {delayed_targets:?}"
+        );
     }
 
-    // The restriction is observable through the resolver: while Barn is face
-    // up, an explicit phase-in of either selected object is a no-op.
+    // CR 702.26b + CR 611.2b: while Barn remains face up, an explicit phase-in of
+    // either chosen permanent is a no-op.
     for object_id in [chosen_host, chosen_aura] {
         let phase_in = engine::types::ability::ResolvedAbility::new(
             engine::types::ability::Effect::PhaseIn {
@@ -554,70 +609,88 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
             .expect("explicit phase-in resolves");
         assert!(
             runner.state().objects[&object_id].is_phased_out(),
-            "a selected object must remain locked while Barn is face up"
+            "a chosen permanent must remain locked while Barn is face up"
         );
-    }
-    // The incidental attachment has no direct restriction: an explicit
-    // phase-in succeeds. Put it back out so the later delayed host phase-in
-    // proves it rides the host rather than a selected delayed entry.
-    {
-        let state = runner.state_mut();
-        let phase_in = engine::types::ability::ResolvedAbility::new(
-            engine::types::ability::Effect::PhaseIn {
-                target: engine::types::ability::TargetFilter::SpecificObject {
-                    id: incidental_equipment,
-                },
-            },
-            vec![TargetRef::Object(incidental_equipment)],
-            barn,
-            P0,
-        );
-        let mut phase_in_events = Vec::new();
-        resolve_phase_in(state, &phase_in, &mut phase_in_events)
-            .expect("incidental explicit phase-in resolves");
-        assert!(
-            state.objects[&incidental_equipment].is_phased_in(),
-            "the incidental attachment must not be separately restricted"
-        );
-        let mut phase_out_events = Vec::new();
-        // Restore the incidental attachment's indirect phase-out so the host's
-        // delayed phase-in cascades it in (CR 702.26g).
-        phase_out_object(
-            state,
-            incidental_equipment,
-            PhaseOutCause::Indirectly,
-            &mut phase_out_events,
-        );
-    }
-
-    // CR 702.26h + CR 611.2b: while Barn is face up the lock holds; once it
-    // planeswalks away the delayed instruction phases the selected objects in.
-    {
-        let state = runner.state_mut();
-        state.command_zone.retain(|id| *id != barn);
-        state.objects.get_mut(&barn).unwrap().face_down = true;
-        engine::game::layers::mark_layers_full(state);
-    }
-    let planeswalk = GameEvent::Planeswalked {
-        player_id: P0,
-        from: Some(barn),
-        to: None,
-    };
-    check_delayed_triggers(runner.state_mut(), &[planeswalk]);
-    let mut resolve_events = Vec::new();
-    while !runner.state().stack.is_empty() {
-        engine::game::stack::resolve_top(runner.state_mut(), &mut resolve_events);
     }
     assert!(
-        runner.state().objects[&chosen_host].is_phased_in(),
+        runner.state().objects[&incidental_equipment].is_phased_out(),
+        "Shuko must stay phased out: it rides its host and is not named by the delayed phase-in (CR 702.26g)"
+    );
+
+    // CR 901.9a/c: roll the planar die through the production action until the
+    // Planeswalker symbol comes up, then resolve the real planeswalk.
+    let seed = (0..100_000)
+        .find(|&seed| {
+            let mut rng = GameRng::seed_from_u64(seed);
+            rng.draw(RandomDraw::Outcome).random_range(1..=6) == 1
+        })
+        .expect("a seed that rolls the Planeswalker symbol");
+    {
+        let state = runner.state_mut();
+        state.rng_seed = seed;
+        state.rng_word_pos = 0;
+        state.rng = GameRng::seed_from_u64(seed);
+    }
+    events.extend(
+        runner
+            .act(GameAction::RollPlanarDie)
+            .expect("roll the planar die through the production action")
+            .events,
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlanarDieRolled {
+                face: PlanarDieFace::Planeswalk,
+                ..
+            }
+        )),
+        "reach: the roll must planeswalk"
+    );
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while the planeswalk resolves: {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through the planeswalk")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "the planeswalk and its delayed instruction must resolve"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Planeswalked { .. })),
+        "the production roll must emit a real Planeswalked event"
+    );
+
+    let state = runner.state();
+    assert!(
+        state.objects[&barn].face_down,
+        "planeswalking turns the departing plane face down"
+    );
+    assert!(
+        state.objects[&chosen_host].is_phased_in(),
         "the delayed instruction must phase in the chosen host"
     );
     assert!(
-        runner.state().objects[&chosen_aura].is_phased_in(),
-        "the delayed instruction must phase in the chosen Aura"
+        state.objects[&chosen_aura].is_phased_in(),
+        "the delayed instruction must phase in the chosen Pacifism"
     );
     assert!(
-        runner.state().objects[&incidental_equipment].is_phased_in(),
-        "the incidental attachment phases in with its host, not as a selected delayed target"
+        state.objects[&incidental_equipment].is_phased_in(),
+        "Shuko phases in along with its host, not as a separate delayed target (CR 702.26g)"
     );
 }
