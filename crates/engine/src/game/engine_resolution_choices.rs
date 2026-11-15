@@ -27,6 +27,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::node_has_stack_target_declaration;
 use super::effects;
+use super::effects::choose::PlayerChoiceHolder;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
@@ -10543,7 +10544,7 @@ pub(crate) fn withdraw_resolution_cast_delayed_triggers(
 /// (`effects::choose::player_choice_holder_mut`).
 ///
 /// - A parked continuation: the answer binds a resolution-scoped chosen
-///   player (CR 608.2c + CR 109.4) — appended to the chain's `chosen_players`
+///   player (CR 608.2c + CR 608.2d) — appended to the chain's `chosen_players`
 ///   so the dependent effect (`ControllerRef::ChosenPlayer { index }`) sees it
 ///   (a later `Choose(Player)` reads the reference set, not this list); the
 ///   chain carries the list because it is a `ResolvedAbility`, unlike
@@ -10564,7 +10565,6 @@ fn record_own_player_choice(
     source: Option<&crate::types::game_state::NamedChoiceSource>,
     pid: crate::types::player::PlayerId,
 ) {
-    use effects::choose::PlayerChoiceHolder;
     match effects::choose::player_choice_holder_mut(state, |holder| {
         effects::choose::named_choice_answer_owned_by(source, holder)
     }) {
