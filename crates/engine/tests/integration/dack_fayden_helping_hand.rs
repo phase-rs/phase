@@ -50,19 +50,21 @@ use crate::for_each_of_those_population::{
     MusterCard, REVEAL_MUSTER,
 };
 use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::turns::{execute_cleanup, execute_untap, start_next_turn};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, ChoiceAssignmentSide, ChoiceType, ChosenAttribute, Duration, Effect,
-    EffectKind, PlayerChoiceDistinctness, PlayerFilter, QuantityExpr, QuantityRef, SubAbilityLink,
-    TargetFilter, TargetSelectionMode,
+    EffectKind, FilterProp, PlayerChoiceDistinctness, PlayerFilter, QuantityExpr, QuantityRef,
+    SubAbilityLink, TargetFilter, TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -90,6 +92,16 @@ const KHARN: &str = "Berzerker \u{2014} Khârn the Betrayer attacks or blocks ea
      able.\nSigil of Corruption \u{2014} When you lose control of Khârn the Betrayer, draw two \
      cards.\nThe Betrayer \u{2014} If damage would be dealt to Khârn the Betrayer, prevent that \
      damage and an opponent of your choice gains control of it.";
+
+/// Dress Down, verbatim Oracle text.
+const DRESS_DOWN: &str = "Flash\nWhen this enchantment enters, draw a card.\nCreatures lose all \
+     abilities.\nAt the beginning of the end step, sacrifice this enchantment.";
+
+/// Vengeful Ancestor, verbatim Oracle text.
+const VENGEFUL_ANCESTOR: &str = "Flying\nWhenever this creature enters or attacks, goad target \
+     creature. (Until your next turn, that creature attacks each combat if able and attacks a \
+     player other than you if able.)\nWhenever a goaded creature attacks, it deals 1 damage to its \
+     controller.";
 
 /// Scrambleverse, verbatim Oracle text (scope fence).
 const SCRAMBLEVERSE: &str = "For each nonland permanent, choose a player at random. Then each \
@@ -740,6 +752,173 @@ fn dack_goad_binds_the_new_controller_for_the_rest_of_the_game() {
         "C3.3: no turn boundary ends the goad"
     );
     assert_goaded_by_p0(&mut board.runner, received_by_p1, "after P0's next untap");
+}
+
+/// A flying creature card (a reveal hit that loses its only ability to Dress
+/// Down).
+fn flier() -> MusterCard {
+    MusterCard::OracleCreature {
+        name: "Aerial Scout",
+        oracle: "Flying",
+        keywords: &["flying"],
+        power: 2,
+        toughness: 2,
+    }
+}
+
+/// `FilterProp::Goaded` over creatures: the one reader the goaded-creature
+/// subjects of other cards (Vengeful Ancestor, Bothersome Quasit) go through.
+fn goaded_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]))
+}
+
+fn is_goaded(runner: &GameRunner, id: ObjectId) -> bool {
+    matches_target_filter(
+        runner.state(),
+        id,
+        &goaded_creature_filter(),
+        &FilterContext::neutral(),
+    )
+}
+
+/// P0's cleanup, then P1's turn begins (CR 302.6: P1 has controlled the
+/// creature it was given continuously since its turn began).
+fn begin_p1_turn(runner: &mut GameRunner) {
+    let mut events = Vec::new();
+    execute_cleanup(runner.state_mut(), &mut events);
+    start_next_turn(runner.state_mut(), &mut events);
+    refresh_layers(runner);
+    assert_eq!(runner.state().active_player, P1);
+}
+
+/// A3.5 (HIGH review gap, runtime): CR 701.15b — "Goaded is neither an ability
+/// nor part of the permanent's copiable values." Dack's creatures are goaded
+/// for the rest of the game by a designation the resolution installed, so a
+/// later Dress Down ("Creatures lose all abilities") removes their abilities
+/// and leaves them goaded: the goaded filter still matches them, the combat
+/// requirement still binds their new controller, and the goader is still
+/// Dack's controller. Reach-guards: the creature really had flying before and
+/// really lost it after, so the removal is demonstrably in force.
+#[test]
+fn dack_goad_is_a_designation_that_a_later_dress_down_cannot_remove() {
+    let library = [
+        MusterCard::Sorcery("Miss One"),
+        flier(),
+        MusterCard::Creature("Creature B"),
+        MusterCard::Creature("Creature C"),
+        MusterCard::Sorcery("Miss Two"),
+    ];
+    let (mut board, dress_down) = dack_board_with(4, &library, |scenario| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Dress Down", true, DRESS_DOWN)
+            .as_enchantment()
+            .with_mana_cost(ManaCost::generic(0))
+            .id()
+    });
+    let scout = board.card("Aerial Scout");
+    board.runner.cast(board.dack).resolve();
+    expect_opponent_prompt(&board.runner, 1);
+    let population = iterated_population(&board.runner);
+    assert_eq!(population.len(), 3, "{population:?}");
+    answer_opponent_prompts(&mut board.runner, &[P1, P2, P3]);
+    let received_by_p1 = population[0];
+    assert_eq!(population[0], scout, "observation: reveal order");
+    assert_eq!(controller(&board.runner, received_by_p1), P1);
+
+    refresh_layers(&mut board.runner);
+    let flying = Keyword::Flying;
+    assert!(
+        board.runner.state().objects[&scout].has_keyword(&flying),
+        "reach-guard: the found creature has flying before Dress Down"
+    );
+    for id in &population {
+        assert!(is_goaded(&board.runner, *id), "goaded before Dress Down");
+    }
+
+    // A later Dress Down: its static is newer than the goad designation.
+    board.runner.cast(dress_down).resolve();
+    refresh_layers(&mut board.runner);
+    assert_eq!(zone_of(&board.runner, dress_down), Zone::Battlefield);
+    assert!(
+        !board.runner.state().objects[&scout].has_keyword(&flying),
+        "reach-guard: Dress Down removed the creature's abilities"
+    );
+
+    // The designation is still there, through every reader.
+    for id in &population {
+        assert_eq!(
+            goad_tces(board.runner.state(), *id),
+            vec![(P0, Duration::Permanent)],
+            "the resolution-created designation outlives the ability removal"
+        );
+        assert!(
+            is_goaded(&board.runner, *id),
+            "FilterProp::Goaded reads the designation after Dress Down"
+        );
+    }
+    assert!(
+        !is_goaded(&board.runner, board.dack),
+        "CR 608.2c: Dack is not one of \"those permanents\""
+    );
+    begin_p1_turn(&mut board.runner);
+    assert_goaded_by_p0(&mut board.runner, received_by_p1, "after Dress Down");
+}
+
+/// A3.6 (HIGH review gap, runtime consumer): CR 701.15b + CR 603.2 — a
+/// creature goaded solely by Dack's resolution is a goaded attacker to every
+/// goaded-creature trigger. With a real Vengeful Ancestor (controlled by P3)
+/// on the battlefield, the creature Dack's controller gave P1 attacks as it
+/// must and its controller P1 loses exactly 1 life; an ungoaded creature of
+/// P1's attacking beside it adds no loss.
+#[test]
+fn vengeful_ancestor_punishes_a_creature_goaded_by_dacks_resolution() {
+    let library = [
+        MusterCard::Sorcery("Miss One"),
+        MusterCard::Creature("Creature A"),
+        MusterCard::Creature("Creature B"),
+        MusterCard::Creature("Creature C"),
+        MusterCard::Sorcery("Miss Two"),
+    ];
+    let (mut board, ox) = dack_board_with(4, &library, |scenario| {
+        scenario
+            .add_creature(P3, "Vengeful Ancestor", 3, 2)
+            .from_oracle_text_with_keywords(&["flying"], VENGEFUL_ANCESTOR);
+        scenario.add_creature(P1, "Ornery Ox", 2, 2).id()
+    });
+    board.runner.cast(board.dack).resolve();
+    expect_opponent_prompt(&board.runner, 1);
+    let population = iterated_population(&board.runner);
+    answer_opponent_prompts(&mut board.runner, &[P1, P2, P3]);
+    let received_by_p1 = population[0];
+    assert_eq!(controller(&board.runner, received_by_p1), P1);
+    assert!(
+        !board.runner.state().objects[&received_by_p1]
+            .goaded_by
+            .contains(&P0),
+        "reach-guard: no direct goaded_by designation, only the resolution-created one"
+    );
+    assert!(
+        !is_goaded(&board.runner, ox),
+        "reach-guard: the Ox is not goaded"
+    );
+
+    begin_p1_turn(&mut board.runner);
+    let attackers = arm_combat(&mut board.runner, P1);
+    assert!(attackers.contains(&received_by_p1) && attackers.contains(&ox));
+    let before = board.runner.state().players[P1.0 as usize].life;
+    board
+        .runner
+        .declare_attackers(&[
+            (received_by_p1, AttackTarget::Player(P2)),
+            (ox, AttackTarget::Player(P2)),
+        ])
+        .expect("P1 attacks P2 with both creatures; only the goader P0 is barred");
+    board.runner.advance_until_stack_empty();
+    assert_eq!(
+        board.runner.state().players[P1.0 as usize].life,
+        before - 1,
+        "the goaded attacker triggers Vengeful Ancestor once; the ungoaded Ox does not"
+    );
 }
 
 /// A3.4 (U3 + U4 + U5; C3.1/C3.2/C3.8): CR 608.2c + CR 608.2d + CR 608.2f —
