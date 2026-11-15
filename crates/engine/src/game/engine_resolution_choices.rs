@@ -5906,6 +5906,7 @@ pub(super) fn handle_resolution_choice(
                 std::collections::HashSet::new();
             let mut pack_slots_seen: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
+            let mut companion_selections = 0usize;
             for selection in &selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -5927,7 +5928,25 @@ pub(super) fn handle_resolution_choice(
                             ));
                         }
                     }
+                    // CR 702.139a: one revealed companion per player, one card.
+                    OutsideGameSelection::Companion => {
+                        companion_selections += 1;
+                        if companion_selections > 1 {
+                            return Err(EngineError::InvalidAction(
+                                "Companion selected more than once".to_string(),
+                            ));
+                        }
+                    }
                 }
+            }
+            if companion_selections > 0
+                && !choices.iter().any(|choice| {
+                    matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                })
+            {
+                return Err(EngineError::InvalidAction(
+                    "Selected companion not in outside-game choices".to_string(),
+                ));
             }
             for (sideboard_index, requested_count) in &sideboard_counts {
                 let Some(choice) = choices.iter().find(|choice| match &choice.source {
@@ -6022,6 +6041,16 @@ pub(super) fn handle_resolution_choice(
                                 card.name
                             ))
                         })?;
+                        chosen_ids.push(object_id);
+                    }
+                    // CR 702.139a + CR 400.11b: the revealed companion is brought
+                    // into the game from outside it, and is then used up.
+                    OutsideGameSelection::Companion => {
+                        let object_id = super::companion::bring_revealed_companion_into_game(
+                            state,
+                            player,
+                            destination,
+                        )?;
                         chosen_ids.push(object_id);
                     }
                     OutsideGameSelection::FaceUpExile { object_id } => {
@@ -10856,9 +10885,19 @@ pub(crate) fn run_batch_completion(
                 .expect("zone result completion publishes once into a live occurrence");
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
-        BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
-            effects::mill::complete_mill_delivery(state, player_id, cards, events)
-        }
+        BatchCompletion::MilledDeliveryComplete {
+            player_id,
+            cards,
+            position,
+            destination,
+        } => effects::mill::complete_mill_delivery(
+            state,
+            player_id,
+            cards,
+            position,
+            destination,
+            events,
+        ),
         BatchCompletion::HordeMillFromLossDeliveryComplete {
             player_id,
             milled,

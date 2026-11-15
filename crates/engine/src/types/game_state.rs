@@ -6996,14 +6996,16 @@ impl EnclosingPostReplacementFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
-    /// Remaining per-object counter removals.
-    pub remaining: Vec<PendingCounterRemoval>,
+    /// Remaining per-object counter removals, consumed from the front. A
+    /// `VecDeque` serializes as the same JSON sequence a `Vec` did.
+    pub remaining: VecDeque<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries. Retained for diagnostics and
-    /// legacy wire compatibility; use `applied_total` for effect result context.
+    /// Total counters requested across all entries, saturating at `u32::MAX` (each
+    /// entry keeps its true count). Retained for diagnostics and legacy wire
+    /// compatibility; use `applied_total` for effect result context.
     pub total: u32,
     /// Counters actually removed so far, after clamping and replacements.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -7056,7 +7058,7 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
                     })
                     .ok_or_else(|| serde::de::Error::missing_field("source_id")),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<VecDeque<_>, _>>()?;
         Ok(Self {
             remaining,
             effect_kind: wire.effect_kind,
@@ -7929,6 +7931,13 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards were taken
+        /// from. Only top-edge moves publish `Milled` events.
+        #[serde(default)]
+        position: LibraryPosition,
+        /// CR 701.17a: Destination zone for the cards. Only Graveyard counts as mill.
+        #[serde(default = "default_zone_graveyard")]
+        destination: Zone,
     },
     /// Horde advanced legendary rule
     /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
@@ -7947,6 +7956,10 @@ pub enum BatchCompletion {
         /// battlefield phases out synchronously (CR 702.26).
         legendary_cohort: Vec<ObjectId>,
     },
+}
+
+const fn default_zone_graveyard() -> Zone {
+    Zone::Graveyard
 }
 
 /// CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused for a
@@ -9102,6 +9115,32 @@ pub enum SpellAlternativeCostElection {
     Legacy,
 }
 
+/// CR 601.3 + CR 601.6: the route that let this cast begin outside sorcery timing,
+/// fixed when the cast is proposed and read, never re-derived, by payment and finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastTimingRoute {
+    /// CR 702.8a + CR 601.3b: flash, or a permission to cast it as though it had flash, needing no cost or target.
+    Permission,
+    /// CR 601.3c + CR 601.3d: only the spell's own "as though it had flash" option.
+    SpellOption,
+    /// CR 118.9 + CR 601.3c: only a granted alternative cost that carries the timing.
+    AlternativeCost,
+    /// CR 702.48a: only an Offering sacrifice.
+    Offering,
+}
+
+impl CastTimingRoute {
+    /// The provenance stamped on the cast object (CR 601.3b timing permission used).
+    pub fn permission(self) -> CastTimingPermission {
+        match self {
+            Self::Offering => CastTimingPermission::Offering,
+            Self::Permission | Self::SpellOption | Self::AlternativeCost => {
+                CastTimingPermission::AsThoughHadFlash
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -9196,7 +9235,7 @@ pub struct PendingCast {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
+    pub cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10658,6 +10697,34 @@ impl GameState {
         owners
     }
 
+    /// The casting stage of the live announcement, read from the prompt being answered when it
+    /// embeds the cast, since another owner may hold the same cast in custody meanwhile.
+    pub(crate) fn pending_cast_stage(&self) -> Option<PendingCastStage> {
+        if let Some((_, stage)) = self.waiting_for.pending_cast_with_stage() {
+            return Some(stage);
+        }
+        Some(match *self.live_pending_cast_owners().first()? {
+            PendingCastOwner::Prompt => self.waiting_for.pending_cast_with_stage()?.1,
+            // CR 601.2d: a division announced before costs keeps `distribute`; the X-deferred
+            // division raised after mana payment holds a fresh cast without it.
+            PendingCastOwner::External => match (&self.waiting_for, self.pending_cast.as_deref()) {
+                (
+                    WaitingFor::DistributeAmong {
+                        scope: DistributionScope::AnnouncedTargets,
+                        ..
+                    },
+                    Some(pending),
+                ) if pending.distribute.is_some() && !pending.activation_cost_committed => {
+                    PendingCastStage::Proposal
+                }
+                _ => PendingCastStage::Costs,
+            },
+            PendingCastOwner::DeferredLifeCost
+            | PendingCastOwner::CostMove
+            | PendingCastOwner::DiscardForCost => PendingCastStage::Costs,
+        })
+    }
+
     /// The [`PendingCast`] held by `owner`, if that owner is live.
     pub(crate) fn pending_cast_at(&self, owner: PendingCastOwner) -> Option<&PendingCast> {
         match owner {
@@ -10824,6 +10891,15 @@ impl GameState {
             };
         }
     }
+}
+
+/// Where an announced cast is, in the order the engine raises its prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingCastStage {
+    /// CR 601.2a–d: the proposal, before the total cost is determined.
+    Proposal,
+    /// CR 601.2f–h: determining and paying the total cost.
+    Costs,
 }
 
 /// CR 601.2 + CR 602.2b: every typed owner of an announced cast or activation
@@ -12206,6 +12282,16 @@ pub enum OutsideGameChoiceSource {
         /// would raise it.
         card: Box<crate::types::card::CardFace>,
     },
+    /// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+    /// outside the game (`Player::companion` with `used == false`). Revealing it
+    /// does not bring it into the game, so an effect that finds cards "from
+    /// outside the game" can find it until the companion special action (or a
+    /// prior such effect) puts it into hand (CR 702.139c). It leaves the
+    /// sideboard pool at the reveal, so it is not a `Sideboard` entry. Boxed for
+    /// the same `WaitingFor` size budget as `BoosterPack`.
+    Companion {
+        card: Box<crate::types::card::CardFace>,
+    },
 }
 
 /// Where an opened booster pack came from, for display. Every card in one pack
@@ -13382,7 +13468,33 @@ pub(crate) struct PrecastShortcutBreakpoint {
 #[derive(Debug, Clone)]
 pub struct TrustedGameStateEnvelope {
     state: GameState,
+    // Persistence metadata only. Absence retains legacy repair authority until restore.
+    block_history_format: Option<BlockHistoryFormat>,
     precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+/// The block-history format a trusted envelope was written in. An envelope
+/// without one predates it: its writer recorded a creature put onto the
+/// battlefield blocking as having blocked (CR 509.4), so restore repairs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockHistoryFormat {
+    /// CR 509.4: only declared blocks are recorded.
+    DeclaredOnly,
+}
+
+impl BlockHistoryFormat {
+    const fn wire_value(self) -> u64 {
+        match self {
+            Self::DeclaredOnly => 1,
+        }
+    }
+
+    fn from_wire_value(value: &serde_json::Value) -> Option<Self> {
+        match value.as_u64() {
+            Some(1) => Some(Self::DeclaredOnly),
+            _ => None,
+        }
+    }
 }
 
 fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameState, String> {
@@ -13422,6 +13534,102 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
         }
     }
     Ok(())
+}
+
+/// Strips the pre-route `"AsThoughHadFlash"` timing value from every serialized
+/// `PendingCast` and lists those casts' objects in `legacy_unrouted_pending_casts`,
+/// where restore recovers their route from the board.
+fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
+    fn visit(value: &mut serde_json::Value, ids: &mut Vec<serde_json::Value>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                // `card_id` and `ability` are required `PendingCast` fields; a
+                // `PendingSpellResolution` carries the same value legitimately.
+                if object.contains_key("card_id")
+                    && object.contains_key("ability")
+                    && object
+                        .get("cast_timing_permission")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("AsThoughHadFlash")
+                {
+                    object.remove("cast_timing_permission");
+                    if let Some(id) = object.get("object_id").filter(|id| !ids.contains(id)) {
+                        ids.push(id.clone());
+                    }
+                }
+                for child in object.values_mut() {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    visit(child, ids);
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    let mut ids = Vec::new();
+    visit(value, &mut ids);
+    if let (false, Some(state)) = (ids.is_empty(), value.as_object_mut()) {
+        state.insert(
+            "legacy_unrouted_pending_casts".into(),
+            serde_json::Value::Array(ids),
+        );
+    }
+}
+
+/// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`,
+/// and its ability's resolution choice.
+fn migrate_legacy_as_though_flash_grants(value: &mut serde_json::Value) {
+    fn legacy_grant(value: &serde_json::Value) -> bool {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility")
+            && value.pointer("/definition/mode")
+                == Some(&serde_json::json!({"CastWithKeyword": {"keyword": "Flash"}}))
+    }
+    // CR 601.3 + CR 608.2d: that permission's "may" is exercised by later casts, not chosen while
+    // the grant resolves; its old writer lowered it as a resolution choice.
+    if value.get("optional") == Some(&serde_json::Value::Bool(true))
+        && value
+            .pointer("/effect/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("GenericEffect")
+        && value
+            .pointer("/effect/static_abilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|statics| {
+                statics.iter().any(|static_ability| {
+                    static_ability
+                        .get("modifications")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|modifications| modifications.iter().any(legacy_grant))
+                })
+            })
+    {
+        value["optional"] = serde_json::Value::Bool(false);
+    }
+    // CR 609.4: "as though it had flash" doesn't give a spell flash, and only
+    // that permission's old writer granted CastWithKeyword { Flash } as an ability.
+    if legacy_grant(value) {
+        if let Some(mode) = value.pointer_mut("/definition/mode") {
+            *mode = serde_json::Value::from("CastWithFlash");
+        }
+    }
+    match value {
+        serde_json::Value::Object(object) => object
+            .values_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(migrate_legacy_as_though_flash_grants),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 /// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
@@ -16717,6 +16925,12 @@ impl Serialize for TrustedGameStateEnvelope {
         S: serde::Serializer,
     {
         let mut value = serde_json::Map::new();
+        if let Some(format) = self.block_history_format {
+            value.insert(
+                "block_history_format".to_string(),
+                format.wire_value().into(),
+            );
+        }
         value.insert(
             "state".to_string(),
             serde_json::to_value(ResolutionStateWire::from_game_state(self.state.clone()))
@@ -16740,6 +16954,13 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         let object = value
             .as_object_mut()
             .ok_or_else(|| serde::de::Error::custom("trusted state must be a JSON object"))?;
+        let block_history_format = match object.remove("block_history_format") {
+            None => None,
+            Some(value) => Some(
+                BlockHistoryFormat::from_wire_value(&value)
+                    .ok_or_else(|| serde::de::Error::custom("unsupported block history format"))?,
+            ),
+        };
         let state = object
             .remove("state")
             .ok_or_else(|| serde::de::Error::custom("trusted state is missing state"))?;
@@ -16754,6 +16975,7 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
             state,
+            block_history_format,
             precast_shortcut_runtime,
         })
     }
@@ -16765,6 +16987,7 @@ impl TrustedGameStateEnvelope {
     pub fn capture(state: GameState) -> Self {
         Self {
             precast_shortcut_runtime: state.precast_shortcut_runtime.clone(),
+            block_history_format: Some(BlockHistoryFormat::DeclaredOnly),
             state,
         }
     }
@@ -17330,6 +17553,8 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    #[error("persisted legacy pending cast cannot be restored: {0}")]
+    LegacyPendingCastNotRestorable(String),
 }
 
 /// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks
@@ -17577,6 +17802,10 @@ impl PersistedGameState {
     /// without publishing it. This is private on purpose: every external
     /// restore must first pass the checked terminal-rest preparation below.
     fn into_game_state_unchecked(self) -> GameState {
+        let repair_legacy_history = match &self {
+            Self::Raw(_) => true,
+            Self::Trusted(envelope) => envelope.block_history_format.is_none(),
+        };
         let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
@@ -17591,14 +17820,20 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
+        if repair_legacy_history {
+            crate::game::combat::migrate_restored_entering_block_history(&mut state);
+        }
         // The recovery checkpoint nested in a staged payment is restored state
-        // too; its parked replacement prompt gets the same repair.
+        // too; its parked replacement prompt and block history get the same repairs.
         if let Some(checkpoint) = state
             .payment_transaction
             .as_deref_mut()
             .and_then(|transaction| transaction.recovered.as_deref_mut())
         {
             checkpoint.state.migrate_restored_replacement_choice_kind();
+            if repair_legacy_history {
+                crate::game::combat::migrate_restored_entering_block_history(&mut checkpoint.state);
+            }
         }
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
@@ -17673,6 +17908,8 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.rehydrate_recovered_checkpoint_rng();
+        crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
+        crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
@@ -21764,6 +22001,12 @@ impl WaitingFor {
     /// mid-payment detail for opponents while preserving the public "spell on
     /// the stack" view elsewhere. `has_pending_cast()` accounts for this.
     pub fn pending_cast_ref(&self) -> Option<&PendingCast> {
+        self.pending_cast_with_stage().map(|(pending, _)| pending)
+    }
+
+    /// [`Self::pending_cast_ref`] with the casting stage the engine raises each prompt in.
+    pub(crate) fn pending_cast_with_stage(&self) -> Option<(&PendingCast, PendingCastStage)> {
+        use PendingCastStage::{Costs, Proposal};
         match self {
             WaitingFor::ChooseXValue { pending_cast, .. }
             | WaitingFor::TargetSelection { pending_cast, .. }
@@ -21772,12 +22015,14 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::OrderCostReductions { pending_cast, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => {
+                Some((pending_cast, Proposal))
+            }
+            WaitingFor::OrderCostReductions { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::HarmonizeTapChoice { pending_cast, .. }
-            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => Some(pending_cast),
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some((pending_cast, Costs)),
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
@@ -21785,14 +22030,14 @@ impl WaitingFor {
                 | CostResume::SpellCost {
                     spell: pending_cast,
                     ..
-                } => Some(pending_cast),
+                } => Some((pending_cast, Costs)),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
                 | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
-                CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
+                CollectEvidenceResume::Casting { pending_cast, .. } => Some((pending_cast, Costs)),
                 CollectEvidenceResume::Effect { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
@@ -27502,6 +27747,11 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cast: Option<Box<PendingCast>>,
 
+    /// Decode-only carrier: pending casts an old save recorded only as cast "as though it had
+    /// flash"; always empty after `PersistedGameState::prepare_for_restore`.
+    #[serde(default, skip_serializing)]
+    pub(crate) legacy_unrouted_pending_casts: Vec<ObjectId>,
+
     /// CR 601.2c + CR 601.2i: a spell announcement's trigger carrier, held here
     /// for the duration of ONE reducer action and returned to whichever
     /// [`PendingCastOwner`] holds the announcement when the action ends.
@@ -29238,6 +29488,8 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        migrate_legacy_pending_cast_timing(&mut value);
+        migrate_legacy_as_though_flash_grants(&mut value);
         if let Some(config) = value.get_mut("format_config") {
             crate::types::format::FormatConfig::migrate_persisted(config);
         }
@@ -35334,6 +35586,7 @@ impl GameState {
             trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
+            legacy_unrouted_pending_casts: Vec::new(),
             in_flight_spell_trigger_carrier: None,
             announcement_event_scope: AnnouncementEventScope::Unowned,
             ring_level: HashMap::new(),
@@ -38998,6 +39251,7 @@ impl GameState {
             trigger_construction_finisher_ran_this_action: _,
             pending_discard_for_cost: _,
             pending_cast: _,
+            legacy_unrouted_pending_casts: _,
             in_flight_spell_trigger_carrier: _,
             announcement_event_scope: _,
             ring_level: _,
@@ -40897,6 +41151,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
+        legacy_unrouted_pending_casts: _,
         in_flight_spell_trigger_carrier: _,
         announcement_event_scope: _,
         ring_level: _,
@@ -44991,7 +45246,7 @@ mod tests {
     fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
         let source_id = ObjectId(17);
         let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
-            remaining: Vec::new(),
+            remaining: VecDeque::new(),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
             total: 2,

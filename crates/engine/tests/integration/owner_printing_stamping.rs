@@ -1867,14 +1867,25 @@ mod post_load_creators {
         };
         assert_eq!(*player, P0);
         assert!(*reveal);
+        // CR 702.139a + CR 400.11: the sideboard entry (`available` copies) and the
+        // revealed, not-yet-used companion (one card outside the game) are the ONLY
+        // sources offered, in that order. An extra or missing source fails here.
         assert!(
             matches!(
                 choices.as_slice(),
-                [entry] if entry.count == available
-                    && matches!(
-                        &entry.source,
-                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
-                    )
+                [sideboard, companion]
+                    if sideboard.count == available
+                        && sideboard.name == LURRUS
+                        && matches!(
+                            &sideboard.source,
+                            OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                        )
+                        && companion.count == 1
+                        && companion.name == LURRUS
+                        && matches!(
+                            &companion.source,
+                            OutsideGameChoiceSource::Companion { card } if card.name == LURRUS
+                        )
             ),
             "{choices:?}"
         );
