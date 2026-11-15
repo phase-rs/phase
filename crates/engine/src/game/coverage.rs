@@ -10832,6 +10832,7 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
