@@ -7068,29 +7068,17 @@ fn try_parse_controlled_creatures_cant_attack_prohibition(
             return None;
         }
 
-        return Some(ParsedEffectClause {
-            optional_targeting: false,
-            unlowered_guard: None,
-            effect: Effect::AddRestriction {
-                restriction: GameRestriction::ProhibitActivity {
-                    source: ObjectId(0),
-                    affected_players: RestrictionPlayerScope::ScopedPlayer,
-                    expiry: RestrictionExpiry::EndOfTurn,
-                    activity: ProhibitedActivity::Attack {
-                        defended,
-                        protected_player: None,
-                    },
+        return Some(parsed_clause(Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::ScopedPlayer,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::Attack {
+                    defended,
+                    protected_player: None,
                 },
             },
-            duration: None,
-            sub_ability: None,
-            distribute: None,
-            multi_target: None,
-            condition: None,
-            optional: false,
-            unless_pay: None,
-            entry_onset: ContinuousEffectOnset::WhenFollowed,
-        });
+        }));
     }
     None
 }
