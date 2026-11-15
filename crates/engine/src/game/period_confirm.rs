@@ -33,11 +33,12 @@ use crate::game::play_trace::{
     self, AnswerOptionality, CostChoices, CostMove, EntryKind, NamedSpan, PeriodReach, PlayLocus,
     PromptClass, TraceEntry,
 };
-use crate::types::ability::TargetRef;
+use crate::types::ability::{ObjectSelectionCardinality, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntryKind, WaitingFor, YieldTarget,
+    CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntry, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::ManaSourceSelection;
@@ -404,7 +405,7 @@ fn renamed(
 
 /// CR 603.2c: one occurrence of a triggered ability, by its source and text.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Occurrence {
+pub(crate) struct Occurrence {
     source_name: String,
     description: Option<String>,
 }
@@ -420,20 +421,25 @@ impl Occurrence {
 
 /// What a replayed cycle ends on: the trigger occurrence on top, or the kind of entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TopOfStack {
+pub(crate) enum TopOfStack {
     Trigger(Occurrence),
     Other(std::mem::Discriminant<StackEntryKind>),
 }
 
-fn top_of_stack(state: &GameState) -> Option<TopOfStack> {
-    state.stack.back().map(|entry| match &entry.kind {
+/// A stack entry's identity: the trigger occurrence it is, or its kind of entry.
+pub(crate) fn entry_identity(entry: &StackEntry) -> TopOfStack {
+    match &entry.kind {
         StackEntryKind::TriggeredAbility {
             source_name,
             description,
             ..
         } => TopOfStack::Trigger(Occurrence::of(source_name, description.as_ref())),
         other => TopOfStack::Other(std::mem::discriminant(other)),
-    })
+    }
+}
+
+fn top_of_stack(state: &GameState) -> Option<TopOfStack> {
+    state.stack.back().map(entry_identity)
 }
 
 /// Where a cycle must end: priority back with `holder`, with the frame's top of stack and at least
@@ -697,20 +703,58 @@ enum PromptKey {
 type KeyedPath = Vec<(PromptKey, PointAnswer)>;
 
 /// CR 601.2c + CR 608.2d: each option of the target or card choice at `replay`, as its answer.
-fn choice_options(replay: &GameState) -> Vec<GameAction> {
+///
+/// CR 608.2d + CR 107.1c: a card choice's answers are the legal SELECTIONS its cardinality
+/// admits (one card for an exact-one pick; every subset, the empty one included, for "any
+/// number"). `None` when the domain holds more than `limit` selections, so the proof declines
+/// rather than enumerating past its bound.
+fn choice_options(replay: &GameState, limit: usize) -> Option<Vec<GameAction>> {
     match &replay.waiting_for {
-        WaitingFor::TriggerTargetSelection { selection, .. } => selection
-            .current_legal_targets
-            .iter()
-            .map(|target| GameAction::ChooseTarget {
-                target: Some(target.clone()),
-            })
-            .collect(),
-        WaitingFor::RevealChoice { cards, .. } => cards
-            .iter()
-            .map(|&card| GameAction::SelectCards { cards: vec![card] })
-            .collect(),
-        _ => Vec::new(),
+        WaitingFor::TriggerTargetSelection { selection, .. } => Some(
+            selection
+                .current_legal_targets
+                .iter()
+                .map(|target| GameAction::ChooseTarget {
+                    target: Some(target.clone()),
+                })
+                .collect(),
+        ),
+        WaitingFor::RevealChoice {
+            cards, cardinality, ..
+        } => {
+            // Exact-one is the historical shape: one selection per card, no subset walk.
+            if *cardinality == ObjectSelectionCardinality::SINGLE {
+                return (cards.len() <= limit).then(|| {
+                    cards
+                        .iter()
+                        .map(|&card| GameAction::SelectCards { cards: vec![card] })
+                        .collect()
+                });
+            }
+            // Any other cardinality walks the subsets: 2^n of them, so past `MAX_SUBSET_WALK`
+            // eligible cards the proof declines instead of enumerating.
+            if cards.len() > MAX_SUBSET_WALK {
+                return None;
+            }
+            let mut selections = Vec::new();
+            for mask in 0u32..(1u32 << cards.len()) {
+                let chosen: Vec<_> = cards
+                    .iter()
+                    .enumerate()
+                    .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, &card)| card)
+                    .collect();
+                if !cardinality.admits(chosen.len()) {
+                    continue;
+                }
+                if selections.len() == limit {
+                    return None;
+                }
+                selections.push(GameAction::SelectCards { cards: chosen });
+            }
+            Some(selections)
+        }
+        _ => Some(Vec::new()),
     }
 }
 
@@ -754,7 +798,7 @@ fn decision_prompt(replay: &GameState, limit: usize) -> Option<(PromptKey, Vec<P
             Some((PromptKey::Order(point_key(&labels)), answers))
         }
         ChoicePoint::AnnouncedTarget | ChoicePoint::ResolutionSet => {
-            let options = choice_options(replay);
+            let options = choice_options(replay, limit)?;
             if options.len() > limit {
                 return None;
             }
@@ -782,7 +826,7 @@ fn answer_action(replay: &GameState, answer: &PointAnswer) -> Option<GameAction>
         PointAnswer::Order(order) => Some(GameAction::OrderTriggers {
             order: order_indices(&point_labels(replay)?, order)?,
         }),
-        PointAnswer::Option(chosen) => choice_options(replay)
+        PointAnswer::Option(chosen) => choice_options(replay, ORDER_EDGES)?
             .contains(chosen)
             .then(|| chosen.clone()),
     }
@@ -1667,6 +1711,9 @@ fn halt(replay: &GameState, refusal: &OfferRefusal) -> Halt {
 /// with at most `1 + 2 * ONWARD_POINTS` replays per edge, the replays are linear in the budget.
 const ORDER_EDGES: usize = 25;
 
+/// The most eligible cards whose subsets a choice's decision domain is walked over.
+const MAX_SUBSET_WALK: usize = 16;
+
 /// The most ordering points a cover check replays, per onward frame, to come back to a node's
 /// point; an edge costs at most `1 + 2 * ONWARD_POINTS` replays.
 const ONWARD_POINTS: usize = 8;
@@ -2134,22 +2181,57 @@ mod tests {
         state
     }
 
-    /// The first priority frame of a mandatory loop at which the recurrence span is known,
-    /// with the offers before it declined (CR 732.2a), and that span.
+    /// Where [`first_mandatory_recurrence`] reads a mandatory loop's frame.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FrameAt {
+        /// The frame the engine offers the shortcut from (CR 732.2a), restored to the proposer's
+        /// priority.
+        Offer,
+        /// A priority frame play reaches after declining the offers before it (CR 732.2a).
+        AfterDecline,
+    }
+
+    /// The first frame of a mandatory loop, read `at`, at which the recurrence span is known, with
+    /// the offers before it declined; that span; and the counted take of the latest offer at or
+    /// before the frame.
     fn first_mandatory_recurrence(
         runner: &mut crate::game::scenario::GameRunner,
-    ) -> (GameState, NamedSpan) {
+        at: FrameAt,
+    ) -> (
+        GameState,
+        NamedSpan,
+        Option<crate::analysis::loop_check::CountedTake>,
+    ) {
+        let mut offered = None;
         for _ in 0..80 {
             let state = runner.state();
             match &state.waiting_for {
-                WaitingFor::LoopShortcut { .. } => {
+                WaitingFor::LoopShortcut {
+                    proposer,
+                    counted_take,
+                    ..
+                } => {
+                    offered = Some(*counted_take);
+                    let mut frame = state.clone();
+                    frame.waiting_for = WaitingFor::Priority { player: *proposer };
+                    if at == FrameAt::Offer {
+                        if let Some(span) =
+                            crate::game::play_trace::mandatory_recurrence_span(&frame)
+                        {
+                            return (frame, span, offered);
+                        }
+                    }
                     runner
                         .act(GameAction::DeclineShortcut)
                         .expect("decline the offer");
                 }
                 WaitingFor::Priority { .. } => {
-                    if let Some(span) = crate::game::play_trace::mandatory_recurrence_span(state) {
-                        return (state.clone(), span);
+                    if at == FrameAt::AfterDecline {
+                        if let Some(span) =
+                            crate::game::play_trace::mandatory_recurrence_span(state)
+                        {
+                            return (state.clone(), span, offered);
+                        }
                     }
                     runner.act(GameAction::PassPriority).expect("pass priority");
                 }
@@ -2171,7 +2253,7 @@ mod tests {
                 other => panic!("unexpected prompt {}", other.variant_name()),
             }
         }
-        panic!("the loop never exposed a mandatory recurrence span at a priority frame");
+        panic!("the loop never exposed a mandatory recurrence span at a frame read there");
     }
 
     /// CR 104.4b + CR 732.4: the MANDATORY-REPLAY caller over real damage history.
@@ -2235,7 +2317,7 @@ mod tests {
         runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
         let _ = runner.cast(shock).target_object(polyraptor).commit();
 
-        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        let (frame, span, _) = first_mandatory_recurrence(&mut runner, FrameAt::AfterDecline);
         let rows = frame.damage_dealt_this_turn.len();
         assert!(
             rows >= 3,
@@ -2274,17 +2356,19 @@ mod tests {
     /// returned Animate Dead reanimates the Dragon, whose entry exiles it again: a loop with no
     /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5), and in
     /// which the Warden gains life each cycle. P1's Mountain and Lightning Bolt are the out
-    /// that turns the loop into an offer (CR 732.5). The offer is declined (CR 732.2a) so play
-    /// reaches a priority frame inside the loop. The counters are reset there, then
-    /// `mandatory_period_holds` replays the span and settles each replayed frame against
-    /// `take_boundary`.
+    /// that turns the loop into an offer (CR 732.5). The frame read is the one the engine offers
+    /// the shortcut from (CR 732.2a), with Animate Dead's enters trigger on top, restored to the
+    /// proposer's priority. The counters are reset there, then `mandatory_period_holds`
+    /// replays the span and settles each replayed frame against `take_boundary`.
     ///
-    /// What it shows: the period holds and the take PERFORMS, so a replayed settle frame
-    /// recurred against the boundary; the buried trigger owns the damage event and reads its
-    /// recipient, so the replay's projections read the damage history play wrote; and they
+    /// What it shows: the engine's offer carries a performing take; the period holds and the
+    /// take PERFORMS, so a replayed settle frame recurred against the boundary; Soul Warden
+    /// resolves twice each period (CR 603.6a); the buried trigger owns the damage event and reads
+    /// its recipient, so the replay's projections read the damage history play wrote; and they
     /// read it at most once per projection.
     #[test]
     fn mandatory_replay_performs_its_take_over_a_buried_damage_recipient_reader() {
+        use crate::analysis::loop_check::CountedTake;
         use crate::analysis::resource::{
             loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
         };
@@ -2411,10 +2495,15 @@ mod tests {
         assert_eq!(runner.state().waiting_for.acting_players(), vec![p0]);
         drop(runner.cast(murder).target_object(dragon).commit());
 
-        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        let (frame, span, offered) = first_mandatory_recurrence(&mut runner, FrameAt::Offer);
         assert!(
             reader_on_stack(&frame),
             "reach guard: the Sniper's trigger is still buried under the loop"
+        );
+        assert_eq!(
+            offered,
+            Some(CountedTake::Performs),
+            "the engine's offer carries a performing take"
         );
         reset_loop_detect_cost();
         DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
@@ -2423,8 +2512,20 @@ mod tests {
         let projections = loop_detect_cost().projected_clones as usize;
         assert_eq!(
             held.map(|held| held.counted_take),
-            Some(crate::analysis::loop_check::CountedTake::Performs),
+            Some(CountedTake::Performs),
             "the period holds and a replayed settle frame recurs against the boundary"
+        );
+        // Replayed after the measured window so its projections are not counted above.
+        let period = replay_period(&frame, span, None).expect("the period replays");
+        assert_eq!(
+            period
+                .performed
+                .iter()
+                .filter(|name| *name == "Soul Warden")
+                .count(),
+            2,
+            "CR 603.6a: the Warden sees the returning Bears and the Dragon: {:?}",
+            period.performed
         );
         assert!(
             scans >= rows,
@@ -2806,5 +2907,76 @@ mod tests {
                 player: PlayerId(0)
             }
         );
+    }
+
+    fn reveal_prompt(
+        cards: Vec<ObjectId>,
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards,
+            filter: crate::types::ability::TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+            cardinality,
+            pending_mana_ability: None,
+        };
+        state
+    }
+
+    /// CR 107.1c + CR 608.2d: one eligible card under "any number" has TWO legal answers — the
+    /// empty selection and the singleton — so it is a decision point whose domain is {∅, {a}},
+    /// never a forced single option. Exact-one keeps its one-answer-per-card domain.
+    #[test]
+    fn an_any_number_reveal_offers_every_subset_as_its_options() {
+        use crate::types::ability::ObjectSelectionCardinality as Card;
+        let select = |cards: Vec<ObjectId>| GameAction::SelectCards { cards };
+        let (a, b) = (ObjectId(11), ObjectId(12));
+
+        let one = reveal_prompt(vec![a], Card::AnyNumber);
+        assert!(!one.waiting_for.is_forced_one_option_choice());
+        assert_eq!(
+            one.waiting_for.option_point(),
+            Some(ChoicePoint::ResolutionSet)
+        );
+        assert_eq!(
+            choice_options(&one, ORDER_EDGES),
+            Some(vec![select(vec![]), select(vec![a])])
+        );
+
+        let two = reveal_prompt(vec![a, b], Card::AnyNumber);
+        assert_eq!(
+            choice_options(&two, ORDER_EDGES),
+            Some(vec![
+                select(vec![]),
+                select(vec![a]),
+                select(vec![b]),
+                select(vec![a, b]),
+            ])
+        );
+
+        // Exact-one behavior is unchanged: a lone card is forced, several are one answer each.
+        let forced = reveal_prompt(vec![a], Card::SINGLE);
+        assert!(forced.waiting_for.is_forced_one_option_choice());
+        assert_eq!(forced.waiting_for.option_point(), None);
+        let pick = reveal_prompt(vec![a, b], Card::SINGLE);
+        assert_eq!(
+            choice_options(&pick, ORDER_EDGES),
+            Some(vec![select(vec![a]), select(vec![b])])
+        );
+    }
+
+    /// CR 104.4b: a subset domain past the proof's bound is declined, never enumerated.
+    #[test]
+    fn an_any_number_reveal_past_the_bound_declines_the_proof() {
+        use crate::types::ability::ObjectSelectionCardinality as Card;
+        let cards: Vec<ObjectId> = (1..=5).map(ObjectId).collect();
+        let prompt = reveal_prompt(cards.clone(), Card::AnyNumber);
+        // 2^5 = 32 selections exceed the 25-edge bound.
+        assert_eq!(choice_options(&prompt, ORDER_EDGES), None);
+        let wide = reveal_prompt((1..=40).map(ObjectId).collect(), Card::AnyNumber);
+        assert_eq!(choice_options(&wide, usize::MAX), None);
     }
 }

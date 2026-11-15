@@ -673,6 +673,8 @@
     "commander": "Dowódca",
     "commanderTitle": "Dowódca: {{name}}",
     "commanderTitleTax": "Dowódca: {{name}} (Podatek: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "Rzuć {{name}} — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "castCommanderTax": "Rzuć {{name}} (Podatek: +{{tax}}) — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "ninjutsuCommander": "Ninjutsu dowódcy: {{name}} — kliknij, aby zwrócić niezablokowanego atakującego do ręki i umieścić tego dowódcę na polu bitwy przekręconego i atakującego",
@@ -1241,6 +1243,7 @@
       "draw": "REMIS",
       "victory": "ZWYCIĘSTWO",
       "defeat": "PORAŻKA",
+      "complete": "KONIEC GRY",
       "lifeSummary": "Ty: <player>{{playerLife}}</player> <sep>/</sep> Przeciwnik: <opponent>{{opponentLife}}</opponent>",
       "turns": "Tury: {{count}}",
       "duration": "Czas trwania: {{time}}",
@@ -1546,7 +1549,9 @@
       "titleReveal": "Ujawnij z ręki",
       "titleOpponentHand": "Ręka przeciwnika",
       "subtitleReveal": "Wybierz kartę do ujawnienia lub odmów",
-      "subtitleChoose": "Wybierz kartę"
+      "subtitleChoose": "Wybierz kartę",
+      "subtitleRevealAnyNumber": "Wybierz dowolną liczbę kart do ujawnienia",
+      "subtitleChooseCount": "Wybierz {{count}} kart"
     },
     "search": {
       "title": "Przeszukaj bibliotekę",
@@ -2652,6 +2657,7 @@
   },
   "outsideGame": {
     "fromExile": "Z wygnania",
+    "fromCompanion": "Z towarzysza",
     "fromSideboard": "Z zaplecza",
     "fromBoosterPack": "Z boostera {{setCode}}",
     "fromCubeBoosterPack": "Z boostera cube"

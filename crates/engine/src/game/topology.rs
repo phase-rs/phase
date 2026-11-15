@@ -342,7 +342,7 @@ pub(crate) fn shared_life_members(state: &GameState, player: PlayerId) -> Vec<Pl
     }
 }
 
-pub(crate) fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+pub fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     if has_shared_poison(state, player) {
         team_members(state, player)
     } else if super::players::is_alive(state, player) {

@@ -560,6 +560,38 @@ describe("draftProtocol", () => {
     // one of those submissions, and `draftPeerSession`'s decode `.catch` would
     // drop the refusal silently. Assert on the RETURNED VALUE, not merely that
     // nothing threw: `[]` must be neither refused nor defaulted into a name.
+    // CR 702.139a: the optional companion is a card name, null, or absent. A
+    // long name is a name, not an instance id, so no instance-id bound applies.
+    it.each([
+      ["a name", "Lurrus of the Dream-Den"],
+      ["a long name", `Lurrus ${"x".repeat(300)}`],
+      ["null", null],
+    ])("accepts a deck submission whose companion is %s", (_label, companion) => {
+      const msg = validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains"],
+        commanders: [],
+        companion,
+      });
+      expect(msg).toMatchObject({ type: "draft_submit_deck", companion });
+    });
+
+    it.each([7, "", "   ", ["Lurrus of the Dream-Den"], {}])(
+      "rejects a deck submission whose companion is %j",
+      (companion) => {
+        expect(() =>
+          validateDraftMessage({
+            type: "draft_submit_deck",
+            submissionId: "submission-1",
+            mainDeck: ["Plains"],
+            commanders: [],
+            companion,
+          }),
+        ).toThrow("companion must be a non-empty string or null");
+      },
+    );
+
     it("accepts an empty designation and returns it empty", () => {
       const msg = validateDraftMessage({
         type: "draft_submit_deck",
@@ -1257,6 +1289,14 @@ describe("draftProtocol", () => {
         });
       });
 
+      it("accepts a launch whose localDeck carries a companion slot", () => {
+        const launch = withDeck({ companion: ["Lurrus of the Dream-Den"] });
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
       it("accepts a launch carrying every set the draft contained", () => {
         const launch = { ...commanderLaunch(), draftSetCodes: ["CMM", "CLB"] };
         expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
@@ -1292,6 +1332,7 @@ describe("draftProtocol", () => {
         ["main_deck holds a non-string element", withDeck({ main_deck: ["Island", 3] })],
         ["sideboard is not an array", withDeck({ sideboard: "Mountain" })],
         ["commander is not an array", withDeck({ commander: null })],
+        ["companion is present but not a string array", withDeck({ companion: "Lurrus of the Dream-Den" })],
         ["draftSetCodes is neither null nor an array", { ...commanderLaunch(), draftSetCodes: "CMM" }],
         ["draftSetCodes is absent", withoutKey("draftSetCodes")],
       ];
