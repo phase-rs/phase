@@ -674,9 +674,7 @@ fn metalworker_with_nothing_eligible_ignores_an_earlier_activations_reveal() {
 
 /// CR 608.2c: Empowered Autogenerator (verified Oracle text, Scryfall) puts its
 /// charge counter on BEFORE its mana is counted, and its "any one color" is the
-/// controller's choice. Its production follows a non-Mana clause, so it
-/// resolves in written order on the stack rather than through the immediate
-/// mana-ability resolver (which would produce first and read zero counters).
+/// controller's choice.
 /// CR 605.1a + CR 605.3b + CR 608.2c: Empowered Autogenerator's "Put a charge
 /// counter on this artifact. Add X mana of any one color, where X is the number
 /// of charge counters on this artifact." is a mana ability. Activated while a
