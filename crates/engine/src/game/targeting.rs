@@ -278,6 +278,12 @@ fn find_legal_targets_with_context(
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
+            // CR 115.1c: SelfRef is a context reference, never a declared
+            // target. An Or that includes it for the resolution move set must
+            // not expose the source as a legal target candidate.
+            if matches!(branch, TargetFilter::SelfRef) {
+                continue;
+            }
             for target in find_legal_targets_with_context(
                 state,
                 branch,
@@ -614,7 +620,14 @@ fn has_legal_target_with_context(
 
     if let TargetFilter::Or { filters } = filter {
         return filters.iter().any(|branch| {
-            has_legal_target_with_context(state, branch, source_controller, source_id, target_ctx)
+            !matches!(branch, TargetFilter::SelfRef)
+                && has_legal_target_with_context(
+                    state,
+                    branch,
+                    source_controller,
+                    source_id,
+                    target_ctx,
+                )
         });
     }
 

@@ -43260,3 +43260,256 @@ fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() 
         );
     }
 }
+// --- Fblthp, Impossibly Lost (Reality Fracture, FRA) ---
+
+/// CR 102.3 + CR 603.2c: "one or more of your opponents" is an opponent-scoped
+/// player subject; the "one or more" quantifier is what the caller turns into
+/// `batched` (CR 603.2c: one trigger event → one trigger).
+#[test]
+fn trigger_subject_extracts_one_or_more_of_your_opponents_as_player() {
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    for (input, expected_rest) in [
+        (
+            "one or more of your opponents are dealt combat damage",
+            "are dealt combat damage",
+        ),
+        ("one or more of your opponents draw a card", "draw a card"),
+        (
+            "one or more of your opponents each draw a card",
+            "draw a card",
+        ),
+    ] {
+        let (filter, rest) = parse_single_subject(input, &mut ParseContext::default());
+        assert_eq!(filter, opponent, "{input}");
+        assert_eq!(rest, expected_rest, "{input}");
+    }
+    // Reach guard for the sibling phrases the same `alt` already served.
+    let (filter, rest) = parse_single_subject(
+        "one or more opponents draw a card",
+        &mut ParseContext::default(),
+    );
+    assert_eq!(filter, opponent);
+    assert_eq!(rest, "draw a card");
+    let (filter, rest) = parse_single_subject(
+        "one or more players draw a card",
+        &mut ParseContext::default(),
+    );
+    assert_eq!(filter, TargetFilter::Player);
+    assert_eq!(rest, "draw a card");
+}
+
+const FBLTHP_ORACLE: &str = "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library. (If you draw from an empty library this way, you still win the game.)";
+
+/// CR 603.2 + CR 603.2c + CR 120.4b + CR 102.1: the verbatim card line is ONE batched
+/// received-damage trigger scoped to opponent players, whose "during your turn"
+/// window is part of the trigger event (EventTime), not an intervening if.
+#[test]
+fn fblthp_full_oracle_keeps_the_damage_received_trigger() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "When one or more of your opponents are dealt combat damage during your turn, draw two cards. If your library has no cards in it, you win the game. Fblthp's owner shuffles him into their library.",
+        "Fblthp, Impossibly Lost",
+        &[],
+        &["Creature".to_string()],
+        &["Homunculus".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageReceived)
+        .unwrap_or_else(|| {
+            panic!(
+                "the full Oracle parse must keep the trigger: {:#?} warnings={:#?}",
+                parsed.triggers, parsed.parse_warnings
+            )
+        });
+    assert!(
+        trigger.batched,
+        "CR 603.2c: one or more opponents is one batched trigger"
+    );
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(trigger.valid_card, None);
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "the recipient is opponent-scoped, not a card filter"
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(event_time(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        })),
+        "the during-your-turn window is the trigger event time"
+    );
+    let body = trigger.execute.as_ref().expect("Fblthp body");
+    assert!(
+        !has_unimplemented(body),
+        "Fblthp body must stay fully parsed: {body:?}"
+    );
+    fn body_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![def.effect.as_ref()];
+        if let Some(sub) = def.sub_ability.as_deref() {
+            out.extend(body_effects(sub));
+        }
+        out
+    }
+    fn has_shuffle_target(def: &AbilityDefinition, target: &TargetFilter) -> bool {
+        matches!(&*def.effect, Effect::Shuffle { target: actual } if actual == target)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| has_shuffle_target(sub, target))
+    }
+    let effects = body_effects(body);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "the full Oracle body keeps draw: {body:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Shuffle { .. })),
+        "the full Oracle body keeps the owner shuffle: {body:?}"
+    );
+    assert!(
+        has_shuffle_target(body, &TargetFilter::Owner),
+        "the terminal shuffle binds the source owner: {body:?}"
+    );
+    assert!(
+        !has_shuffle_target(body, &TargetFilter::ParentTargetOwner),
+        "the source self-move does not use the parent-target owner: {body:?}"
+    );
+}
+
+#[test]
+fn fblthp_impossibly_lost_head_is_batched_opponent_combat_damage_with_turn_window() {
+    let def = parse_trigger_line(FBLTHP_ORACLE, "Fblthp, Impossibly Lost");
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(def.damage_amount, None);
+    assert!(
+        def.batched,
+        "CR 603.2c: \"one or more\" is one trigger event"
+    );
+    assert_eq!(
+        def.valid_card, None,
+        "a player recipient must not land in valid_card"
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(
+        def.condition,
+        Some(event_time(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        }))
+    );
+    assert_eq!(def.constraint, None);
+    let body = def.execute.as_ref().expect("Fblthp body");
+    assert!(
+        !has_unimplemented(body),
+        "Fblthp body must stay fully parsed: {body:?}"
+    );
+    fn has_shuffle_target(def: &AbilityDefinition, target: &TargetFilter) -> bool {
+        matches!(&*def.effect, Effect::Shuffle { target: actual } if actual == target)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| has_shuffle_target(sub, target))
+    }
+    fn body_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![def.effect.as_ref()];
+        if let Some(sub) = def.sub_ability.as_deref() {
+            out.extend(body_effects(sub));
+        }
+        out
+    }
+    assert!(
+        body_effects(body)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "Fblthp body must retain the draw instruction: {body:?}"
+    );
+    assert!(
+        body_effects(body)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Shuffle { .. })),
+        "Fblthp body must retain the shuffle instruction: {body:?}"
+    );
+    // CR 400.3 + CR 701.24c: "Fblthp's owner shuffles him …" names the exact
+    // source's owner, not the owner of the combat-damage event source.
+    assert!(
+        has_shuffle_target(body, &TargetFilter::Owner),
+        "the terminal shuffle must bind the source's owner: {body:?}"
+    );
+    assert!(
+        !has_shuffle_target(body, &TargetFilter::ParentTargetOwner),
+        "the source self-move must not use the parent-target-owner binding: {body:?}"
+    );
+}
+
+/// CR 603.2 + CR 506.1: no printed card has a received-damage head with a
+/// "during combat" window; the nearest printed received-damage head is
+/// Fblthp, Impossibly Lost, and the nearest printed "during combat" event
+/// window is Mongrel Pack's dies trigger. This row exercises the shared
+/// `parse_event_window` building block, not a Fblthp-specific turn tag.
+#[test]
+fn received_damage_event_window_types_the_combat_phase() {
+    let def = parse_trigger_line(
+        "When one or more of your opponents are dealt combat damage during combat, draw two cards.",
+        "Synthetic Received Damage Window",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.condition, Some(event_time(combat_window())));
+}
+
+/// CR 603.2: no printed card has an untypeable received-damage window; the
+/// nearest printed received-damage head is Fblthp, Impossibly Lost. This row
+/// pins the fail-closed guard that keeps a future untyped window coverage-red
+/// instead of firing ungated on every combat-damage batch.
+#[test]
+fn received_damage_event_window_declines_untyped_windows() {
+    let bad = parse_trigger_line(
+        "When one or more of your opponents are dealt combat damage during your upkeep, draw two cards.",
+        "Synthetic Received Damage Untyped Window",
+    );
+    assert!(
+        matches!(bad.mode, TriggerMode::Unknown(_)),
+        "got {:?}",
+        bad.mode
+    );
+    // Reach guard: the same sentence with a typed window parses, so the Unknown
+    // above comes from the window guard, not from the head.
+    let good = parse_trigger_line(
+        "When one or more of your opponents are dealt combat damage during your turn, draw two cards.",
+        "Fblthp, Impossibly Lost",
+    );
+    assert_eq!(good.mode, TriggerMode::DamageReceived);
+}
+
+/// Preservation: the peel must add no condition where none is printed.
+#[test]
+fn received_damage_siblings_without_windows_keep_no_condition() {
+    let barbs = parse_trigger_line(
+        "Whenever one or more opponents are dealt noncombat damage, creatures you control get +1/+0 until end of turn.",
+        "Master of Barbs",
+    );
+    assert_eq!(barbs.mode, TriggerMode::DamageReceived);
+    assert_eq!(barbs.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert!(barbs.batched);
+    assert_eq!(barbs.condition, None);
+
+    let galleon = parse_trigger_line(
+        "Whenever one or more creatures your opponents control are dealt excess noncombat damage, create a Treasure token.",
+        "Magmatic Galleon",
+    );
+    assert_eq!(galleon.mode, TriggerMode::ExcessDamageAll);
+    assert_eq!(galleon.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert_eq!(galleon.condition, None);
+}
