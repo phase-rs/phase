@@ -3328,17 +3328,25 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("reproduce counters".into(), format!("{per_kind_count:?}")));
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 122.1 + CR 115.10a: a mass removal's population is a non-targeting
+        // filter, keyed like the `ForceAttack` arm so the parse-diff artifact tells
+        // "remove ... from target creature" apart from "... from all creatures".
         Effect::RemoveCounter {
             counter_type,
             count,
             target,
+            scope,
         } => {
             let counter = counter_type
                 .as_ref()
                 .map(CounterType::as_str)
                 .map_or_else(|| "all".to_string(), |counter| counter.into_owned());
             d.push(("counter".into(), format!("{} {counter}", fmt_qty(count))));
-            d.push(("target".into(), fmt_target(target)));
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
         }
         Effect::MultiplyCounter {
             counter_type,
@@ -20451,6 +20459,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -24638,6 +24647,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 counter_type: Some(CounterType::Generic("depletion".to_string())),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
         );
         face.triggers.push(

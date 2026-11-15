@@ -1761,6 +1761,19 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
 
+    /// CR 614.1d + CR 607.1c + CR 707.10: the "if you cast a spell this way,
+    /// that artifact enters tapped" rider of the graveyard permission this
+    /// spell was cast through (Edgar, Master Machinist), written at
+    /// finalization from the announced permission's latch. Offered as a
+    /// CR 616.1 replacement candidate when this spell resolves onto the
+    /// battlefield. Stack-scoped like `cast_occurrence`: cleared on every
+    /// Stack exit and on a copy (a copy of a spell isn't cast).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::zones::EtbTapState::is_unspecified"
+    )]
+    pub cast_permission_enter_tapped: crate::types::zones::EtbTapState,
+
     /// CR 601.2a + CR 400.7: this spell's identity while it is announced and on
     /// the stack (`GameState::mint_spell_announcement`). Survives the
     /// origin→stack move at finalization; cleared on stack exit and on a
@@ -2101,6 +2114,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_occurrence: _,
         // COMPARED: which spell on the stack this object is (CR 601.2a).
         spell_announcement: _,
+        // COMPARED: the cast-this-way enters-tapped rider changes how this
+        // spell's entry resolves (CR 614.1d) while it is on the stack.
+        cast_permission_enter_tapped: _,
         cast_controller: _,
         cast_spell_keywords: _,
         cast_casualty_grant_sources: _,
@@ -3148,6 +3164,7 @@ impl GameObject {
             // (`combat::live_block_pairs_of`); the object alone cannot answer it.
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
@@ -3438,6 +3455,7 @@ impl GameObject {
             cast_from_zone: None,
             copied_from_zone: None,
             cast_occurrence: None,
+            cast_permission_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             spell_announcement: None,
             cast_controller: None,
             cast_spell_keywords: Vec::new(),

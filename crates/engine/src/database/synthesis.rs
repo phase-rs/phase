@@ -3926,6 +3926,32 @@ pub(crate) fn entry_replacement_for_grant_static(
     })
 }
 
+/// CR 614.12 + CR 702.136a + CR 702.98a: whether `replacement`, carried by an object with
+/// `statics`, is the as-enters replacement a keyword grant among those statics contributes — the
+/// same builders `synthesize_riot`, `synthesize_unleash` and the layer seam-3 derivation install
+/// (`build_riot_replacement` / `build_unleash_replacement` over the static's `affected` filter).
+///
+/// Compared structurally against the builders' own output, the equality the layer seam uses for
+/// idempotent install, so a printed grant and its runtime re-derivation are recognised alike. A
+/// replacement that merely shares the granted population (Metallic Mimic's "Each other creature
+/// you control of the chosen type enters with an additional +1/+1 counter on it.") is built by
+/// neither builder and is not recognised.
+pub(crate) fn is_keyword_grant_entry_replacement<'a>(
+    statics: impl IntoIterator<Item = &'a StaticDefinition>,
+    replacement: &ReplacementDefinition,
+) -> bool {
+    statics.into_iter().any(|static_def| {
+        // CR 702.136a: a Riot grant (seam 3's keyword → as-enters replacement mapping).
+        let grants_riot_replacement = entry_replacement_for_grant_static(static_def)
+            .is_some_and(|derived| derived == *replacement);
+        // CR 702.98a: an Unleash grant, as `synthesize_unleash` installs it.
+        let grants_unleash_replacement = static_grants_unleash(static_def)
+            && build_unleash_replacement(static_def.affected.clone().unwrap_or(TargetFilter::Any))
+                == *replacement;
+        grants_riot_replacement || grants_unleash_replacement
+    })
+}
+
 /// CR 702.64a: Absorb N — "If a source would deal damage to this creature,
 /// prevent N of that damage." A continuous, self-recipient damage replacement:
 /// `DamageModification::PreventionMinus { value: N }` saturating-subtracts N
@@ -6749,6 +6775,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
@@ -6876,6 +6903,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
             counter_type: Some(counter_type.clone()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     TriggerDefinition::new(TriggerMode::Phase)
@@ -6920,6 +6948,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Fade),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     )
     .sub_ability(sacrifice_if_none_removed);
@@ -9862,6 +9891,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     // CR 702.176a: gated on impending cost paid AND has a time counter.
@@ -15997,6 +16027,136 @@ mod riot_synthesis_tests {
             "static Unleash grant should add recipient-gated CantBlock for affected filter, got {:?}",
             face.static_abilities
         );
+    }
+
+    /// The face a card's verbatim Oracle text builds, with its keyword-grant replacements
+    /// synthesized as card-data does.
+    fn synthesized_face(
+        oracle_text: &str,
+        name: &str,
+        keyword_names: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> CardFace {
+        let owned = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(
+            oracle_text,
+            name,
+            &owned(keyword_names),
+            &owned(types),
+            &owned(subtypes),
+        );
+        let mut face = CardFace {
+            keywords: parsed.extracted_keywords,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            ..CardFace::default()
+        };
+        synthesize_riot(&mut face);
+        synthesize_unleash(&mut face);
+        face
+    }
+
+    /// CR 614.12 + CR 702.136a + CR 702.98a: `is_keyword_grant_entry_replacement` recognises the
+    /// as-enters replacement a keyword grant contributes to its granting source (Rhythm of the
+    /// Wild's riot grant, Tesak, Judith's Hellhound's unleash grant), and nothing else: not the
+    /// source's own printed unleash, not an entry replacement that only shares the granted
+    /// population (Metallic Mimic), and not the riot builder's output over another filter.
+    #[test]
+    fn keyword_grant_entry_replacement_is_recognised() {
+        let rhythm = synthesized_face(
+            "Creature spells you control can't be countered.\nNontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)",
+            "Rhythm of the Wild",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let rhythm_grant = rhythm
+            .static_abilities
+            .iter()
+            .find(|static_def| static_grants_riot(static_def))
+            .expect("Rhythm of the Wild parses a riot grant");
+        let rhythm_affected = rhythm_grant
+            .affected
+            .clone()
+            .expect("riot grant population");
+        let rhythm_riot = rhythm
+            .replacements
+            .iter()
+            .find(|replacement| is_riot_replacement(replacement, &rhythm_affected))
+            .expect("synthesize_riot installs the grant's replacement");
+        assert!(is_keyword_grant_entry_replacement(
+            &rhythm.static_abilities,
+            rhythm_riot
+        ));
+
+        let tesak = synthesized_face(
+            "Unleash (You may have this creature enter with a +1/+1 counter on it. It can't block as long as it has a +1/+1 counter on it.)\nOther Dogs you control have unleash.\nCreatures you control with counters on them have haste.\nWhenever Tesak attacks, add {R} for each attacking creature.",
+            "Tesak, Judith's Hellhound",
+            &["Unleash"],
+            &["Creature"],
+            &["Elemental", "Dog"],
+        );
+        let tesak_affected = tesak
+            .static_abilities
+            .iter()
+            .find(|static_def| static_grants_unleash(static_def))
+            .and_then(|static_def| static_def.affected.clone())
+            .expect("Tesak parses an unleash grant to other Dogs");
+        let tesak_grant = tesak
+            .replacements
+            .iter()
+            .find(|replacement| is_unleash_replacement(replacement, &tesak_affected))
+            .expect("synthesize_unleash installs the grant's replacement");
+        let tesak_printed = tesak
+            .replacements
+            .iter()
+            .find(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef))
+            .expect("Tesak's printed unleash installs its own replacement");
+        assert!(is_keyword_grant_entry_replacement(
+            &tesak.static_abilities,
+            tesak_grant
+        ));
+        // The source's own printed keyword is an ability of the source, not a grant.
+        assert!(!is_keyword_grant_entry_replacement(
+            &tesak.static_abilities,
+            tesak_printed
+        ));
+
+        // Hostile: an entry replacement over an overlapping population that no keyword grant
+        // builds (Metallic Mimic's "Each other creature you control of the chosen type enters
+        // with an additional +1/+1 counter on it.").
+        let mimic = synthesized_face(
+            "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.",
+            "Metallic Mimic",
+            &[],
+            &["Artifact", "Creature"],
+            &["Shapeshifter"],
+        );
+        let mimic_counters = mimic
+            .replacements
+            .iter()
+            .find(|replacement| replacement.event == ReplacementEvent::ChangeZone)
+            .expect("Metallic Mimic parses its chosen-type counter replacement");
+        let statics_together: Vec<StaticDefinition> = rhythm
+            .static_abilities
+            .iter()
+            .chain(&mimic.static_abilities)
+            .cloned()
+            .collect();
+        assert!(!is_keyword_grant_entry_replacement(
+            &statics_together,
+            mimic_counters
+        ));
+
+        // Hostile: the riot builder's output over a filter no grant among the statics names.
+        let other_filter = build_riot_replacement(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(!is_keyword_grant_entry_replacement(
+            &rhythm.static_abilities,
+            &other_filter
+        ));
     }
 }
 
@@ -24331,6 +24491,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Fade),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
         let sacrifice = removal
@@ -24391,6 +24552,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Time),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
 
