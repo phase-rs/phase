@@ -11158,7 +11158,12 @@ fn extract_ability_features_with_token_statics(
     // CR 615.7: several sources of one instruction can hit one shielded recipient.
     if matches!(
         &*def.effect,
-        Effect::EachDealsDamageEqualToPower { .. } | Effect::EachSourceDealsDamage { .. }
+        Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::DealDamage {
+                damage_source: Some(crate::types::ability::DamageSource::EachTarget),
+                ..
+            }
     ) {
         emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
     }
@@ -16780,13 +16785,19 @@ mod tests {
     /// it would damage is shuffled into its owner's library) and Wolverine, Fierce Fighter (its
     /// other damage is healed). Purity's shield is noncombat-only, so combat never meets it.
     /// CR 615.7: a damage instruction whose several sources can hit one recipient (Allies at
-    /// Last, Rakdos Charm's third mode) is fenced as `shared_shield_split_unoffered`; a fight,
+    /// Last, Coordinated Clobbering's "They each deal damage", Rakdos Charm's third mode) is fenced as `shared_shield_split_unoffered`; a fight,
     /// whose two sources each hit the other (Pit Fight), is not.
     #[test]
     fn a_shared_recipient_damage_instruction_is_a_coverage_gap() {
         const TAG: &str = "structural:shared_shield_split_unoffered";
         type Case = (&'static str, &'static str, &'static [&'static str], bool);
-        let cards: [Case; 3] = [
+        let cards: [Case; 4] = [
+            (
+                "Coordinated Clobbering",
+                "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.",
+                &["Sorcery"],
+                true,
+            ),
             (
                 "Allies at Last",
                 "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)\nUp to two target creatures you control each deal damage equal to their power to target creature an opponent controls.",
