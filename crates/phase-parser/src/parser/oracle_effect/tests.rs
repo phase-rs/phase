@@ -66987,6 +66987,114 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
     }
 }
 
+/// CR 701.3d + CR 603.7 + CR 608.2c: Unexpected Request's "You may attach an
+/// Equipment you control to that creature. If you do, unattach it at the
+/// beginning of the next end step." The delayed body unattaches the attachment
+/// anaphor with no host named, and the Attach forwards what it attached so that
+/// anaphor names the Equipment rather than the creature the spell targeted.
+#[test]
+fn unexpected_request_delayed_unattach_names_the_attached_equipment() {
+    let parsed = parse_oracle_text(
+        "Gain control of target creature until end of turn. Untap that creature. It gains \
+         haste until end of turn. You may attach an Equipment you control to that creature. \
+         If you do, unattach it at the beginning of the next end step.",
+        "Unexpected Request",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Unexpected Request lowers to a spell ability chain");
+    assert!(
+        !tree_has_unimplemented(ability),
+        "Unexpected Request must have zero Unimplemented nodes; got {ability:#?}"
+    );
+
+    let mut node = ability;
+    while !matches!(&*node.effect, Effect::Attach { .. }) {
+        node = node
+            .sub_ability
+            .as_deref()
+            .expect("the chain reaches the Attach instruction");
+    }
+    assert!(
+        node.optional,
+        "reach: the Attach is the optional \"you may\" instruction"
+    );
+    assert!(
+        node.forward_result,
+        "the Attach must forward the object it attached to the unattach anaphor"
+    );
+    let delayed = node
+        .sub_ability
+        .as_deref()
+        .expect("the If-you-do rider follows the Attach");
+    assert!(
+        matches!(
+            delayed.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        ),
+        "the rider is gated by \"If you do\", got {:?}",
+        delayed.condition
+    );
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*delayed.effect
+    else {
+        panic!(
+            "rider must be CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        "at the beginning of the next end step"
+    );
+    assert_eq!(
+        *effect.effect,
+        Effect::UnattachAll {
+            attachment: TargetFilter::ParentTarget,
+            target: TargetFilter::Any,
+        },
+        "\"unattach it\": the anaphor is the attachment and no host is named"
+    );
+}
+
+/// CR 701.3d: "unattach" with an operand the resolver cannot bind ("unattach ~",
+/// "unattach enchanted Equipment") stays unimplemented; only a parent anaphor is
+/// admitted by the singular unattach arm.
+#[test]
+fn unattach_non_anaphor_operands_stay_unimplemented() {
+    for (name, text, fragment) in [
+        (
+            "Elbrus, the Binding Blade",
+            "When equipped creature deals combat damage to a player, unattach Elbrus, the \
+             Binding Blade, then transform it.",
+            "unattach ~",
+        ),
+        (
+            "Carry Away",
+            "Enchant Equipment\nWhen this Aura enters, unattach enchanted Equipment.",
+            "unattach enchanted Equipment",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Artifact".to_string()], &[]);
+        let dbg = format!("{parsed:#?}");
+        assert!(
+            dbg.contains("Unimplemented")
+                && dbg.contains(&format!("\"{fragment}\""))
+                && !dbg.contains("UnattachAll"),
+            "{name}: a non-anaphor unattach operand must stay unimplemented as \
+             {fragment:?}. Parse:\n{dbg}"
+        );
+    }
+}
+
 /// C2 (honest Ogre pin — measured limitation, NOT a false unlock): Ogre
 /// Geargrabber's identical-shape last sentence STAYS `Effect::Unimplemented`.
 /// Ogre is single-target ("gain control of target Equipment"), so the dual-target

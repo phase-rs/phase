@@ -3630,6 +3630,45 @@ impl ResolutionStack {
         true
     }
 
+    /// CR 608.2c: The continuation that owns the later instructions of the
+    /// Attach-choice child that was the active top when `child_boundary` was
+    /// captured. The child keeps its slot while the selected Attach runs: every
+    /// frame its attach-time choices raise (the post-replacement frame, and a
+    /// second choice's parked continuation above it, Psychic Paper) is pushed
+    /// or inserted at or above `child_boundary`. Fails closed (`None`) unless
+    /// that slot still holds an Attach-choice child and the slot beneath it an
+    /// ability continuation.
+    ///
+    /// The marked-child check is a shape check, not an identity check, so the
+    /// depth is sound only when it was captured in the same synchronous call
+    /// that spends it; never store it or carry it across a pause.
+    pub fn ability_continuation_outside_attachment_choice_child_mut(
+        &mut self,
+        child_boundary: ChildStackDepth,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        // The child was the top when the depth was captured: it is still the
+        // top when nothing was raised above it, else directly beneath the
+        // first frame raised at the captured depth.
+        let child = if self.capture_child_boundary() == child_boundary {
+            self.frames.top()?
+        } else {
+            self.frames
+                .below(self.frames.slot_at_captured_depth(child_boundary)?)?
+        };
+        if !matches!(
+            self.frames.get(child),
+            Some(ResolutionFrame::AbilityContinuation(frame))
+                if frame.pending.attachment_choice.is_some()
+        ) {
+            return None;
+        }
+        let outer = self.frames.below(child)?;
+        match self.frames.get_mut(outer) {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
     /// Retires the exact empty post-replacement/Attach-choice pair at the
     /// active boundary.
     ///
