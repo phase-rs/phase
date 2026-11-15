@@ -3257,7 +3257,7 @@ mod tests {
                 max: None,
                 distinctness: NumberDistinctness::Repeatable,
             },
-            ChoiceType::CardName,
+            ChoiceType::card_name(),
         ] {
             let mut by_rule = melody.clone();
             if let WaitingFor::NamedChoice {

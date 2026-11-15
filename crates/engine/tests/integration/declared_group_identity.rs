@@ -881,8 +881,15 @@ fn run_on(
                 players
             })
             .unwrap(),
+            // CR 701.20a: a transient reveal ends with its resolution; what the
+            // table keeps is the public identity the reveal published.
             {
-                let mut revealed: Vec<_> = state.revealed_cards.iter().copied().collect();
+                let mut revealed: Vec<_> = state
+                    .revealed_cards
+                    .iter()
+                    .chain(state.public_revealed_cards.iter())
+                    .copied()
+                    .collect();
                 revealed.sort();
                 revealed
             },
