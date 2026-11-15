@@ -278,6 +278,12 @@ fn find_legal_targets_with_context(
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
+            // CR 115.1c: SelfRef is a context reference, never a declared
+            // target. An Or that includes it for the resolution move set must
+            // not expose the source as a legal target candidate.
+            if matches!(branch, TargetFilter::SelfRef) {
+                continue;
+            }
             for target in find_legal_targets_with_context(
                 state,
                 branch,
@@ -614,7 +620,14 @@ fn has_legal_target_with_context(
 
     if let TargetFilter::Or { filters } = filter {
         return filters.iter().any(|branch| {
-            has_legal_target_with_context(state, branch, source_controller, source_id, target_ctx)
+            !matches!(branch, TargetFilter::SelfRef)
+                && has_legal_target_with_context(
+                    state,
+                    branch,
+                    source_controller,
+                    source_id,
+                    target_ctx,
+                )
         });
     }
 
@@ -3138,6 +3151,8 @@ pub(crate) fn extract_source_from_event(
         GameEvent::Evolved { object_id } => Some(*object_id),
         // Un-card Gotcha: "that card" is the card being returned.
         GameEvent::GotchaSaid { returns, .. } => Some(returns.reference.object_id),
+        // Un-card touch: "it" is the object that was touched.
+        GameEvent::ObjectTouched { object_id, .. } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
@@ -3299,6 +3314,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::TokenCreated { .. }
         | GameEvent::ExtraTurnCreated { .. }
@@ -3435,6 +3451,8 @@ pub(crate) fn extract_player_from_event(
         GameEvent::Cycled { player_id, .. } => Some(*player_id),
         GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
         GameEvent::CrimeCommitted { player_id, .. } => Some(*player_id),
+        // Un-card touch: "that player" is the player who touched the object.
+        GameEvent::ObjectTouched { player, .. } => Some(*player),
         GameEvent::PlayerEliminated { player_id, .. } => Some(*player_id),
         // CR 506.2 + CR 508.1: The attacking player is the common controller of the
         // declared attackers in this batch. All attackers in one AttackersDeclared
@@ -8577,6 +8595,7 @@ mod tests {
         let second = TargetRef::Object(ObjectId(2));
         let body = ResolvedAbility::new(
             crate::types::ability::Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,

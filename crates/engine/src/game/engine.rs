@@ -1546,7 +1546,7 @@ fn apply_action_boundary_core(
     } else {
         Some(semantic_owner)
     };
-    let preserve_interaction = interaction::action_preserves_interaction(&action);
+    let preserve_interaction = interaction::action_preserves_interaction(state, &action);
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -2681,7 +2681,6 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    super::un_actions::refresh_menu(state);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve
@@ -20328,13 +20327,15 @@ fn commit_land_play(
     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
         controller_override,
         performed_by,
+        ownership_actor,
         ..
     } = &mut proposed
     {
         *controller_override = Some(player);
         // CR 116.2a: the player performs the land play, which a format's
-        // entry-ownership axis may read as the land's new owner.
+        // entry-ownership axis reads as the land's new owner.
         *performed_by = Some(player);
+        *ownership_actor = crate::types::proposed_event::EntryOwnershipActor::Player(player);
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -30774,28 +30775,30 @@ mod resolving_carrier_settle_tests {
                     scenario
                         .add_creature(p2, name, 1, 1)
                         .with_replacement_definition(
-                            ReplacementDefinition::new(ReplacementEvent::Moved)
-                                .destination_zone(Zone::Graveyard)
-                                .execute(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::ChangeZone {
-                                        library_shuffle: Default::default(),
-                                        destination: Zone::Exile,
-                                        origin: None,
-                                        target: TargetFilter::SelfRef,
-                                        owner_library: false,
-                                        enter_transformed: false,
-                                        enters_under: None,
-                                        enter_tapped: EtbTapState::Unspecified,
-                                        enters_attacking: false,
-                                        up_to: false,
-                                        enter_with_counters: vec![],
-                                        conditional_enter_with_counters: vec![],
-                                        face_down_profile: None,
-                                        enters_modified_if: None,
-                                    },
-                                )),
-                        );
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .destination_zone(Zone::Graveyard)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
+                                    library_shuffle: Default::default(),
+                                    destination: Zone::Exile,
+                                    origin: None,
+                                    target: TargetFilter::SelfRef,
+                                    owner_library: false,
+                                    enter_transformed: false,
+                                    enters_under: None,
+                                    enter_tapped: EtbTapState::Unspecified,
+                                    enters_attacking: false,
+                                    up_to: false,
+                                    enter_with_counters: vec![],
+                                    conditional_enter_with_counters: vec![],
+                                    face_down_profile: None,
+                                    enters_modified_if: None,
+                                },
+                            )),
+                    );
                 }
             }
             let mut runner = scenario.build();

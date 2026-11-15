@@ -3002,6 +3002,7 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -8103,8 +8104,8 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 ///
 /// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
 /// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
-/// builds its eligible pool via `FilterContext::from_ability` (source excluded
-/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+/// builds its eligible pool via `FilterContext::from_ability` (no recipient
+/// bound, so `FilterProp::Another` excludes the source).
 ///
 /// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
 /// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
@@ -11773,6 +11774,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,

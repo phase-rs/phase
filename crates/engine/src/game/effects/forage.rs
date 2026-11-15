@@ -88,6 +88,7 @@ fn exile_three_branch() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
