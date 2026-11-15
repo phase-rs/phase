@@ -26453,7 +26453,7 @@ fn resolve_chain_body(
         });
         if let Some((frame_id, result)) = result {
             discard_context = ability.clone();
-            discard_context.context.direct_discard_result = Some(result);
+            discard_context.context.direct_discard_result = Some(Box::new(result));
             let retired = state.resolution_stack.take_active_discard().expect(
                 "completed Recruit discard frame must remain live until direct-child hand-off",
             );

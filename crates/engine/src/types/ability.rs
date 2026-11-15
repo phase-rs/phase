@@ -1921,8 +1921,11 @@ pub struct SpellContext {
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
+    /// Boxed: the result carries a full LKI snapshot, is populated only for that
+    /// one hand-off, and the resolver keeps many `SpellContext`s live per chain
+    /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_discard_result: Option<DiscardedCardResult>,
+    pub direct_discard_result: Option<Box<DiscardedCardResult>>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -6008,7 +6011,7 @@ impl ResolvedAbility {
     /// explicitly cleared so this one contingent fact cannot leak past its
     /// immediate consumer.
     pub fn set_direct_discard_result_for_immediate_node(&mut self, result: DiscardedCardResult) {
-        self.context.direct_discard_result = Some(result);
+        self.context.direct_discard_result = Some(Box::new(result));
         for (_, child) in self.child_links_mut() {
             child.clear_direct_discard_result_recursive();
         }
