@@ -1093,7 +1093,6 @@ face = [
   { key = "heat stroke", class = "dropped_qualifier", clauses = ["At end of combat, destroy each creature that blocked or was blocked this turn."] },
   { key = "hedonist's trove", class = "dropped_qualifier", clauses = ["When this enchantment enters, exile target opponent's graveyard.", "You may play lands from among cards exiled with this enchantment.", "You can't cast more than one spell this way each turn."] },
   { key = "hedron alignment", class = "condition_wrong", clauses = ["At the beginning of your upkeep, you may reveal your hand.", "If you do, you win the game if you own a card named Hedron Alignment in exile, in your hand, in your graveyard, and on the battlefield."] },
-  { key = "hedron blade", class = "dropped_qualifier", clauses = ["Whenever equipped creature becomes blocked by one or more colorless creatures, it gains deathtouch until end of turn."] },
   { key = "hedron-field purists", class = "condition_wrong", clauses = ["LEVEL 1-4\n1/4\nIf a source would deal damage to you or a creature you control, prevent 1 of that damage.", "LEVEL 5+\n2/5\nIf a source would deal damage to you or a creature you control, prevent 2 of that damage."] },
   { key = "heed the mists", class = "wrong_object", clauses = ["Mill a card, then draw cards equal to the milled card's mana value."] },
   { key = "hellion crucible", class = "cost_wrong", clauses = ["{1}{R}, {T}, Remove two pressure counters from this land and sacrifice it: Create a 4/4 red Hellion creature token with haste."] },
