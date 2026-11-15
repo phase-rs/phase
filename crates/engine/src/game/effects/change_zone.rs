@@ -6011,6 +6011,7 @@ mod tests {
             .push(CoreType::Land);
         let mut second = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,

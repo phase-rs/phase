@@ -45464,6 +45464,8 @@ mod drain_stack_reentrancy_tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
+            privacy_zones: None,
             player: PlayerId(0),
             cards: vec![blood],
             count: 2,
@@ -45481,15 +45483,16 @@ mod drain_stack_reentrancy_tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
-            privacy_zones: None,
         };
         let target = TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature().properties(vec![
@@ -45500,6 +45503,7 @@ mod drain_stack_reentrancy_tests {
         );
         let chain = Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Battlefield,
                 target,
@@ -66856,6 +66860,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     fn effect_zone_choice_performer_roundtrips_and_defaults_when_missing() {
         let wf = |performed_by| WaitingFor::EffectZoneChoice {
             performed_by,
+            privacy_zones: None,
             player: PlayerId(0),
             cards: vec![ObjectId(7)],
             count: 1,
