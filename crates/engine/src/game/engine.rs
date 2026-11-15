@@ -1546,7 +1546,7 @@ fn apply_action_boundary_core(
     } else {
         Some(semantic_owner)
     };
-    let preserve_interaction = interaction::action_preserves_interaction(&action);
+    let preserve_interaction = interaction::action_preserves_interaction(state, &action);
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -2681,7 +2681,6 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    super::un_actions::refresh_menu(state);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve

@@ -1682,7 +1682,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.resolving_begin_game_abilities = false;
 
     // Un-card actions: enabled status and Gotcha offers are private to the entitled player.
-    // The gesture menu is derived from all active abilities in the game and is shared.
+    // The gesture menu and the touchable objects are derived only while some
+    // player is opted in, so they are as private as the opt-in itself: only an
+    // opted-in viewer receives them. An opted-out viewer or a spectator sees the
+    // same projection whatever the other seats chose.
+    let viewer_opted_in = viewer.is_some_and(|viewer_id| filtered.un_actions.is_enabled(viewer_id));
     if let Some(viewer_id) = viewer {
         filtered
             .un_actions
@@ -1695,6 +1699,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     } else {
         filtered.un_actions.enabled_players.clear();
         filtered.un_actions.gotcha_offers.clear();
+    }
+    if !viewer_opted_in {
+        filtered.un_actions.menu.clear();
+        filtered.un_actions.touchable.clear();
     }
     filtered.un_actions.pending_offers.clear();
 
@@ -4049,6 +4057,9 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     // public face while hidden.
     obj.is_token = false;
     obj.is_horde_deck_token = false;
+    // `display_source = Token` is token-ness by another name — reset it with
+    // the flags above so a hidden card's art routing leaks nothing either.
+    obj.display_source = crate::game::game_object::DisplaySource::Card;
     obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
