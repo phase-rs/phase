@@ -690,6 +690,7 @@ pub fn apply_debug_action(
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec: Box::new(spec),
                 copy: None,
@@ -1279,6 +1280,7 @@ fn route_debug_token_to_battlefield(
     );
 
     let proposed = ProposedEvent::TokenEntry {
+        redirected_to: None,
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_with_counters: intrinsic_counters,

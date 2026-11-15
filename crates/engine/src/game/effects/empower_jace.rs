@@ -51,6 +51,7 @@ pub fn resolve(
     // CR 701.71a + CR 111.2 + CR 614.1: the controller creates the Jace token,
     // and token-creation replacement effects apply to that event.
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(jace_token_spec(controller, source_id)),
         copy: None,

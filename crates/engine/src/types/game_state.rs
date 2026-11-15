@@ -44566,6 +44566,7 @@ mod tests {
                 remaining: vec![PositionedTokenBatch {
                     position: 1,
                     batch: TokenBatch {
+                        redirected_to: None,
                         owner: PlayerId(0),
                         spec: Box::new(spec),
                         copy: None,

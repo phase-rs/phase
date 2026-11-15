@@ -412,6 +412,10 @@ pub struct TokenBatch {
     #[serde(default)]
     pub enter_tapped: EtbTapState,
     pub count: u32,
+    /// CR 614.6: where an applied replacement sent this batch's entrants
+    /// instead of the battlefield (see [`ProposedEvent::CreateToken`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<Zone>,
 }
 
 impl TokenBatch {
@@ -423,6 +427,7 @@ impl TokenBatch {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         } = self;
         ProposedEvent::CreateToken {
             owner,
@@ -431,6 +436,7 @@ impl TokenBatch {
             enter_tapped,
             count,
             appended: Vec::new(),
+            redirected_to,
             applied,
         }
     }
@@ -833,11 +839,21 @@ pub enum ProposedEvent {
         /// whole event is delivered (and its created referent published) as one.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         appended: Vec<TokenBatch>,
+        /// CR 614.6 + CR 111.1: where an applied replacement sent the batch's
+        /// entrants instead of the battlefield (Hallowed Moonlight: "exile it
+        /// instead"). The creation itself still happens (CR 111.1, CR 701.7a);
+        /// only the entry is replaced. `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
         entry_ref: ObjectId,
+        /// CR 614.6: the zone an applied replacement sent this entrant to
+        /// instead of the battlefield; `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(default)]
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1538,6 +1554,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             } => {
                 let mut views = Vec::with_capacity(appended.len() + 1);
@@ -1548,6 +1565,7 @@ impl ProposedEvent {
                     enter_tapped,
                     count,
                     appended: Vec::new(),
+                    redirected_to,
                     applied: applied.clone(),
                 });
                 views.extend(
@@ -1603,6 +1621,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             mut appended,
+            redirected_to,
             mut applied,
         } = views.next()?
         else {
@@ -1616,6 +1635,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended: view_appended,
+                redirected_to: view_redirected_to,
                 applied: view_applied,
             } = view
             else {
@@ -1627,6 +1647,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                redirected_to: view_redirected_to,
             });
             appended.extend(view_appended);
             applied.extend(view_applied);
@@ -1638,6 +1659,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             applied,
         })
     }
@@ -1653,6 +1675,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             ..
         } = self
         else {
@@ -1665,6 +1688,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         });
         batches.extend(appended);
         Some(batches)
@@ -2072,6 +2096,7 @@ mod tests {
 
     fn batch(name: &str, count: u32) -> TokenBatch {
         TokenBatch {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(name),
             copy: None,
@@ -2086,6 +2111,7 @@ mod tests {
 
     fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(primary),
             copy: None,

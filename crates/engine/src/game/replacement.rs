@@ -5413,6 +5413,7 @@ fn create_token_applier(
         enter_tapped,
         count,
         mut appended,
+        redirected_to,
         applied,
     } = event
     {
@@ -5472,6 +5473,7 @@ fn create_token_applier(
                 enter_tapped,
                 count: 0,
                 appended,
+                redirected_to,
                 applied,
             });
         }
@@ -5537,6 +5539,7 @@ fn create_token_applier(
                     copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
+                    redirected_to: None,
                 },
             );
         }
@@ -5578,6 +5581,7 @@ fn create_token_applier(
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: new_count,
+                        redirected_to: None,
                     },
                 );
             }
@@ -5590,6 +5594,7 @@ fn create_token_applier(
             enter_tapped,
             count: new_count,
             appended,
+            redirected_to,
             applied,
         })
     } else {
@@ -16982,6 +16987,7 @@ mod tests {
         let result = replace_event(
             &mut state,
             ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
@@ -17031,6 +17037,7 @@ mod tests {
             .expect("fixture conniver exists")
             .snapshot;
         let token_event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -17113,6 +17120,7 @@ mod tests {
             ),
             (
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref: ObjectId(77),
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -20103,6 +20111,7 @@ mod tests {
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(spec),
                 copy: None,
@@ -22149,6 +22158,7 @@ mod tests {
         let dies =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
         let token = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -22264,6 +22274,7 @@ mod tests {
     fn change_zone_matcher_requires_a_token_to_enter() {
         let state = GameState::new_two_player(42);
         let token = |count: u32| ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -22283,6 +22294,7 @@ mod tests {
         );
         assert!(change_zone_matcher(
             &ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref: ObjectId(20),
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
@@ -22458,6 +22470,7 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -22483,6 +22496,7 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -23220,6 +23234,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -23264,6 +23279,7 @@ mod tests {
         spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(spec),
@@ -25665,6 +25681,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(plant_spec),
             copy: None,
@@ -25761,6 +25778,7 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -25836,6 +25854,7 @@ mod tests {
     /// would have left it.
     fn treasure_plus_squirrel_event(source_id: ObjectId) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(compound_test_token_spec(
                 "Treasure",
@@ -25846,6 +25865,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             appended: vec![TokenBatch {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(compound_test_token_spec(
                     "Squirrel",
@@ -25905,6 +25925,7 @@ mod tests {
             unreachable!();
         };
         let treasure_only = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner,
             spec,
             copy: None,
@@ -26059,6 +26080,7 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(food_spec),
             copy: None,
@@ -26134,6 +26156,7 @@ mod tests {
 
         let soldier = test_token_spec(PlayerId(0), CoreType::Creature);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(soldier),
             copy: None,
@@ -26223,6 +26246,7 @@ mod tests {
         state.battlefield.push_back(source);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Artifact)),
             copy: None,
@@ -26438,6 +26462,7 @@ mod tests {
         state.battlefield.push_back(ojer);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -26542,6 +26567,7 @@ mod tests {
         );
 
         let token_event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(PlayerId(1), CoreType::Creature)),
@@ -26647,6 +26673,7 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(soldier_spec),
             copy: None,
@@ -27224,6 +27251,7 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -27326,6 +27354,7 @@ mod tests {
         treasure.source_id = manufactor;
         treasure.controller = PlayerId(1);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(treasure),
             copy: None,
@@ -27456,6 +27485,7 @@ mod tests {
         state.battlefield.push_back(tap_effect2);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
@@ -28286,6 +28316,7 @@ mod tests {
             repl.mode(ReplacementMode::Optional { decline: None })
         }
         let create_two = || ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -28859,6 +28890,8 @@ mod tests {
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
                     owner_library: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     enter_transformed: false,
                     enters_under: None,
                     enter_tapped: Default::default(),
@@ -28879,6 +28912,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.pending_damage_replacements.push(def);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -28977,6 +29011,7 @@ mod tests {
         for (accounted, count) in [(false, 0u32), (true, 1u32)] {
             assert_eq!(
                 event_is_accounted(&ProposedEvent::CreateToken {
+                    redirected_to: None,
                     owner: PlayerId(0),
                     spec: Box::new(token_spec_of("Soldier", CoreType::Creature, "Soldier")),
                     copy: None,

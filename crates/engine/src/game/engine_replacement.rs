@@ -6638,6 +6638,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -6768,6 +6769,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -6933,6 +6935,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -7114,6 +7117,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,
@@ -7272,6 +7276,7 @@ mod tests {
             .clone()
             .unwrap_or_default();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(dog_spec),
             copy: None,
@@ -7416,6 +7421,7 @@ mod tests {
         // Propose Treasure → Jinnie is the only matching replacement.
         let mut events = Vec::new();
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure_spec),
             copy: None,

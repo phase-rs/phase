@@ -653,6 +653,7 @@ pub(crate) fn resolve_with_host_override(
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: token_owner,
         spec: Box::new(spec),
         copy: None,
@@ -3436,6 +3437,7 @@ fn token_creation_needs_choice(
 ) -> bool {
     let registry = replacement::replacement_registry();
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner,
         spec: Box::new(spec.clone()),
         copy: None,
@@ -5873,6 +5875,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -7912,6 +7915,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -8012,6 +8016,7 @@ mod tests {
                 remaining: vec![PositionedTokenBatch {
                     position: 0,
                     batch: TokenBatch {
+                        redirected_to: None,
                         owner: PlayerId(0),
                         spec: Box::new(spec),
                         copy: Some(Box::new(copy)),
@@ -8112,12 +8117,14 @@ mod tests {
             attach_to: TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(creature_spec("Plant")),
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             appended: vec![TokenBatch {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(creature_spec("Squirrel")),
                 copy: None,
@@ -8192,6 +8199,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -8264,6 +8272,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -8345,6 +8354,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -8540,6 +8550,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9105,6 +9116,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9173,6 +9185,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9244,6 +9257,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9322,6 +9336,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9379,6 +9394,7 @@ mod tests {
         };
 
         let event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -9622,6 +9638,7 @@ mod tests {
             commit_liminal_token_entry_with_post_actions(
                 &mut state,
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -9731,6 +9748,7 @@ mod tests {
             commit_liminal_token_entry_with_post_actions(
                 &mut state,
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -9865,6 +9883,7 @@ mod tests {
         );
 
         let event = ProposedEvent::TokenEntry {
+            redirected_to: None,
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],

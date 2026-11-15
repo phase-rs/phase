@@ -1818,6 +1818,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -1915,6 +1916,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -2007,6 +2009,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(token_spec),
             copy: None,

@@ -525,6 +525,7 @@ fn drain_copy_token_resolution(
         spec.enters_attacking = batch.copy.enters_attacking;
         let enter_tapped = EtbTapState::from_seeded_tapped(batch.copy.tapped);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: batch.owner,
             spec: Box::new(spec),
             copy: Some(batch.copy),
@@ -1101,6 +1102,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             );
 
             let proposed = ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref: token_id,
                 enter_tapped,
                 enter_with_counters: Vec::new(),
@@ -7237,6 +7239,7 @@ mod tests {
         let spec =
             super::super::token::copy_probe_spec_for(source_id, PlayerId(0), None, &copy.values);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: Some(Box::new(copy)),

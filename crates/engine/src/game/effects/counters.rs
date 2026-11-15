@@ -1023,6 +1023,7 @@ fn apply_pending_counter_post_action(
                 return true;
             }
             let event = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec,
                 copy: None,
