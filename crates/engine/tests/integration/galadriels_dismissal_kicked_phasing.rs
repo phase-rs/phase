@@ -485,11 +485,24 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
     let target_slots = prompted_slots.expect("Barn's chaos trigger must raise a target prompt");
 
     // CR 601.2c + CR 115.1: "for each opponent, choose up to one target nonland
-    // permanent that opponent controls" declares one target per opponent.
+    // permanent that opponent controls" declares one target per opponent. Each
+    // per-opponent group is a non-optional player header (auto-filled at the
+    // prompt — the printed text names no player target) followed by that
+    // opponent's "up to one" object slot.
     assert_eq!(
         target_slots.len(),
-        2,
-        "Barn must declare one target slot per opponent, got {target_slots:?}"
+        4,
+        "Barn must declare a header + object slot per opponent, got {target_slots:?}"
+    );
+    assert_eq!(
+        target_slots[0].legal_targets,
+        vec![TargetRef::Player(P1)],
+        "the first group's header binds the first opponent"
+    );
+    assert_eq!(
+        target_slots[2].legal_targets,
+        vec![TargetRef::Player(p2)],
+        "the second group's header binds the second opponent"
     );
     let objects = |slot: &engine::types::game_state::TargetSelectionSlot| {
         slot.legal_targets
@@ -500,8 +513,8 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
             })
             .collect::<Vec<_>>()
     };
-    let first_slot = objects(&target_slots[0]);
-    let second_slot = objects(&target_slots[1]);
+    let first_slot = objects(&target_slots[1]);
+    let second_slot = objects(&target_slots[3]);
     assert!(
         first_slot.contains(&chosen_host) && first_slot.contains(&incidental_equipment),
         "the first opponent's slot must offer its host and incidental Shuko, got {first_slot:?}"
@@ -512,12 +525,31 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
         "the second opponent's slot must offer its Pacifism"
     );
 
-    // Submit both choices through the real prompt.
+    // Submit both choices through the real prompt, in the announced slot shape:
+    // the two auto-filled headers plus each opponent's chosen permanent. The
+    // prompt already carries the header decisions, so assert them rather than
+    // guessing.
+    let WaitingFor::TriggerTargetSelection { selection, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!("expected the Barn target prompt to still be open");
+    };
+    assert_eq!(
+        selection.selected_slots,
+        vec![Some(TargetRef::Player(P1))],
+        "the first opponent's header is auto-filled on the controller's behalf"
+    );
+    assert_eq!(
+        selection.current_slot, 1,
+        "the walk opens on the first opponent's own permanent slot"
+    );
+
     events.extend(
         runner
             .act(GameAction::SelectTargets {
                 targets: vec![
+                    TargetRef::Player(P1),
                     TargetRef::Object(chosen_host),
+                    TargetRef::Player(p2),
                     TargetRef::Object(chosen_aura),
                 ],
             })

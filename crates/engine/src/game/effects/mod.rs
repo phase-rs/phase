@@ -5392,6 +5392,14 @@ pub(crate) fn apply_parent_chain_context(
     // `ParentTargetSlot` keeps indexing the DECLARED slots rather than the
     // population. A zone-move `forward_result` context, by contrast,
     // intentionally stays readable by later instructions.
+    //
+    // Known, deliberate limit: a DESCENDANT of the consuming rider is also a
+    // later instruction, so it reads the chain root's declared targets rather
+    // than the population. Every printed phase rider is immediate — Barn's
+    // "they phase out … those permanents phase in" is a separate delayed
+    // trigger that carries its own `parent_target_snapshot`, not a chain
+    // descendant — so re-stamping a descendant would reintroduce exactly the
+    // cross-instruction leak scoping this population removes.
     if child
         .context
         .forwarded_result_context
