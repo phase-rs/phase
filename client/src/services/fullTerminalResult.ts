@@ -48,14 +48,87 @@ function isTerminalPlayerRecord(value: unknown): boolean {
     && (value.is_eliminated === undefined || typeof value.is_eliminated === "boolean");
 }
 
-/** A stack entry the board renders: stack entry identity and controller. */
-function isTerminalStackEntry(value: unknown): boolean {
-  if (!isObjectRecord(value)) return false;
-  return typeof value.id === "number" && Number.isInteger(value.id);
-}
-
 function isObjectId(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value);
+}
+
+/**
+ * The resolved ability a stack entry exposes. The stack renderer walks
+ * `targets` and the nested `sub_ability` chain, and reads `source_card_id` and
+ * `description` for the entry label, so those are the fields admission
+ * guarantees before the view can be retained, published, or rendered.
+ */
+function isTerminalAbilityRecord(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return Array.isArray(value.targets)
+    && (value.sub_ability === undefined || isTerminalAbilityRecord(value.sub_ability))
+    && (value.else_ability === undefined || isTerminalAbilityRecord(value.else_ability))
+    && (value.description === undefined || typeof value.description === "string")
+    && (value.selected_mode_labels === undefined
+      || (Array.isArray(value.selected_mode_labels)
+        && value.selected_mode_labels.every((label) => typeof label === "string")))
+    && (value.source_card_id === undefined || isObjectId(value.source_card_id));
+}
+
+/** One frozen combat-damage assignment of a pre-M10 `CombatDamage` entry. */
+function isTerminalCombatDamageAssignment(value: unknown): boolean {
+  if (!isObjectRecord(value) || !isObjectRecord(value.source) || !isObjectRecord(value.target)) {
+    return false;
+  }
+  if (!isObjectId(value.source.object_id) || typeof value.amount !== "number") return false;
+  if (typeof value.target.type !== "string") return false;
+  switch (value.target.type) {
+    case "Object": {
+      const data = value.target.data;
+      return isObjectRecord(data) && isObjectId(data.object_id);
+    }
+    case "Player":
+      return isObjectId(value.target.data);
+    default:
+      return false;
+  }
+}
+
+/**
+ * The typed kind the stack renderer switches on (`StackEntry.tsx`,
+ * `stackTargets.ts`). Every variant carries a `data` payload; the variants the
+ * renderer dereferences have their payload fields checked here as well.
+ */
+function isTerminalStackEntryKind(value: unknown): boolean {
+  if (!isObjectRecord(value) || typeof value.type !== "string" || !isObjectRecord(value.data)) {
+    return false;
+  }
+  const data = value.data;
+  switch (value.type) {
+    case "Spell":
+      return isObjectId(data.card_id)
+        && (data.ability === undefined || isTerminalAbilityRecord(data.ability));
+    case "ActivatedAbility":
+      return isObjectId(data.source_id) && isTerminalAbilityRecord(data.ability);
+    case "TriggeredAbility":
+      return isObjectId(data.source_id)
+        && isTerminalAbilityRecord(data.ability)
+        && (data.description === undefined || typeof data.description === "string")
+        && (data.source_name === undefined || typeof data.source_name === "string")
+        && (data.provenance === undefined || isObjectRecord(data.provenance));
+    case "KeywordAction":
+      return isObjectRecord(data.action);
+    case "CombatDamage":
+      return (data.sub_step === "FirstStrike" || data.sub_step === "Regular")
+        && Array.isArray(data.assignments)
+        && data.assignments.every(isTerminalCombatDamageAssignment);
+    default:
+      return false;
+  }
+}
+
+/** A stack entry the board renders: identity, controller, and a typed kind. */
+function isTerminalStackEntry(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return isObjectId(value.id)
+    && isObjectId(value.source_id)
+    && isObjectId(value.controller)
+    && isTerminalStackEntryKind(value.kind);
 }
 
 /**
@@ -81,6 +154,8 @@ export function isValidFinalView(value: unknown): value is GameState {
     && state.battlefield.every(isObjectId)
     && Array.isArray(state.stack)
     && state.stack.every(isTerminalStackEntry)
+    && (state.resolving_stack_entry === undefined
+      || isTerminalStackEntry(state.resolving_stack_entry))
     && Array.isArray(state.exile)
     && state.exile.every(isObjectId)
     && isObjectRecord(state.objects)

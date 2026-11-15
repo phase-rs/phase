@@ -1436,6 +1436,42 @@ describe("WebSocketAdapter", () => {
       expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
     });
 
+    it("retains a matching delivery whose final view carries a renderable stack entry", async () => {
+      const delivery: FullTerminalDelivery = {
+        ...nativeDelivery,
+        finalView: {
+          players: [{ id: 0, life: 20 }],
+          objects: {},
+          battlefield: [],
+          stack: [{
+            id: 10,
+            source_id: 10,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 101 } },
+          }],
+          exile: [],
+          turn_number: 1,
+          active_player: 0,
+          priority_player: 0,
+          phase: "PreCombatMain",
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+      };
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery },
+      }));
+
+      await vi.waitFor(() => {
+        expect(terminalStore.commit).toHaveBeenCalledWith(delivery);
+        expect(events).toContainEqual({ type: "terminalDelivery", delivery });
+      });
+      expect(events.map((event) => event.type)).not.toContain("terminalUnavailable");
+      nativeAdapter.dispose();
+    });
+
     it.each([
       ["an absent data payload", { type: "TerminalResult" }],
       ["a null data payload", { type: "TerminalResult", data: null }],
@@ -1476,6 +1512,26 @@ describe("WebSocketAdapter", () => {
               objects: {},
               battlefield: [],
               stack: [null],
+              exile: [],
+              turn_number: 1,
+              active_player: 0,
+              priority_player: 0,
+              phase: "PreCombatMain",
+              waiting_for: { type: "GameOver", data: { winner: 0 } },
+            },
+          },
+        },
+      }],
+      ["a delivery whose stack entry omits the kind the board renders", {
+        type: "TerminalResult",
+        data: {
+          delivery: {
+            ...nativeDelivery,
+            finalView: {
+              players: [{ id: 0, life: 20 }],
+              objects: {},
+              battlefield: [],
+              stack: [{ id: 10 }],
               exile: [],
               turn_number: 1,
               active_player: 0,

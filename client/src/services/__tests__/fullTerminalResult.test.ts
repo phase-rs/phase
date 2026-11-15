@@ -19,13 +19,21 @@ import {
   type FullTerminalDelivery,
 } from "../fullTerminalResult";
 import { p2pFinalStateCommitment } from "../p2pTerminalResult";
-import type { GameState } from "../../adapter/types";
+import type { GameState, StackEntry } from "../../adapter/types";
 
 const finalViewJsonTemplate = readFileSync(
   resolve(process.cwd(), "../fixtures/full-terminal-final-view.template.json"),
   "utf8",
 ).trim();
 const finalView = JSON.parse(finalViewJsonTemplate) as GameState;
+
+/** A spell entry shaped exactly as the stack renderer consumes it. */
+const terminalStackEntry: StackEntry = {
+  id: 10,
+  source_id: 10,
+  controller: 0,
+  kind: { type: "Spell", data: { card_id: 101 } },
+};
 
 const delivery: FullTerminalDelivery = {
   key: { game_code: "TERM01", generation: 3 },
@@ -108,7 +116,7 @@ describe("full terminal result persistence", () => {
       players: [{ id: 0, life: 20, is_eliminated: false }, { id: 1, life: 0, is_eliminated: true }],
       objects: {},
       battlefield: [1],
-      stack: [{ id: 10 }],
+      stack: [terminalStackEntry],
       exile: [2],
       turn_number: 12,
       active_player: 0,
@@ -137,6 +145,47 @@ describe("full terminal result persistence", () => {
       ...finalView,
       exile: ["bad-id"],
     })).toBe(false);
+    // The board switches on `kind` and dereferences its payload, so an entry
+    // carrying only an identity cannot be retained, acknowledged, or rendered.
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{ id: 10 }],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{ id: 10, source_id: 10, controller: 0 }],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{ ...terminalStackEntry, kind: { type: "Spell", data: {} } }],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{
+        ...terminalStackEntry,
+        kind: { type: "TriggeredAbility", data: { source_id: 10 } },
+      }],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{
+        ...terminalStackEntry,
+        kind: { type: "TriggeredAbility", data: { source_id: 10, ability: { targets: [] } } },
+      }],
+    })).toBe(true);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{ ...terminalStackEntry, kind: { type: "UnknownKind", data: {} } }],
+    })).toBe(false);
+    // A mid-resolution entry is the same renderable type and gets the same guard.
+    expect(isValidFinalView({
+      ...finalView,
+      resolving_stack_entry: { id: 10 },
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      resolving_stack_entry: terminalStackEntry,
+    })).toBe(true);
     expect(isValidFinalView(finalView)).toBe(true);
     expect(isValidFullTerminalDelivery({
       ...delivery,

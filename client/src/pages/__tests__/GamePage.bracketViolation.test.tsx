@@ -2076,7 +2076,9 @@ describe("GamePage — rematch preserves the format the game was played with", (
               ).build({
                 waiting_for: { type: "GameOver", data: { winner: 0 } },
               }),
-              stack: [null],
+              // The reported delivery: a stack record with no `kind`, which
+              // the board's StackEntry renderer dereferences.
+              stack: [{ id: 10 }],
             } as never,
           },
         });
