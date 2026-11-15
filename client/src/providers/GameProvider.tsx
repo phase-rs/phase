@@ -7,6 +7,7 @@ import {
   type GameAction,
   type MatchConfig,
   type MatchType,
+  type TokenImageRef,
   persistedGameStateView,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
@@ -21,7 +22,7 @@ import {
   readFullTerminalResult,
 } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
-import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
+import type { NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
 import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
@@ -47,7 +48,14 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
-import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
+import {
+  captureSubmissionArtPreferences,
+  submitDeckList,
+  submitParsedDeck,
+  type SubmittedDeck,
+  type SubmissionDeck,
+} from "../services/deckSubmission";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { emptySeatDeck, pileSeatDeck, pileSourceFromParam, type PileSource } from "../services/pileSource";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
@@ -90,10 +98,13 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
 import { isCoherentUnresolvedDraftStage } from "../stores/draftStore";
 import {
+  TURTLE_TEAMUP_SURVIVOR_IDENTITIES,
   assignRandomAvatars,
   avatarCardNameForName,
+  fetchBossAvatarUrl,
 } from "../services/playerAvatars";
 import type { PlayerAvatarIdentity } from "../services/playerAvatars";
+import { getSeatCount } from "../viewmodel/seatCount";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -134,10 +145,26 @@ function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNam
   );
 }
 
+/**
+ * Install one commander-derived identity per owner, and report whether it did.
+ *
+ * Derived from EVERY `is_commander` object in the state — deliberately NOT from
+ * `command_zone`, which is only the cards sitting in the command zone at this
+ * instant (`viewmodel/commanderColumn.ts` reads it that way). A commander that
+ * has been cast, that died, or that was exiled is still its owner's commander
+ * (CR 903.3), but it no longer appears in `command_zone` — so gating on that
+ * list made a mid-game reload skip this derivation entirely and keep the random
+ * planeswalker identities `setupRandomAvatars` seeded, swapping every seat's
+ * name and avatar on refresh (issue #8053).
+ *
+ * A state with no commander object at all — a non-Commander game, or a snapshot
+ * that has not loaded yet — writes NOTHING and answers `false`, so a caller's
+ * existing fallback identities survive instead of being erased to empty maps.
+ */
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
-) {
+): boolean {
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
@@ -148,6 +175,8 @@ function setupCommanderAvatars(
     commanderNames.set(obj.owner, obj.name);
   }
 
+  if (commanderNames.size === 0) return false;
+
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
     playerAvatars.set(playerId, { kind: "card", cardName });
@@ -156,6 +185,93 @@ function setupCommanderAvatars(
   useMultiplayerStore.setState(
     preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
+  return true;
+}
+
+/**
+ * Install Turtle Team-Up Horde seat identities, and report whether it did.
+ *
+ * Horde seats have no commander (boss-deck games are Constructed), so without
+ * this the random fallback `setupRandomAvatars` seeds names the TMNT villains
+ * after arbitrary planeswalkers ("Vivien") and gives survivors arbitrary
+ * avatar art ("Karn"). Horde seats take the deployed Boss's short name and
+ * pinned art instead; survivors take the Turtle roster in seat order.
+ *
+ * Seat and Boss SELECTION is the engine's (`derived.horde`, built from the
+ * game-state authorities): this renders that projection and only formats it —
+ * short names, Turtle theming, image lookup. It never scans `command_zone`
+ * for a Boss and never classifies seats from the raw seat vector, so a
+ * snapshot omitting that vector still resolves. The projection lists deployed
+ * Bosses only — never the face-down Boss pile — so hidden Bosses cannot leak
+ * through the seat identity. The Turtle-Team-Up gate below is presentation
+ * theming (which avatar roster), not game-state derivation: other challenge
+ * decks keep the existing random/commander identities.
+ *
+ * Like `setupCommanderAvatars`, writes NOTHING and answers `false` when this
+ * isn't a Turtle Team-Up game or no Boss is deployed yet, so the caller's
+ * fallback identities survive and the subscription keeps listening.
+ */
+function setupHordeAvatars(
+  gameState: {
+    format_config?: { format?: string; horde_ruleset?: { challenge_deck?: string } | null } | null;
+    derived?: {
+      horde?: {
+        horde_seat_ids?: readonly number[];
+        hero_player_ids?: readonly number[];
+        deployed_boss_ids?: readonly number[];
+      } | null;
+    };
+    objects: Record<number, { name: string; token_image_ref?: TokenImageRef | null }>;
+  },
+  gameId: string,
+): boolean {
+  if (gameState.format_config?.format !== "Horde") return false;
+  if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
+    return false;
+  }
+  const horde = gameState.derived?.horde;
+  const bossId = horde?.deployed_boss_ids?.[0];
+  const boss = bossId != null ? gameState.objects[bossId] : undefined;
+  if (!horde || bossId == null || !boss) return false;
+  const hordeSeats = horde.horde_seat_ids ?? [];
+  const names = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
+  const bossShortName = boss.name.split(",")[0].split(" //")[0];
+  for (const seatId of hordeSeats) {
+    names.set(seatId, bossShortName);
+  }
+  (horde.hero_player_ids ?? []).forEach((seatId, survivorIndex) => {
+    const turtle = TURTLE_TEAMUP_SURVIVOR_IDENTITIES[
+      survivorIndex % TURTLE_TEAMUP_SURVIVOR_IDENTITIES.length
+    ];
+    names.set(seatId, turtle.name);
+    playerAvatars.set(seatId, { kind: "card", cardName: turtle.cardName });
+  });
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars });
+  // Boss art resolves async through the token-image sidecar, so names never
+  // wait on it. Merged into the stored map when it lands, bound to the game
+  // id, the session generation, and the requested Boss: a debug import
+  // replaces the session under the same route id (bumping only the
+  // generation), and a stage clear replaces the Boss under the same session,
+  // so an id-only fence would paint a stale portrait either way. A sidecar
+  // miss leaves the seat without an avatar entry and the HUD renders the
+  // initial tile.
+  const bossRef = boss.token_image_ref;
+  if (bossRef?.scryfall_id) {
+    const generation = useGameStore.getState().gameSessionGeneration;
+    void fetchBossAvatarUrl(bossRef).then((url) => {
+      const current = useGameStore.getState();
+      if (!url || current.gameId !== gameId) return;
+      if (current.gameSessionGeneration !== generation) return;
+      if (current.gameState?.derived?.horde?.deployed_boss_ids?.[0] !== bossId) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      for (const seatId of hordeSeats) {
+        next.set(seatId, { kind: "external", url });
+      }
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+  return true;
 }
 
 function setupDraftMatchAvatars(seed: string) {
@@ -249,19 +365,7 @@ function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number
   return names;
 }
 
-function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
-  return expandParsedDeck(deck);
-}
-
-type ExpandedDeckWithTier = {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck: string[];
-  scheme_deck: string[];
-  signature_spell: string[];
-  companion: string[];
-  sticker_sheets: string[];
+type ExpandedDeckWithTier = SubmittedDeck<ExpandedDeck> & {
   bracket_tier: CommanderBracketTier;
 };
 type DeckListPayload = {
@@ -287,7 +391,7 @@ function sameStringArray(value: unknown, expected: readonly string[]): boolean {
     && value.every((entry, index) => typeof entry === "string" && entry === expected[index]);
 }
 
-/** The raw object is forwarded unchanged to the engine, so every key and value must match publication. */
+/** Validate the name-only publication before decorating a separate in-memory submission. */
 function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
   if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
   const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
@@ -308,6 +412,19 @@ function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
     difficulty: deckList.ai_difficulties[index] ?? "Medium",
     deck,
   }));
+}
+
+/** One fresh handoff binds every locally configured seat without changing publication. */
+async function submitLocalHandoff<T extends {
+  player: SubmissionDeck;
+  opponent: SubmissionDeck;
+  ai_decks: SubmissionDeck[];
+}>(payload: T) {
+  const snapshot = captureSubmissionArtPreferences();
+  const [player, opponent, ...ai_decks] = await Promise.all(
+    [payload.player, payload.opponent, ...payload.ai_decks].map((deck) => submitDeckList(deck, snapshot)),
+  );
+  return { ...payload, player, opponent, ai_decks };
 }
 
 /** Restores normal local resume behavior only after native setup has failed. */
@@ -366,7 +483,9 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
   return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
-async function buildLocalAiDeckList(
+// Exported for the Horde payload regression tests; production callers go
+// through the GameProvider start flow.
+export async function buildLocalAiDeckList(
   t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
@@ -388,6 +507,88 @@ async function buildLocalAiDeckList(
       player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
+  // Horde: the human is a survivor bringing their own constructed deck; the
+  // Horde seats are the self-piloting Horde, whose libraries are the
+  // engine-supplied challenge decks injected by `load_horde_library`. No saved
+  // deck is tagged "Horde", so Horde seats submit empty and must NOT be drawn
+  // from the (empty) Horde-filtered catalog — but AI seats OUTSIDE the Horde
+  // roster are allied survivors and need real decks from the unfiltered
+  // catalog, or they start with an empty library and lose on their first draw.
+  if (formatConfig && formatConfig.format === "Horde") {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+      signature_spell: [],
+      companion: [],
+      sticker_sheets: [],
+      bracket_tier: "core",
+    });
+    // One catalog fetch serves the human Random fallback AND the AI survivor
+    // seats: no format tag (the pool is unrestricted), but the picked
+    // challenge deck, so the engine validates each candidate against the
+    // challenge's survivor requirements (Commander shape for EDH hordes,
+    // unrestricted for constructed-block hordes).
+    const survivorCatalog = await buildLegalAiDeckCatalog({
+      selectedMatchType,
+      selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
+    });
+    let hordePlayerDeck = deck;
+    let hordePlayerBracket = playerBracket ?? null;
+    if (!hordePlayerDeck) {
+      // Human chose "Random Deck": pick from the unfiltered catalog rather
+      // than the Horde-tagged one (which is empty).
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {});
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      hordePlayerDeck = pick.deck;
+      hordePlayerBracket = pick.bracket;
+    }
+    // Seat map: player = seat 0 (human survivor), opponent = seat 1 (Horde
+    // primary — the init path remaps archenemy_player onto the first AI seat),
+    // ai_decks[i] = seat 2+i. The Horde roster is the primary plus one seat
+    // per co-Horde deck; roster seats submit empty (the engine injects
+    // challenge libraries), every other AI seat is an allied survivor.
+    const hordeSeatCount =
+      1 + (formatConfig.horde_ruleset?.co_horde_decks?.length ?? 0);
+    const takenDeckIds = new Set<string>();
+    const aiDecks: ExpandedDeckWithTier[] = [];
+    for (let i = 0; i < opponentCount - 1; i++) {
+      if (i < hordeSeatCount - 1) {
+        aiDecks.push(emptySeat());
+        continue;
+      }
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {
+        excludeIds: takenDeckIds,
+      });
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      takenDeckIds.add(pick.id);
+      aiDecks.push({
+        ...expandParsedDeck(pick.deck),
+        bracket_tier: bracketToEngineTier(pick.bracket),
+      });
+    }
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: {
+        ...expandParsedDeck(hordePlayerDeck),
+        bracket_tier: bracketToEngineTier(hordePlayerBracket),
+      },
+      opponent: emptySeat(),
+      ai_decks: aiDecks,
       ai_difficulties: aiDifficulties,
     };
   }
@@ -486,7 +687,10 @@ async function buildLocalAiDeckList(
     excludeIds,
   });
 
-  const playerExpanded = expandParsedDeck(playerDeck);
+  const snapshot = captureSubmissionArtPreferences();
+  const [playerExpanded, ...aiExpanded] = await Promise.all(
+    [playerDeck, ...picks.map((candidate) => candidate.deck)].map((candidate) => submitParsedDeck(candidate, snapshot)),
+  );
   const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
@@ -494,8 +698,8 @@ async function buildLocalAiDeckList(
   const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
     player: { ...playerExpanded, bracket_tier: playerTier },
-    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
-    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    opponent: { ...aiExpanded[0], bracket_tier: bracketToEngineTier(picks[0].bracket) },
+    ai_decks: aiExpanded.slice(1).map((deck, index) => ({ ...deck, bracket_tier: bracketToEngineTier(picks[index + 1].bracket) })),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -650,27 +854,6 @@ export function GameProvider({
   tRef.current = t;
 
   useEffect(() => {
-    if (mode !== "ai") return;
-    let applied = false;
-    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
-      setupCommanderAvatars(state.gameState);
-      return true;
-    };
-    const unsub = useGameStore.subscribe((state) => {
-      if (applied || !applyCommanderAvatars(state)) return;
-      applied = true;
-      unsub();
-    });
-    const state = useGameStore.getState();
-    if (!applied && applyCommanderAvatars(state)) {
-      applied = true;
-      unsub();
-    }
-    return unsub;
-  }, [mode, gameId]);
-
-  useEffect(() => {
     // A Commander pod's launched game is admitted here for its names and
     // avatars, and ONLY for those — its seat stays with `setupDraftMatchAvatars`
     // in the effect below, whose cleanup is what nulls the seat, so writer and
@@ -706,12 +889,16 @@ export function GameProvider({
     }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
-      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
-      appliedCommanderAvatars = true;
+      if (!gameState?.format_config?.uses_commander) return;
+      // Same zone-independent derivation as the AI path: `command_zone` is
+      // empty as soon as a commander is on the battlefield, and gating on it
+      // made a mid-game reload keep the random identities (issue #8053).
       // The lobby modes keep their names; the Commander pod game has none to
       // keep and takes commander-derived ones for every seat. Never `false` for
       // `setupRandomAvatars` above — that one would write a literal "You".
-      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
+      if (setupCommanderAvatars(gameState, !isCommanderDraftMatch)) {
+        appliedCommanderAvatars = true;
+      }
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
@@ -820,6 +1007,8 @@ export function GameProvider({
       // finishing a retained cleanup needs no deck.
       const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
       const parsedDeck = suppliedFormat ? null : loadActiveDeck();
+      // Keep the active deck's bracket bound to the same pre-preparation selection.
+      const playerBracket = suppliedFormat ? null : loadActiveDeckBracket();
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         // Host-only: proactively request notification permission while the
@@ -937,27 +1126,6 @@ export function GameProvider({
               return;
             }
           }
-          if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
-            onNoDeckRef.current?.();
-            return;
-          }
-          let player: ExpandedDeckWithTier;
-          if (!suppliedFormat) {
-            player = {
-              ...expandParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
-              bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
-            };
-          } else if (mode === "p2p-host") {
-            const pileDeck = await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile));
-            if (!pileDeck) {
-              if (!signal.aborted) onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
-              return;
-            }
-            player = { ...pileDeck, bracket_tier: "core" };
-          } else {
-            player = emptySeat();
-          }
-          const deckList = buildPlayerOnlyDeckList(player);
           signal.throwIfAborted();
 
           if (mode === "p2p-host") {
@@ -1046,6 +1214,25 @@ export function GameProvider({
                 return;
               }
               throw new Error("The local native engine is unavailable for this hosted game.");
+            }
+            if (!isResume && !parsedDeck && !suppliedFormat) {
+              onNoDeckRef.current?.();
+              return;
+            }
+            let deckList: unknown = savedSession?.hostDeckData;
+            if (!isResume) {
+              const prepared = suppliedFormat
+                ? await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile))
+                : await submitParsedDeck(parsedDeck!);
+              signal.throwIfAborted();
+              if (!prepared) {
+                onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
+                return;
+              }
+              deckList = buildPlayerOnlyDeckList({
+                ...prepared,
+                bracket_tier: suppliedFormat ? "core" : bracketToEngineTier(playerBracket),
+              });
             }
 
             // Only open a fresh broker client when starting a fresh
@@ -1186,6 +1373,14 @@ export function GameProvider({
             const { conn, peer } = await joinRoom(code, signal);
             hostPeerHandle = peer;
             signal.throwIfAborted();
+            const player = existing || suppliedFormat
+              ? emptySeat()
+              : {
+                  ...await submitParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
+                  bracket_tier: bracketToEngineTier(playerBracket),
+                };
+            signal.throwIfAborted();
+            const deckList = buildPlayerOnlyDeckList(player);
             const adapter = new P2PGuestAdapter(
               deckList,
               peer,
@@ -1276,15 +1471,6 @@ export function GameProvider({
     let cancelled = false;
 
     if (isOnline || isReconnect) {
-      const parsedDeck = isSpectate ? null : loadActiveDeck();
-      // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
-      const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
-      const deck = parsedDeck && !suppliedJoin
-        ? {
-            ...parsedDeckToDeckData(parsedDeck),
-            bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
-          }
-        : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
@@ -1447,6 +1633,14 @@ export function GameProvider({
           ?? reconnectSession?.serverUrl
           ?? originUrl
           ?? await detectServerUrl();
+        if (cancelled) return;
+        // Reconnect/spectator authority carries no fresh deck; select only at a new join.
+        const suppliedJoin = formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
+        const parsedDeck = !reconnectSession && wsMode === "join" && !suppliedJoin ? loadActiveDeck() : null;
+        const playerBracket = parsedDeck ? loadActiveDeckBracket() : null;
+        const deck = parsedDeck
+          ? { ...await submitParsedDeck(parsedDeck), bracket_tier: bracketToEngineTier(playerBracket) }
+          : emptySeatDeck();
         if (cancelled) return;
 
         wsAdapter = new WebSocketAdapter(
@@ -1629,7 +1823,7 @@ export function GameProvider({
     // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
     // optimized code, card database, and AI worker pool) persist across game sessions.
     // On cleanup, we clear the WASM game state but keep the worker alive.
-    const setupLocal = async () => {
+    const setupLocal = async (preparedDeckList?: DeckListPayload) => {
       if (cancelled) return;
       const adapter = getSharedAdapter();
       const soloDraft = source === "draft" && !!draftId;
@@ -1657,10 +1851,12 @@ export function GameProvider({
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
+          const submission = await submitLocalHandoff(deckList);
+          if (cancelled) return;
           await initGame(
             gameId,
             adapter,
-            deckList,
+            submission,
             formatConfig,
             playerCount,
             matchConfig,
@@ -1698,7 +1894,9 @@ export function GameProvider({
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          const submission = await submitLocalHandoff(deckList);
+          if (cancelled) return;
+          await initGame(gameId, adapter, submission, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
@@ -1722,6 +1920,16 @@ export function GameProvider({
       }
       if (cancelled) return;
 
+      // Horde: the archenemy (Horde) seat is an AI, never the local human (who
+      // is always seat 0 in solo Play-vs-AI). Remap the registry default
+      // (archenemy_player: 0) onto the first AI seat (seat 1) so
+      // `load_horde_library` injects the challenge deck under the AI, not the
+      // player — otherwise the human is dealt the Cyberman library (the
+      // seat-inversion bug). Mirrors the P2PHostAdapter remap on the host path.
+      const initFormatConfig =
+        formatConfig?.format === "Horde"
+          ? { ...formatConfig, archenemy_player: 1 }
+          : formatConfig;
       if (soloDraft) {
         try {
           draftDeckRaw = sessionStorage.getItem(draftDeckKey);
@@ -1822,7 +2030,7 @@ export function GameProvider({
           }
           let deckList: DeckListPayload;
           try {
-            deckList = await buildLocalAiDeckList(
+            deckList = preparedDeckList ?? await buildLocalAiDeckList(
               tRef.current,
               randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
@@ -1836,8 +2044,9 @@ export function GameProvider({
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
             return;
           }
+          if (cancelled) return;
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, initFormatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -1893,7 +2102,7 @@ export function GameProvider({
 
       let deckList: DeckListPayload;
       try {
-        deckList = await buildLocalAiDeckList(
+        deckList = preparedDeckList ?? await buildLocalAiDeckList(
           tRef.current,
           randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
           playerCount ?? 2,
@@ -1907,12 +2116,13 @@ export function GameProvider({
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
         return;
       }
+      if (cancelled) return;
       try {
         await initGame(
           gameId,
           adapter,
           deckList,
-          formatConfig,
+          initFormatConfig,
           playerCount,
           matchConfig,
           firstPlayer,
@@ -1940,6 +2150,43 @@ export function GameProvider({
             isBracketViolation,
           );
         }
+      }
+    };
+
+    const resetLocalStore = () => {
+      // Clear store state but keep the shared WASM worker alive — its V8
+      // TurboFan-compiled code, card database, and AI pool persist for reuse.
+      const adapter = useGameStore.getState().adapter;
+      if (adapter instanceof WasmAdapter) {
+        // Not awaited (cleanup can't be async), but safe: resetGame is posted
+        // to the same worker's FIFO message queue, so it executes before any
+        // subsequent initializeGame call from the next game session.
+        adapter.resetGameState();
+        // Defer the store clear so a StrictMode remount or dep-change re-run
+        // can cancel it before it fires. On real unmount (user navigates
+        // away), the timeout fires on the next macrotask and clears the store.
+        scheduleStoreReset(() => {
+          useGameStore.setState({
+            gameId: null,
+            gameState: null,
+            events: [],
+            eventHistory: [],
+            logHistory: [],
+            nextLogSeq: 0,
+            adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
+            waitingFor: null,
+            legalActions: [],
+            autoPassRecommended: false,
+            endContinuousEffectOffers: [],
+            manaPaymentShortcutActions: [],
+            spellCosts: {},
+            stateHistory: [],
+            turnCheckpoints: [],
+          });
+        });
+      } else {
+        scheduleStoreReset(reset);
       }
     };
 
@@ -2178,7 +2425,7 @@ export function GameProvider({
             ),
           );
           saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
-          await setupLocal();
+          await setupLocal(deckList);
         }
       };
 
@@ -2196,7 +2443,7 @@ export function GameProvider({
         useMultiplayerStore.getState().setStateWithheld(null);
         audioManager.setContext("menu");
         clearPromptOverlayState();
-        scheduleStoreReset(reset);
+        resetLocalStore();
       };
     }
 
@@ -2209,42 +2456,104 @@ export function GameProvider({
       // Issue #2369: drop prompt overlays synchronously so the next mount's
       // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
       clearPromptOverlayState();
-      // Clear store state but keep the shared WASM worker alive — its V8
-      // TurboFan-compiled code, card database, and AI pool persist for reuse.
-      const adapter = useGameStore.getState().adapter;
-      if (adapter instanceof WasmAdapter) {
-        // Not awaited (cleanup can't be async), but safe: resetGame is posted
-        // to the same worker's FIFO message queue, so it executes before any
-        // subsequent initializeGame call from the next game session.
-        adapter.resetGameState();
-        // Defer the store clear so a StrictMode remount or dep-change re-run
-        // can cancel it before it fires. On real unmount (user navigates
-        // away), the timeout fires on the next macrotask and clears the store.
-        scheduleStoreReset(() => {
-          useGameStore.setState({
-            gameId: null,
-            gameState: null,
-            events: [],
-            eventHistory: [],
-            logHistory: [],
-            nextLogSeq: 0,
-            adapter: null,
-            gameSessionGeneration: nextGameSessionGeneration(),
-            waitingFor: null,
-            legalActions: [],
-            autoPassRecommended: false,
-            endContinuousEffectOffers: [],
-            manaPaymentShortcutActions: [],
-            spellCosts: {},
-            stateHistory: [],
-            turnCheckpoints: [],
-          });
-        });
-      } else {
-        scheduleStoreReset(reset);
-      }
+      resetLocalStore();
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
+
+  // Seat identities derive AFTER the setup effect above: setup re-seeds the
+  // random fallback on every mount, so a derivation placed before it would
+  // lose on a remount with loaded state (and the Horde continuity key would
+  // then suppress every later snapshot as "unchanged"). Deriving last, the
+  // mount run wins over the seed and continuous play and a remount agree.
+  useEffect(() => {
+    if (mode !== "ai") return;
+    // Horde games with themed seats take Horde identities; everything else
+    // falls through to the commander derivation. The commander branch is
+    // one-shot per session — it applies as soon as the state carries a
+    // commander, in whatever zone it is in (see `setupCommanderAvatars`
+    // for why the command zone is the wrong gate). The Horde branch is
+    // continuous: a stage clear replaces the deployed Boss under the same
+    // session, so the seat must re-derive whenever the engine's projected
+    // identity changes. Neither branch unsubscribes: a debug import can
+    // replace the session under this same route (bumping only the session
+    // generation), and a Turtle→Cyberman or Commander→Turtle replacement
+    // must reselect identities instead of keeping the previous game's.
+    let commanderDone = false;
+    let lastHordeKey: string | null = null;
+    let lastGeneration = useGameStore.getState().gameSessionGeneration;
+    // A generation change is a session replacement, never continuous play
+    // (engine snapshots commit without bumping it — only init, resume,
+    // and import do). Reset both branches and reseed the random fallback
+    // for the replacement snapshot's seats, so a replacement neither
+    // branch claims sheds the previous game's themed maps instead of
+    // keeping them.
+    const reselectOnReplace = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || state.gameSessionGeneration === lastGeneration) return;
+      lastGeneration = state.gameSessionGeneration;
+      commanderDone = false;
+      lastHordeKey = null;
+      // The count comes from the INSTALLED replacement snapshot, never the
+      // mounted route: a debug import replaces the session under the same
+      // route id without navigating, and the replacement game can seat more
+      // players than the route's count — reseeding from the route would
+      // leave the extra seats with generic labels instead of identities.
+      const replacementSeats = state.gameState ? getSeatCount(state.gameState) : 0;
+      setupRandomAvatars(replacementSeats > 0 ? replacementSeats : (playerCount ?? 2), gameId);
+    };
+    // The projected Horde identity this snapshot themes, or null when no
+    // themed seats apply (non-Horde format, other challenge deck, or no
+    // Boss deployed yet). Bound to the game id and the session generation
+    // as well as the projection: a debug import replaces the session under
+    // the same route id and can reuse the same object ids, so an id-only
+    // key would match a different game and keep its stale names.
+    const hordeKeyFor = (
+      gameState: NonNullable<ReturnType<typeof useGameStore.getState>["gameState"]>,
+      generation: number,
+    ): string | null => {
+      if (gameState.format_config?.format !== "Horde") return null;
+      if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
+        return null;
+      }
+      const horde = gameState.derived?.horde;
+      if (!horde || (horde.deployed_boss_ids?.length ?? 0) === 0) return null;
+      return JSON.stringify([
+        gameId,
+        generation,
+        horde.horde_seat_ids ?? [],
+        horde.hero_player_ids ?? [],
+        horde.deployed_boss_ids ?? [],
+      ]);
+    };
+    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (commanderDone || state.gameId !== gameId || !state.gameState) return false;
+      return setupCommanderAvatars(state.gameState);
+    };
+    const applyHordeAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState) return false;
+      const key = hordeKeyFor(state.gameState, state.gameSessionGeneration);
+      if (key === null) return false;
+      // Identity unchanged: themed seats are already active, so neither a
+      // rewrite (which would clobber a user rename) nor a refetch is due.
+      // Returning true keeps the commander fallback short-circuited.
+      if (key === lastHordeKey) return true;
+      if (!setupHordeAvatars(state.gameState, gameId)) return false;
+      lastHordeKey = key;
+      return true;
+    };
+    const unsub = useGameStore.subscribe((state) => {
+      reselectOnReplace(state);
+      if (applyHordeAvatars(state)) return;
+      if (applyCommanderAvatars(state)) {
+        commanderDone = true;
+      }
+    });
+    const state = useGameStore.getState();
+    reselectOnReplace(state);
+    if (!applyHordeAvatars(state) && applyCommanderAvatars(state)) {
+      commanderDone = true;
+    }
+    return unsub;
+  }, [mode, gameId, playerCount]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

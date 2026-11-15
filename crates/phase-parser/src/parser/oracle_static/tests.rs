@@ -7,14 +7,15 @@ use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
-    CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
+    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
+    Parity, ParitySource, PlayerFilter, PlayerRelation, PlayerScope, ProtectionDoesNotRemove,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
+    SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::keywords::{Keyword, WardCost};
+use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
@@ -87,6 +88,33 @@ fn color_conditional_keyword_grant_single_pair() {
         defs[0].modifications,
         vec![ContinuousModification::AddKeyword {
             keyword: Keyword::Vigilance
+        }]
+    );
+}
+
+/// CR 611.3a + CR 608.2c: Predator's Gambit's printed "as long as its controller
+/// controls no other creatures" stays an explicit `Unrecognized` coverage gap.
+/// A static ability has no resolving target to bind the referent against, so the
+/// shared target-controller recognizer must not be reachable from
+/// `parse_inner_condition` and read an unbound parent-target controller.
+#[test]
+fn predators_gambit_controller_clause_stays_an_explicit_gap() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has intimidate as long as its controller controls no other creatures.",
+    );
+    assert_eq!(defs.len(), 1);
+    assert!(
+        matches!(
+            defs[0].condition,
+            Some(StaticCondition::Unrecognized { .. })
+        ),
+        "the controller clause must stay an explicit gap, got {:?}",
+        defs[0].condition
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Intimidate
         }]
     );
 }
@@ -2792,6 +2820,49 @@ fn cant_attack_scoped_player_only_variant() {
         Some(crate::types::triggers::AttackTargetFilter::Player),
         "companion must be scoped to Player, got {:?}",
         lockout.attack_defended
+    );
+}
+
+/// CR 508.1c + CR 508.6: Bloodthirster / Port Razer — "This creature can't attack
+/// a player it has already attacked this turn." The defended scope is the
+/// creature's OWN attack history, not a blanket prohibition. Before this arm
+/// existed the history rider was left unconsumed after the bare " a player" match,
+/// the whole line fell through to the blanket `CantAttack` arm, and the creature
+/// could not attack any opponent at all (issue #8064).
+///
+/// Both printed printings normalize their subject to the self-reference the static
+/// grammar understands (`This creature` and the card name both become `~`), so the
+/// subject axis is covered by the shared self-reference combinator rather than a
+/// per-card string.
+#[test]
+fn cant_attack_player_already_attacked_scopes_to_the_source_history() {
+    for line in [
+        "This creature can't attack a player it has already attacked this turn.",
+        "~ can't attack a player it has already attacked this turn.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        assert_eq!(def.mode, StaticMode::CantAttack, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            def.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn),
+            "{line}: the restriction must scope to players this creature already attacked, got {:?}",
+            def.attack_defended
+        );
+        assert!(
+            def.condition.is_none(),
+            "{line}: the history rider belongs to the defended scope, not a gate; got {:?}",
+            def.condition
+        );
+    }
+
+    // Control: the bare self restriction is still a blanket `CantAttack` with no
+    // defended scope, so the new arm cannot swallow it.
+    let bare = parse_static_line("~ can't attack.").expect("bare cant attack");
+    assert_eq!(bare.mode, StaticMode::CantAttack);
+    assert_eq!(
+        bare.attack_defended, None,
+        "a bare CantAttack must stay unscoped"
     );
 }
 
@@ -6484,6 +6555,122 @@ fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     assert_eq!(
         def.active_zones,
         crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// CR 107.14 + CR 601.2f: Blaster Hulk's reduction counts the energy the
+/// controller paid or lost this turn. Regression for issue #7899: the clause
+/// fell through to the type-phrase fallback and became an `ObjectCount` over an
+/// empty filter (every object), so the spell cost only {R}{R}.
+#[test]
+fn static_this_spell_cost_less_for_each_energy_paid_or_lost_this_turn() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.",
+        "Blaster Hulk",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Pirate".to_string()],
+    );
+    let reductions: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
+        .collect();
+    assert_eq!(reductions.len(), 1, "statics = {:?}", parsed.statics);
+    let def = reductions[0];
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost { generic: 1, .. },
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                ..
+            }
+        ),
+        "got {:?}",
+        def.mode
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// CR 601.2f: a "for each" count the parser cannot read must leave the cost
+/// modifier unparsed. It must not fall back to an `ObjectCount` over an empty
+/// filter (every object in the game), which made these spells nearly free
+/// (issue #7899 class: Lumbering Megasloth, Astral Confrontation).
+#[test]
+fn static_cost_reduction_with_unreadable_for_each_count_fails_closed() {
+    for line in [
+        "This spell costs {1} less to cast for each counter among players and permanents.",
+        "This spell costs {1} less to cast for each opponent you're attacking.",
+    ] {
+        let def = parse_static_line(line);
+        assert!(
+            !matches!(
+                def.as_ref().map(|def| &def.mode),
+                Some(StaticMode::ModifyCost { .. })
+            ),
+            "{line}: unreadable count must not yield a cost modifier, got {def:?}"
+        );
+    }
+    // Reach guard: a readable count through the same "for each" path still
+    // lowers to a dynamic cost modifier.
+    let readable = parse_static_line(
+        "This spell costs {1} less to cast for each creature that attacked this turn.",
+    );
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
+    );
+}
+
+/// CR 601.2f: the type-phrase fallback must consume the WHOLE count clause. A
+/// recognized type followed by an unparsed qualifier would otherwise count a
+/// broader class than the text allows ("each creature" instead of "each creature
+/// that's attacking") and over-reduce the cost. The premise assert pins that the
+/// folding parser really leaves this qualifier behind, so the test cannot go
+/// vacuously green if that parser learns the suffix later.
+#[test]
+fn static_cost_reduction_with_unparsed_type_qualifier_fails_closed() {
+    let phrase = "creature that's attacking";
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+    assert!(
+        !remainder.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(ref tf) if !tf.type_filters.is_empty()),
+        "probe premise: a recognized type with an unparsed qualifier, got {filter:?} / {remainder:?}"
+    );
+    let line = format!("This spell costs {{1}} less to cast for each {phrase}.");
+    let def = parse_static_line(&line);
+    assert!(
+        !matches!(
+            def.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost { .. })
+        ),
+        "{line}: unparsed qualifier must not yield a cost modifier, got {def:?}"
+    );
+    // Reach guard: the same type phrase without the qualifier still parses.
+    let readable =
+        parse_static_line("This spell costs {1} less to cast for each creature you control.");
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
     );
 }
 
@@ -12854,6 +13041,80 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
 }
 
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's timing permission (Scryfall-
+/// verified verbatim Oracle line 1; the production pipeline normalizes "Teferi"
+/// to `~` before the static line parses, so the unit shape uses `~` directly).
+/// Unlike the Wandering Emperor's conditional possessive form, this is
+/// unconditional with an "of \<subject\>" axis plus the "on any player's turn"
+/// infix — which CR 304.5 subsumes into instant timing (priority only), so it
+/// lowers to the same shared `ActivateAsInstant { PaysLoyalty, None }` mode,
+/// self-scoped. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_teferi_master_of_time_loyalty_timing_permission() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of ~ on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(def.condition, None);
+}
+
+/// CR 606.3 + CR 304.5: the subject axis composes — Teferi's Talent's emblem
+/// carries the same timing permission scoped to "planeswalkers you control"
+/// (verbatim emblem text, already quoted in the granted-loyalty corpus below).
+/// Same shared mode; only `affected` differs.
+#[test]
+fn static_loyalty_timing_permission_subject_axis_composes() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.condition, None);
+}
+
+/// CR 304.5: the "on any player's turn" infix is optional — instant timing
+/// already spans any player's turn, so the bare tail parses to the same
+/// permission rather than failing closed. Combinator pin: no printed card
+/// carries the bare form yet. Both apostrophe forms parse.
+#[test]
+fn static_loyalty_timing_permission_turn_infix_optional() {
+    for line in [
+        "You may activate loyalty abilities of ~ any time you could cast an instant.",
+        "You may activate loyalty abilities of ~ on any player\u{2019}s turn any time you could cast an instant.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+                keyword: None,
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+    }
+}
+
 #[test]
 fn static_equip_abilities_activate_as_instant() {
     let def =
@@ -14771,19 +15032,11 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
-    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
-    // flash-timing path (granted_spell_keywords) reads — with the spell-type
-    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
-    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
-    // the timing grant and the type restriction.
+    // CR 601.3b + CR 609.4: "You may cast [type] spells as though they had
+    // flash" is a `CastWithFlash` timing permission that keeps the spell-type
+    // filter (Vivien, Champion of the Wilds: creature spells only).
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
         panic!(
             "affected must be a Typed creature filter, got {:?}",
@@ -15100,12 +15353,7 @@ fn static_cast_as_though_flash_all_spells() {
     // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
     // Orrery) grants flash to every spell the controller casts.
     let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     assert_eq!(
         def.affected,
         Some(TargetFilter::Typed(
@@ -15120,12 +15368,7 @@ fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
         "You may cast legendary spells and artifact spells as though they had flash.",
     )
     .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash
-        }
-    );
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
     let Some(TargetFilter::Or { filters }) = &def.affected else {
         panic!("expected Or affected filter, got {:?}", def.affected);
     };
@@ -15277,18 +15520,153 @@ fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
         "Any player may cast Sliver spells as though they had flash.",
     ] {
         let def = parse_static_line(text).unwrap();
-        assert_eq!(
-            def.mode,
-            StaticMode::CastWithKeyword {
-                keyword: Keyword::Flash
-            }
-        );
+        assert_eq!(def.mode, StaticMode::CastWithFlash);
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, None, "{text}: must apply to every player");
             }
             other => panic!("{text}: expected Typed affected filter, got {other:?}"),
         }
+    }
+}
+
+/// CR 609.4: every printed "you may cast [type] spells as though they had flash" line is a
+/// `CastWithFlash` timing permission, never a Flash keyword grant.
+#[test]
+fn printed_as_though_flash_statics_lower_to_cast_with_flash() {
+    for (name, card_type, line) in [
+        ("Akoum", "Plane", "Players may cast enchantment spells as though they had flash."),
+        ("Breath of the Sleepless", "Enchantment", "You may cast Spirit spells as though they had flash."),
+        ("Captain Mar-Vell, Space-Born", "Creature", "Cosmic Awareness \u{2014} As long as an opponent has cast a spell this turn, you may cast spells as though they had flash."),
+        ("Gandalf the White", "Creature", "You may cast legendary spells and artifact spells as though they had flash."),
+        ("Gandalf, Friend of the Shire", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Heliod, the Warped Eclipse", "Creature", "You may cast spells as though they had flash."),
+        ("High Fae Trickster", "Creature", "You may cast spells as though they had flash."),
+        ("Hypersonic Dragon", "Creature", "You may cast sorcery spells as though they had flash. (You may cast them any time you could cast an instant.)"),
+        ("Keeper of the Secret Lair", "Creature", "You may cast Secret Lair spells as though they had flash."),
+        ("Kianne, Corrupted Memory", "Creature", "As long as Kianne's power is even, you may cast noncreature spells as though they had flash."),
+        ("Kianne, Corrupted Memory", "Creature", "As long as Kianne's power is odd, you may cast creature spells as though they had flash."),
+        ("Leyline of Anticipation", "Enchantment", "You may cast spells as though they had flash."),
+        ("Liberator, Urza's Battlethopter", "Creature", "You may cast colorless spells and artifact spells as though they had flash."),
+        ("Mai and Zuko", "Creature", "You may cast Ally spells and artifact spells as though they had flash."),
+        ("Najal, the Storm Runner", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Oura, the Imitator", "Creature", "You may cast Faerie spells as though they had flash."),
+        ("Prophet of Kruphix", "Creature", "You may cast creature spells as though they had flash."),
+        ("Quick Sliver", "Creature", "Any player may cast Sliver spells as though they had flash."),
+        ("Quicksilver, Speedster", "Creature", "As long as Quicksilver is tapped, you may cast spells as though they had flash."),
+        ("Raff Capashen, Ship's Mage", "Creature", "You may cast historic spells as though they had flash. (Artifacts, legendaries, and Sagas are historic.)"),
+        ("Rattlechains", "Creature", "You may cast Spirit spells as though they had flash."),
+        ("Renari, Merchant of Marvels", "Creature", "You may cast Dragon spells and artifact spells as though they had flash."),
+        ("Sally Sparrow", "Creature", "You may cast creature spells as though they had flash."),
+        ("Shimmer Myr", "Creature", "You may cast artifact spells as though they had flash."),
+        ("Sigarda's Aid", "Enchantment", "You may cast Aura and Equipment spells as though they had flash."),
+        ("Singer of Swift Rivers", "Creature", "You may cast Merfolk spells as though they had flash."),
+        ("Skittering Cicada", "Creature", "You may cast colorless spells as though they had flash."),
+        ("Tawnos", "Vanguard", "You may cast artifact, creature, and enchantment spells as though they had flash."),
+        ("Tidal Barracuda", "Creature", "Any player may cast spells as though they had flash."),
+        ("Valley Floodcaller", "Creature", "You may cast noncreature spells as though they had flash."),
+        ("Vedalken Orrery", "Artifact", "You may cast spells as though they had flash."),
+        ("Vernal Equinox", "Enchantment", "Any player may cast creature and enchantment spells as though they had flash."),
+        ("Vivien, Champion of the Wilds", "Planeswalker", "You may cast creature spells as though they had flash."),
+        ("Whirlwing Stormbrood", "Creature", "You may cast sorcery spells and Dragon spells as though they had flash."),
+        ("Wizards of Thay", "Creature", "You may cast sorcery spells as though they had flash."),
+        ("Yeva, Nature's Herald", "Creature", "You may cast green creature spells as though they had flash."),
+        ("The Blue Spirit", "Creature", "You may cast the first creature spell you cast each turn as though it had flash."),
+        ("Radagast of Rhosgobel", "Creature", "The first creature spell you cast each turn costs {2} less to cast and can be cast as though it had flash."),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|def| def.mode == StaticMode::CastWithFlash && def.affected.is_some()),
+            "{name}: {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .statics
+                .iter()
+                .any(|def| matches!(def.mode, StaticMode::CastWithKeyword { .. })),
+            "{name}: {:?}",
+            parsed.statics
+        );
+    }
+}
+
+/// CR 702.8a: "have flash" grants the keyword itself.
+#[test]
+fn printed_have_flash_statics_stay_flash_keyword_grants() {
+    for (name, line) in [
+        (
+            "Chea, Friend to Maybe Too Many",
+            "Familiar spells you cast have flash.",
+        ),
+        (
+            "Teferi, Mage of Zhalfir",
+            "Creature cards you own that aren't on the battlefield have flash.",
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|def| def.mode
+                == StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash
+                }),
+            "{name}: {:?}",
+            parsed.statics
+        );
+    }
+}
+
+/// CR 611.2a + CR 609.4: resolved "you may cast … spells this turn / until your next turn as
+/// though they had flash" grants a player-scoped `CastWithFlash` permission.
+#[test]
+fn printed_as_though_flash_effects_grant_cast_with_flash() {
+    for (name, card_type, line) in [
+        ("Alchemist's Refuge", "Land", "{G}{U}, {T}: You may cast spells this turn as though they had flash."),
+        ("Borne Upon a Wind", "Instant", "You may cast spells this turn as though they had flash."),
+        ("Complete the Circuit", "Instant", "You may cast sorcery spells this turn as though they had flash."),
+        ("Emergence Zone", "Land", "{1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash."),
+        ("Teferi, Time Raveler", "Planeswalker", "[+1]: Until your next turn, you may cast sorcery spells as though they had flash."),
+        ("Winding Canyons", "Land", "{2}, {T}: You may cast creature spells this turn as though they had flash."),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        let Some(crate::types::ability::Effect::GenericEffect {
+            static_abilities, ..
+        }) = parsed.abilities.first().map(|ability| &*ability.effect)
+        else {
+            panic!("{name}: expected a GenericEffect, got {:?}", parsed.abilities);
+        };
+        let modes: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|def| &def.modifications)
+            .filter_map(|modification| match modification {
+                ContinuousModification::GrantStaticAbility { definition } => {
+                    Some(&definition.mode)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modes, vec![&StaticMode::CastWithFlash], "{name}");
     }
 }
 
@@ -16280,6 +16658,7 @@ fn own_unlimited_cast_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -24838,7 +25217,17 @@ fn cant_cast_spells_of_chosen_color() {
 
 #[test]
 fn cant_cast_spells_with_even_mana_values() {
-    // CR 101.2: "can't cast spells with even mana values"
+    // CR 601.3a: "can't cast spells with even mana values" — Void Winnower, the
+    // card that rule's own example is written about. The parity is one of the
+    // "certain qualities" CR 601.3a says the prohibition names, so it must
+    // reach `affected`; CR 202.3 defines the mana value it is read from.
+    //
+    // This test used to assert `def.mode` ALONE and passed with the card
+    // completely broken: `affected` was `None`, and
+    // `is_blocked_by_cant_be_cast_for` skips its filter test when `affected` is
+    // `None` and falls through to PROHIBITED — so Void Winnower stopped
+    // opponents from casting every spell in the game. Asserting the filter is
+    // the whole point of this test; do not weaken it back to a mode check.
     let def = parse_static_line("Your opponents can't cast spells with even mana values.").unwrap();
     assert_eq!(
         def.mode,
@@ -24846,6 +25235,44 @@ fn cant_cast_spells_with_even_mana_values() {
             who: ProhibitionScope::Opponents,
         }
     );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }),
+            "even-mana-value cast prohibition must scope to EVEN mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!(
+            "expected a Typed filter carrying ManaValueParity(Fixed(Even)), got {other:?} \
+             (an unfiltered prohibition is a total cast-lock on every spell)"
+        ),
+    }
+}
+
+#[test]
+fn cant_cast_spells_with_odd_mana_values() {
+    // CR 601.3a + CR 202.3: the ODD mirror of the Void Winnower arm. No printed
+    // card uses it today, but the parity must be read from the text rather than
+    // defaulted — a head that hardcoded `Even` would pass the sibling test
+    // above and silently invert this one.
+    let def = parse_static_line("Your opponents can't cast spells with odd mana values.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Odd),
+            }),
+            "odd-mana-value cast prohibition must scope to ODD mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!("expected ManaValueParity(Fixed(Odd)), got {other:?}"),
+    }
 }
 
 #[test]
@@ -35055,6 +35482,68 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
     );
 }
 
+/// CR 613.1f: "has/have no abilities" (Xu-Ifit, Osteoharmonist's rider) is the
+/// "has" form of ability removal and yields `LossMember::Abilities`; the
+/// existing "loses all ..." arm and the empty scan are unchanged.
+#[test]
+fn loss_enumeration_reads_has_no_abilities() {
+    assert_eq!(
+        parse_loss_enumeration("has no abilities").expect("has form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        parse_loss_enumeration("have no abilities").expect("have form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        scan_loss_enumeration("is a skeleton in addition to its other types and has no abilities"),
+        vec![LossMember::Abilities]
+    );
+    assert!(parse_continuous_modifications("and has no abilities")
+        .contains(&ContinuousModification::RemoveAllAbilities));
+    // Positive: the "loses all" arm still reads.
+    assert_eq!(
+        scan_loss_enumeration("loses all land types and abilities"),
+        vec![LossMember::LandTypes, LossMember::Abilities]
+    );
+    // Hostile: empty input and the filter phrase yield nothing.
+    assert!(scan_loss_enumeration("").is_empty());
+    assert!(scan_loss_enumeration("creatures with no abilities get +2/+2").is_empty());
+}
+
+/// CR 613.1f: the filter phrase "with no abilities" (Muraganda Petroglyphs,
+/// Ruxa) selects objects; it is not ability removal.
+#[test]
+fn no_abilities_filter_is_not_ability_removal() {
+    for (text, power) in [
+        ("Creatures with no abilities get +2/+2.", 2),
+        ("Creatures you control with no abilities get +1/+1.", 1),
+    ] {
+        let def = parse_static_line(text).expect("static def");
+        // Reach guard: the filter and the pump parsed.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "{text}: {:?}",
+                tf.properties
+            ),
+            other => panic!("{text}: expected Typed filter, got {other:?}"),
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddPower { value: power }),
+            "{text}: {:?}",
+            def.modifications
+        );
+        assert!(
+            !def.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities),
+            "{text}: {:?}",
+            def.modifications
+        );
+    }
+}
+
 /// CR 205.3i: "land types" is a fourth loss-enumeration member alongside
 /// abilities/card types/creature types — Alpine Moon, Lithoform Blight, and
 /// Ultima, Origin of Oblivion all use "loses all land types and abilities".
@@ -36341,10 +36830,13 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
         };
         assert!(
             props.contains(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }),
-            "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"
+            "{line:?}: expected a source-anchored Either pairing prop, got {props:?}"
         );
     }
 }
@@ -41894,6 +42386,55 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
     );
 }
 
+// SHAPE: full-document routing must retain the live set and the Aura's own-source rider.
+#[test]
+fn kannushi_pledge_full_oracle_live_color_set() {
+    for (name, text, types, subtypes, aura) in [
+        (
+            "Empty-Shrine Kannushi",
+            "This creature has protection from each color among permanents you control.",
+            vec!["Creature".to_string()],
+            vec!["Human".to_string(), "Cleric".to_string()],
+            false,
+        ),
+        (
+            "Pledge of Loyalty",
+            "Enchant creature\nEnchanted creature has protection from each color among permanents you control. This effect doesn't remove this Aura.",
+            vec!["Enchantment".to_string()],
+            vec!["Aura".to_string()],
+            true,
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text, name, &[], &types, &subtypes,
+        );
+        let grant = ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl,
+            )),
+        };
+        let def = parsed.statics.iter().find(|def| def.modifications.contains(&grant))
+            .unwrap_or_else(|| panic!("{name}: missing live grant: {parsed:?}"));
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if aura {
+            assert!(matches!(&def.affected, Some(TargetFilter::Typed(filter))
+                if filter.properties.contains(&FilterProp::EnchantedBy)));
+            assert_eq!(def.protection_does_not_remove, Some(ProtectionDoesNotRemove::Source));
+        } else {
+            assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(def.protection_does_not_remove, None);
+        }
+        assert!(!parsed.extracted_keywords.iter().any(|keyword|
+            matches!(keyword, Keyword::Protection(ProtectionTarget::EachColor(_)))));
+        assert_eq!(def.modifications, vec![grant]);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty(), "{name}: unexpected residual ability");
+        assert!(parsed.triggers.is_empty());
+        assert!(parsed.replacements.is_empty());
+        assert!(!parsed.extracted_keywords.iter().any(|keyword| matches!(keyword, Keyword::Unknown(_))));
+    }
+}
+
 // SHAPE: the full Oracle line and its canonical trailing forms must preserve
 // both the live Forest census and the complementary combat gates.
 // CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
@@ -42073,4 +42614,469 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
             subtype: "Ooze".to_string()
         }));
     }
+}
+
+fn dynamic_count_of(line: &str) -> QuantityRef {
+    match parse_static_line(line).map(|def| def.mode) {
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(count),
+            ..
+        }) => count,
+        other => panic!("{line}: expected a counted cost modifier, got {other:?}"),
+    }
+}
+
+/// CR 601.2f + CR 108.3 + CR 400.1: cost-modifier counts keep every qualifier
+/// of a coordinated population — owned cards across listed zones restricted by
+/// a card-description list, an "and each" union of populations, and a
+/// spell-relative name reference.
+#[test]
+fn cost_modifier_counts_keep_coordinated_population_qualifiers() {
+    let owned = || FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        owned(),
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Exile, Zone::Graveyard],
+                        },
+                    ])),
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                            TargetFilter::Typed(
+                                TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                            ),
+                        ],
+                    },
+                ],
+            },
+        }
+    );
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        owned(),
+                    ])),
+                ],
+            },
+        }
+    );
+    // CR 400.1: legs in one zone can share an object, which a single union count
+    // would count once instead of once per leg, so that union declines.
+    // Synthetic; Machinist's Dismissal is the nearest printed card.
+    assert!(!matches!(
+        parse_static_line("This spell costs {1} less to cast for each artifact you control and each creature you control.")
+            .map(|def| def.mode),
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Or { .. }
+            }),
+            ..
+        })
+    ));
+    assert_eq!(
+        dynamic_count_of("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                },
+                owned(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+        }
+    );
+}
+
+/// CR 509.1h + CR 105.2: a combat-status word after a `non-`
+/// prefix, and "that each share a color with one or more <objects>", both
+/// stay in the parsed filter.
+#[test]
+fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
+    let (filter, rest) =
+        crate::parser::oracle_target::parse_target("target nonartifact attacking creature");
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
+                .properties(vec![FilterProp::Attacking { defender: None }])
+        )
+    );
+    let (filter, rest) = crate::parser::oracle_target::parse_target(
+        "target card that each share a color with one or more permanents you control",
+    );
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+                ))),
+                relation: SharedQualityRelation::Shares,
+            }])
+        )
+    );
+}
+
+fn parsed_json(name: &str, text: &str, card_type: &str) -> String {
+    let parsed =
+        crate::parser::oracle::parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+    serde_json::to_string(&(&parsed.abilities, &parsed.triggers)).expect("parse serializes")
+}
+
+/// Neighbours of the repaired grammars stay honest: each either parses to its
+/// printed meaning or keeps an explicit gap instead of a silently wrong shape.
+#[test]
+fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
+    // CR 608.2c + CR 109.4: "Other creatures that player controls" excludes the
+    // target (Mark for Death), not the spell.
+    let mark = parsed_json(
+        "Mark for Death",
+        "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.",
+        "Sorcery",
+    );
+    assert!(
+        mark.contains(r#""controller":"ParentTargetController","properties":[{"type":"DistinctFrom","reference":{"type":"ParentTarget"}}]"#),
+        "{mark}"
+    );
+    // CR 508.1k / CR 509.1g / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
+    let baeloth = parsed_json(
+        "Baeloth Barrityl, Entertainer",
+        "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",
+        "Creature",
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Attacking"}]"#),
+        "{baeloth}"
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Blocking"}]"#),
+        "{baeloth}"
+    );
+    // CR 607.2d: a trigger reading "the chosen quality" binds the persisted choice.
+    let gollum = parsed_json(
+        "Gollum, Riddle Master",
+        "As Gollum enters, choose odd or even. (Zero is even.)\nWhenever an opponent casts a spell with mana value of the chosen quality, you draw a card.",
+        "Creature",
+    );
+    assert!(
+        gollum.contains(r#""parity":{"type":"SourceChosen"}"#),
+        "{gollum}"
+    );
+    // Unmodeled riders and targeted fixed-kind adjustments stay explicit gaps.
+    for (name, text, card_type) in [
+        (
+            "Watcher of Hours",
+            "Whenever you remove a time counter from this card while it's exiled, surveil 1.",
+            "Creature",
+        ),
+        (
+            "Sigurd, Jarl of Ravensthorpe",
+            "Boast \u{2014} {1}: Put a lore counter on target Saga you control or remove one from it.",
+            "Creature",
+        ),
+        (
+            "Discover the Formula",
+            "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+            "Instant",
+        ),
+    ] {
+        let json = parsed_json(name, text, card_type);
+        assert!(
+            json.contains("Unknown") || json.contains("Unimplemented"),
+            "{name} must stay an explicit gap: {json}"
+        );
+    }
+}
+
+fn assert_you_creature_flash_grant(def: &StaticDefinition, expect_during_your_turn: bool) {
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        expect_during_your_turn,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected typed inner filter");
+    };
+    assert!(inner_tf.type_filters.contains(&TypeFilter::Creature));
+}
+
+#[test]
+fn static_radagast_first_creature_spell_costs_less_and_has_flash() {
+    // CR 601.2f + CR 601.3b: one subject, two statics under the same gate.
+    let defs = parse_static_line_multi(
+        "The first creature spell you cast each turn costs {2} less to cast and can be cast as though it had flash.",
+    );
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert!(matches!(
+        defs[0].mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
+    assert_you_creature_flash_grant(&defs[1], false);
+    assert_eq!(defs[0].condition, defs[1].condition);
+}
+
+#[test]
+fn static_first_creature_spell_during_your_turns_costs_less_and_has_flash() {
+    // No printed first-spell flash card uses this timing (nearest: Radagast of Rhosgobel, "each turn"); it pins that the builder accepts the controller-turn axis.
+    let defs = parse_static_line_multi(
+        "The first creature spell you cast during each of your turns costs {1} less to cast and can be cast as though it had flash.",
+    );
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert_you_creature_flash_grant(&defs[1], true);
+}
+
+#[test]
+fn nth_qualified_spell_grant_declines_unsupported_timing() {
+    assert!(nth_qualified_spell_grant(
+        "the first creature spell you cast each turn",
+        StaticMode::CastWithFlash,
+        None,
+        "",
+    )
+    .is_some());
+    // No printed first-spell flash card uses this timing (nearest: The Blue Spirit, "each turn"); it pins that the builder declines the opponent-turn axis.
+    assert!(nth_qualified_spell_grant(
+        "the first creature spell you cast during each opponent's turn",
+        StaticMode::CastWithFlash,
+        None,
+        "",
+    )
+    .is_none());
+}
+
+#[test]
+fn opponent_cast_first_spell_cost_and_flash_grants_no_flash() {
+    // No printed card has an opponent-scoped first-spell cost combined with a flash grant; nearest are Radagast of Rhosgobel (printed, controller-scoped) and the Magic Online-only Heartwood Storyteller Avatar (opponent-scoped cost).
+    let defs = parse_static_line_multi(
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast and can be cast as though it had flash.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            d.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
+                ..
+            }
+        )),
+        "{defs:?}"
+    );
+    assert!(
+        !defs.iter().any(|d| matches!(
+            d.mode,
+            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+        )),
+        "{defs:?}"
+    );
+}
+
+#[test]
+fn static_blue_spirit_may_cast_first_creature_spell_as_though_flash() {
+    // CR 601.3b + CR 702.8a: The Blue Spirit's permission form.
+    let def = parse_static_line(
+        "You may cast the first creature spell you cast each turn as though it had flash.",
+    )
+    .unwrap();
+    assert_you_creature_flash_grant(&def, false);
+}
+
+#[test]
+fn leading_condition_keeps_first_spell_flash_gate() {
+    // CR 611.3a: Hungering Yeti's leading gate on The Blue Spirit's permission; no printed card combines them.
+    let def = parse_static_line(
+        "As long as you control a green or blue permanent, you may cast the first creature spell you cast each turn as though it had flash.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    let Some(StaticCondition::And { conditions }) = &def.condition else {
+        panic!("expected And of both gates, got {:?}", def.condition);
+    };
+    assert_eq!(conditions.len(), 2, "{conditions:?}");
+    assert_eq!(
+        Some(&conditions[0]),
+        parse_static_condition("you control a green or blue permanent").as_ref()
+    );
+    assert_first_spell_gate(&conditions[1], false);
+}
+
+// --- Edgar, Master Machinist (#9770): the cast-this-way enters-tapped rider ---
+
+fn edgar_parse(text: &str, name: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
+    crate::parser::oracle::parse_oracle_text(
+        text,
+        name,
+        &[],
+        &types.iter().map(|t| (*t).to_string()).collect::<Vec<_>>(),
+        &[],
+    )
+}
+
+fn graveyard_permission(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> Option<&StaticDefinition> {
+    parsed
+        .statics
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::GraveyardCastPermission { .. }))
+}
+
+const EDGAR_PERMISSION: &str = "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped.";
+
+/// CR 601.3 + CR 607.1c + CR 614.1d (C1): Edgar's line is one permission with
+/// its linked rider: once per turn, cast-only, artifact spells, during its
+/// controller's turns, and the spell cast this way enters tapped.
+#[test]
+fn edgar_graveyard_permission_enters_tapped_rider() {
+    use crate::types::zones::EtbTapState;
+    let parsed = edgar_parse(
+        EDGAR_PERMISSION,
+        "Edgar, Master Machinist",
+        &["Legendary", "Creature"],
+    );
+    let def = graveyard_permission(&parsed).expect("Edgar parses to a graveyard cast permission");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                enter_tapped: EtbTapState::Tapped,
+                enters_with_counter: None,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                ..
+            }
+        ),
+        "got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.condition,
+        Some(crate::types::ability::StaticCondition::DuringYourTurn)
+    );
+    let Some(TargetFilter::Typed(filter)) = &def.affected else {
+        panic!("a typed affected filter, got {:?}", def.affected);
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Artifact]);
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(*ability.effect, Effect::Unimplemented { .. })),
+        "no residual Unimplemented: {:?}",
+        parsed.abilities
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the rider is carried, not swallowed: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 614.1d (C2): the "enters the battlefield tapped" template is the same rider.
+#[test]
+fn edgar_graveyard_permission_enters_tapped_rider_battlefield_template() {
+    use crate::types::zones::EtbTapState;
+    let parsed = edgar_parse(
+        "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters the battlefield tapped.",
+        "Test Machinist",
+        &["Creature"],
+    );
+    let def = graveyard_permission(&parsed).expect("the template parses");
+    assert!(matches!(
+        def.mode,
+        StaticMode::GraveyardCastPermission {
+            enter_tapped: EtbTapState::Tapped,
+            ..
+        }
+    ));
+}
+
+/// CR 607.1 (C3): a rider with more after "enters tapped" is not modelled, so
+/// the whole permission declines rather than dropping the rest. Positive
+/// control: the rider alone parses (C1).
+#[test]
+fn edgar_graveyard_permission_rider_trailing_text_declines() {
+    let control = edgar_parse(EDGAR_PERMISSION, "Test Machinist", &["Creature"]);
+    assert!(graveyard_permission(&control).is_some(), "reach guard");
+    let parsed = edgar_parse(
+        "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped and attacking.",
+        "Test Machinist",
+        &["Creature"],
+    );
+    assert!(
+        graveyard_permission(&parsed).is_none(),
+        "the trailing \"and attacking\" must decline, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 614.1d (C4): `ExileCastPermission` has no enters-tapped carrier, so an
+/// exile permission with that rider declines. Positive control: the same
+/// line with the finality rider parses (Intrepid Paleontologist).
+#[test]
+fn edgar_exile_permission_tapped_rider_declines() {
+    let exile_permission = |parsed: &crate::parser::oracle::ParsedAbilities| {
+        parsed
+            .statics
+            .iter()
+            .find(|def| matches!(def.mode, StaticMode::ExileCastPermission { .. }))
+            .cloned()
+    };
+    let control = edgar_parse(
+        "You may cast Dinosaur creature spells from among cards you own exiled with this creature. If you cast a spell this way, that creature enters with a finality counter on it.",
+        "Intrepid Paleontologist",
+        &["Creature"],
+    );
+    assert!(
+        matches!(
+            exile_permission(&control).map(|def| def.mode),
+            Some(StaticMode::ExileCastPermission {
+                enters_with_counter: Some(CounterType::Finality),
+                ..
+            })
+        ),
+        "reach guard: the finality line parses, got {:?}",
+        control.statics
+    );
+    let parsed = edgar_parse(
+        "You may cast Dinosaur creature spells from among cards you own exiled with this creature. If you cast a spell this way, that creature enters tapped.",
+        "Intrepid Paleontologist",
+        &["Creature"],
+    );
+    assert!(
+        exile_permission(&parsed).is_none(),
+        "no exile permission may drop the tapped rider, got {:?}",
+        parsed.statics
+    );
 }

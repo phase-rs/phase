@@ -328,6 +328,9 @@ fn resolve_reveal(
                         source_id: Some(ability.source_id),
                         rest_cards: Vec::new(),
                         rest_destination: pile_destination,
+                        // The printed clause named this pile's zone, so it is a
+                        // routed remainder rather than a silent one.
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                         rest_order,
                         rest_split_top_count: None,
                         clear_markers,
@@ -464,6 +467,7 @@ fn resolve_reveal(
                         kept_delivery: Default::default(),
                         continuation_targets: Vec::new(),
                         rest_delivery: Default::default(),
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     },
                 );
                 return Ok(());
@@ -531,6 +535,7 @@ fn resolve_reveal(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 },
             );
             return Ok(());
@@ -666,6 +671,7 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         rest_order,
         rest_split_top_count: None,
         source_id: Some(ability.source_id),
@@ -697,6 +703,14 @@ fn resolve_revealing_player(
 ) -> Option<PlayerId> {
     match player_filter {
         TargetFilter::Controller => Some(ability.controller),
+        // CR 608.2c + CR 400.3: "This creature's owner shuffles it into their
+        // library. If that player does, they reveal …" — parser lowering binds
+        // that third-person anaphor to `Owner`, the same owner the terminal
+        // Shuffle resolves. Use the shared live-or-LKI source-owner authority so
+        // a nonowner activator never reveals from their own library.
+        TargetFilter::Owner => {
+            Some(super::source_owner(state, ability).unwrap_or(ability.controller))
+        }
         TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
                 .unwrap_or(ability.controller),
@@ -836,6 +850,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -1409,6 +1425,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,

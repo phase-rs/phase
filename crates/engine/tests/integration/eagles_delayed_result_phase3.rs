@@ -1570,6 +1570,8 @@ fn redirect_own_hand_move_to(destination: Zone) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,

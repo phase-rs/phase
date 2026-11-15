@@ -109,7 +109,7 @@ jobs:
       draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
       engine_fingerprint: ${{ steps.engine-fingerprint.outputs.fingerprint }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -119,7 +119,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Derive MTGJSON cache key
         id: mtgjson-key
@@ -350,11 +350,20 @@ jobs:
     needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Data files built from inputs outside the repository. combo-table.json
+      # comes from a pinned Commander Spellbook snapshot that CI does not hold, so
+      # a missing one is warned and skipped instead of failing the job. Keep this
+      # list aligned with phase-server's best-effort data files.
+      # draft-pools.json is still required here because this job publishes its
+      # content-addressed copy (built by preview-inputs) before the mutable
+      # manifest loop.
+      BEST_EFFORT_DATA_FILES: "combo-table.json"
     permissions:
       actions: write
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -364,7 +373,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Set cache keys
         id: cache-keys
@@ -514,8 +523,18 @@ jobs:
           npx wrangler r2 object put "phase-rs-data/staging/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
+              if is_best_effort "$f"; then
+                echo "::warning::Best-effort data file client/public/$f was not generated; skipping upload"
+                continue
+              fi
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
@@ -533,13 +552,20 @@ jobs:
       - name: Verify R2 uploads landed
         # Wrangler v4 silently writes to a local emulator unless --remote is
         # passed. Fail the deploy if any file the frontend will fetch is not
-        # actually reachable. Reads from data-files.json — same source as upload.
+        # actually reachable, except a BEST_EFFORT_DATA_FILES entry this run did
+        # not build. Reads from data-files.json — same source as upload.
         env:
           CARD_DATA_FILENAME: ${{ needs.preview-inputs.outputs.card_data_filename }}
           DRAFT_POOLS_FILENAME: draft-pools-${{ needs.preview-inputs.outputs.draft_pools_hash16 }}.json
         run: |
           BASE="https://data.phase-rs.dev/staging"
           fail=0
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           check() {
             local f="$1"
             local status
@@ -558,7 +584,13 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
-          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
+          while IFS= read -r f; do
+            if is_best_effort "$f" && [ ! -f "client/public/$f" ]; then
+              echo "::warning::Best-effort data file client/public/$f was not uploaded in this run; skipping verification"
+              continue
+            fi
+            check "$f"
+          done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON. The 200
           # checks above pass regardless of encoding; this is the real proof.
@@ -576,7 +608,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -603,7 +635,7 @@ jobs:
       # sets up node for its build-wasm job).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
@@ -652,7 +684,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -685,7 +717,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Assert the preview lobby advertises this commit's protocol versions
         # Guards the exact regression this job exists to prevent: a preview
@@ -741,7 +773,7 @@ jobs:
     outputs:
       pages_artifact_id: ${{ steps.upload-pages.outputs.artifact_id }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -757,7 +789,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
@@ -872,11 +904,11 @@ jobs:
         run: cp client/dist/index.html client/dist/404.html
 
       - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload Pages artifact
         id: upload-pages
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: client/dist
 
@@ -933,7 +965,7 @@ jobs:
             triple: aarch64-unknown-linux-musl
             cargo_cmd: zigbuild
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
@@ -1005,7 +1037,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 

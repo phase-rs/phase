@@ -95,6 +95,7 @@
     "botSeedIgnored": "Discord 帖子中的部分设置在此无法使用 — 请检查赛制和牌手人数。",
     "botServerNotice": "由专用服务器运行牌局。它可能变慢或离线。",
     "commanderDamage": "指挥官伤害",
+    "poisonCounters": "中毒指示物",
     "customFormatHostingUnavailable": "尚不支持使用自定义赛制创建牌局 — 无法检查其套牌合法性。目前可先保存并预览。",
     "customFormatInUse": "使用中",
     "customFormatNamePlaceholder": "为此赛制命名",

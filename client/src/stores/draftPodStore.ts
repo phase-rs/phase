@@ -17,7 +17,7 @@
 import { create } from "zustand";
 import i18n from "i18next";
 
-import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
+import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type PostDraftPlay, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import type { DraftPackChoice } from "./draftStore";
 import type { DraftPodHostConfig, DraftPodListing } from "../adapter/draftPodHostAdapter";
@@ -28,10 +28,19 @@ import {
   clearActiveDraftPodIfCurrent,
   inspectActiveDraftPod,
   loadDraftHostSession,
-  persistedDraftHostSessionState,
+  type ActiveDraftPodMetaCapture,
+  type DraftHostSessionLoadResult,
 } from "../services/draftPersistence";
 import { parseWebSocketUrl } from "../services/serverDetection";
-import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore, type DraftSessionOpenOutcome } from "./multiplayerDraftStore";
+import {
+  DRAFT_OFFLINE_ERROR,
+  useMultiplayerDraftStore,
+  type DraftRole,
+  type DraftSessionOpenOutcome,
+  type HostedDraftRecoveryOutcome,
+  type MultiplayerDraftPhase,
+} from "./multiplayerDraftStore";
+import { preflightDraftPodHostRecovery } from "../adapter/draftPodHostAdapter";
 import { useMultiplayerStore } from "./multiplayerStore";
 import { getEffectiveOffline } from "./connectivityStore";
 import type { DraftKind } from "../components/draft/draftKind";
@@ -43,7 +52,26 @@ export type PoolMode = "set" | "cube";
 export type SetDraftMode = "uniform" | "chaos";
 
 /** Result of one host-recovery probe. Page entry owns the route policy. */
-export type HostedPodResumeOutcome = "resumed" | "absent" | "terminal" | "invalid" | "offline" | "superseded";
+export type HostedPodResumeOutcome =
+  | "resumed"
+  | "absent"
+  | "terminal"
+  | "invalid"
+  | "incompatible"
+  | "readFailure"
+  | "initializationFailure"
+  | "offline"
+  | "superseded";
+
+export interface HostedPodRecoveryFailure {
+  kind: "incompatible" | "readFailure" | "initializationFailure";
+  capture: ActiveDraftPodMetaCapture;
+  /** The route and store generation that were current when this became visible. */
+  routeToken: number;
+  orchestrationGeneration: number;
+  raw?: unknown;
+  error?: unknown;
+}
 
 /** The backup API is served beside the selected phase-server's WebSocket API. */
 function configuredBackupEndpoint(): string | undefined {
@@ -215,6 +243,8 @@ interface DraftPodState {
   loadingPool: boolean;
   /** Error from pool loading or pod creation. */
   configError: string | null;
+  /** Capture-bound host recovery error. It is deliberately not guest state. */
+  hostRecoveryFailure: HostedPodRecoveryFailure | null;
   /** Exact engine-allowed seat counts for the selected tournament format. */
   allowedPodSizes: number[] | null;
   /** Configuration for which the procedure cache was published. */
@@ -254,6 +284,8 @@ interface DraftPodState {
   packsPerPlayer: number | null;
   /** Engine-published cube deck-size floor for `procedureCacheKey`. */
   cubeMinDeckSize: number | null;
+  /** Engine-published post-draft play for the selected kind; `null` until published, kept across a format change. */
+  postDraftPlay: PostDraftPlay | null;
 }
 
 interface DraftPodActions {
@@ -314,7 +346,19 @@ interface DraftPodActions {
   joinPod: () => Promise<void>;
   /** Resume the active hosted pod from local persistence. With `entry: "auto"`
    *  it yields (`"superseded"`) to a session this tab already holds. */
-  resumeHostedPod: (options?: { silent?: boolean; entry?: "auto" | "host"; routeToken?: number; signal?: AbortSignal }) => Promise<HostedPodResumeOutcome>;
+  resumeHostedPod: (options?: {
+    silent?: boolean;
+    entry?: "auto" | "host";
+    routeToken?: number;
+    signal?: AbortSignal;
+    /** A rendered failure may retry only the exact attempt that produced it. */
+    expectedFailure?: HostedPodRecoveryFailure;
+  }) => Promise<HostedPodResumeOutcome>;
+  /**
+   * Retires a host error before an intentional guest/new-route transition.
+   * It also ends a pending host recovery, and starts no pod operation.
+   */
+  retireHostedPodRecoveryFailure: () => void;
   /** Host: start the draft (delegates to multiplayerDraftStore). */
   startDraft: () => Promise<void>;
   /** Reset pod store state. */
@@ -344,6 +388,7 @@ const initialState: DraftPodState = {
   setPoolJson: null,
   loadingPool: false,
   configError: null,
+  hostRecoveryFailure: null,
   allowedPodSizes: null,
   procedureCacheKey: null,
   pendingProcedureDefault: null,
@@ -351,6 +396,7 @@ const initialState: DraftPodState = {
   allowedSetLayouts: null,
   packsPerPlayer: null,
   cubeMinDeckSize: null,
+  postDraftPlay: null,
 };
 
 /**
@@ -374,7 +420,9 @@ function persistedPodPacks(poolInput: PoolInput): DraftPackChoice[] {
 
 interface HostedPodResumeAttempt {
   routeToken: number;
+  orchestrationGeneration: number;
   signal: AbortSignal | undefined;
+  controller: AbortController;
   promise: Promise<HostedPodResumeOutcome>;
 }
 
@@ -386,17 +434,68 @@ let resumeHostedPodAttempt: HostedPodResumeAttempt | null = null;
 // monotonically increasing identity so only the newest read may publish.
 let podOrchestrationGeneration = 0;
 
+/**
+ * A recovery probe has its own ownership, but retiring it must not always
+ * supersede the shared setup procedure. In particular, an absent persistence
+ * locator is a page-entry fallback, not a new host-setup operation.
+ */
+function retireHostedPodResumeAttempt(): void {
+  resumeHostedPodAttempt?.controller.abort();
+  resumeHostedPodAttempt = null;
+}
+
 function beginPodOrchestration(set?: (partial: Partial<DraftPodState>) => void): number {
   podOrchestrationGeneration += 1;
   // A newer public operation retires any pool spinner and deduplicated resume
   // attempt owned by the older generation before its continuation can settle.
-  resumeHostedPodAttempt = null;
-  set?.({ loadingPool: false });
+  retireHostedPodResumeAttempt();
+  // A visible host failure belongs only to the attempt that published it.
+  // Every new entry, retry, reset, or configuration replacement retires the
+  // old UI state before publishing its own route.
+  set?.({ loadingPool: false, hostRecoveryFailure: null });
   return podOrchestrationGeneration;
 }
 
 function isCurrentPodOrchestration(generation: number): boolean {
   return generation === podOrchestrationGeneration;
+}
+
+function sameActivePodCapture(
+  left: ActiveDraftPodMetaCapture,
+  right: ActiveDraftPodMetaCapture,
+): boolean {
+  return left.id === right.id && left.roomCode === right.roomCode && left.updatedAt === right.updatedAt;
+}
+
+export function isHostedPodRecoveryFailureCurrent(
+  failure: HostedPodRecoveryFailure | null,
+  routeToken: number,
+): failure is HostedPodRecoveryFailure {
+  if (!failure || failure.routeToken !== routeToken) return false;
+  if (!isCurrentPodOrchestration(failure.orchestrationGeneration)) return false;
+  const active = inspectActiveDraftPod();
+  return active.type === "present" && sameActivePodCapture(active.capture, failure.capture);
+}
+
+/** Whether this tab holds a pod session that an entry or an exit must leave running. */
+export function isDraftPodSessionHeld(
+  session: { role: DraftRole | null; phase: MultiplayerDraftPhase },
+): boolean {
+  return session.role !== null && session.phase !== "idle" && session.phase !== "error";
+}
+
+/**
+ * Whether a hosted recovery attempt can still commit: one is registered,
+ * neither its own controller nor its route signal is aborted, and its
+ * orchestration is still current. An attempt that a route cleanup aborted
+ * stays registered until it settles, but it no longer counts.
+ */
+export function isHostedPodRecoveryInFlight(): boolean {
+  const attempt = resumeHostedPodAttempt;
+  return attempt !== null
+    && !attempt.controller.signal.aborted
+    && !attempt.signal?.aborted
+    && isCurrentPodOrchestration(attempt.orchestrationGeneration);
 }
 
 /**
@@ -431,6 +530,7 @@ function procedureCache(
   | "allowedSetLayouts"
   | "packsPerPlayer"
   | "cubeMinDeckSize"
+  | "postDraftPlay"
 > {
   return {
     allowedPodSizes: procedure.allowed_pod_sizes,
@@ -439,6 +539,7 @@ function procedureCache(
     allowedSetLayouts: procedure.allowed_set_layouts,
     packsPerPlayer: procedure.packs_per_player,
     cubeMinDeckSize: procedure.cube_min_deck_size,
+    postDraftPlay: procedure.post_draft_play,
   };
 }
 
@@ -499,6 +600,36 @@ function procedurePublication(
     loadingPool: false,
     configError: null,
   };
+}
+
+/**
+ * A recovery that ends with no host and no failure owes the setup screen the
+ * procedure its refresh skipped or lost to that recovery. This starts no new pod
+ * operation, so any newer one wins, and it keeps the message the recovery left.
+ */
+async function publishProcedureAfterRecovery(
+  set: (update: (prev: DraftPodState) => Partial<DraftPodState>) => void,
+  get: () => DraftPodState,
+  orchestrationGeneration: number,
+): Promise<void> {
+  if (getEffectiveOffline()) return;
+  const { kind, tournamentFormat } = get().config;
+  const target: ProcedureCacheKey = { kind, tournamentFormat };
+  const isStale = () => !isCurrentPodOrchestration(orchestrationGeneration)
+    || !procedureTargetMatchesConfig(target, get().config)
+    || getEffectiveOffline();
+  try {
+    const procedure = await loadProcedure(target.kind, target.tournamentFormat);
+    if (isStale()) return;
+    set((prev) => {
+      const adoptsProcedureDefault = prev.pendingProcedureDefault?.kind === target.kind
+        && prev.pendingProcedureDefault?.tournamentFormat === target.tournamentFormat;
+      return { ...procedurePublication(prev, procedure, target, adoptsProcedureDefault), configError: prev.configError };
+    });
+  } catch (err) {
+    if (isStale()) return;
+    set((prev) => ({ configError: prev.configError ?? (err instanceof Error ? err.message : String(err)) }));
+  }
 }
 
 type HostPodOutcome = DraftSessionOpenOutcome | { readonly status: "refused" };
@@ -598,6 +729,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           allowedSetLayouts: procedureChanged ? null : prev.allowedSetLayouts,
           packsPerPlayer: procedureChanged ? null : prev.packsPerPlayer,
           cubeMinDeckSize: procedureChanged ? null : prev.cubeMinDeckSize,
+          postDraftPlay: kindChanged ? null : prev.postDraftPlay,
           loadingPool: false,
           configError: null,
         };
@@ -951,241 +1083,321 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     resumeHostedPod: async (options = {}) => {
+      const routeToken = options.routeToken ?? 0;
+      const expected = options.expectedFailure;
+      if (expected) {
+        const visible = get().hostRecoveryFailure;
+        const expectedStillVisible = visible !== null
+          && visible.kind === expected.kind
+          && visible.routeToken === expected.routeToken
+          && visible.orchestrationGeneration === expected.orchestrationGeneration
+          && sameActivePodCapture(visible.capture, expected.capture);
+        if (!expectedStillVisible || !isHostedPodRecoveryFailureCurrent(expected, expected.routeToken)) {
+          return "superseded";
+        }
+      }
+      // An offline entry is a fresh public operation, not a request to join a
+      // held recovery probe. Retire that probe before reporting offline so it
+      // cannot later publish against this route.
       if (getEffectiveOffline()) {
         beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return "offline";
       }
-      const routeToken = options.routeToken ?? 0;
       if (
-        resumeHostedPodAttempt &&
-        resumeHostedPodAttempt.routeToken === routeToken &&
-        resumeHostedPodAttempt.signal === options.signal
+        resumeHostedPodAttempt
+        && resumeHostedPodAttempt.routeToken === routeToken
+        && resumeHostedPodAttempt.signal === options.signal
       ) {
         return resumeHostedPodAttempt.promise;
       }
 
+      // Automatic entry carries no request to switch pods, so it never
+      // replaces a session this tab holds, whatever its role or room. It must
+      // run before the saved pod is read: an `"absent"` outcome sends the page
+      // on to `resumeDraft`, which can replace a held host.
+      if (options.entry === "auto") {
+        if (isDraftPodSessionHeld(useMultiplayerDraftStore.getState())) {
+          // This entry asks for no recovery, so it retires any failure an
+          // earlier route left: route tokens restart with each page mount.
+          set({ hostRecoveryFailure: null });
+          return "superseded";
+        }
+      }
+
+      // A missing (or invalid) locator is an established page-entry fallback,
+      // not a replacement host setup. Retire only recovery-owned state here:
+      // advancing the shared procedure generation would discard an ordinary
+      // host setup that is already loading its engine procedure.
+      const active = inspectActiveDraftPod();
+      if (active.type === "absent" || active.type === "invalid") {
+        retireHostedPodResumeAttempt();
+        set({ hostRecoveryFailure: null });
+        if (active.type === "invalid" && active.capture) {
+          clearActiveDraftPodIfCurrent(active.capture);
+        }
+        if (!options.silent) {
+          set({ configError: active.type === "absent" ? "No draft pod to resume" : "Saved draft pod is invalid" });
+        }
+        return active.type === "absent" ? "absent" : "invalid";
+      }
+
+      // Do this before any probe so a new host entry/retry cannot leave an
+      // old failure on top of the replacement route while storage is pending.
+      const orchestrationGeneration = beginPodOrchestration(set);
+
       const attempt: HostedPodResumeAttempt = {
         routeToken,
+        orchestrationGeneration,
         signal: options.signal,
+        controller: new AbortController(),
         promise: Promise.resolve("superseded"),
       };
+      const abortAttempt = () => attempt.controller.abort();
+      options.signal?.addEventListener("abort", abortAttempt, { once: true });
       const isCurrentAttempt = () =>
-        resumeHostedPodAttempt === attempt && !options.signal?.aborted;
+        resumeHostedPodAttempt === attempt
+        && !options.signal?.aborted
+        && !attempt.controller.signal.aborted
+        && isCurrentPodOrchestration(orchestrationGeneration);
+      const failure = (
+        kind: HostedPodRecoveryFailure["kind"],
+        capture: ActiveDraftPodMetaCapture,
+        details: Pick<HostedPodRecoveryFailure, "raw" | "error"> = {},
+      ): HostedPodRecoveryFailure => ({
+        kind,
+        capture,
+        routeToken,
+        orchestrationGeneration,
+        ...details,
+      });
+
+      // An async IIFE executes through its first await immediately. Register
+      // the attempt first so its initial ownership check sees this exact
+      // attempt rather than treating every fresh probe as superseded.
+      resumeHostedPodAttempt = attempt;
       attempt.promise = (async (): Promise<HostedPodResumeOutcome> => {
-        if (options.signal?.aborted) return "superseded";
-        // Automatic entry carries no request to switch pods, so it never
-        // replaces a session this tab holds, whatever its role or room. It must
-        // run before the saved pod is read: an `"absent"` outcome sends the page
-        // on to `resumeDraft`, which can replace a held host.
-        if (options.entry === "auto") {
-          const held = useMultiplayerDraftStore.getState();
-          if (held.role !== null && held.phase !== "idle" && held.phase !== "error") {
-            return "superseded";
-          }
-        }
-        const active = inspectActiveDraftPod();
-        if (active.type === "absent") {
-          if (!options.silent) set({ configError: "No draft pod to resume" });
-          return "absent";
-        }
-        if (active.type === "invalid") {
-          if (active.capture) clearActiveDraftPodIfCurrent(active.capture);
-          if (!options.silent) set({ configError: "Saved draft pod is invalid" });
-          return "invalid";
-        }
+        if (!isCurrentAttempt()) return "superseded";
         const { meta, capture } = active;
+        // Until the lifecycle store's fenced commit, the saved pod record must
+        // still be the exact record this recovery read. The committed host
+        // then re-saves that record with a new update time, so after the
+        // commit only its pod identity is compared: another pod's record, or
+        // none, still supersedes. A later failure is recorded against the
+        // record this check last accepted.
+        let committed = false;
+        let validatedCapture = capture;
+        const captureIsCurrent = () => {
+          const current = inspectActiveDraftPod();
+          if (current.type !== "present") return false;
+          if (!committed) return sameActivePodCapture(current.capture, capture);
+          if (current.capture.id !== capture.id) return false;
+          validatedCapture = current.capture;
+          return true;
+        };
+        const isCurrentCapture = () => isCurrentAttempt() && captureIsCurrent();
 
         const activeDraft = useMultiplayerDraftStore.getState();
         if (
-          activeDraft.role === "host" &&
-          activeDraft.phase !== "idle" &&
-          activeDraft.phase !== "error" &&
-          activeDraft.roomCode === meta.roomCode
+          activeDraft.role === "host"
+          && activeDraft.phase !== "idle"
+          && activeDraft.phase !== "error"
+          && activeDraft.hostPersistenceId === meta.id
         ) {
           return "resumed";
         }
 
-        // Fence the persisted read itself. A new entry, refresh, creation, or
-        // reset that starts while storage is pending must win before this
-        // resume can publish its recovered configuration.
-        const procedureRequest = beginPodOrchestration(set);
-        let persisted: Awaited<ReturnType<typeof loadDraftHostSession>>;
+        let loaded: DraftHostSessionLoadResult;
         try {
-          persisted = await loadDraftHostSession(meta.id);
-        } catch (err) {
-          if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) return "superseded";
-          if (getEffectiveOffline()) {
-            set({ configError: DRAFT_OFFLINE_ERROR });
-            return "offline";
-          }
-          set({ configError: err instanceof Error ? err.message : String(err) });
-          return "invalid";
+          loaded = await loadDraftHostSession(meta.id);
+        } catch (error) {
+          loaded = { type: "readFailure", error };
         }
-        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) return "superseded";
+        if (!isCurrentCapture()) return "superseded";
         if (getEffectiveOffline()) {
           set({ configError: DRAFT_OFFLINE_ERROR });
           return "offline";
         }
-        if (!persisted) {
+
+        if (loaded.type === "readFailure") {
+          set({
+            hostRecoveryFailure: failure("readFailure", capture, { error: loaded.error }),
+            configError: loaded.error instanceof Error ? loaded.error.message : String(loaded.error),
+          });
+          return "readFailure";
+        }
+        if (loaded.type === "absent") {
           clearActiveDraftPodIfCurrent(capture);
           if (!options.silent) set({ configError: "Saved draft pod was not found" });
-          return "invalid";
+          return "absent";
         }
-        const sessionState = persistedDraftHostSessionState(persisted);
-        if (
-          persisted.persistenceId !== meta.id ||
-          persisted.roomCode !== meta.roomCode ||
-          sessionState !== "live"
-        ) {
-          // Release only the active locator. A terminal snapshot is retained as
-          // local history; a corrupt one is unreachable after this exact-match
-          // cleanup and cannot poison a replacement pod.
+        if (loaded.type === "invalid" || loaded.type === "terminal") {
+          const terminal = loaded.type === "terminal";
           clearActiveDraftPodIfCurrent(capture);
-          if (!options.silent) {
-            set({ configError: sessionState === "terminal" ? "Saved draft pod is complete" : "Saved draft pod is invalid" });
-          }
-          return sessionState === "terminal" ? "terminal" : "invalid";
+          if (!options.silent) set({ configError: terminal ? "Saved draft pod is complete" : "Saved draft pod is invalid" });
+          return terminal ? "terminal" : "invalid";
         }
 
-        // Branch on the persisted pool source: restore the matching UI
-        // state (poolMode + cubeForm or setPoolJson cache) so a refresh
-        // mid-pod lands the host back on the same tab they configured.
-        if (persisted.poolInput.type === "Cube") {
-          const cubeData = persisted.poolInput.data;
-          set({
-            config: {
-              packs: [],
-              setCode: CUSTOM_CUBE_SET_CODE,
-              setName: cubeData.cube_name,
-              kind: persisted.kind,
-              podSize: persisted.podSize,
-              tournamentFormat: persisted.tournamentFormat,
-              podPolicy: persisted.podPolicy,
-            },
-            hostDisplayName: persisted.hostDisplayName,
-            poolMode: "cube",
-            setDraftMode: "uniform",
-            cubeForm: {
-              cubeName: cubeData.cube_name,
-              cubeListText: cubeData.cube_list_text,
-              settings: cubeData.cube_draft_settings,
-            },
-            setPoolJson: null,
-            loadingPool: false,
-            configError: null,
-            allowedPodSizes: null,
-            procedureCacheKey: null,
-            pendingProcedureDefault: null,
-            packDistribution: null,
-            allowedSetLayouts: null,
-            packsPerPlayer: null,
-            cubeMinDeckSize: null,
-          });
-        } else {
-          // Restore the pack sequence the pod was configured with, so a host
-          // who refreshes mid-lobby sees the sets they arranged rather than an
-          // unlabelled pod. A snapshot in the pre-multi-set spelling has no
-          // sequence to restore; its packs stay empty and the label falls back.
-          const packs = persistedPodPacks(persisted.poolInput);
-          set({
-            config: {
-              packs,
-              setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
-              setName: packs.length > 0 ? distinctJoined(packs.map((pack) => pack.name), " · ") : "Draft Pod",
-              kind: persisted.kind,
-              podSize: persisted.podSize,
-              tournamentFormat: persisted.tournamentFormat,
-              podPolicy: persisted.podPolicy,
-            },
-            hostDisplayName: persisted.hostDisplayName,
-            poolMode: "set",
-            setDraftMode: persisted.poolInput.type === "Chaos" ? "chaos" : "uniform",
-            cubeForm: null,
-            setPoolJson: JSON.stringify(persisted.poolInput.data),
-            loadingPool: false,
-            configError: null,
-            allowedPodSizes: null,
-            procedureCacheKey: null,
-            pendingProcedureDefault: null,
-            packDistribution: null,
-            allowedSetLayouts: null,
-            packsPerPlayer: null,
-            cubeMinDeckSize: null,
-          });
-        }
-
-        // Rehydrate the complete engine procedure cache for the resumed lobby.
-        // A later entry/refresh is allowed to supersede this publication.
-        const target: ProcedureCacheKey = {
-          kind: persisted.kind,
-          tournamentFormat: persisted.tournamentFormat,
-        };
-        try {
-          const procedure = await loadProcedure(target.kind, target.tournamentFormat);
-          if (
-            !isCurrentAttempt()
-            || !isCurrentPodOrchestration(procedureRequest)
-            || !procedureTargetMatchesConfig(target, get().config)
-          ) return "superseded";
-          if (getEffectiveOffline()) {
-            set({ configError: DRAFT_OFFLINE_ERROR });
-            return "offline";
-          }
-          set((prev) => procedurePublication(prev, procedure, target, false));
-        } catch (err) {
-          if (
-            !isCurrentAttempt()
-            || !isCurrentPodOrchestration(procedureRequest)
-            || !procedureTargetMatchesConfig(target, get().config)
-          ) return "superseded";
-          if (getEffectiveOffline()) {
-            set({ configError: DRAFT_OFFLINE_ERROR });
-            return "offline";
-          }
-          set({ configError: err instanceof Error ? err.message : String(err) });
+        const persisted = loaded.session;
+        if (persisted.persistenceId !== meta.id || persisted.roomCode !== meta.roomCode) {
+          clearActiveDraftPodIfCurrent(capture);
+          if (!options.silent) set({ configError: "Saved draft pod is invalid" });
           return "invalid";
+        }
+
+        const recovery = { session: persisted, raw: loaded.raw };
+        let preflight: Awaited<ReturnType<typeof preflightDraftPodHostRecovery>>;
+        try {
+          preflight = await preflightDraftPodHostRecovery(recovery);
+        } catch (error) {
+          // A check that cannot answer admits nothing: the saved pod stays
+          // the recovery source, reported as a connection failure.
+          if (!isCurrentCapture()) return "superseded";
+          set({ hostRecoveryFailure: failure("initializationFailure", capture, { error }), configError: "podError.connection" });
+          return "initializationFailure";
+        }
+        if (preflight.type === "incompatible") {
+          if (!isCurrentCapture()) return "superseded";
+          set({ hostRecoveryFailure: failure("incompatible", capture, { raw: loaded.raw }), configError: "podError.incompatible" });
+          return "incompatible";
+        }
+
+        // Build, but do not publish, the recovered pod state: it is published
+        // only once the lifecycle store reports B resumed. A live A stays
+        // authoritative until the lifecycle store's fenced commit, which comes
+        // before B restores a saved draft session or, when the record carries
+        // none, after B has initialized.
+        const recoveredPodState: Partial<DraftPodState> = persisted.poolInput.type === "Cube"
+          ? {
+              config: {
+                packs: [], setCode: CUSTOM_CUBE_SET_CODE, setName: persisted.poolInput.data.cube_name,
+                kind: persisted.kind, podSize: persisted.podSize,
+                tournamentFormat: persisted.tournamentFormat, podPolicy: persisted.podPolicy,
+              },
+              hostDisplayName: persisted.hostDisplayName,
+              poolMode: "cube",
+              setDraftMode: "uniform",
+              cubeForm: {
+                cubeName: persisted.poolInput.data.cube_name,
+                cubeListText: persisted.poolInput.data.cube_list_text,
+                settings: persisted.poolInput.data.cube_draft_settings,
+              },
+              setPoolJson: null,
+            }
+          : (() => {
+              const packs = persistedPodPacks(persisted.poolInput);
+              return {
+                config: {
+                  packs,
+                  setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
+                  setName: packs.length > 0 ? distinctJoined(packs.map((pack) => pack.name), " · ") : "Draft Pod",
+                  kind: persisted.kind, podSize: persisted.podSize,
+                  tournamentFormat: persisted.tournamentFormat, podPolicy: persisted.podPolicy,
+                },
+                hostDisplayName: persisted.hostDisplayName,
+                poolMode: "set" as const,
+                setDraftMode: persisted.poolInput.type === "Chaos" ? "chaos" as const : "uniform" as const,
+                cubeForm: null,
+                setPoolJson: JSON.stringify(persisted.poolInput.data),
+              };
+            })();
+        const target: ProcedureCacheKey = { kind: persisted.kind, tournamentFormat: persisted.tournamentFormat };
+        let procedure: DraftProcedure;
+        try {
+          procedure = await loadProcedure(target.kind, target.tournamentFormat);
+        } catch (error) {
+          if (!isCurrentCapture()) return "superseded";
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return "offline";
+          }
+          set({
+            hostRecoveryFailure: failure("initializationFailure", capture, { error }),
+            configError: error instanceof Error ? error.message : String(error),
+          });
+          return "initializationFailure";
+        }
+        if (!isCurrentCapture()) return "superseded";
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return "offline";
         }
 
         const hostConfig: DraftPodHostConfig = {
           poolInput: persisted.poolInput,
           kind: persisted.kind,
-          podSize: get().config.podSize,
+          podSize: persisted.podSize,
           hostDisplayName: persisted.hostDisplayName,
           tournamentFormat: persisted.tournamentFormat,
           podPolicy: persisted.podPolicy,
           persistenceId: persisted.persistenceId,
           preferredRoomCode: persisted.roomCode || undefined,
           backupEndpoint: configuredBackupEndpoint(),
+          recovery,
         };
-
-        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) {
-          return "superseded";
-        }
-        if (getEffectiveOffline()) {
-          set({ configError: DRAFT_OFFLINE_ERROR });
-          return "offline";
-        }
-        const hosted = await useMultiplayerDraftStore.getState().hostDraft({
-          ...hostConfig,
-          signal: options.signal,
+        const isCurrentRecovery = () =>
+          isCurrentCapture()
+          && hostConfig.persistenceId === capture.id
+          && hostConfig.preferredRoomCode === capture.roomCode;
+        const hosted: HostedDraftRecoveryOutcome = await useMultiplayerDraftStore.getState().resumeHostedDraft({
+          config: { ...hostConfig, signal: attempt.controller.signal },
+          isCurrent: isCurrentRecovery,
+          routeSignal: options.signal,
+          onCommitted: () => {
+            committed = true;
+          },
         });
-        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest) || hosted.status === "superseded") {
-          return "superseded";
-        }
-        if (hosted.status === "failed" && getEffectiveOffline()) {
+        // After the lifecycle store's commit the committed host re-saves this
+        // locator, so any outcome but resumed compares only its pod identity.
+        // Successful installation republishes this locator with its new update
+        // time. The lifecycle validated the original capture at commit; only
+        // non-installed outcomes still compare that pre-install timestamp.
+        if (!isCurrentAttempt() || (hosted !== "resumed" && !captureIsCurrent())) return "superseded";
+        if (hosted === "offline" || getEffectiveOffline()) {
           set({ configError: DRAFT_OFFLINE_ERROR });
           return "offline";
         }
-        return hosted.status === "opened" ? "resumed" : "invalid";
+        if (hosted === "aborted" || hosted === "superseded") return "superseded";
+        if (hosted === "incompatible" || hosted === "readFailure" || hosted === "initializationFailure") {
+          const kind = hosted === "incompatible" ? "incompatible" : hosted === "readFailure" ? "readFailure" : "initializationFailure";
+          set({
+            hostRecoveryFailure: failure(kind, validatedCapture, hosted === "incompatible" ? { raw: loaded.raw } : {}),
+            configError: hosted === "incompatible" ? "podError.incompatible" : "podError.connection",
+          });
+          return hosted;
+        }
+        if (hosted !== "resumed") return "invalid";
+
+        // The lifecycle commit succeeded. Only now does B's recovered
+        // configuration become visible in this store/page.
+        set((previous) => {
+          const staged = { ...previous, ...recoveredPodState, config: recoveredPodState.config! } as DraftPodState;
+          return {
+            ...recoveredPodState,
+            ...procedurePublication(staged, procedure, target, false),
+            pendingProcedureDefault: null,
+            hostRecoveryFailure: null,
+            configError: null,
+          };
+        });
+        return "resumed";
       })();
-      resumeHostedPodAttempt = attempt;
 
       try {
-        return await attempt.promise;
+        const outcome = await attempt.promise;
+        if (outcome === "absent" || outcome === "invalid" || outcome === "terminal") {
+          void publishProcedureAfterRecovery(set, get, orchestrationGeneration);
+        }
+        return outcome;
       } finally {
+        options.signal?.removeEventListener("abort", abortAttempt);
         if (resumeHostedPodAttempt === attempt) resumeHostedPodAttempt = null;
       }
+    },
+
+    retireHostedPodRecoveryFailure: () => {
+      retireHostedPodResumeAttempt();
+      set({ hostRecoveryFailure: null });
     },
 
     joinPod: async () => {

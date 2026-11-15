@@ -473,6 +473,60 @@ mod tests {
         }
     }
 
+    /// The native socket decodes a pre-change client's Brawl create frame as its
+    /// engine wrote it; only Full mode, which runs the config, refuses it.
+    #[test]
+    fn native_decode_admits_a_legacy_create_frame() {
+        use engine::types::format::FormatConfig;
+        use server_core::client_message_wire_guard::guard_client_message_before_dispatch;
+        use server_core::protocol::ServerMode;
+        let frame = |config: FormatConfig, threshold: u8| {
+            let mut frame = serde_json::to_value(ClientMessage::CreateGameWithSettings {
+                deck: Default::default(),
+                display_name: "Host".into(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: Some(config),
+                room_name: None,
+                host_peer_id: Some("peer-1".into()),
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+                booster_pack_pool: None,
+            })
+            .unwrap();
+            frame["data"]["format_config"]["commander_damage_threshold"] = threshold.into();
+            frame["command_id"] = 7.into();
+            frame
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let envelope: ClientEnvelope = serde_json::from_value(frame(config.clone(), 21))
+                .expect("a recorded Brawl threshold decodes");
+            let ClientMessage::CreateGameWithSettings {
+                format_config: Some(decoded),
+                ..
+            } = &envelope.message
+            else {
+                panic!("expected a settings create with a format config");
+            };
+            assert_eq!(decoded.commander_damage_threshold, Some(21));
+            assert!(
+                guard_client_message_before_dispatch(&envelope.message, ServerMode::LobbyOnly)
+                    .is_ok()
+            );
+            let refusal = guard_client_message_before_dispatch(&envelope.message, ServerMode::Full)
+                .unwrap_err();
+            assert!(refusal.contains("commander_damage_threshold"), "{refusal}");
+
+            assert!(serde_json::from_value::<ClientEnvelope>(frame(config, 0)).is_err());
+        }
+    }
+
     #[test]
     fn command_metadata_does_not_change_the_canonical_action_payload() {
         let command: ClientEnvelope = serde_json::from_value(serde_json::json!({

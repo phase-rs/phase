@@ -37,6 +37,10 @@
 //! * A paused spell that its own instruction moves off the stack ("Exile
 //!   Invoke Calamity", after its CR 608.2g free-cast window) is left where it
 //!   was put, and is still reported resolved once.
+//! * A paused spell that exiles itself and is then cast again from exile during
+//!   the same resolution (CR 608.2g) finishes that first resolution once, as a
+//!   spell that left the stack (CR 608.2m), and leaves the new spell — a new
+//!   object (CR 400.7) — on the stack untouched.
 //! * CR 603.3b: whatever triggered while the paused resolution was under way —
 //!   its own instructions, the answer that finished it, and its final part's
 //!   move off the stack — is put on the stack as one batch the next time a
@@ -46,13 +50,18 @@
 //!   its own (a CR 616.1 ordering of its own move) is still an object on the
 //!   stack, and leaves the game with its departing owner.
 
+use engine::ai_support::legal_actions;
 use engine::game::engine::apply;
+use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
-use engine::types::ability::{CastingPermission, EffectKind, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, CastingPermission, Effect, EffectKind, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card::LayoutKind;
+use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -62,9 +71,11 @@ use engine::types::game_state::{
     PersistedRestoreFinalization, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -977,6 +988,648 @@ fn a_paused_spell_that_exiles_itself_is_left_in_exile_and_reported_resolved() {
     assert!(!graveyard(state, P0).contains(&invoke));
     assert_eq!(stack_resolved_count(&events, invoke), 1);
     assert_settled(state);
+}
+
+/// Creative Technique's spell paragraph, verbatim, without its Demonstrate
+/// line. The tests built on it omit Demonstrate to isolate the engine class;
+/// `a_demonstrate_spell_cast_again_after_exiling_itself_finishes_its_first_resolution`
+/// carries the full verbatim Oracle text built with
+/// `from_oracle_text_with_keywords(&["Demonstrate"], …)`.
+///
+/// Its reveal ("reveal cards from the top of it until …") does not parse, so
+/// "Exile that card" has no antecedent and falls back to the spell itself: the
+/// spell exiles itself while it resolves, and "You may cast the exiled card"
+/// then offers to cast it again. That is a defect of the card's parse, not a
+/// rule, and these tests ride it to reach the state under test; their reach
+/// guard (the spell is in exile at the offer) fails loudly once it is fixed.
+const CREATIVE_TECHNIQUE: &str = "Shuffle your library, then reveal cards from the top of it \
+     until you reveal a nonland card. Exile that card and put the rest on the bottom of your \
+     library in a random order. You may cast the exiled card without paying its mana cost.";
+
+/// Creative Technique's full Oracle text, verbatim, including its Demonstrate
+/// line (CR 702.144a).
+const CREATIVE_TECHNIQUE_ORACLE: &str = "Demonstrate (When you cast this spell, you may copy it. \
+     If you do, choose an opponent to also copy it.)\nShuffle your library, then reveal cards \
+     from the top of it until you reveal a nonland card. Exile that card and put the rest on the \
+     bottom of your library in a random order. You may cast the exiled card without paying its \
+     mana cost.";
+
+/// A synthetic member of the class, not a printed card: a spell that exiles
+/// itself and then offers to cast the exiled card, in a grammar the parser
+/// reads fully, so it reaches the same state without the fallback above.
+/// No printed card with this self-recast shape was identified. The nearest
+/// printed reproducer is Creative Technique through its defective parse;
+/// self-recasting is not the correct reading of that card.
+const SELF_RECASTER: &str =
+    "Exile Self Recaster. You may cast the exiled card without paying its mana cost.";
+
+fn creative_technique_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 4,
+    }
+}
+
+/// P0 in its main phase with `mountains` Mountains and six nonland cards in
+/// its library.
+fn self_recast_board(mountains: usize) -> GameScenario {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..mountains {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    for i in 0..6 {
+        scenario.add_card_to_library_top(P0, &format!("Library card {i}"));
+    }
+    scenario
+}
+
+fn pass_twice(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority is accepted")
+                .events,
+        );
+    }
+    events
+}
+
+fn cast_from_hand(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the spell is accepted")
+        .events
+}
+
+/// Reach guards at the offer to cast the exiled card: the resolution paused on
+/// that offer after the spell's own instruction exiled it (it left the stack
+/// once it started to resolve, CR 608.2m), the resolution carrier still names
+/// it and owes its final part (CR 608.2n), and it is not yet reported resolved.
+fn assert_offered_to_cast_itself_again(state: &GameState, spell: ObjectId, events: &[GameEvent]) {
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::OptionalEffectChoice { player, source_id, .. }
+                if *player == P0 && *source_id == spell
+        ),
+        "reach guard: the resolution paused on its offer to cast the exiled card, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.objects[&spell].zone,
+        Zone::Exile,
+        "reach guard: the spell's own instruction exiled it"
+    );
+    assert_eq!(
+        state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+        Some(spell),
+        "reach guard: the resolution carrier still names the spell"
+    );
+    assert_eq!(
+        state.owed_spell_final_part(),
+        Some(&OwedSpellFinalPart { spell }),
+        "reach guard: the paused resolution owes its final part"
+    );
+    assert!(
+        state.stack.is_empty(),
+        "reach guard: nothing else is on the stack"
+    );
+    assert_eq!(
+        stack_resolved_count(events, spell),
+        0,
+        "reach guard: the paused resolution is not yet reported resolved"
+    );
+}
+
+/// Builds the board, casts the spell, passes twice, and returns at the offer to
+/// cast the exiled card with every reach guard asserted.
+fn stage_spell_that_exiles_itself_and_offers_its_recast(
+    name: &str,
+    oracle: &str,
+    cost: ManaCost,
+    mountains: usize,
+) -> (GameRunner, ObjectId, Vec<GameEvent>) {
+    let mut scenario = self_recast_board(mountains);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+        .with_mana_cost(cost)
+        .id();
+    let mut runner = scenario.build();
+    let mut events = cast_from_hand(&mut runner, spell);
+    events.extend(pass_twice(&mut runner));
+    assert_offered_to_cast_itself_again(runner.state(), spell, &events);
+    (runner, spell, events)
+}
+
+/// CR 608.2m + CR 608.2n + CR 400.7 + CR 117.3b: once the exiled card is cast
+/// again, the first resolution is over — its carrier retired, its final part
+/// no longer owed, reported resolved exactly once — and the new spell, a new
+/// object under the same id, is the only object on the stack when the active
+/// player receives priority.
+fn assert_first_resolution_finished_under_the_new_spell(
+    state: &GameState,
+    spell: ObjectId,
+    accept_events: &[GameEvent],
+) {
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0),
+        "CR 117.3b: the active player receives priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.resolving_stack_entry.is_none(),
+        "the first resolution's carrier was retired"
+    );
+    assert!(
+        state.owed_spell_final_part().is_none(),
+        "the first resolution's final part is no longer owed"
+    );
+    assert_eq!(
+        state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![spell],
+        "CR 601.2a: the new spell is the only object on the stack"
+    );
+    assert!(
+        matches!(
+            state.stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell { .. })
+        ),
+        "the live entry is the new spell"
+    );
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(
+        stack_resolved_count(accept_events, spell),
+        1,
+        "CR 608.2m: the first resolution is reported resolved exactly once"
+    );
+}
+
+/// CR 608.2m + CR 608.2n + CR 400.7 + CR 608.2g: a paused spell that exiled
+/// itself and whose card is then cast again during the same resolution
+/// finishes that first resolution as a spell that left the stack, and leaves
+/// the new spell alone. The new spell then resolves as its own resolution,
+/// with its own carrier and final part.
+///
+/// REVERT-FAILING: without the fix, accepting the cast panics with
+/// "NotOwed cannot discharge an installed final-part debt".
+#[test]
+fn a_spell_cast_again_after_exiling_itself_finishes_its_first_resolution() {
+    let (mut runner, spell, mut events) = stage_spell_that_exiles_itself_and_offers_its_recast(
+        "Creative Technique",
+        CREATIVE_TECHNIQUE,
+        creative_technique_cost(),
+        5,
+    );
+
+    let accept_events = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("casting the exiled card is accepted")
+        .events;
+    assert_first_resolution_finished_under_the_new_spell(runner.state(), spell, &accept_events);
+    events.extend(accept_events);
+
+    // The new spell resolves as its own resolution. With the same unparsed
+    // reveal it again exiles itself and offers the cast — a property of the
+    // card's defective parse, derived from the same clause reading as the
+    // first resolution. Its offer proves the first carrier did not leak into
+    // the second and that the new spell's entry was intact enough to resolve.
+    let mut second = pass_twice(&mut runner);
+    assert_offered_to_cast_itself_again(runner.state(), spell, &second);
+    second.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("declining the cast is accepted")
+            .events,
+    );
+    second.extend(run_until_settled(&mut runner, |_| None));
+    events.extend(second);
+
+    let state = runner.state();
+    assert_settled(state);
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(
+        stack_resolved_count(&events, spell),
+        2,
+        "one report per resolution"
+    );
+}
+
+/// CR 608.2m + CR 608.2n + CR 400.7: the same state reached by a spell whose
+/// text parses fully ("Exile ~. You may cast the exiled card …"), so the fix
+/// covers the class, not the fallback one card's parse falls into.
+///
+/// REVERT-FAILING: without the fix, accepting the cast panics with
+/// "NotOwed cannot discharge an installed final-part debt".
+#[test]
+fn a_spell_that_exiles_itself_and_casts_the_exiled_card_finishes_its_first_resolution() {
+    let mut scenario = self_recast_board(2);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Self Recaster", false, SELF_RECASTER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(&*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(has_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(has_unimplemented)
+    }
+    let abilities = &runner.state().objects[&spell].abilities;
+    assert!(
+        !abilities.is_empty(),
+        "reach guard: the spell's text parsed into an ability"
+    );
+    assert!(
+        !abilities.iter().any(has_unimplemented),
+        "reach guard: the spell's text parses fully, so this does not ride a fallback: {abilities:?}"
+    );
+
+    let mut events = cast_from_hand(&mut runner, spell);
+    events.extend(pass_twice(&mut runner));
+    assert_offered_to_cast_itself_again(runner.state(), spell, &events);
+
+    let accept_events = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("casting the exiled card is accepted")
+        .events;
+    assert_first_resolution_finished_under_the_new_spell(runner.state(), spell, &accept_events);
+    events.extend(accept_events);
+
+    let mut second = pass_twice(&mut runner);
+    assert_offered_to_cast_itself_again(runner.state(), spell, &second);
+    second.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("declining the cast is accepted")
+            .events,
+    );
+    second.extend(run_until_settled(&mut runner, |_| None));
+    events.extend(second);
+
+    let state = runner.state();
+    assert_settled(state);
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(
+        stack_resolved_count(&events, spell),
+        2,
+        "one report per resolution"
+    );
+}
+
+/// CR 702.144a + CR 608.2m + CR 608.2n + CR 400.7 + CR 603.3b + CR 117.3b: the
+/// card built from its full Oracle text, Demonstrate included. Its Demonstrate
+/// copy is declined at the first cast. Casting the exiled card again finishes
+/// the first resolution once, and the new spell's own Demonstrate trigger
+/// (CR 601.2i: it triggers when the new spell becomes cast) is put on the stack
+/// above the new spell before the active player receives priority.
+///
+/// REVERT-FAILING: without the fix, accepting the cast panics with
+/// "NotOwed cannot discharge an installed final-part debt".
+#[test]
+fn a_demonstrate_spell_cast_again_after_exiling_itself_finishes_its_first_resolution() {
+    let mut scenario = self_recast_board(5);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Creative Technique", false)
+        .with_mana_cost(creative_technique_cost())
+        .from_oracle_text_with_keywords(&["Demonstrate"], CREATIVE_TECHNIQUE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    let object = &runner.state().objects[&spell];
+    assert!(
+        object.keywords.contains(&Keyword::Demonstrate),
+        "reach guard: the Demonstrate line parsed as the keyword"
+    );
+    assert!(
+        object.base_trigger_definitions.iter().any(|trigger| {
+            matches!(trigger.mode, TriggerMode::SpellCast)
+                && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
+                && trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| matches!(&*ability.effect, Effect::CopySpell { .. }))
+        }),
+        "reach guard: the Demonstrate line produced its copy-on-cast trigger, not an \
+         unimplemented line"
+    );
+
+    // CR 702.144a + CR 603.3: the Demonstrate trigger goes on the stack above
+    // the spell; when it resolves, its controller is asked whether to copy.
+    let mut events = cast_from_hand(&mut runner, spell);
+    let state = runner.state();
+    assert_eq!(
+        state.stack.front().map(|entry| entry.id),
+        Some(spell),
+        "the spell is on the stack below its Demonstrate trigger"
+    );
+    assert!(
+        matches!(
+            state.stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { source_id, .. }) if *source_id == spell
+        ),
+        "CR 702.144a: the Demonstrate trigger is on top of the stack, got {:?}",
+        state.stack
+    );
+    assert_eq!(state.stack.len(), 2);
+    events.extend(pass_twice(&mut runner));
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player, source_id, .. }
+                if *player == P0 && *source_id == spell
+        ),
+        "CR 702.144a: Demonstrate asks whether to copy the spell, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "the spell has not begun to resolve at the Demonstrate prompt"
+    );
+    events.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("declining the copy is accepted")
+            .events,
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![spell],
+        "declining the copy leaves only the spell on the stack"
+    );
+
+    events.extend(pass_twice(&mut runner));
+    assert_offered_to_cast_itself_again(runner.state(), spell, &events);
+
+    let accept_events = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("casting the exiled card is accepted")
+        .events;
+    let state = runner.state();
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0),
+        "CR 117.3b: the active player receives priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.resolving_stack_entry.is_none(),
+        "the first resolution's carrier was retired"
+    );
+    assert!(
+        state.owed_spell_final_part().is_none(),
+        "the first resolution's final part is no longer owed"
+    );
+    assert_eq!(
+        stack_resolved_count(&accept_events, spell),
+        1,
+        "CR 608.2m: the first resolution is reported resolved exactly once"
+    );
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(
+        state.stack.len(),
+        2,
+        "the new spell and its Demonstrate trigger, got {:?}",
+        state.stack
+    );
+    assert_eq!(
+        state.stack.front().map(|entry| entry.id),
+        Some(spell),
+        "CR 601.2a: the new spell is on the stack below its trigger"
+    );
+    assert!(
+        matches!(
+            state.stack.front().map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell { .. })
+        ),
+        "the bottom entry is the new spell"
+    );
+    assert!(
+        matches!(
+            state.stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { source_id, .. }) if *source_id == spell
+        ),
+        "CR 603.3b + CR 601.2i: the new spell's Demonstrate trigger is on top, got {:?}",
+        state.stack
+    );
+}
+
+/// The AI's candidate filter simulates each answer at the offer, including
+/// casting the exiled card; it must not panic there, and the real answer from
+/// the same state completes the first resolution (CR 608.2n).
+///
+/// REVERT-FAILING: without the fix, `legal_actions` panics with
+/// "NotOwed cannot discharge an installed final-part debt".
+#[test]
+fn the_candidate_filter_can_simulate_casting_a_spell_again_during_its_own_resolution() {
+    let (mut runner, _spell, _) = stage_spell_that_exiles_itself_and_offers_its_recast(
+        "Creative Technique",
+        CREATIVE_TECHNIQUE,
+        creative_technique_cost(),
+        5,
+    );
+
+    let actions = legal_actions(runner.state());
+    assert!(
+        actions.contains(&GameAction::DecideOptionalEffect { accept: true }),
+        "casting the exiled card is offered, got {actions:?}"
+    );
+    assert!(
+        actions.contains(&GameAction::DecideOptionalEffect { accept: false }),
+        "declining is offered, got {actions:?}"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("casting the exiled card is accepted");
+    assert!(runner.state().owed_spell_final_part().is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+}
+
+/// CR 608.2m + CR 608.2n: declining to cast the exiled card leaves the spell
+/// where its own instruction put it. Its final part has nothing to move, and
+/// it is reported resolved once.
+#[test]
+fn a_spell_that_exiled_itself_and_is_not_cast_again_stays_in_exile() {
+    let (mut runner, spell, _) = stage_spell_that_exiles_itself_and_offers_its_recast(
+        "Creative Technique",
+        CREATIVE_TECHNIQUE,
+        creative_technique_cost(),
+        5,
+    );
+
+    let mut events = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the cast is accepted")
+        .events;
+    events.extend(run_until_settled(&mut runner, |_| None));
+
+    let state = runner.state();
+    assert_settled(state);
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert!(!graveyard(state, P0).contains(&spell));
+    assert_eq!(stack_resolved_count(&events, spell), 1);
+}
+
+/// CR 400.7 + CR 601.2a + CR 715.3d: a spell cast as an Adventure that exiled
+/// itself and whose card was cast again. The first resolution's final part
+/// must not run the Adventure's stack-exit bookkeeping on the new spell: the
+/// permission to cast the creature lasts only "for as long as that card
+/// remains exiled", and the card is now a new spell on the stack.
+///
+/// This is a synthetic Adventure fixture; no printed Adventure with this
+/// self-recast shape was identified. Its nearest printed reproducer is
+/// Creative Technique through its defective parse, not an Adventure card.
+///
+/// REVERT-FAILING: without the fix, accepting the cast panics with
+/// "NotOwed cannot discharge an installed final-part debt"; a fix that ran the
+/// departed spell's stack exit on the new spell fails the permission assertion.
+#[test]
+fn an_adventure_cast_again_after_exiling_itself_gains_no_adventure_permission_from_its_first_resolution(
+) {
+    let mut scenario = self_recast_board(0);
+    let donor = scenario
+        .add_spell_to_hand_from_oracle(P0, "Technique Donor", false, CREATIVE_TECHNIQUE)
+        .id();
+    let card = scenario
+        .add_creature_to_hand(P0, "Recasting Giant", 4, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Red, 4));
+    let mut runner = scenario.build();
+
+    let abilities: Vec<AbilityDefinition> =
+        runner.state().objects[&donor].abilities.as_ref().clone();
+    let mut card_types = CardType::default();
+    card_types.core_types.push(CoreType::Sorcery);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&card)
+        .expect("the card exists")
+        .back_face = Some(BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
+        name: "Recasting Technique".to_string(),
+        power: None,
+        toughness: None,
+        loyalty: None,
+        printed_loyalty: None,
+        defense: None,
+        card_types,
+        mana_cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        },
+        keywords: Vec::new(),
+        abilities,
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: vec![ManaColor::Red],
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        layout_kind: Some(LayoutKind::Adventure),
+        parse_warnings: vec![],
+    });
+
+    let has_adventure_permission = |state: &GameState| {
+        state.objects[&card]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(permission, CastingPermission::AdventureCreature))
+    };
+
+    let mut events = cast_from_hand(&mut runner, card);
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::CastOffer { player, kind: CastOfferKind::Adventure { .. } }
+                if *player == P0
+        ),
+        "reach guard: CR 715.3 asks which half to cast, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseAdventureFace { creature: false })
+            .expect("casting the Adventure half is accepted")
+            .events,
+    );
+    events.extend(pass_twice(&mut runner));
+    assert_offered_to_cast_itself_again(runner.state(), card, &events);
+    assert!(
+        matches!(
+            runner
+                .state()
+                .resolving_stack_entry
+                .as_ref()
+                .map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell {
+                casting_variant: CastingVariant::Adventure,
+                ..
+            })
+        ),
+        "reach guard: the paused resolution is the Adventure cast"
+    );
+    assert!(
+        !has_adventure_permission(runner.state()),
+        "reach guard: no Adventure permission before the final part"
+    );
+
+    let accept_events = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("casting the exiled card is accepted")
+        .events;
+    let state = runner.state();
+    assert!(
+        state.resolving_stack_entry.is_none(),
+        "the first resolution's carrier was retired"
+    );
+    assert!(
+        state.owed_spell_final_part().is_none(),
+        "the first resolution's final part is no longer owed"
+    );
+    assert_eq!(
+        state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![card],
+        "CR 601.2a: the new spell is the only object on the stack"
+    );
+    assert_eq!(state.objects[&card].zone, Zone::Stack);
+    assert_eq!(stack_resolved_count(&accept_events, card), 1);
+    assert!(
+        !has_adventure_permission(state),
+        "CR 715.3d + CR 400.7: the new spell gains no permission from the first resolution"
+    );
 }
 
 /// CR 707.10: a copy copies the spell and the choices made casting it; the

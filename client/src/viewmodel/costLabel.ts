@@ -7,6 +7,7 @@ import type {
   RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
+  UnlessDrawCostView,
 } from "../adapter/types.ts";
 import i18n from "../i18n";
 import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
@@ -225,6 +226,8 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "PermanentsLeftBattlefieldThisTurn": return "permanents that left the battlefield this turn";
     case "NonlandPermanentsLeftBattlefieldThisTurn": return "nonland permanents that left this turn";
     case "CrimesCommittedThisTurn": return "crimes committed this turn";
+    case "EnergyPaidOrLostThisTurn":
+      return i18n.t("quantityRef.energyPaidOrLostThisTurn");
     // Counter / property references
     case "BasicLandTypeCount": return "basic land types you control";
     case "PartySize": return "your party's size";
@@ -806,4 +809,25 @@ export function stripCostPrefix(text: string): string {
   const costMatch = text.match(/^[^:]+:\s*/);
   if (costMatch) return text.slice(costMatch[0].length);
   return text;
+}
+
+/**
+ * CR 121.1 + CR 702.24a: label the draw an unless-payment prompt asks for from
+ * the engine-resolved count and repetition (`derived.unless_draw_cost`); the
+ * cost AST is never decoded here.
+ */
+export function unlessDrawCostLabel(draw: UnlessDrawCostView): string {
+  const instruction = draw.cards === 1
+    ? i18n.t("game:gamePage.cost.draw")
+    : i18n.t("game:gamePage.cost.drawCount", { count: draw.cards });
+  return draw.instructions > 1 ? `${instruction} × ${draw.instructions}` : instruction;
+}
+
+/**
+ * CR 702.24a: whether the open unless-payment prompt offers a decline. The
+ * engine reports the stage (`derived.unless_draw_cost.stage`): a repeated draw
+ * payment that is already partly performed only continues.
+ */
+export function unlessPaymentCanBeDeclined(draw: UnlessDrawCostView | undefined): boolean {
+  return draw?.stage !== "Continuing";
 }

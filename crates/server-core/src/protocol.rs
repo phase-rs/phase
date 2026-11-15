@@ -404,7 +404,12 @@ pub enum ClientMessage {
         match_config: MatchConfig,
         #[serde(default)]
         ai_seats: Vec<AiSeatRequest>,
-        #[serde(default)]
+        /// Decoded as its writer recorded it for the lobby relay; Full mode re-checks it
+        /// strictly (`guard_client_message_before_dispatch`).
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         /// Optional distinct label for this room, separate from the host's
         /// player name. Routed into `LobbyGame.room_name`.
@@ -3330,6 +3335,8 @@ mod tests {
             next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            post_draft_play: DraftKind::Sealed.procedure().post_draft_play,
+            deck_submission_open: false,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
             // Sealed has no shared stack and no Winston play/draw election, so
@@ -3352,6 +3359,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.post_draft_play, PostDraftPlay::TournamentPairings);
                 assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);

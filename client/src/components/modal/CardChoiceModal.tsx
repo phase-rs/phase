@@ -39,7 +39,7 @@ import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { BoosterPackModal, boosterPackEntries } from "./BoosterPackModal.tsx";
-import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
+import { NamedChoiceModal, SecretAgendaModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
 import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
@@ -175,6 +175,7 @@ export function CardChoiceModal() {
     selectionInteractionId(s.viewerInteraction),
   );
   const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
+  const promptIdentity = useGameStore((s) => s.gameState?.derived?.waiting_for_identity);
 
   if (!waitingFor) return null;
 
@@ -203,6 +204,17 @@ export function CardChoiceModal() {
         />
       );
     case "RevealUntilBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
+    case "DigBottomOrder":
       if (!canActForWaitingState) return null;
       return (
         <RevealUntilBottomOrderModal
@@ -305,6 +317,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "SecretAgendaChoice":
+      if (!canActForWaitingState) return null;
+      return <SecretAgendaModal key={waitingFor.data.object_id} data={waitingFor.data} />;
     case "OpponentGuess":
       // CR 608.2d: the guesser picks one of the offered options. Display-only —
       // reuses the generic option picker; the engine computes correctness.
@@ -332,10 +347,12 @@ export function CardChoiceModal() {
       return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       return null;
-    case "PayCost":
+    case "PayCost": {
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <PayCostDispatch key={payCostPromptKey(waitingFor.data)} data={waitingFor.data} />;
+      const promptKey = promptIdentity ?? payCostPromptKey(waitingFor.data);
+      return <PayCostDispatch key={promptKey} promptKey={promptKey} data={waitingFor.data} />;
+    }
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -404,6 +421,15 @@ export function CardChoiceModal() {
           }
         />
       );
+    case "HeroEventChoice": {
+      if (!canActForWaitingState) return null;
+      // Per-prompt key: Baxter copies re-prompt the same hero with the same
+      // offer, and queue steps advance the same Event — `copies_pending` plus
+      // the recorded-answer count disambiguate what `cards` alone cannot, so a
+      // stale selection never survives into the next prompt.
+      const heroEventKey = `${waitingFor.data.event_id}:${waitingFor.data.player}:${waitingFor.data.copies_pending}:${waitingFor.data.answers?.length ?? 0}:${waitingFor.data.cards.join(",")}`;
+      return <HeroEventModal key={heroEventKey} data={waitingFor.data} />;
+    }
     case "WardDiscardChoice":
       if (!canActForWaitingState) return null;
       return (
@@ -2504,10 +2530,9 @@ function RevealForCostModal({ data }: { data: PayCost["data"] }) {
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
 // `key` forces a fresh selection set when the prompt identity or cost step changes.
-function PayCostDispatch({ data }: { data: PayCost["data"] }) {
+function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey: string }) {
   const { t } = useTranslation("game");
   const isManaAbility = data.resume.type === "ManaAbility";
-  const promptKey = payCostPromptKey(data);
   switch (data.kind.type) {
     case "Discard":
       return (
@@ -2847,6 +2872,151 @@ function DiscardModal({
   );
 }
 
+// ── Turtle Team-Up Hero-Event Choice Modal ────────────────────────────────────
+
+function HeroEventModal({
+  data,
+}: {
+  data: Extract<WaitingFor, { type: "HeroEventChoice" }>["data"];
+}) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const isUpTo = data.up_to === true;
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  // Krang's Stratagem Oracle text ("As a team, the heroes discard a total of
+  // two cards" — not CR 701.9b, which only covers who chooses the discarded
+  // card): "up to N" allows min..=count (min floors the team contribution
+  // where the engine sets one); exact requires precisely count.
+  const min = data.min ?? 0;
+  const isReady = isUpTo
+    ? selected.size >= min && selected.size <= data.count
+    : selected.size === data.count;
+
+  let title: string;
+  let subtitle: string;
+  let badgeLabel: string;
+  let tone: (typeof EFFECT_ZONE_VISUAL_CLASSES)[keyof typeof EFFECT_ZONE_VISUAL_CLASSES];
+  let buttonLabel: string;
+  switch (data.event.type) {
+    case "ChromeOverload":
+      title = t("cardChoice.heroEvent.chromeOverload.title");
+      subtitle = t("cardChoice.heroEvent.chromeOverload.subtitle");
+      badgeLabel = t("cardChoice.badges.sacrifice");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.sacrificeCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "KrangStratagem":
+      title = t("cardChoice.heroEvent.krangStratagem.title");
+      subtitle =
+        isUpTo && min > 0
+          ? t("cardChoice.heroEvent.krangStratagem.subtitleMin", {
+              min,
+              count: data.count,
+              remaining: data.event.data.remaining,
+            })
+          : isUpTo
+            ? t("cardChoice.heroEvent.krangStratagem.subtitleUpTo", {
+                count: data.count,
+                remaining: data.event.data.remaining,
+              })
+            : t("cardChoice.heroEvent.krangStratagem.subtitleExact", { count: data.count });
+      badgeLabel = t("cardChoice.badges.discard");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.discardCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "Smackdown":
+      title = t("cardChoice.heroEvent.smackdown.title");
+      subtitle = t("cardChoice.heroEvent.smackdown.subtitle");
+      badgeLabel = t("cardChoice.badges.destroy");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "RatKingRevolution":
+      title = t("cardChoice.heroEvent.ratKingRevolution.title");
+      subtitle = t("cardChoice.heroEvent.ratKingRevolution.subtitle");
+      badgeLabel = t("cardChoice.badges.tap");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Tap;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "SavantiCurse":
+      title = t("cardChoice.heroEvent.savantiCurse.title");
+      subtitle = t("cardChoice.heroEvent.savantiCurse.subtitle", { count: data.count });
+      badgeLabel = t("cardChoice.badges.return");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Hand;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "Infiltration":
+      title = t("cardChoice.heroEvent.infiltration.title");
+      subtitle = t("cardChoice.heroEvent.infiltration.subtitle");
+      badgeLabel = t("cardChoice.badges.destroy");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "VillainMayhem":
+      title = t("cardChoice.heroEvent.villainMayhem.title");
+      subtitle = t("cardChoice.heroEvent.villainMayhem.subtitle", { count: data.count });
+      badgeLabel = t("cardChoice.badges.keep");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Battlefield;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+  }
+
+  return (
+    <ChoiceOverlay
+      title={title}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={buttonLabel} />}
+    >
+      <SelectableCardGrid
+        cards={data.cards}
+        objects={objects}
+        value={selected}
+        onChange={setSelected}
+        cap={data.count}
+        tone={tone}
+        badgeLabel={badgeLabel}
+        counterText={t("cardChoice.bulk.counterChoose", {
+          selected: selected.size,
+          cap: data.count,
+        })}
+        hoverProps={hoverProps}
+        onConfirm={handleConfirm}
+        canConfirm={isReady}
+      />
+    </ChoiceOverlay>
+  );
+}
+
 // ── Legend Choice Modal ─────────────────────────────────────────────────────
 
 function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
@@ -2993,6 +3163,8 @@ function CommanderZoneChoiceModal({
           >
             <CardImage
               cardName={obj?.name ?? "Unknown"}
+              ownerPrinting={obj?.printing}
+              ownerPrintedRef={obj?.printed_ref}
               size="normal"
               className={CHOICE_CARD_IMAGE_CLASS}
             />
@@ -3069,6 +3241,8 @@ function RevealUntilKeptChoiceModal({
         >
           <CardImage
             cardName={obj?.name ?? "Unknown"}
+            ownerPrinting={obj?.printing}
+            ownerPrintedRef={obj?.printed_ref}
             size="normal"
             className={CHOICE_CARD_IMAGE_CLASS}
           />

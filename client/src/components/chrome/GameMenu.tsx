@@ -60,6 +60,10 @@ interface GameMenuProps {
    *  multiplayer sandbox). */
   showSandboxTools?: boolean;
   onSandboxToolsClick?: () => void;
+  /** Toggles Click Mode directly. Present only where debug actions apply —
+   *  the prop's presence is the authority (GamePage decides). */
+  debugInteractionMode?: boolean;
+  onToggleDebugInteractionMode?: () => void;
   debugClickModeButtonVisible?: boolean;
   onToggleDebugClickModeButtonVisible?: () => void;
   /** Show the always-visible "Report a card problem" flag button. Gated by the
@@ -89,6 +93,8 @@ export function GameMenu({
   takebackAudience = "table",
   showSandboxTools,
   onSandboxToolsClick,
+  debugInteractionMode = false,
+  onToggleDebugInteractionMode,
   debugClickModeButtonVisible = false,
   onToggleDebugClickModeButtonVisible,
   showReportCard,
@@ -253,6 +259,18 @@ export function GameMenu({
               label={t("gameMenu.openSandboxTools")}
               onClick={() => {
                 onSandboxToolsClick();
+                setOpen(false);
+              }}
+            />
+          )}
+          {onToggleDebugInteractionMode && (
+            <MenuButton
+              label={t("gameMenu.clickMode")}
+              shortcut="K"
+              active={debugInteractionMode}
+              pressed={debugInteractionMode}
+              onClick={() => {
+                onToggleDebugInteractionMode();
                 setOpen(false);
               }}
             />

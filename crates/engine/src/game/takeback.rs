@@ -532,7 +532,13 @@ impl TakebackLedger {
             return None;
         }
         let pending = self.pending.take().expect("checked above");
+        // A takeback installs an earlier state in place: continue the replaced state's revision
+        // and advance it, so the restored snapshot and every later one carry revisions not used
+        // by the discarded branch.
+        let replaced_revision = state.state_revision;
         *state = pending.target_state;
+        state.state_revision = replaced_revision;
+        crate::game::public_state::bump_state_revision(state);
         crate::game::rekey_after_trusted_restore(state);
         // The rolled-back state is the new baseline. Snapshots *after* the
         // restored one belong to the branch the table just discarded, and
@@ -945,6 +951,19 @@ mod tests {
         assert_eq!(table.state.waiting_for, before_pass.waiting_for);
         assert_eq!(table.state.eliminated_players, vec![P2]);
         assert_eq!(table.state.phase, before_pass.phase);
+    }
+
+    /// An approval installs the older snapshot with the replaced state's revision advanced,
+    /// so the restored state never repeats a revision the discarded branch already used.
+    #[test]
+    fn an_approved_rollback_continues_the_replaced_revision() {
+        let (mut table, before_pass, _) = bolt_3h(20);
+        let replaced_revision = table.state.state_revision;
+        assert!(before_pass.state_revision < replaced_revision);
+        assert_eq!(table.request(P0), Ok(TakebackOutcome::Pending));
+        assert_eq!(table.respond(P1, true), Ok(APPROVED));
+        assert_eq!(table.state.waiting_for, before_pass.waiting_for);
+        assert_eq!(table.state.state_revision, replaced_revision + 1);
     }
 
     /// L2. Target branch: no other human is in the game now, so the humans in

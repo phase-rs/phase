@@ -1867,6 +1867,12 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
 /// `serde_json::from_str` — that routes unknown tags to the reject path.
 /// (No `PartialEq`: `DeckData` is not `PartialEq`, matching the canonical
 /// `ClientMessage`, which is also not `PartialEq`.)
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn. (Same allow as the canonical
+// `ClientMessage`; this subset's variant balance trips the lint on its own.)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LobbyClientMessage {
@@ -1894,7 +1900,11 @@ pub enum LobbyClientMessage {
         player_count: u8,
         #[serde(default)]
         match_config: MatchConfig,
-        #[serde(default)]
+        /// Relayed to the host's build only, so decoded as the host's engine wrote it.
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         #[serde(default)]
         room_name: Option<String>,

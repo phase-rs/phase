@@ -13,6 +13,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
@@ -20,6 +21,7 @@ use crate::types::zones::Zone;
 
 use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
+use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -130,6 +132,28 @@ fn run_state_based_actions(
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
 ) {
+    // CR 104.1 + CR 704.3: a game that has already ended is terminal, and no
+    // player will receive priority again — so no state-based actions are
+    // performed. Without this guard the player-loss collectors below would run
+    // after the winning effect recorded `GameOver` and eliminate the player the
+    // effect just named the winner when the same resolution also set a loss
+    // condition (an empty-library draw resolving into "you win the game" —
+    // Fblthp, Impossibly Lost; issue #10451). `game_end` is the CR 104.1
+    // terminal record, written only by `elimination::end_game`; the
+    // `WaitingFor::GameOver` arm also covers a restored/terminal wait whose
+    // record predates the field. `match_phase` covers the persisted Bo3
+    // between-games boundary: `game_end` is `#[serde(skip)]`, so a restored
+    // state keeps the prior winner's serialized empty-library flag but loses
+    // the record, and the next `SubmitSideboard` would otherwise run this net
+    // against that earlier game's winner. This is the same InGame predicate
+    // `elimination::check_game_over` uses.
+    if state.game_end.is_some()
+        || state.match_phase != MatchPhase::InGame
+        || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+    {
+        return;
+    }
+
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -173,6 +197,15 @@ fn run_state_based_actions(
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
+        // Turtle Team-Up: a Boss stage clearing (life hit zero on a non-final
+        // stage) exiles the deployed Bosses, resets Boss life, and deploys
+        // the next stage — BEFORE life losers are collected, so the reset
+        // seat is not a loser this pass. On the final stage this returns
+        // false and the normal CR 704.5a loss below proceeds (the heroes
+        // win). A clear performs game actions, so it counts as SBA progress.
+        if super::boss::maybe_clear_boss_stage(state, events) {
+            any_performed = true;
+        }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
         let mut losers: Vec<PlayerId> = collect_life_losers(state);
@@ -681,15 +714,14 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
-        // Archenemy Commander takes the individual branch for every seat —
-        // CR 904.13c keeps poison unshared even though life is shared.
+        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
+        // (ten by default), or fifteen shared by the team. Archenemy Commander
+        // takes the individual branch for every seat — CR 904.13c keeps poison
+        // unshared even though life is shared. `players::poison_loss_measure`
+        // is the shared authority (twin of `collect_poison_losers`).
         !player.is_eliminated
-            && if super::topology::has_shared_poison(state, player.id) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
+            && super::players::poison_loss_measure(state, player)
+                .is_some_and(PoisonLossMeasure::is_lethal)
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -781,6 +813,11 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        // Horde Magic (casual variant): the Horde seat has no life total, so it
+        // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
+        // the life-loss→mill redirect (its life never drops), but this makes
+        // "no life total" a hard guarantee independent of the redirect.
+        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
         .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -799,8 +836,9 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
-/// game; in a team-based format, a team with fifteen or more shared poison
+/// CR 704.5c + CR 704.6b / CR 810.8d + CR 904.13c: A player with the format's
+/// individual threshold (ten by default) or more poison counters loses the
+/// game; where poison is shared, a team with fifteen or more shared poison
 /// counters loses instead (CR 810.10/810.10a: poison counters are shared by
 /// the team and checked via `team_poison_total`). Pure collector (see
 /// `collect_life_losers`).
@@ -810,13 +848,10 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above:
+            // Twin of the `has_pending_player_loss_sba` poison branch above,
+            // through the same authority, `players::poison_loss_measure`:
             // Archenemy Commander takes the individual branch (CR 904.13c).
-            if super::topology::has_shared_poison(state, p.id) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -2463,8 +2498,17 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(state, obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
+            // Horde-deck-token exemption (casual Horde Magic variant): a token
+            // that IS a Horde deck card lives outside the battlefield by
+            // design (library placeholders, the Boss pile, the command zone,
+            // boss-deck graveyard instances), so it is NOT swept here. The
+            // same flag carves these tokens out of the CR 111.8 movement
+            // freeze (`zones::token_cannot_change_zones`) — boss-deck loops
+            // move them by design, while classic decks never move theirs.
+            // Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.is_horde_deck_token
+                && (zones::token_is_outside_battlefield_and_stack(state, obj)
+                    || zones::copy_of_card_outside_battlefield_and_stack(state, obj))
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -3079,6 +3123,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -3209,6 +3255,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -4686,6 +4734,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4775,6 +4824,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -4864,6 +4915,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -5589,6 +5641,55 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    /// CR 104.1 + CR 704.3: a game that has already ended never runs state-based
+    /// actions. Regression for #10451: the winning resolution draws from an empty
+    /// library (setting the CR 704.5b flag) and then wins the game; the terminal
+    /// player-loss safety net must not turn that flag into a `PlayerLost` for the
+    /// winner after `GameOver` is recorded.
+    #[test]
+    fn sba_terminal_player_loss_does_not_run_after_the_game_ended() {
+        let mut state = setup();
+        state.players[0].drew_from_empty_library = true;
+        let mut events = Vec::new();
+
+        // The win resolves while the draw flag is set: the opponent leaves and
+        // the CR 104.1 result is recorded.
+        crate::game::elimination::eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            &mut events,
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "the winner is recorded before the terminal SBA net runs, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.game_end.is_some());
+        let game_over_at = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::GameOver { .. }))
+            .expect("the win emitted GameOver");
+
+        // The terminal player-loss safety net runs after the winning action.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[0].is_eliminated,
+            "the winner must not be eliminated by the empty-library flag its own win left behind"
+        );
+        assert!(
+            !events[game_over_at..].iter().any(
+                |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == PlayerId(0))
+            ),
+            "no PlayerLost for the winner after GameOver"
+        );
     }
 
     // --- CR 704.5j: Legend rule choice tests ---
@@ -7720,6 +7821,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         destination: Zone::Battlefield,
                         origin: None,
                         target: TargetFilter::SelfRef,

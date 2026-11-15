@@ -76,11 +76,17 @@ describe("shared adapter contract fixtures", () => {
 
   it("drives GameStarted through the websocket adapter", async () => {
     const fixture = readFixture<{ type: "GameStarted"; data: { state: GameState } }>("game_started.json");
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
       "join",
       { main_deck: [], sideboard: [] },
       "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -106,11 +112,17 @@ describe("shared adapter contract fixtures", () => {
       data: { state: GameState; events: unknown[] };
     }>("state_update.json");
 
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
       "join",
       { main_deck: [], sideboard: [] },
       "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);

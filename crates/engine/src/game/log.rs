@@ -25,9 +25,12 @@ pub fn resolve_log_entries(
     before: &GameState,
     after: &GameState,
 ) -> Vec<GameLogEntry> {
-    let has_game_start = events
-        .iter()
-        .any(|event| matches!(event, GameEvent::GameStarted));
+    let has_game_start = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. }
+        )
+    });
     let mut cursor = if has_game_start {
         LogCursor::pregame()
     } else {
@@ -333,7 +336,9 @@ impl LogCursor {
 
     fn apply(&mut self, event: &GameEvent) {
         match event {
-            GameEvent::GameStarted => *self = Self::pregame(),
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. } => {
+                *self = Self::pregame()
+            }
             GameEvent::TurnStarted { turn_number, .. } => {
                 self.turn = *turn_number;
                 self.phase = Phase::Untap;
@@ -482,6 +487,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::RoomDoorUnlocked { .. }
@@ -562,6 +568,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
@@ -822,6 +829,18 @@ fn num(n: i32) -> LogSegment {
     LogSegment::Number(n)
 }
 
+/// CR 107.1 + CR 107.1c + CR 122.1: no rule caps a count (game numbers are
+/// integers; a player may have any number of counters on a permanent or
+/// choose any number); the engine stores it as `u32`. A count that fits
+/// `i32` stays a `Number` chip; a larger count is carried exactly as text
+/// rather than saturated or wrapped, so the log never misreports the amount.
+fn exact_u32_segment(n: u32) -> LogSegment {
+    match i32::try_from(n) {
+        Ok(n) => num(n),
+        Err(_) => LogSegment::Text(n.to_string()),
+    }
+}
+
 fn phase_label(phase: Phase) -> &'static str {
     match phase {
         Phase::Untap => "Untap step",
@@ -1038,6 +1057,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
         | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::Firebend { .. }
@@ -1103,8 +1123,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text(phase_label(*phase))]
         }
 
+        // CR 117.3d: `player_id` is the player who *receives* priority after
+        // the previous holder passed, not the passer.
         GameEvent::PriorityPassed { player_id } => {
-            vec![player_seg(state, *player_id), text(" passes priority")]
+            vec![text("Priority passes to "), player_seg(state, *player_id)]
         }
 
         GameEvent::PlayerPerformedAction {
@@ -1386,7 +1408,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 }
                 segments.push(player_seg(state, *player));
                 segments.push(text(" "));
-                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+                segments.push(exact_u32_segment(*value));
             }
             segments
         }
@@ -1550,13 +1572,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segs
         }
 
-        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
         GameEvent::AttackerBecameBlockedByEffect { attacker } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
-        // CR 509.3d: a disambiguated single blocker/attacker pair from a
-        // per-blocker filtered blocks-or-becomes-blocked firing.
+        // CR 509.3d: an attacker-side entering-blocker relationship or a
+        // disambiguated per-blocker filtered firing carries this exact pair.
         GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
             vec![
                 card_seg(state, *blocker),
@@ -1660,7 +1682,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             // not surfaced).
             ..
         } => vec![
-            num(*count as i32),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1686,7 +1708,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             counter_type,
             count,
         } => vec![
-            num(*count as i32),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1884,7 +1906,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // round-by-round detail lives in the structured event for the UI.
         GameEvent::StartingPlayerContest { winner, .. } => vec![
             player_seg(state, *winner),
-            text(" wins the roll to take the first turn"),
+            text(" wins the roll and chooses who takes the first turn"),
         ],
 
         GameEvent::GameOver { winner } => match winner {
@@ -1982,6 +2004,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::GotchaSaid { player, .. } => {
             vec![player_seg(state, *player), text(" says \"Gotcha!\"")]
         }
+
+        GameEvent::ObjectTouched { player, object_id } => vec![
+            player_seg(state, *player),
+            text(" touches "),
+            card_seg(state, *object_id),
+        ],
 
         GameEvent::RingTemptsYou { player_id, .. } => {
             vec![text("The Ring tempts "), player_seg(state, *player_id)]
@@ -2147,7 +2175,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" stationed by "),
             card_seg(state, *creature_id),
             text(" (+"),
-            num(*counters_added as i32),
+            exact_u32_segment(*counters_added),
             text(" charge)"),
         ],
         GameEvent::Saddled {
@@ -2386,10 +2414,12 @@ mod tests {
 
     use super::*;
     use crate::game::engine::{
-        start_game, start_game_skip_mulligan, start_game_with_starting_player,
+        apply, start_game, start_game_skip_mulligan, start_game_with_starting_player,
     };
     use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
     use crate::types::game_state::StackEntryKind;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
     use crate::types::resolved_commands::RulesExecutionNodeRef;
 
@@ -3237,6 +3267,29 @@ mod tests {
     }
 
     #[test]
+    fn priority_passed_names_the_receiving_player() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PriorityPassed {
+                player_id: PlayerId(1),
+            }],
+            &state,
+            &state,
+        );
+        let segments: Vec<&LogSegment> = entries.iter().flat_map(|e| &e.segments).collect();
+        assert!(
+            matches!(segments.first(), Some(LogSegment::Text(t)) if t == "Priority passes to ")
+        );
+        assert!(matches!(
+            segments.get(1),
+            Some(LogSegment::PlayerName { player_id, .. }) if *player_id == PlayerId(1)
+        ));
+        assert!(!segments
+            .iter()
+            .any(|s| matches!(s, LogSegment::Text(t) if t.contains("passes priority"))));
+    }
+
+    #[test]
     fn all_event_variants_produce_segments() {
         // Ensure no event variant panics during formatting
         let state = GameState::new_two_player(42);
@@ -3457,28 +3510,53 @@ mod tests {
     }
 
     #[test]
-    fn start_game_log_entries_reset_hostile_context_before_turn_one() {
+    fn start_game_log_entries_reset_hostile_context_at_the_choice() {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 99;
         state.phase = Phase::End;
 
         let result = start_game(&mut state);
 
+        // CR 103.1: the start batch is the contest alone; it resets the log
+        // cursor like a game-start batch despite the hostile turn-99 context.
         assert!(matches!(
             result.events.as_slice(),
+            [GameEvent::StartingPlayerContest { .. }]
+        ));
+        assert_eq!(result.log_entries[0].turn, 0);
+        assert_eq!(result.log_entries[0].phase, Phase::Untap);
+        assert_eq!(
+            result.log_entries[0].segments.last(),
+            Some(&LogSegment::Text(
+                " wins the roll and chooses who takes the first turn".to_string()
+            ))
+        );
+
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let answer = apply(
+            &mut state,
+            chooser,
+            GameAction::ChooseStartingPlayer { player: chooser },
+        )
+        .expect("the chooser elects to play first");
+
+        assert!(matches!(
+            answer.events.as_slice(),
             [
-                GameEvent::StartingPlayerContest { .. },
                 GameEvent::GameStarted,
                 GameEvent::TurnStarted { turn_number: 1, .. },
                 ..
             ]
         ));
-        assert_eq!(result.log_entries[0].turn, 0);
-        assert_eq!(result.log_entries[0].phase, Phase::Untap);
-        assert_eq!(result.log_entries[1].turn, 0);
-        assert_eq!(result.log_entries[1].phase, Phase::Untap);
-        assert_eq!(result.log_entries[2].turn, 1);
-        assert_eq!(result.log_entries[2].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[0].turn, 0);
+        assert_eq!(answer.log_entries[0].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[1].turn, 1);
+        assert_eq!(answer.log_entries[1].phase, Phase::Untap);
     }
 
     #[test]
@@ -4017,5 +4095,108 @@ mod tests {
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert_eq!(lines(&[mana]), 0);
+    }
+}
+
+#[cfg(test)]
+mod counter_count_log_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
+
+    fn charge() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    fn relic(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Astral Cornucopia".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 107.1 + CR 122.1: a count above `i32::MAX` logs its exact value as
+    /// text, never saturated to `i32::MAX` nor wrapped negative; a count that
+    /// fits `i32` stays a `Number`.
+    #[test]
+    fn counter_counts_past_i32_max_log_exactly() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let removed = |count: u32| GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count,
+        };
+        let segments = format_segments(&removed(1 << 31), &state);
+        assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
+        assert_eq!(segments[3], text(" counters removed from "));
+
+        // Boundary: `i32::MAX` is still a `Number`; one more is exact text.
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32), &state)[0],
+            LogSegment::Number(i32::MAX)
+        );
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32 + 1), &state)[0],
+            LogSegment::Text("2147483648".into())
+        );
+
+        let added = GameEvent::CounterAdded {
+            object_id: id,
+            counter_type: charge(),
+            count: u32::MAX,
+            actor: PlayerId(0),
+        };
+        let segments = format_segments(&added, &state);
+        assert_eq!(segments[0], LogSegment::Text("4294967295".into()));
+        assert_eq!(segments[3], text(" counters on "));
+
+        let stationed = GameEvent::Stationed {
+            spacecraft_id: id,
+            creature_id: id,
+            counters_added: 1 << 31,
+        };
+        let segments = format_segments(&stationed, &state);
+        assert_eq!(segments[4], LogSegment::Text("2147483648".into()));
+    }
+
+    /// CR 107.1c: a revealed "any number" choice above `i32::MAX` logs its
+    /// exact value; a small number in the same reveal stays a `Number`.
+    #[test]
+    fn chosen_numbers_past_i32_max_log_exactly() {
+        let state = GameState::new_two_player(7);
+        let revealed = GameEvent::ChosenNumbersRevealed {
+            numbers: vec![(PlayerId(0), 3_000_000_000), (PlayerId(1), 7)],
+        };
+        let segments = format_segments(&revealed, &state);
+        assert_eq!(segments[3], LogSegment::Text("3000000000".into()));
+        assert_eq!(segments[7], LogSegment::Number(7));
+    }
+
+    #[test]
+    fn small_counter_counts_log_unchanged() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let three = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 3,
+        };
+        let segments = format_segments(&three, &state);
+        assert_eq!(segments[0], LogSegment::Number(3));
+        assert_eq!(segments[3], text(" counters removed from "));
+        let one = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 1,
+        };
+        assert_eq!(
+            format_segments(&one, &state)[3],
+            text(" counter removed from ")
+        );
     }
 }
