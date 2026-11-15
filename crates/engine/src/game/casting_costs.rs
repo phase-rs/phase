@@ -899,6 +899,7 @@ pub(crate) fn handle_decide_additional_cost(
     // `additional_cost_paid` is set.
     let mut optional_cost_paid = false;
     let mut elected_alternative: Option<AbilityCost> = None;
+    let mut recompute_declined_alternative_cost = false;
 
     let cost_to_pay = match additional_cost {
         // CR 702.33a: Kicker is an optional additional cost.
@@ -961,7 +962,15 @@ pub(crate) fn handle_decide_additional_cost(
                         _ => Some(chosen_cost),
                     }
                 } else {
-                    Some(chosen_cost)
+                    // CR 601.2f: declining the alternative leaves the printed
+                    // mana cost as the spell's base cost, which `pending.cost`
+                    // already carries. Option 1 only names that cost for the
+                    // prompt; paying it as an additional cost would charge it
+                    // twice. Re-derive the total from the unchanged base so
+                    // additional costs declared alongside the offer
+                    // (CR 118.9d) are still counted once.
+                    recompute_declined_alternative_cost = true;
+                    None
                 }
             } else {
                 Some(chosen_cost)
@@ -997,6 +1006,14 @@ pub(crate) fn handle_decide_additional_cost(
     if let Some(alternative) = elected_alternative.as_ref() {
         let source = updated_pending.alt_cost_grant_source;
         record_elected_alternative_cost(state, player, &mut updated_pending, alternative, source);
+    }
+    if recompute_declined_alternative_cost {
+        updated_pending.cost = super::casting::recompute_pending_mana_total(
+            state,
+            player,
+            &updated_pending,
+            updated_pending.ability.chosen_x,
+        );
     }
     if current_instance.is_some() {
         updated_pending.additional_cost_queue.remove(0);
@@ -10490,14 +10507,18 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 // it without prompting. Two or more branches prompt, in printed
                 // order, so every alternative the caster could pay is reachable
                 // (Dusk Mangler may have all three). None offerable means the
-                // spell cannot be cast.
+                // spell cannot be cast. An elected branch is the spell's required
+                // additional cost, so each is judged by the same authority as a
+                // `Required` cost — including a matching Defiler's reduction
+                // announced alongside it (`required_declaration_offerable`).
                 let mut offerable = Vec::new();
                 for (option_index, chosen_cost) in costs.iter().enumerate() {
-                    if additional_cost_declaration_is_offerable(
+                    if required_declaration_offerable(
                         state,
                         player,
                         &pending,
-                        chosen_cost.clone(),
+                        chosen_cost,
+                        residual.as_ref(),
                     )? {
                         offerable.push(option_index);
                     }

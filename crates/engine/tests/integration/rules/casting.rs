@@ -2972,6 +2972,13 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
         Zone::Stack,
         "MV-2 spell should be on the stack after paying the printed {{2}} cost"
     );
+    // CR 601.2f: declining leaves the printed {2} as the whole cost — paid
+    // once, from exactly the two mana provided.
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the printed {{2}} is paid exactly once"
+    );
     assert!(
         !runner
             .state()

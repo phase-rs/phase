@@ -60455,7 +60455,7 @@ mod x_sentinel_tap_creatures_activation_cost {
 /// silently rewrote the spell's X to the number of creatures the player happened
 /// to tap.
 ///
-/// Production route: `GameAction::CastSpell` → `DecideOptionalCost{pay:true}` →
+/// Production route: `GameAction::CastSpell` → `DecideOptionalCost { index: 0 }` →
 /// `pay_additional_cost_with_source`'s `Aggregate` sub-arm →
 /// `WaitingFor::PayCost` → `handle_tap_creatures_for_spell_cost` (the fixed
 /// line) → `ChooseXValue` → `ManaPayment` → resolution.
