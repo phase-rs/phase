@@ -24,6 +24,9 @@
 //!     attacking at the beginning of the declare attackers step on your next
 //!     turn."
 //!   Unsummon — "Return target creature to its owner's hand."
+//!   Cling to Dust — "Exile target card from a graveyard. If it was a creature
+//!     card, you gain 3 life. Otherwise, you draw a card. / Escape—{3}{B}, Exile
+//!     five other cards from your graveyard. (...)"
 //!   All-Fates Stalker — "When this creature enters, exile up to one target
 //!     non-Assassin creature until this creature leaves the battlefield. /
 //!     Warp {1}{W}"
@@ -245,20 +248,45 @@ fn vengeful_regrowth_returns_its_targets_and_creates_that_many_plants() {
 
 /// CR 608.2b: a target that became illegal as the spell resolves is not
 /// affected, while a sibling target that is still legal is. Both lands are
-/// declared through the production cast path; one leaves the graveyard while
-/// Vengeful Regrowth is on the stack, so one land returns and "that many"
-/// Plant Warriors is 1 (not the 2 targets declared). A sibling-legality
-/// control, not a zero-moved row: the target list stays non-empty, and the
-/// invalidation is a direct zone move, not a game action.
+/// declared through the production cast path; in response, Cling to Dust is cast
+/// through the production cast path and exiles the first land from the
+/// graveyard, so one land returns and "that many" Plant Warriors is 1
+/// (not the 2 targets declared). A sibling-legality control, not a zero-moved
+/// row: the target list stays non-empty, so it reaches no empty-target guard.
 #[test]
 fn vengeful_regrowth_with_one_target_invalidated_returns_the_legal_sibling_only() {
-    let Some((mut runner, regrowth, lands)) = regrowth_board() else {
+    let Some(db) = shared_card_db() else {
         return;
     };
+    let mut scenario = main_phase();
+    let regrowth = scenario.add_real_card(P0, "Vengeful Regrowth", Zone::Hand, db);
+    let cling = scenario.add_real_card(P0, "Cling to Dust", Zone::Hand, db);
+    // Cling to Dust draws for a non-creature card; keep P0 off an empty library.
+    scenario.with_library_top(P0, &["Island", "Swamp"]);
+    let lands = [
+        scenario.add_real_card(P0, "Forest", Zone::Graveyard, db),
+        scenario.add_real_card(P0, "Forest", Zone::Graveyard, db),
+    ];
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Green, ManaType::Green], 4);
+    add_mana(&mut runner, P0, &[ManaType::Black], 0);
+
     let commit = runner.cast(regrowth).target_objects(&lands).commit();
     let mut events = commit.events().to_vec();
-    let mut scratch = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), lands[0], Zone::Exile, &mut scratch);
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == regrowth),
+        "reach: Vengeful Regrowth is on the stack with both lands declared"
+    );
+    // In response: Cling to Dust exiles the first land from the graveyard.
+    let response = runner.cast(cling).target_object(lands[0]).commit();
+    events.extend(response.events().iter().cloned());
+    pass_until(&mut runner, &mut events, |r| {
+        r.state().objects[&lands[0]].zone == Zone::Exile
+    });
     assert_eq!(
         runner.state().objects[&lands[0]].zone,
         Zone::Exile,
