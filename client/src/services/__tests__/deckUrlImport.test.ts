@@ -244,7 +244,10 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   TwoHeadedGiant: "constructed",
   Archenemy: "constructed",
   Planechase: "constructed",
+  PlanechaseCommander: "commander",
   Commander: "commander",
+  TwoHeadedGiantCommander: "commander",
+  ArchenemyCommander: "commander",
   DuelCommander: "commander",
   PauperCommander: "commander",
   Brawl: "commander",
@@ -257,6 +260,7 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   Freeform: "constructed",
   FreeformCommander: "commander",
   Dandan: "mainOnly",
+  Horde: "constructed",
 };
 
 describe("fetchDeckFromUrl — format coverage", () => {

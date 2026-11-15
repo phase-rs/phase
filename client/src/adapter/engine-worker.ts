@@ -11,6 +11,10 @@ import init, {
   initialize_multiplayer_host_game,
   submit_action,
   drive_contest_js,
+  request_takeback_js,
+  respond_takeback_js,
+  cancel_takeback_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
@@ -37,6 +41,7 @@ import init, {
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
+  checkDeckPrintingsBounds,
   customFormatFromLobbyConfig,
   formatConfigForCustomRules,
   apply_seat_mutation,
@@ -63,6 +68,7 @@ import init, {
 import * as engineWasm from "@wasm/engine";
 
 import {
+  appliedSubmitResult,
   isActionOutcome,
   type ActionRejection,
   type AiActionProposal,
@@ -76,6 +82,7 @@ import type {
 import type { BracketDeckRequest, BracketEstimateRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
+import { StateCodecRuntime } from "./state-codec-runtime";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -111,6 +118,10 @@ type EngineRequest =
       awayPlayers: number[];
       clicks: unknown[];
     }
+  | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
+  | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
+  | { type: "cancelTakeback"; id: number; actor: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
@@ -156,6 +167,7 @@ type EngineRequest =
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "checkDeckPrintingsBounds"; id: number; printings: unknown }
   | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
   | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
@@ -167,6 +179,9 @@ type EngineRequest =
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
+  | { type: "openStateCodec"; id: number }
+  | { type: "decodeStateCodec"; id: number; sessionId: number; frame: Uint8Array }
+  | { type: "closeStateCodec"; id: number; sessionId: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "estimateBracketForDeck"; id: number; request: BracketEstimateRequest }
@@ -193,6 +208,13 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+/** Set once the WASM module is instantiated by the `init` handler. */
+let wasmInitialized = false;
+/**
+ * Negotiated state-codec sessions for this worker's WASM instance. Decoder
+ * baselines live here, never on the main thread; see `state-codec-runtime.ts`.
+ */
+let stateCodecRuntime: StateCodecRuntime | null = null;
 
 type ComboTableLoadOutcome = "loaded" | "unavailable";
 
@@ -284,6 +306,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         } else {
           await init();
         }
+        wasmInitialized = true;
         result(msg.id, null);
         break;
       }
@@ -344,6 +367,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, evaluateDeckFormatGate(msg.request));
+        break;
+      }
+
+      // Resource bounds on one guest deck's printings sidecar, for the P2P host's
+      // admission. The engine throws its reason on abuse; the outer try/catch
+      // returns that throw as an `error` response. Reads no card database, so it
+      // does not gate on one.
+      case "checkDeckPrintingsBounds": {
+        checkDeckPrintingsBounds(msg.printings);
+        result(msg.id, null);
         break;
       }
 
@@ -469,11 +502,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           rejectionError(msg.id, outcome.rejection);
           break;
         }
-        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
-          events: actionResult.events ?? [],
-          log_entries: actionResult.log_entries ?? [],
-        });
+        result(msg.id, appliedSubmitResult(outcome));
         break;
       }
 
@@ -489,6 +518,29 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, outcome);
+        break;
+      }
+
+      case "requestTakeback": {
+        result(msg.id, request_takeback_js(msg.actor, Uint8Array.from(msg.aiPlayers)));
+        break;
+      }
+
+      case "respondTakeback": {
+        result(
+          msg.id,
+          respond_takeback_js(msg.actor, msg.approve, Uint8Array.from(msg.aiPlayers)),
+        );
+        break;
+      }
+
+      case "cancelTakeback": {
+        result(msg.id, cancel_takeback_js(msg.actor));
+        break;
+      }
+
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 
@@ -780,6 +832,37 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "ping": {
         result(msg.id, ping());
+        break;
+      }
+
+      // ── Negotiated state-codec sessions ──────────────────────────────
+      // Decoder sessions are transport plumbing: they read frames and retain
+      // their own baselines. They never load card data, touch GAME_STATE, or
+      // expose game state on the main thread.
+
+      case "openStateCodec": {
+        if (!wasmInitialized) {
+          error(msg.id, "Engine is not initialized.");
+          break;
+        }
+        stateCodecRuntime ??= new StateCodecRuntime(engineWasm);
+        result(msg.id, stateCodecRuntime.open());
+        break;
+      }
+
+      case "decodeStateCodec": {
+        const runtime = stateCodecRuntime;
+        if (!runtime) {
+          error(msg.id, "State codec session was never opened.");
+          break;
+        }
+        result(msg.id, runtime.decode(msg.sessionId, msg.frame));
+        break;
+      }
+
+      case "closeStateCodec": {
+        stateCodecRuntime?.close(msg.sessionId);
+        result(msg.id, null);
         break;
       }
 

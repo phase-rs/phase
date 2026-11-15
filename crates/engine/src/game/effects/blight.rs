@@ -66,6 +66,7 @@ pub fn resolve(
     // `count` (in EffectZoneChoice) is the number of creatures chosen (1);
     // `count_param` carries N — the number of -1/-1 counters to place.
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: blighting_player,
         cards: eligible,
         count: 1,
@@ -88,6 +89,7 @@ pub fn resolve(
         conditional_enter_with_counters: vec![],
         count_param: count,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,

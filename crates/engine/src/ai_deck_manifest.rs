@@ -61,7 +61,7 @@ pub enum ManifestError {
 
 impl AiDeckManifest {
     /// The compiled-in default. Mirrors the production `include_str!` of
-    /// `crates/engine/data/oracle-subtypes.json` at parser/oracle_util.rs:1146.
+    /// `crates/phase-ast/data/oracle-subtypes.json` at parser/oracle_util.rs:1146.
     pub fn bundled() -> &'static AiDeckManifest {
         static BUNDLED: OnceLock<AiDeckManifest> = OnceLock::new();
         BUNDLED.get_or_init(|| {

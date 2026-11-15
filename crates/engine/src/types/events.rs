@@ -11,10 +11,14 @@ use super::ability::{
     TypedFilter,
 };
 use super::card::PrintedCardRef;
+use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
+use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
@@ -75,6 +79,11 @@ pub struct LibrarySearchCardView {
     pub zone: Zone,
     pub identity: ObjectIncarnationRef,
     pub card_id: CardId,
+    /// The searched card's printing; card-level, so it covers every face. Display-only:
+    /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
+    /// reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     pub current_face: LibrarySearchCardFaceView,
     pub front_face: LibrarySearchCardFaceView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,8 +156,8 @@ impl ActivationTriggerState {
 
 /// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
 /// `Bound` means at least one trigger was admitted for the event — whether its
-/// context was queued or then pruned (a remembered decline still spends a
-/// "triggers only once each turn" limit). A bound observation has consequences
+/// context was queued or then pruned (a remembered accept with no legal target
+/// still spends a "triggers only once each turn" limit). A bound observation has consequences
 /// a mana-tap undo cannot reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivationObservers {
@@ -382,6 +391,143 @@ pub struct EventObjectSnapshot {
     pub relations: EventObjectRelationSnapshot,
 }
 
+/// CR 603.10 + CR 603.10d: what a `ControllerChanged` event records about the
+/// moment immediately before its instruction.
+///
+/// Deliberately not an `Option`: the absent case is a named policy. A payload
+/// saved before this field existed, or any event built without an instruction
+/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
+/// control-change trigger. It is never reconstructed from current state.
+///
+/// `Observed` holds only the key of its observation in
+/// `GameState::control_change_observations`. The observation itself (latched
+/// watcher contexts, an exact subject snapshot) can describe hidden cards (a
+/// face-down card exiled with Duplicity), and events are cloned into many
+/// carriers: prompts, pending triggers, logs, the live stream. Keeping it out of
+/// the event means no carrier can expose it; viewer projections drop the one
+/// table instead (CR 400.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlChangeEvidence {
+    #[default]
+    Unrecorded,
+    Observed(u64),
+}
+
+impl ControlChangeEvidence {
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+}
+
+/// CR 603.10d: the immediately-before facts of one control change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeObservation {
+    /// CR 400.7 + CR 110.1: the changing object's exact incarnation, zone and
+    /// characteristics immediately before its instruction.
+    pub subject: EventObjectSnapshot,
+    /// CR 603.10: every functioning look-back control-change watcher, with its
+    /// controller, immediately before the instruction. One list is shared by
+    /// every event the instruction publishes.
+    pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    /// CR 603.2d + CR 603.10d: every functioning trigger-doubling static, with
+    /// its controller, immediately before the instruction. A look-back
+    /// watcher's trigger counts its additional triggers against these, not
+    /// against a doubler the instruction itself moved or removed.
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+}
+
+/// CR 603.2d: one functioning "triggers an additional time" static ability
+/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, as an
+/// observed source context (its controller is "you", and its chosen
+/// attributes answer source-relative scope such as "of the chosen type"), the
+/// spawning-event predicate and the trigger-source scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedTriggerDoubler {
+    pub source: TriggerSourceContext,
+    pub cause: super::statics::TriggerCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected: Option<super::ability::TargetFilter>,
+}
+
+impl LatchedTriggerDoubler {
+    pub fn source_id(&self) -> ObjectId {
+        self.source.identity.reference.object_id
+    }
+
+    pub fn controller(&self) -> PlayerId {
+        self.source.lki.controller
+    }
+}
+
+fn latched_doublers_are_empty(doublers: &std::sync::Arc<Vec<LatchedTriggerDoubler>>) -> bool {
+    doublers.is_empty()
+}
+
+/// CR 608.2e + CR 603.10d: one control-change instruction's immediately-before
+/// capture: the shared watcher latch plus every candidate subject's snapshot.
+///
+/// Built by `gain_control::capture_control_change_instruction` (the single
+/// writer) after the instruction's entrance settle and before its first
+/// mutation. A player-scope fan-out builds it once, before its first seat, and
+/// keeps it in `GameState::control_change_captures` under the id its template's
+/// head carries, so every seat (including one resumed from a parked
+/// continuation) publishes against the same pre-instruction board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeInstructionCapture {
+    pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    pub subjects: Vec<EventObjectSnapshot>,
+}
+
+impl ControlChangeInstructionCapture {
+    /// The observation for `object_id`, when it was in the captured population.
+    pub fn observation_for(&self, object_id: ObjectId) -> Option<ControlChangeObservation> {
+        self.subjects
+            .iter()
+            .find(|subject| subject.identity.object_id == object_id)
+            .map(|subject| ControlChangeObservation {
+                subject: subject.clone(),
+                watchers: self.watchers.clone(),
+                doublers: self.doublers.clone(),
+            })
+    }
+}
+
+/// CR 608.2e: what a fan-out driver hands its control-change node(s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlChangeInstructionCarrier {
+    /// The template's single control-change action is its head, so the
+    /// driver's pre-seat capture is that action's immediately-before board.
+    /// The id keys `GameState::control_change_captures`; the capture itself
+    /// stays out of the ability, so no viewer copy carries it.
+    Captured(u64),
+    /// The template's control-change actions can't share one boundary (more
+    /// than one, or one behind a retained prefix). Their events publish
+    /// `Unrecorded` evidence: no observation is substituted. Coverage marks
+    /// every such producer unsupported (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
+    Unobservable,
+}
+
+/// A player-scope link's pre-seat capture (`GameState::control_change_captures`)
+/// and the members it has already published.
+///
+/// The engine applies one simultaneous action seat by seat, so a later seat
+/// can find a member whose live controller already moved: a layer-dependent
+/// consequence of an earlier seat (an Aura's controller changing who controls
+/// the enchanted creature), or the same member moved by an earlier seat. The
+/// first is still the captured board's change (CR 608.2e: the action is
+/// processed once, simultaneously), so it publishes its captured observation.
+/// The second would be a second change of one member within one action, so it
+/// publishes `Unrecorded`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeLink {
+    pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub published: std::collections::BTreeSet<ObjectId>,
+}
+
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
 ///
 /// This is a *structural* classification, computed without a game state, so a parser gate
@@ -530,6 +676,9 @@ impl EventObjectSnapshot {
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
+            // CR 108.3 + CR 508.1d: per-member owner anchor — denotes players,
+            // never the conniving permanent itself.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner => PermanentDomainFalse,
 
@@ -549,6 +698,7 @@ impl EventObjectSnapshot {
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             // CR 506.3: needs live combat state (the attacker's current attack target)
             // and may be a planeswalker permanent; unlike `DefendingPlayer` it is not
@@ -856,6 +1006,7 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
+    /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
         player_id: PlayerId,
     },
@@ -1033,7 +1184,8 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b: An activated mana ability resolved and produced mana. Unlike
+    /// CR 605.1b: A mana ability resolved and produced mana; a triggered mana
+    /// ability's production is emitted only while loop detection samples. Unlike
     /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
     /// `TappedForMana`, it also covers mana abilities without a tap cost.
     ManaAbilityProduced {
@@ -1251,6 +1403,11 @@ pub enum GameEvent {
     ResolutionHalted {
         involved: Vec<ObjectId>,
     },
+    /// CR 732.1b + CR 732.2c: marks the start of one committed repetition of a taken shortcut.
+    ShortcutRepetition {
+        controller: PlayerId,
+        repetition: u32,
+    },
     DamageDealt {
         source_id: ObjectId,
         target: TargetRef,
@@ -1347,6 +1504,27 @@ pub enum GameEvent {
     Evolved {
         object_id: ObjectId,
     },
+    /// Un-card gesture (no CR entry): `player` performed `tell` from the
+    /// Un-actions menu. Drives client animations and opens Gotcha windows.
+    UnTellPerformed {
+        player: PlayerId,
+        tell: super::un_actions::UnTell,
+    },
+    /// Un-card speech (no CR entry): `player` said `phrase` aloud to pay an
+    /// `AbilityCost::SayPhrase`. Drives client animations.
+    PhraseSaid {
+        player: PlayerId,
+        phrase: String,
+    },
+    /// Un-card Gotcha (no CR entry): `player` called "Gotcha!" for the Gotcha
+    /// ability on `source` (exact occurrence), naming `returns` (exact card
+    /// occurrence) as the card to return. Consumed by `TriggerMode::GotchaSaid` —
+    /// the "When you do" reflexive trigger.
+    GotchaSaid {
+        player: PlayerId,
+        source: ObjectIdentityBinding,
+        returns: ObjectIdentityBinding,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,
@@ -1386,6 +1564,11 @@ pub enum GameEvent {
         object_id: ObjectId,
         old_controller: PlayerId,
         new_controller: PlayerId,
+        /// CR 603.10 + CR 603.10d: the immediately-before authority that
+        /// look-back control-change triggers read. Absent on a pre-change
+        /// payload, which decodes to `Unrecorded` and authorizes nothing.
+        #[serde(default, skip_serializing_if = "ControlChangeEvidence::is_unrecorded")]
+        evidence: ControlChangeEvidence,
     },
     EffectResolved {
         kind: EffectKind,
@@ -1436,19 +1619,19 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
-    /// an unblocked creature at that time — the precondition for "becomes blocked"
-    /// triggers to fire from an effect-block.
-    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
-    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
-    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    /// CR 509.3c: An effect or entering blocker changed an unblocked attacker
+    /// into a blocked attacker. Only the bare "becomes blocked" form consumes
+    /// this first-transition event.
+    /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
+    /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
+    /// entering blocker supplies a separate per-creature event below.
     AttackerBecameBlockedByEffect {
         attacker: ObjectId,
     },
-    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
-    /// firing with an explicit blocker/attacker qualifier — carries both ids so
-    /// "that creature"/"the other creature" resolution never has to infer
-    /// orientation from event shape.
+    /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
+    /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
+    /// blocker. The explicit pair preserves "that creature" context orientation.
+    /// CR 509.4: This event never claims that the entering blocker itself blocked.
     AttackerBecameBlockedByFilteredBlocker {
         attacker: ObjectId,
         blocker: ObjectId,
@@ -1719,9 +1902,11 @@ pub enum GameEvent {
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
     /// round (including tie rerolls) with no downstream re-derivation. `rounds`
-    /// preserves the round boundaries the engine computes; `winner` is the
-    /// engine's authoritative starting player (unique max of the final round, or
-    /// the lowest-seat fallback when tied at the reroll cap). Replaces the prior
+    /// preserves the round boundaries the engine computes; `winner` is the roll
+    /// winner (unique max of the final round, or the lowest-seat fallback when
+    /// tied at the reroll cap), who chooses who takes the first turn (CR 103.1);
+    /// under shared team turns the choice passes to that seat's side
+    /// representative (CR 103.1a). Replaces the prior
     /// flat per-roll `DieRolled` batch on the starting-player contest path; in-game
     /// die rolls still emit `DieRolled`.
     StartingPlayerContest {

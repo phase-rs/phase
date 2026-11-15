@@ -488,7 +488,7 @@ fn ruthless_ripper_turn_face_up_reveal_cost() {
         .expect("turn face up");
     match &runner.state().waiting_for {
         WaitingFor::PayCost {
-            kind: PayCostKind::Reveal,
+            kind: PayCostKind::Reveal { .. },
             count,
             choices,
             ..
@@ -775,6 +775,8 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::SelfRef,
@@ -896,7 +898,7 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
 #[test]
 fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, TargetSelectionMode,
     };
     use engine::types::replacements::ReplacementEvent;
     use engine::types::{ReplacementDefinition, TargetFilter};
@@ -962,6 +964,7 @@ fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },
@@ -1202,8 +1205,8 @@ fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
 #[test]
 fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ReplacementDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode,
     };
     use engine::types::game_state::PendingCostMoveResume;
     use engine::types::replacements::ReplacementEvent;
@@ -1275,6 +1278,7 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },
@@ -2063,7 +2067,7 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
             raw_waiting,
             WaitingFor::PayCost {
                 player: P0,
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 count: 1,
                 ..
             }
@@ -2717,8 +2721,8 @@ const SAFFI_ERIKSDOTTER_ORACLE: &str =
 #[test]
 fn turn_face_up_sacrifice_cost_preserves_delayed_triggers_across_child_pause() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
-        TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ReplacementDefinition,
+        TargetFilter, TargetSelectionMode,
     };
     use engine::types::game_state::PendingCostMoveResume;
     use engine::types::replacements::ReplacementEvent;
@@ -2805,6 +2809,7 @@ fn turn_face_up_sacrifice_cost_preserves_delayed_triggers_across_child_pause() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },
@@ -3092,6 +3097,8 @@ fn turn_face_up_sacrifice_preserves_delivered_observer_prefix_across_second_repl
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::SelfRef,
@@ -3391,6 +3398,8 @@ fn turn_face_up_sacrifice_preserves_delivered_delayed_trigger_prefix_across_seco
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -3613,6 +3622,8 @@ fn blood_artist_co_departure_runner(
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: engine::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,

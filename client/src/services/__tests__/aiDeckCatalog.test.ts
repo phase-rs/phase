@@ -6,7 +6,9 @@ import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import {
   buildLegalAiDeckCatalog,
+  candidateDeclarations,
   candidateSeatDeck,
+  submitCandidateSeatDeck,
   catalogRequestKey,
   filterByBracket,
   useAiDeckCatalog,
@@ -158,6 +160,39 @@ describe("buildLegalAiDeckCatalog", () => {
     expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
       expect.objectContaining({ commander: ["Murmuring Mystic"] }),
       { selectedFormat: "PauperCommander", selectedMatchType: "Bo1", summaryOnly: true },
+    );
+  });
+
+  it("validates Horde survivor candidates against the picked challenge with no format tag", async () => {
+    saveDeck("EDH Deck", deck("EDH Card", "EDH Commander"));
+    saveDeck("Constructed Deck", deck("Constructed Card"));
+    // The engine answers the picked challenge's survivor verdict per
+    // candidate (here scripted: only the EDH-shaped deck fits Sauron).
+    vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
+      compatibility(parsed.main[0]?.name === "EDH Card")
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedMatchType: "Bo1",
+      selectedChallengeDeck: "SauronHorde",
+    });
+
+    // The request contract: no format tag (unrestricted pool), challenge set.
+    expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        selectedFormat: undefined,
+        selectedMatchType: "Bo1",
+        selectedChallengeDeck: "SauronHorde",
+        summaryOnly: true,
+      },
+    );
+    // Only the survivor-compatible candidate survives.
+    expect(catalog.candidates.map((candidate) => candidate.id)).toContain("saved:EDH Deck");
+    expect(catalog.candidates.map((candidate) => candidate.id)).not.toContain("saved:Constructed Deck");
+    // Scans for different challenges must not share a request key.
+    expect(catalogRequestKey(null, "Bo1", "SauronHorde")).not.toBe(
+      catalogRequestKey(null, "Bo1", "CybermanHorde"),
     );
   });
 
@@ -707,11 +742,30 @@ describe("combo declarations", () => {
       comboDeclaration: EARLY_COMBO,
     };
 
-    expect(candidateSeatDeck(candidate)).toMatchObject({
+    const submitted = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    expect(candidateSeatDeck(candidate, submitted)).toMatchObject({
+      main_deck: ["Forest"],
       bracket_tier: null,
       combo_declaration: EARLY_COMBO,
     });
-    expect(candidateSeatDeck({ ...candidate, declaredBracket: 5 }).bracket_tier).toBe("cedh");
+    expect(candidateSeatDeck({ ...candidate, declaredBracket: 5 }, submitted).bracket_tier).toBe("cedh");
+    expect(candidateDeclarations(candidate)).toEqual({
+      bracket_tier: null,
+      combo_declaration: EARLY_COMBO,
+    });
+  });
+
+  it("submits a candidate's own deck with that candidate's declarations, not a neighbour's", async () => {
+    const early = { ...makeCandidate("Early", null), comboDeclaration: EARLY_COMBO };
+    const undeclared = makeCandidate("Plain", null);
+
+    const [first, second] = await Promise.all([
+      submitCandidateSeatDeck(early),
+      submitCandidateSeatDeck(undeclared),
+    ]);
+
+    expect(first.combo_declaration).toEqual(EARLY_COMBO);
+    expect(second.combo_declaration).toEqual({ kind: "undeclared" });
   });
 
   it("refreshes a settled catalog when only a candidate's answer changed", async () => {

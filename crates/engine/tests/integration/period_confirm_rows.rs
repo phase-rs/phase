@@ -55,6 +55,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::food_chain_board::{self, BoardCMember};
+use crate::loop_period_remade_token_source::{markers, take_recorded};
 use crate::play_trace::{
     ability, activate, altar_board, cast, chooses_color, is_offer, names, place, settle,
 };
@@ -2384,7 +2385,10 @@ fn a_bounded_offer_or_proposal_on_the_ring_road_with_a_period_is_refused_on_relo
 }
 
 /// CR 704.5a + CR 800.4a + CR 104.2a: on four seats the Zulaport drain drops P1 and P2 together at
-/// the repetition both reach 0, and P3 at its own; a take stops at exactly what it declared.
+/// the repetition both reach 0, and P3 at its own; a take stops at exactly what it declared. Each
+/// repetition casts Gravecrawler from the graveyard (Walking Corpse is the Zombie) and sacrifices
+/// it to Phyrexian Altar, and Zulaport Cutthroat makes each opponent lose 1: from [5, 5, 7] P1 and
+/// P2 leave in repetition 5 of six, which the take's record elides but for their departures.
 #[test]
 fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     let Some(db) = shared_card_db() else { return };
@@ -2396,13 +2400,14 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     assert_eq!(lives(&offered)[1..], [5, 5, 7]);
 
     let mut runner = GameRunner::from_state(offered.clone());
-    let events = take(&mut runner, 6);
+    let result = take_recorded(runner.state_mut(), 6);
+    let events = &result.events;
     let six = runner.state();
     assert_eq!(eliminated(six), [P1, P2]);
     assert_eq!(six.players[3].life, 1);
     assert_eq!(six.waiting_for, WaitingFor::Priority { player: P0 });
-    assert_eq!(eliminations(&events), [P1, P2]);
-    let logged = resolve_log_entries(&events, &offered, six)
+    assert_eq!(eliminations(events), [P1, P2]);
+    let logged = resolve_log_entries(events, &offered, six)
         .iter()
         .filter(|entry| {
             entry.segments.iter().any(
@@ -2411,6 +2416,55 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
         })
         .count();
     assert_eq!(logged, 2);
+    assert_eq!(markers(events), [(P0, 1), (P0, 6)]);
+    let sixth = events
+        .iter()
+        .position(|event| {
+            *event
+                == GameEvent::ShortcutRepetition {
+                    controller: P0,
+                    repetition: 6,
+                }
+        })
+        .expect("marker 6");
+    for seat in [P1, P2] {
+        for departure in [
+            GameEvent::PlayerLost { player_id: seat },
+            GameEvent::PlayerEliminated { player_id: seat },
+        ] {
+            assert!(
+                events[..sixth].contains(&departure),
+                "{departure:?} before marker 6"
+            );
+        }
+    }
+    let line = |wanted: &str| {
+        result
+            .log_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry
+                    .segments
+                    .iter()
+                    .any(|segment| matches!(segment, LogSegment::Text(text) if text == wanted))
+            })
+            .map(|(index, entry)| (index, entry.segments.last().cloned()))
+            .collect::<Vec<_>>()
+    };
+    let eliminated_lines = line(" is eliminated");
+    let marker_lines = line(" repeats the loop — repetition ");
+    assert_eq!(eliminated_lines.len(), 2);
+    assert_eq!(
+        marker_lines
+            .iter()
+            .map(|(_, last)| last.clone())
+            .collect::<Vec<_>>(),
+        [Some(LogSegment::Number(1)), Some(LogSegment::Number(6))]
+    );
+    assert!(eliminated_lines
+        .iter()
+        .all(|(index, _)| *index < marker_lines[1].0));
 
     let seven = taken(&offered, 7);
     assert_eq!(seven.waiting_for, WaitingFor::GameOver { winner: Some(P0) });

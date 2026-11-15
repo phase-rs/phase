@@ -29,6 +29,7 @@
 //! ("resolve_trigger", "apply_damage") here is out of scope; this is a
 //! structural legality pipeline, not a rules engine.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -265,15 +266,81 @@ impl SimulationFilter {
             if before == Some(after) {
                 return true;
             }
-            !matches!(
-                crate::game::casting_costs::post_origin_auto_payment_verdict(&mut sim, &pending,),
-                Some(false)
-            )
+            match crate::game::casting_costs::post_origin_auto_payment_verdict(&mut sim, &pending) {
+                // CR 601.2g-i: the Auto payer alone can't pay after targeting.
+                // Offer the cast only if the real reducer, from the same
+                // announcement, actually completes it (mana abilities the Auto
+                // payer doesn't activate included); no witness keeps the refusal.
+                Some(false) => {
+                    targeted_cast_offer_witnessed(state, actor, semantic_owner, &candidate.action)
+                }
+                Some(true) | None => true,
+            }
         })
     }
 }
 
 type SpellRootProvenance = (ObjectId, Option<CastingPermissionIndex>);
+
+thread_local! {
+    /// Reducer applications the targeted-cast offer witness may still spend in
+    /// the current filter pass; `None` outside a pass.
+    static OFFER_WITNESS_POOL: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Scopes one filter pass's shared offer-witness pool: however many casts
+/// qualify, one pass spends at most the AI's own per-decision payment ceiling.
+struct OfferWitnessPoolGuard {
+    previous: Option<usize>,
+}
+
+impl OfferWitnessPoolGuard {
+    fn enter() -> Self {
+        let previous = OFFER_WITNESS_POOL.with(|pool| {
+            pool.replace(Some(
+                super::payment_continuation::PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+            ))
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for OfferWitnessPoolGuard {
+    fn drop(&mut self) {
+        OFFER_WITNESS_POOL.with(|pool| pool.set(self.previous));
+    }
+}
+
+/// CR 601.2a-i: whether the bounded reducer witness completes this targeted
+/// Auto cast. Each run gets at most the per-cast bound, and within a filter
+/// pass at most what the pass's pool has left; the pool is debited by the
+/// applications actually spent. Exhaustion is never a completion.
+fn targeted_cast_offer_witnessed(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: &GameAction,
+) -> bool {
+    use super::payment_continuation::{
+        witness_targeted_cast_offer, TargetedCastVerdict, TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
+    };
+    let pool = OFFER_WITNESS_POOL.with(Cell::get);
+    let allowance = pool.map_or(TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS, |remaining| {
+        remaining.min(TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS)
+    });
+    let witness = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::TargetedOfferWitness,
+        );
+        witness_targeted_cast_offer(state, actor, semantic_owner, action, allowance)
+    };
+    if let Some(remaining) = pool {
+        OFFER_WITNESS_POOL.with(|cell| cell.set(Some(remaining - witness.reducer_attempts)));
+    }
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_targeted_offer_witness(&witness);
+    witness.verdict == TargetedCastVerdict::Completed
+}
 
 fn pending_spell_root_provenance(state: &GameState) -> Option<SpellRootProvenance> {
     state
@@ -504,6 +571,7 @@ impl FilterPipeline {
         let poison = LegalityPoisonGates::compute(state);
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
+        let _offer_witness_pool = OfferWitnessPoolGuard::enter();
         candidates
             .into_iter()
             .filter(|c| {
@@ -1236,17 +1304,9 @@ fn resolved_ability_target_filters_safe(ability: &ResolvedAbility) -> bool {
             return false;
         }
     }
-    if let Some(sub) = &ability.sub_ability {
-        if !resolved_ability_target_filters_safe(sub) {
-            return false;
-        }
-    }
-    if let Some(els) = &ability.else_ability {
-        if !resolved_ability_target_filters_safe(els) {
-            return false;
-        }
-    }
-    true
+    ability
+        .child_links()
+        .all(|(_, child)| resolved_ability_target_filters_safe(child))
 }
 
 /// Conservative per-`FilterPipeline::apply` poison gates, computed ONCE via a
@@ -1540,6 +1600,10 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
+    use crate::analysis::decision_template::IterationCount;
+    use crate::analysis::loop_check::{
+        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+    };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
@@ -3465,5 +3529,163 @@ mod tests {
             0,
             "`accept_with_probe` must answer an enumerated search selection without cloning"
         );
+    }
+
+    /// #10464: CR 732.2b/c — an opponent's accept-or-shorten answer is a PROMPT ANSWER, so the
+    /// prompt-answer authority must decide it. Without that arm the answer fell through to
+    /// `fallback_simulation`, which clones the state and APPLIES the answer: for the last
+    /// responder the Accept takes the whole shortcut, so a 1000-repetition loop paid a full
+    /// take to check legality and then paid it again to take it.
+    ///
+    /// The verdict asserts are reach guards; the per-method zero counters are the evidence.
+    /// `Shorten` is exercised at place 1 of a two-repetition proposal that still has a queued
+    /// responder, so the reducer advances the window instead of materializing a take — this row
+    /// measures the HATCH, not the drive.
+    #[test]
+    fn shortcut_response_hatch_is_wired_into_both_accept_methods() {
+        // CR 732.2c: one queued responder is what keeps an Accept on the advance path — the
+        // shortcut is taken only once the last player has answered. The count is two so place 1
+        // is a CR 732.2b shortening place the proposal admits.
+        let shortcut_state = || {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::RespondToShortcut {
+                player: PlayerId(0),
+                remaining_players: vec![PlayerId(1)],
+                proposal: ShortcutProposal {
+                    proposer: PlayerId(1),
+                    predicted_winner: None,
+                    count: IterationCount::Fixed(2),
+                    unbounded: Vec::new(),
+                    rising: Vec::new(),
+                    win_kind: None,
+                    win_kind_at: None,
+                    template: None,
+                    per_cycle: None,
+                    shortened_by: None,
+                    published_declaration: None,
+                    leading_aims: Vec::new(),
+                    road: OfferRoad::Ring,
+                    counted_take: Default::default(),
+                    period: Default::default(),
+                },
+            };
+            state
+        };
+        let candidate = |response| CandidateAction {
+            action: GameAction::RespondToShortcut { response },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
+        };
+
+        for response in [
+            ShortcutResponse::Accept,
+            ShortcutResponse::Shorten { at_iteration: 1 },
+        ] {
+            let state = shortcut_state();
+            let candidate = candidate(response);
+
+            // Reach guard + the `cheap ⊆ sim` half of the invariant: the authority admits it,
+            // and the probe the hatch replaces admits it too.
+            assert!(
+                crate::ai_support::structurally_valid_prompt_answer(&state, &candidate.action),
+                "the prompt-answer authority must admit {:?}",
+                candidate.action
+            );
+            assert!(
+                pass_oracle_accepts(&state, &candidate),
+                "SimulationFilter's probe must accept {:?}",
+                candidate.action
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept(&state, &candidate));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept` must answer a shortcut response without cloning the state"
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept_with_probe` must answer a shortcut response without cloning the state"
+            );
+        }
+    }
+
+    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects,
+    /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
+    /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
+    /// place after skipping the clone that used to reject it.
+    #[test]
+    fn shortcut_response_authority_refuses_every_reducer_refusal() {
+        let state_with = |count: IterationCount, counted_take: CountedTake| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::RespondToShortcut {
+                player: PlayerId(0),
+                remaining_players: vec![PlayerId(1)],
+                proposal: ShortcutProposal {
+                    proposer: PlayerId(1),
+                    predicted_winner: None,
+                    count,
+                    unbounded: Vec::new(),
+                    rising: Vec::new(),
+                    win_kind: None,
+                    win_kind_at: None,
+                    template: None,
+                    per_cycle: None,
+                    shortened_by: None,
+                    published_declaration: None,
+                    leading_aims: Vec::new(),
+                    road: OfferRoad::Ring,
+                    counted_take,
+                    period: Default::default(),
+                },
+            };
+            state
+        };
+        let shorten = |at_iteration: u32| CandidateAction {
+            action: GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten { at_iteration },
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
+        };
+
+        let budget = crate::game::engine::MAX_SHORTCUT_CYCLES;
+        for (label, count, counted_take, at_iteration) in [
+            // CR 732.2b: a place at the proposed count names no different choice.
+            (
+                "a place at the proposed count",
+                IterationCount::Fixed(2),
+                CountedTake::Performs,
+                2,
+            ),
+            // The drive's own ceiling, which the reducer refuses before the take.
+            (
+                "a place past the drive's budget",
+                IterationCount::Fixed(budget + 2),
+                CountedTake::Performs,
+                budget + 1,
+            ),
+            // CR 732.2a: a take that performs no repetition leaves place 0 the only place.
+            (
+                "a place on a take that refuses",
+                IterationCount::Fixed(2),
+                CountedTake::Unperformable(UnperformableCause::UncontainedChoice),
+                1,
+            ),
+        ] {
+            let state = state_with(count, counted_take);
+            let candidate = shorten(at_iteration);
+            assert!(
+                !crate::ai_support::structurally_valid_prompt_answer(&state, &candidate.action),
+                "the authority must refuse {label}"
+            );
+            assert!(
+                !pass_oracle_accepts(&state, &candidate),
+                "the probe must refuse {label} too, or the hatch offers what the reducer rejects"
+            );
+        }
     }
 }

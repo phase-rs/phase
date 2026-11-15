@@ -1,10 +1,86 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::player::PlayerId;
 
-/// CR 701.20e: Reveal the top card(s) of a player's library.
+/// Whose library a `RevealTop` reveals from, bound once for both [`resolve`]
+/// and [`optional_reveal_is_infeasible`].
+enum RevealSubjects {
+    /// "Two target players each reveal the top card of their library" (Parker
+    /// Luck): every targeted player reveals their own top card.
+    EachTargeted(Vec<PlayerId>),
+    /// One player, or `None` when the player reference names no one
+    /// (CR 608.2b — see `resolve_player_for_context_ref`).
+    One(Option<PlayerId>),
+}
+
+/// CR 701.20 + CR 601.2c: "two target players each reveal the top card of their
+/// library" (Parker Luck). When the reveal is a true `Player`-target reveal with
+/// more than one chosen player, every targeted player reveals their own top card
+/// and the full ordered set lands in `last_revealed_ids`. Guarded on the targeted
+/// `Player` filter + `> 1` chosen players so single-target reveals and
+/// context-ref (`Controller`/`ScopedPlayer`) `player_scope` reveals (Duskmantle
+/// Seer) are byte-unchanged.
+///
+/// CR 115.1: Mirror Draw/Mill/Discard — context-ref filters (Controller,
+/// DefendingPlayer, etc.) must consult state slots, not `ability.targets`,
+/// so a chained "reveal top of your library" sub-ability does not inherit
+/// the parent's Player target and reveal from the wrong library.
+fn reveal_subjects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    player_filter: &TargetFilter,
+) -> RevealSubjects {
+    let targeted_players: Vec<PlayerId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            TargetRef::Object(_) => None,
+        })
+        .collect();
+    if matches!(player_filter, TargetFilter::Player) && targeted_players.len() > 1 {
+        RevealSubjects::EachTargeted(targeted_players)
+    } else {
+        RevealSubjects::One(super::resolve_player_for_context_ref(
+            state,
+            ability,
+            player_filter,
+        ))
+    }
+}
+
+/// CR 608.2d + CR 701.20a: "you may reveal the top card of your library" is an
+/// impossible option when it would reveal no card at all — every library it
+/// reads is empty, or it names no player. CR 608.2d's empty-library exception
+/// covers drawing only (CR 121.3). Fewer cards than the count is not
+/// impossible: the reveal does as much as possible (CR 609.3).
+pub(crate) fn optional_reveal_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let Effect::RevealTop { count, player } = &ability.effect else {
+        return false;
+    };
+    if *count == 0 {
+        return true;
+    }
+    match reveal_subjects(state, ability, player) {
+        // WATCH-POINT N2 mirror: `resolve` skips a missing player or an empty
+        // library individually, so the reveal is impossible only when it skips
+        // every targeted player.
+        RevealSubjects::EachTargeted(players) => players.into_iter().all(|pid| {
+            state
+                .players
+                .get(pid.0 as usize)
+                .is_none_or(|player| state.library_of(player.id).is_empty())
+        }),
+        RevealSubjects::One(None) => true,
+        RevealSubjects::One(Some(pid)) => state.library_of(pid).is_empty(),
+    }
+}
+
+/// CR 701.20a: Reveal the top card(s) of a player's library.
 ///
 /// Resolves the `player` target filter (typically `DefendingPlayer` or `Controller`)
 /// into a PlayerId, then takes the top `count` cards from that player's library,
@@ -21,73 +97,53 @@ pub fn resolve(
 
     state.last_parent_target_missing_reason = None;
 
-    // CR 701.20 + CR 601.2c: "two target players each reveal the top card of their
-    // library" (Parker Luck). When the reveal is a true `Player`-target reveal with
-    // more than one chosen player, every targeted player reveals their own top card
-    // and the full ordered set lands in `last_revealed_ids`. Guarded on the targeted
-    // `Player` filter + `> 1` chosen players so single-target reveals and
-    // context-ref (`Controller`/`ScopedPlayer`) `player_scope` reveals (Duskmantle
-    // Seer) are byte-unchanged.
-    let targeted_players: Vec<crate::types::player::PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-            crate::types::ability::TargetRef::Object(_) => None,
-        })
-        .collect();
-    if matches!(player_filter, crate::types::ability::TargetFilter::Player)
-        && targeted_players.len() > 1
-    {
-        let mut accumulated: Vec<crate::types::identifiers::ObjectId> = Vec::new();
-        for pid in targeted_players {
-            let Some(player) = state.players.get(pid.0 as usize) else {
-                continue;
-            };
-            // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
-            // early-return, or a first empty library would suppress every later
-            // player's reveal (CR 608.2b fail-closed per player).
-            let library = state.library_of(player.id);
-            if library.is_empty() {
-                continue;
+    let target_player = match reveal_subjects(state, ability, &player_filter) {
+        RevealSubjects::EachTargeted(targeted_players) => {
+            let mut accumulated: Vec<crate::types::identifiers::ObjectId> = Vec::new();
+            for pid in targeted_players {
+                let Some(player) = state.players.get(pid.0 as usize) else {
+                    continue;
+                };
+                // WATCH-POINT N2: skip an empty library INDIVIDUALLY — never
+                // early-return, or a first empty library would suppress every later
+                // player's reveal (CR 608.2b fail-closed per player).
+                let library = state.library_of(player.id);
+                if library.is_empty() {
+                    continue;
+                }
+                let count_n = count.min(library.len());
+                let revealed_ids: Vec<_> = library.iter().take(count_n).copied().collect();
+                // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
+                for &card_id in &revealed_ids {
+                    state.revealed_cards.insert(card_id);
+                }
+                let card_names: Vec<String> = revealed_ids
+                    .iter()
+                    .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                    .collect();
+                events.push(GameEvent::CardsRevealed {
+                    player: pid,
+                    card_ids: revealed_ids.clone(),
+                    card_names,
+                });
+                accumulated.extend(revealed_ids);
             }
-            let count_n = count.min(library.len());
-            let revealed_ids: Vec<_> = library.iter().take(count_n).copied().collect();
-            // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
-            for &card_id in &revealed_ids {
-                state.revealed_cards.insert(card_id);
-            }
-            let card_names: Vec<String> = revealed_ids
-                .iter()
-                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
-                .collect();
-            events.push(GameEvent::CardsRevealed {
-                player: pid,
-                card_ids: revealed_ids.clone(),
-                card_names,
+            // CR 108.3 + CR 608.2c: the full ordered set drives owner-keyed per-player
+            // binding and the OtherRevealedCard by-exclusion cross-loss.
+            super::publish_reveal_result(state, accumulated);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Reveal,
+                source_id: ability.source_id,
+                subject: None,
             });
-            accumulated.extend(revealed_ids);
+            return Ok(());
         }
-        // CR 108.3 + CR 608.2c: the full ordered set drives owner-keyed per-player
-        // binding and the OtherRevealedCard by-exclusion cross-loss.
-        super::publish_reveal_result(state, accumulated);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::Reveal,
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
-
-    // CR 115.1: Mirror Draw/Mill/Discard — context-ref filters (Controller,
-    // DefendingPlayer, etc.) must consult state slots, not `ability.targets`,
-    // so a chained "reveal top of your library" sub-ability does not inherit
-    // the parent's Player target and reveal from the wrong library.
-    let Some(target_player) = super::resolve_player_for_context_ref(state, ability, &player_filter)
-    else {
-        super::publish_reveal_result(state, Vec::new());
-        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
-        return Ok(());
+        RevealSubjects::One(None) => {
+            super::publish_reveal_result(state, Vec::new());
+            state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+            return Ok(());
+        }
+        RevealSubjects::One(Some(target_player)) => target_player,
     };
 
     let library = state.library_of(target_player);
@@ -294,5 +350,99 @@ mod tests {
             !state.revealed_cards.contains(&p1_top),
             "P1's library top must NOT be revealed — inherited parent target must not override Controller filter"
         );
+    }
+
+    fn library_card(state: &mut GameState, owner: PlayerId, card: u64) -> ObjectId {
+        create_object(
+            state,
+            CardId(card),
+            owner,
+            format!("Library Card {card}"),
+            Zone::Library,
+        )
+    }
+
+    fn optional_reveal(
+        player: TargetFilter,
+        count: u32,
+        targets: Vec<TargetRef>,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::RevealTop { player, count },
+            targets,
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// U2-a/b — CR 608.2d + CR 701.20a + CR 609.3: "you may reveal the top card
+    /// of your library" is impossible with an empty library, but a library
+    /// smaller than the count still reveals what it has.
+    #[test]
+    fn optional_reveal_is_infeasible_only_when_it_would_reveal_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let reveal_one = optional_reveal(TargetFilter::Controller, 1, vec![]);
+        assert!(
+            optional_reveal_is_infeasible(&state, &reveal_one),
+            "an empty library has no top card to reveal"
+        );
+
+        library_card(&mut state, PlayerId(0), 1);
+        let reveal_three = optional_reveal(TargetFilter::Controller, 3, vec![]);
+        assert!(
+            !optional_reveal_is_infeasible(&state, &reveal_one),
+            "reach: one card is revealable"
+        );
+        assert!(
+            !optional_reveal_is_infeasible(&state, &reveal_three),
+            "fewer cards than the count reveals as many as possible (CR 609.3)"
+        );
+    }
+
+    /// U2-c — CR 701.20a + CR 601.2c: "two target players each reveal …" is
+    /// feasible while any targeted library has a card, and impossible when every
+    /// targeted library is empty.
+    #[test]
+    fn optional_each_targeted_reveal_needs_one_nonempty_library() {
+        let reveal = optional_reveal(
+            TargetFilter::Player,
+            1,
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+        );
+        let mut state = GameState::new_two_player(42);
+        assert!(
+            optional_reveal_is_infeasible(&state, &reveal),
+            "both targeted libraries are empty"
+        );
+        library_card(&mut state, PlayerId(1), 1);
+        assert!(
+            !optional_reveal_is_infeasible(&state, &reveal),
+            "the second targeted player still reveals a card"
+        );
+    }
+
+    /// U2-d — CR 608.2b + CR 608.2d: a reveal whose player reference names no
+    /// one (an unannounced declared player) reveals nothing, so it is impossible
+    /// even when libraries have cards.
+    #[test]
+    fn optional_reveal_naming_no_player_is_infeasible() {
+        let mut state = GameState::new_two_player(42);
+        library_card(&mut state, PlayerId(0), 1);
+        library_card(&mut state, PlayerId(1), 2);
+        let reveal = optional_reveal(
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId(
+                    crate::types::ability::ChosenGroupId::DECLARED_PLAYER_BASE,
+                ),
+            },
+            1,
+            vec![],
+        );
+        assert!(optional_reveal_is_infeasible(&state, &reveal));
     }
 }

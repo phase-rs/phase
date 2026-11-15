@@ -222,6 +222,9 @@ enum RunContext {
     Measurement,
 }
 
+/// Error for a missing, blank, or flag-shaped `--watch-cards` value.
+const WATCH_CARDS_REQUIRES: &str = "error: --watch-cards requires a comma-separated card name list";
+
 /// Pure argument parser: consumes the raw process args plus the one
 /// env-derived flag `main` reads once (`measurement_env`, from
 /// `PHASE_AI_MEASUREMENT` -- presence-based, matching `PHASE_DUMP_*`
@@ -232,10 +235,9 @@ enum RunContext {
 /// `--players`, and `--games-file` validation) that used to live directly in
 /// `main`, so `main` itself does nothing but read the env var, call this, and
 /// report success/failure. Error paths return an `Err` instead, exactly
-/// mirroring the direct-exit message each replaces, with two exceptions that
-/// still exit with status 1 directly: a rejected difficulty label
-/// (`--difficulty`, `--difficulty-pK`), via `parse_difficulty`, and a rejected
-/// `--action-cap` value, via `parse_action_cap`.
+/// mirroring the direct-exit message each replaces. Every value-taking flag
+/// rejects a missing or unparseable value with an error naming that flag; none
+/// falls back to its default.
 fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
     let mut cards_path: Option<String> = None;
     let mut combo_table: Option<PathBuf> = None;
@@ -263,36 +265,30 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
-            "--seed" => {
-                if let Some(v) = args_iter.next() {
-                    if let Ok(n) = v.parse::<u64>() {
-                        seed = n;
-                    }
-                }
-            }
-            "--difficulty" => {
-                if let Some(v) = args_iter.next() {
-                    difficulty = parse_difficulty(v);
-                }
-            }
+            "--seed" => match args_iter.next() {
+                Some(v) => seed = parse_seed(v)?,
+                None => return Err("error: --seed requires an integer".to_string()),
+            },
+            "--difficulty" => match args_iter.next() {
+                Some(v) => difficulty = parse_difficulty_checked("--difficulty", v)?,
+                None => return Err("error: --difficulty requires a difficulty label".to_string()),
+            },
             "--bracket" => match args_iter.next() {
                 Some(value) => bracket = Some(parse_bracket(value)?),
                 None => return Err("error: --bracket requires a bracket label".to_string()),
             },
-            "--action-cap" => {
-                if let Some(v) = args_iter.next() {
-                    action_cap = parse_action_cap(v);
-                }
-            }
+            "--action-cap" => match args_iter.next() {
+                Some(v) => action_cap = parse_action_cap_checked(v)?,
+                None => return Err("error: --action-cap requires a positive integer".to_string()),
+            },
             "--players" => match args_iter.next() {
                 Some(v) => players = parse_player_count(v)?,
                 None => return Err("error: --players requires a seat count".to_string()),
             },
-            "--feed" => {
-                if let Some(v) = args_iter.next() {
-                    feed = v.clone();
-                }
-            }
+            "--feed" => match args_iter.next() {
+                Some(v) => feed = v.clone(),
+                None => return Err("error: --feed requires a path".to_string()),
+            },
             "--combo-table" => match args_iter.next() {
                 Some(value) if !value.trim().is_empty() && !value.starts_with("--") => {
                     combo_table = Some(PathBuf::from(value));
@@ -323,19 +319,21 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
             },
             "--watch-cards" => match args_iter.next() {
                 Some(v) => {
-                    watch_cards = v
+                    let names: HashSet<String> = v
                         .split(',')
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                    // Parity with `--watch-card`: an all-blank list or a
+                    // following flag taken as the value is a mistake, not an
+                    // empty set (which would silently switch telemetry off).
+                    if names.is_empty() || v.trim_start().starts_with("--") {
+                        return Err(WATCH_CARDS_REQUIRES.to_string());
+                    }
+                    watch_cards = names;
                 }
-                None => {
-                    return Err(
-                        "error: --watch-cards requires a comma-separated card name list"
-                            .to_string(),
-                    );
-                }
+                None => return Err(WATCH_CARDS_REQUIRES.to_string()),
             },
             "--watch-card" => match args_iter.next() {
                 Some(v) => {
@@ -382,7 +380,12 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
         let (idx, value) = parse_seat_override(axis.flag(), suffix, value, players)?;
         let seat = &mut seats[idx];
         match axis {
-            SeatAxis::Difficulty => seat.difficulty = Some(parse_difficulty(value)),
+            SeatAxis::Difficulty => {
+                seat.difficulty = Some(parse_difficulty_checked(
+                    &format!("{}{suffix}", axis.flag()),
+                    value,
+                )?)
+            }
             SeatAxis::Bracket => seat.tier = Some(parse_bracket(value)?),
             SeatAxis::Deck => seat.deck = Some(PathBuf::from(value)),
         }
@@ -408,7 +411,7 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
     }
 
     // `--games-file` batch entries are validated up front — same hard-fail-at-
-    // startup discipline as `parse_difficulty`/`parse_action_cap`/
+    // startup discipline as `parse_difficulty_checked`/`parse_action_cap_checked`/
     // `parse_seat_override` above: a garbled batch file should fail before the
     // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
     let batch_games: Option<Vec<(u64, AiDifficulty)>> = match games_file.as_deref() {
@@ -1411,7 +1414,8 @@ fn read_dump_env(key: &str) -> Option<String> {
         .expect("invalid Unicode in dump-destination env var")
 }
 
-/// Parses a `--difficulty` value. Delegates the actual label→enum mapping to
+/// Parses a `--difficulty` / `--difficulty-pK` value (`flag` names which, for
+/// the error message). Delegates the actual label→enum mapping to
 /// `AiDifficulty::from_label` (the crate's single authority — see its doc
 /// comment) so this binary's understanding of each label can never drift from
 /// every other transport that parses one. Unlike `from_label` itself, which
@@ -1421,34 +1425,32 @@ fn read_dump_env(key: &str) -> Option<String> {
 /// mislabeled skill tier with no indication anything went wrong (phase#6080
 /// diagnosis; pod-lab gauntlet plan §3.8/§4.5, whose local tier-echo guard
 /// exists precisely because this class of silent downgrade was possible).
-fn parse_difficulty(s: &str) -> AiDifficulty {
+fn parse_difficulty_checked(flag: &str, s: &str) -> Result<AiDifficulty, String> {
     if !ACCEPTED_DIFFICULTY_LABELS
         .iter()
         .any(|label| label.eq_ignore_ascii_case(s.trim()))
     {
-        eprintln!(
-            "error: unrecognized --difficulty {s:?}; accepted values: {}",
+        return Err(format!(
+            "error: unrecognized {flag} {s:?}; accepted values: {}",
             ACCEPTED_DIFFICULTY_LABELS.join(", ")
-        );
-        std::process::exit(1);
+        ));
     }
-    AiDifficulty::from_label(s)
+    Ok(AiDifficulty::from_label(s))
 }
 
-/// Parses an `--action-cap` value, aborting startup on a garbled cap. Thin
-/// exiting wrapper over [`parse_action_cap_checked`] — see it for the rule.
-fn parse_action_cap(s: &str) -> usize {
-    parse_action_cap_checked(s).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    })
+/// Parses a `--seed` value. A non-numeric seed is an `Err`, never a silent
+/// fallback to the default seed (which would run a different game than asked).
+fn parse_seed(s: &str) -> Result<u64, String> {
+    s.trim()
+        .parse::<u64>()
+        .map_err(|_| format!("error: --seed {s:?} must be a non-negative integer"))
 }
 
 /// Validates an `--action-cap` value: a positive integer (whitespace trimmed).
 /// A garbled cap (non-numeric, or zero) would either silently keep the built-in
 /// default or abort every game on the first batch — both the same silent-poison
-/// failure class `parse_difficulty` guards against — so it is returned as an
-/// `Err` the wrapper turns into a hard startup error rather than falling back.
+/// failure class `parse_difficulty_checked` guards against — so it is returned as an
+/// `Err` that `parse_cli` propagates as a hard startup error rather than falling back.
 fn parse_action_cap_checked(s: &str) -> Result<usize, String> {
     match s.trim().parse::<usize>() {
         Ok(n) if n > 0 => Ok(n),
@@ -1480,12 +1482,13 @@ fn parse_player_count(s: &str) -> Result<u8, String> {
 }
 
 /// Resolves a parameterized `--<axis>-pK <value>` seat override. `suffix` is the
-/// text after the flag stem; `value` is the following CLI argument, if
-/// present. Mirrors the hard-fail discipline of `parse_difficulty` /
-/// `parse_action_cap`: a non-numeric or out-of-range (`>= players`) seat index,
+/// text after the flag stem, so errors echo the flag exactly as typed; `value` is
+/// the following CLI argument, if present. Mirrors the hard-fail discipline of
+/// `parse_difficulty_checked` / `parse_action_cap_checked`: a non-numeric or
+/// out-of-range (`>= players`) seat index,
 /// or a missing label, is a startup error rather than a silently dropped flag —
 /// which previously also swallowed the label arg, cascading it into the
-/// catch-all. Label validity is delegated to `parse_difficulty` by the caller.
+/// catch-all. Label validity is delegated to `parse_difficulty_checked` by the caller.
 /// `players` is a validated seat count (`parse_player_count` /
 /// `DEFAULT_PLAYERS`, so ≥ 2). `parse_cli` calls this after the argument loop
 /// so the check doesn't depend on argument order.
@@ -1507,7 +1510,7 @@ fn parse_seat_override<'a>(
         })?;
     let label = value
         .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
-        .ok_or_else(|| format!("error: {flag}{idx} requires a value"))?;
+        .ok_or_else(|| format!("error: {flag}{suffix} requires a value"))?;
     Ok((idx, label))
 }
 
@@ -2732,6 +2735,87 @@ mod tests {
         ];
         for row in rows {
             assert!(parse_cli_args(row).is_err(), "row {row:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_cli_rejects_missing_or_malformed_value_naming_the_flag() {
+        // Reach guard: well-formed values still parse and reach the option.
+        let cli = parse_cli_args(&[
+            "--seed",
+            "7",
+            "--difficulty",
+            "Hard",
+            "--action-cap",
+            "9",
+            "--feed",
+            "f.json",
+            "--difficulty-p1",
+            "VeryHard",
+        ])
+        .expect("well-formed values must parse");
+        assert_eq!(cli.seed, 7);
+        assert_eq!(cli.difficulty, AiDifficulty::Hard);
+        assert_eq!(cli.action_cap, 9);
+        assert_eq!(cli.feed, "f.json");
+        assert_eq!(cli.seats[1].difficulty, Some(AiDifficulty::VeryHard));
+        assert_eq!(parse_cli_args(&["--seed", " 7"]).unwrap().seed, 7);
+        let cli = parse_cli_args(&["--watch-cards", "Sol Ring, ,Arcane Signet"]).unwrap();
+        assert_eq!(cli.watch_cards.len(), 2);
+
+        // (args, flag the error must name, flags the error must NOT name)
+        let rows: &[(&[&str], &str, &[&str])] = &[
+            (&["--seed"], "--seed", &[]),
+            (&["--seed", "abc"], "--seed", &[]),
+            (&["--seed", "-1"], "--seed", &[]),
+            (&["--difficulty"], "--difficulty", &[]),
+            (&["--difficulty", "Bogus"], "--difficulty", &[]),
+            (&["--action-cap"], "--action-cap", &[]),
+            (&["--action-cap", "abc"], "--action-cap", &[]),
+            (&["--seed", " 7x"], "--seed", &[]),
+            (&["--feed"], "--feed", &[]),
+            (&["--watch-cards"], "--watch-cards", &[]),
+            (&["--watch-cards", ""], "--watch-cards", &[]),
+            (&["--watch-cards", "  "], "--watch-cards", &[]),
+            (&["--watch-cards", ","], "--watch-cards", &[]),
+            // A following flag must not be swallowed as the value.
+            (&["--watch-cards", "--seed", "7"], "--watch-cards", &[]),
+            (
+                &["--difficulty-p01", "Bogus"],
+                "--difficulty-p01",
+                &["--difficulty-p1", "unrecognized --difficulty "],
+            ),
+            (
+                &["--difficulty-p+1"],
+                "--difficulty-p+1",
+                &["--difficulty-p1 "],
+            ),
+            (&["--difficulty-p1"], "--difficulty-p1", &[]),
+            (
+                &["--difficulty-p1", "Bogus"],
+                "--difficulty-p1",
+                &["unrecognized --difficulty "],
+            ),
+            (
+                &["--players", "3", "--difficulty-p2", "Bogus"],
+                "--difficulty-p2",
+                &["unrecognized --difficulty "],
+            ),
+        ];
+        for (row, flag, absent) in rows {
+            let message = parse_cli_args(row)
+                .err()
+                .unwrap_or_else(|| panic!("row {row:?} must be rejected"));
+            assert!(
+                message.contains(flag),
+                "row {row:?}: error {message:?} must name {flag}"
+            );
+            for bad in *absent {
+                assert!(
+                    !message.contains(bad),
+                    "row {row:?}: error {message:?} must not contain {bad:?}"
+                );
+            }
         }
     }
 

@@ -24,10 +24,11 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
-import type { FormatConfig } from "../../adapter/types";
+import type { FormatConfig, TakebackEvent, TakebackResolution } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
-import { P2PHostAdapter } from "../../adapter/p2p-adapter";
+import { P2PGuestAdapter, P2PHostAdapter } from "../../adapter/p2p-adapter";
+import type { TransportConnection, TransportPeer } from "../../network/transport";
 import { WebSocketAdapter } from "../../adapter/ws-adapter";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -89,6 +90,7 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
     hostingStatus: "idle",
     playerSlots: [] as unknown[],
     displayName: "",
+    stateWithheld: null as { revision: number; reason: string } | null,
     setConnectionStatus: vi.fn(),
     setActionPending: vi.fn(),
     setLatency: vi.fn(),
@@ -161,51 +163,53 @@ vi.mock("../../game/dispatch.ts", () => ({
   currentSnapshot: new Map(),
 }));
 
-vi.mock("../../stores/gameStore", async () => ({
-  useGameStore: Object.assign(
-    vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
-      selector({
-        gameState: storeOverrides.gameState,
-        gameMode: storeOverrides.gameMode,
-        waitingFor: storeOverrides.waitingFor,
-        legalActions: [],
-        endContinuousEffectOffers: [],
-        autoPassRecommended: false,
-        spellCosts: {},
-        legalActionsByObject: {},
-        // CR 118.3: the acting-player "can't pay this cost right now" read-out.
-        // Mutable so a test can seed it; reset in `beforeEach` alongside the
-        // other `storeOverrides` fields.
-        activationBlockReasons: storeOverrides.activationBlockReasons,
-        events: [],
-        eventHistory: [],
-        logHistory: [],
-        adapter: storeOverrides.adapter,
-        lobbyProgress: null,
-      }),
+vi.mock("../../stores/gameStore", async () => {
+  const snapshot = (): Record<string, unknown> => ({
+    gameState: storeOverrides.gameState,
+    gameMode: storeOverrides.gameMode,
+    waitingFor: storeOverrides.waitingFor,
+    legalActions: [],
+    endContinuousEffectOffers: [],
+    autoPassRecommended: false,
+    spellCosts: {},
+    legalActionsByObject: {},
+    // CR 118.3: the acting-player "can't pay this cost right now" read-out.
+    // Mutable so a test can seed it; reset in `beforeEach` alongside the
+    // other `storeOverrides` fields.
+    activationBlockReasons: storeOverrides.activationBlockReasons,
+    events: [],
+    eventHistory: [],
+    logHistory: [],
+    adapter: storeOverrides.adapter,
+    lobbyProgress: null,
+  });
+  return {
+    useGameStore: Object.assign(
+      vi.fn((selector: (s: Record<string, unknown>) => unknown) => selector(snapshot())),
+      // The real `useKeyboardShortcuts` listener reads the store imperatively.
+      { getState: snapshot, setState: mockSetGameState },
     ),
-    { setState: mockSetGameState },
-  ),
-  clearGame: vi.fn(),
-  // The real predicate, and `importActual` is what makes that claim true.
-  // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
-  // only in this module; re-deriving it here as `mode === "online" || …` would
-  // pass while the real predicate classified a mode differently — exactly the
-  // failure the `takebackAudience` assertions below exist to catch. Only the
-  // predicate is taken: `useGameStore` stays the mock above, so the real
-  // zustand store is imported but never rendered against.
-  hasRemoteHumans: (
-    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
-  ).hasRemoteHumans,
-  canExportAuthoritativeState: (
-    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
-  ).canExportAuthoritativeState,
-  loadActiveGame: vi.fn(() => null),
-  saveActiveGame: vi.fn(),
-  clearActiveGame: vi.fn(),
-  loadGame: vi.fn(() => Promise.resolve(null)),
-  loadCheckpoints: vi.fn(() => Promise.resolve([])),
-}));
+    clearGame: vi.fn(),
+    // The real predicate, and `importActual` is what makes that claim true.
+    // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
+    // only in this module; re-deriving it here as `mode === "online" || …` would
+    // pass while the real predicate classified a mode differently — exactly the
+    // failure the `takebackAudience` assertions below exist to catch. Only the
+    // predicate is taken: `useGameStore` stays the mock above, so the real
+    // zustand store is imported but never rendered against.
+    hasRemoteHumans: (
+      await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+    ).hasRemoteHumans,
+    canExportAuthoritativeState: (
+      await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+    ).canExportAuthoritativeState,
+    loadActiveGame: vi.fn(() => null),
+    saveActiveGame: vi.fn(),
+    clearActiveGame: vi.fn(),
+    loadGame: vi.fn(() => Promise.resolve(null)),
+    loadCheckpoints: vi.fn(() => Promise.resolve([])),
+  };
+});
 
 // `FORMAT_DEFAULTS` is consumed at module top-level by multiplayerDraftStore
 // (and indexed by GamePage). This test mocks the whole store to avoid its
@@ -539,6 +543,12 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     renderGamePage("/game/test-game-123?format=Planechase&players=4");
 
     expect(capturedFormatConfig?.format).toBe("Planechase");
+  });
+
+  it("passes Planechase Commander to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=PlanechaseCommander&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("PlanechaseCommander");
   });
 
   // The setup screen hands its edited config over on the navigation rather than
@@ -1389,19 +1399,16 @@ describe("GamePage — a refused request is survivable", () => {
  * mode that never got the button, while spectators (whom `request_takeback`
  * rejects server-side) did.
  */
-describe("GamePage — takeback is a transport capability", () => {
-  class FakeWebSocketAdapter extends WebSocketAdapter {
-    // Real superclass construction, not a stub — `super(...)` runs. It is safe
-    // to call here because the constructor only assigns fields and
-    // `maxReconnectAttempts`; it opens no socket. The subclass exists solely
-    // to supply throwaway arguments, since all this fixture needs is
-    // `instanceof` to hold — the exact predicate GamePage and
-    // `handleRequestTakeback` both use.
-    constructor() {
-      super("ws://test/ws", "host", { main_deck: [], sideboard: [] });
-    }
+class FakeWebSocketAdapter extends WebSocketAdapter {
+  // Real superclass construction, not a stub — `super(...)` runs. It is safe
+  // to call here because the constructor only assigns fields and
+  // `maxReconnectAttempts`; it opens no socket.
+  constructor() {
+    super("ws://test/ws", "host", { main_deck: [], sideboard: [] });
   }
+}
 
+describe("GamePage — takeback is a transport capability", () => {
   it("offers takeback for a WebSocketAdapter in desktop-solo mode", () => {
     storeOverrides.adapter = new FakeWebSocketAdapter();
 
@@ -1447,6 +1454,26 @@ describe("GamePage — takeback is a transport capability", () => {
     renderGamePage("/game/test-game-123?mode=host");
 
     expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+    expect(screen.queryByTestId("state-withheld-banner")).toBeNull();
+  });
+
+  it("shows a withheld state's reason without taking the takeback control away", () => {
+    const reason = "The game state after this action is too large to send.";
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+    mockMultiplayerState.stateWithheld = { revision: 6, reason };
+    try {
+      renderGamePage("/game/test-game-123?mode=host");
+
+      const banner = screen.getByTestId("state-withheld-banner");
+      expect(banner).toHaveTextContent(reason);
+      expect(banner).toHaveClass("pointer-events-none");
+      expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+      act(() => capturedOnWsEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+      expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+      expect(screen.getByTestId("state-withheld-banner")).toBeInTheDocument();
+    } finally {
+      mockMultiplayerState.stateWithheld = null;
+    }
   });
 
   // F5 (M11 half). The label axis must come from the AUTHORITATIVE store mode,
@@ -1472,6 +1499,172 @@ describe("GamePage — takeback is a transport capability", () => {
     renderGamePage("/game/test-game-123?mode=host");
 
     expect(capturedGameMenuProps?.takebackAudience).toBe("table");
+  });
+});
+
+type StreamEvent = TakebackEvent | { type: "bootstrapDelivered" };
+
+describe("GamePage — takeback on P2P seats", () => {
+  // Real constructors: neither touches its transport until `initialize()`, and
+  // `supportsTakeback` is an instance field a prototype-only fixture would lack.
+  const P2P_SEATS = [
+    {
+      kind: "host",
+      mode: "p2p-host",
+      build: () => new P2PHostAdapter({}, {} as TransportPeer, () => () => {}, 2),
+    },
+    {
+      kind: "guest",
+      mode: "p2p-join",
+      build: () =>
+        new P2PGuestAdapter({}, {} as TransportPeer, "host-peer", {} as TransportConnection),
+    },
+  ] as const;
+
+  function mountSeat(
+    adapter: P2PHostAdapter | P2PGuestAdapter,
+    mode: "p2p-host" | "p2p-join" | "draft-match",
+  ) {
+    const senders = {
+      request: vi.spyOn(adapter, "sendRequestTakeback").mockImplementation(() => {}),
+      respond: vi.spyOn(adapter, "sendRespondTakeback").mockImplementation(() => {}),
+      cancel: vi.spyOn(adapter, "sendCancelTakeback").mockImplementation(() => {}),
+    };
+    storeOverrides.adapter = adapter;
+    storeOverrides.gameMode = mode;
+    renderGamePage(`/game/test-game-123?mode=${mode}`);
+    return senders;
+  }
+
+  it.each(P2P_SEATS)("offers the last-action request to a P2P $kind", ({ build, mode }) => {
+    const { request } = mountSeat(build(), mode);
+
+    expect(capturedGameMenuProps).toBeDefined();
+    const onRequestTakeback = capturedGameMenuProps?.onRequestTakeback;
+    expect(onRequestTakeback).toBeTypeOf("function");
+    act(() => (onRequestTakeback as () => void)());
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith();
+    expect(capturedGameMenuProps?.takebackAudience).toBe("table");
+  });
+
+  it.each(
+    P2P_SEATS.flatMap((seat) => [
+      { ...seat, button: "Approve", approve: true },
+      { ...seat, button: "Decline", approve: false },
+    ]),
+  )("lets a P2P $kind answer another seat's request: $button", async ({ build, mode, button, approve }) => {
+    const { respond } = mountSeat(build(), mode);
+
+    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: button }));
+
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith(approve);
+  });
+
+  it("lets a P2P host cancel its own request", async () => {
+    const { cancel } = mountSeat(P2P_SEATS[0].build(), "p2p-host");
+
+    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 0, requesterName: "host", voters: [1] }));
+    expect(screen.getByText("Takeback requested")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel request" }));
+
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("withholds the request where the page routes no adapter events (draft-match)", () => {
+    const adapter = P2P_SEATS[0].build();
+
+    mountSeat(adapter, "draft-match");
+    expect(capturedGameMenuProps).toBeDefined();
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeUndefined();
+
+    cleanup();
+    mountSeat(adapter, "p2p-host");
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+  });
+
+  const STREAMS = [
+    {
+      stream: "P2P",
+      url: "/game/test-game-123?mode=p2p-host",
+      build: P2P_SEATS[0].build,
+      send: (event: StreamEvent) => capturedOnP2PEvent?.(event),
+    },
+    {
+      stream: "WebSocket",
+      url: "/game/test-game-123?mode=host",
+      build: () => new FakeWebSocketAdapter(),
+      send: (event: StreamEvent) => capturedOnWsEvent?.(event),
+    },
+  ] as const;
+
+  it.each(STREAMS)("$stream: offers Approve/Decline only to a voter", ({ url, build, send }) => {
+    storeOverrides.adapter = build();
+    renderGamePage(url);
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [2] }));
+    expect(screen.queryByText("guest-one requests a takeback")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+
+    act(() => send({ type: "takebackRequested", requester: 0, requesterName: "host", voters: [1] }));
+    expect(screen.getByText("Takeback requested")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel request" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it.each(STREAMS)("$stream: a bootstrap closes the vote it does not replay", async ({ url, build, send }) => {
+    storeOverrides.adapter = build();
+    renderGamePage(url);
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+    act(() => send({ type: "bootstrapDelivered" }));
+    await waitFor(() => expect(screen.queryByText("guest-one requests a takeback")).toBeNull());
+
+    act(() => send({ type: "bootstrapDelivered" }));
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+  const RESOLUTION_TOASTS: ReadonlyArray<{ resolution: TakebackResolution; toasts: string[][] }> = [
+    { resolution: "approved", toasts: [] },
+    { resolution: "declined", toasts: [["Takeback request declined"]] },
+    { resolution: "cancelled", toasts: [["Takeback request cancelled"]] },
+    { resolution: "withdrawn", toasts: [["Takeback request withdrawn: a player left the game"]] },
+  ];
+
+  it.each(STREAMS.flatMap((s) => RESOLUTION_TOASTS.map((r) => ({ ...s, ...r }))))(
+    "$stream: a $resolution vote closes the dialog and toasts its cause",
+    async ({ url, build, send, resolution, toasts }) => {
+      storeOverrides.adapter = build();
+      renderGamePage(url);
+
+      act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+      expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+      mockMultiplayerState.showToast.mockClear();
+      act(() => send({ type: "takebackResolved", resolution, resolvedBy: 1 }));
+
+      await waitFor(() => expect(screen.queryByText("guest-one requests a takeback")).toBeNull());
+      expect(mockMultiplayerState.showToast.mock.calls).toEqual(toasts);
+      if (resolution === "withdrawn") {
+        expect(mockMultiplayerState.showToast.mock.calls.flat()).not.toContain("Takeback request declined");
+      }
+    },
+  );
+
+  it.each(P2P_SEATS)("toasts a P2P $kind's refused request raw", ({ build, mode }) => {
+    mountSeat(build(), mode);
+
+    act(() => capturedOnP2PEvent?.({ type: "requestRejected", reason: "A takeback request is already pending" }));
+
+    expect(mockMultiplayerState.showToast).toHaveBeenCalledWith("A takeback request is already pending");
   });
 });
 
@@ -1511,6 +1704,49 @@ describe("GamePage — desktop solo sandbox tools without the banner", () => {
     renderGamePage("/game/test-game-123?mode=ai");
 
     expect(screen.getByRole("status", { name: "Sandbox mode banner" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * GamePage is the authority on where Click Mode is offered: one
+ * `sandboxToolsAvailable` decision feeds both the K hotkey and the Game-menu
+ * toggle. The hook and the menu are tested below that seam with the flag or
+ * handler passed in directly, so these cases pin the decision itself through
+ * the real `useKeyboardShortcuts` listener GamePage mounts.
+ */
+describe("GamePage — Click Mode is offered only where sandbox tools are", () => {
+  beforeEach(() => {
+    useUiStore.setState({ debugInteractionMode: false, helpSheetOpen: false });
+  });
+  afterEach(() => {
+    useUiStore.setState({ debugInteractionMode: false, helpSheetOpen: false });
+  });
+
+  it("offers the menu toggle and the K hotkey in a game against the AI", () => {
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(capturedGameMenuProps?.onToggleDebugInteractionMode).toBeTypeOf("function");
+
+    fireEvent.keyDown(window, { key: "k" });
+
+    expect(useUiStore.getState().debugInteractionMode).toBe(true);
+  });
+
+  it("withholds both from an online seat in a game that is not sandbox-flagged", () => {
+    renderGamePage("/game/test-game-123?mode=host");
+
+    // Reach guard: GameMenu really was rendered, so the undefined prop is the
+    // gate rather than an unmounted menu.
+    expect(capturedGameMenuProps).toBeDefined();
+    expect(capturedGameMenuProps?.onToggleDebugInteractionMode).toBeUndefined();
+
+    fireEvent.keyDown(window, { key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+
+    // Reach guard for the inert K: the same listener is live and reaches its
+    // `switch`. Dispatched last, because an open help sheet swallows keys.
+    fireEvent.keyDown(window, { key: "?" });
+    expect(useUiStore.getState().helpSheetOpen).toBe(true);
   });
 });
 

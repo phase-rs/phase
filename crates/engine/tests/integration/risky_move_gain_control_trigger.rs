@@ -336,6 +336,7 @@ impl Board {
                     object_id,
                     old_controller,
                     new_controller,
+                    ..
                 } => Some((*object_id, *old_controller, *new_controller)),
                 _ => None,
             })
@@ -840,10 +841,10 @@ fn r10_zero_creatures_on_the_trigger_route_changes_nothing() {
     }
 }
 
-/// R12 (attribution only): the cleanup reversion of Word of Seizing's "until end
-/// of turn" control is a gain from another player, and its trigger is the
-/// gainer's (CR 514.2, CR 603.3a). No claim is made about the cleanup step's
-/// own trigger timing (CR 514.3a).
+/// R12 (attribution + timing): the cleanup reversion of Word of Seizing's
+/// "until end of turn" control is a gain from another player, and its trigger is
+/// the gainer's (CR 514.2, CR 603.3a). CR 514.3a: the reversion's trigger is put
+/// on the stack, and resolves, in that turn's cleanup step.
 #[test]
 fn r12_cleanup_reversion_gain_trigger_belongs_to_the_gainer() {
     let mut board = Board::new(Opts::on_battlefield(P0).hand(HandCard {
@@ -884,7 +885,15 @@ fn r12_cleanup_reversion_gain_trigger_belongs_to_the_gainer() {
 
     // Keep going: the until-end-of-turn effect ends and Risky Move reverts to P1.
     let changes_before_reversion = board.controller_changes().len();
+    let turn_before = board.state().turn_number;
     board.drive_to_prompt();
+    assert_eq!(
+        board.state().phase,
+        Phase::Cleanup,
+        "CR 514.3a: the trigger is placed in the cleanup step"
+    );
+    assert_eq!(board.state().active_player, P1);
+    assert_eq!(board.state().turn_number, turn_before);
     let reversion = board.controller_changes()[changes_before_reversion..].to_vec();
     assert!(
         reversion.contains(&(risky, P2, P1)),
@@ -934,6 +943,10 @@ fn c1_attribution_reads_event_endpoints_in_apnap_order() {
         "reach: the live controller is the last gainer, not the first"
     );
     assert_eq!(state.active_player, P0);
+    // Each event carries evidence captured from this board, as a control-change
+    // instruction records it before its change (the latch includes Risky Move).
+    let first = state.control_change_evidence_for_test(risky);
+    let second = state.control_change_evidence_for_test(risky);
     process_triggers(
         state,
         &[
@@ -941,11 +954,13 @@ fn c1_attribution_reads_event_endpoints_in_apnap_order() {
                 object_id: risky,
                 old_controller: P0,
                 new_controller: P1,
+                evidence: first,
             },
             GameEvent::ControllerChanged {
                 object_id: risky,
                 old_controller: P1,
                 new_controller: P2,
+                evidence: second,
             },
         ],
     );

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Zidane, Tantalus Thief / CR 603.10d control-change evidence (PR #9902): GameEvent::ControllerChanged gains evidence (a key into GameState::control_change_observations, the immediately-before watcher latch and subject snapshot that look-back control-change triggers read), ResolvedAbility gains control_change_instruction (a player-scope fan-out's capture carrier) and GameState gains control_change_observations and control_change_captures. An older full-game or P2P peer drops the evidence and resolves those triggers differently. Lobby, draft and directory surfaces are unchanged."
+}

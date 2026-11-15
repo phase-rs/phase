@@ -56,13 +56,22 @@ Keep the original requested behavior and acceptance criteria in every handoff. B
 
 A test that reaches the product and reveals wrong behavior calls for a product fix. Required evidence stays required at its due boundary; scheduling it later under Step 5 is not dropping it, a failed check, or grounds for an expansion case. Never report a deferred check as passed.
 
+## Real cards
+
+The engine's job is to execute real cards. This rule binds every role in this pipeline and every skill that links here, in every artifact: plans and charters, addenda, executor and final reports, review findings, PR bodies and review replies.
+
+- Every explanation or justification of engine behavior names the real printed card(s), quotes their verbatim Oracle text from Scryfall or MTGJSON, and cites the CR rule grep-verified in `docs/MagicCompRules.txt`.
+- A test name, a synthetic card or an abstract shape is never the justification. A test is evidence for a claim about a real card, not the authority for it.
+- Every card whose text a test exercises is a real printed card with verbatim Oracle text ([card-test](../card-test/SKILL.md)); a textless filler body is not justification and is exempt. A synthetic card is acceptable only where no printed card exhibits the shape; the test then says so and names the nearest printed card. When no printed card exhibits the shape, first ask whether the behavior is needed at all.
+- Reviewers report a violation as a finding that changes the artifact, never as a note.
+
 ## Run limits
 
 Apply these before every dispatch or verification-tool edit and after every result, across all modes, phases and renamed successor work for the original task.
 
 **Attempt history.** Every planner, reviewer and executor receives the original task and acceptance criteria, current scope, the budget, and a brief attempt history: each review loop's rounds with their finding tags, and every expansion case with its outcome. Keep it in the [phase-fit record](#phase-fit-record); create no other ledger, schema or tracking script. If prior history is lost, report that and stop rather than reset it.
 
-**Finding classes.** Reviewers tag every blocking finding — every plan-review blocker or material gap, and every HIGH or MED implementation-review finding (a LOW finding that reports no wrong behavior rides along with a design round or ships as a residual; any finding reporting wrong behavior is blocking):
+**Finding classes.** Reviewers tag every blocking finding — every plan-review blocker or material gap, and every HIGH or MED implementation-review finding (a LOW finding that reports no wrong behavior rides along with a design round or, with none due, closes through Step 6 by its tag, because a finding the change introduces is never a clean residual; any finding reporting wrong behavior is blocking):
 
 - `behavior` — closing it changes product code or tests: a design choice, a missing site or path, a wrong or vacuous test, a false CR claim.
 - `text` — it quotes a coordinate and supplies the replacement text (or the repair is deleting the sentence), and closing it changes nothing the code does.
@@ -98,9 +107,9 @@ A budget or approval covers one original task. A generic "continue" approves not
 
 Argue from the open item and the prediction record only. Work already spent is not a reason. Claim no severity or convergence the finding list does not show, and never offer to drop a required check.
 
-**Decline path.** Preserve commits and working changes. Before implementation, a declined case stops the run unless every open finding is `text`, which the orchestrator applies before continuing. After implementation, these may ship as residuals, each listed under the PR's Validation Failures with its evidence and a follow-up: `text` findings, LOW findings that report no wrong behavior, and observations outside the acceptance criteria. A final review whose only findings are listed residuals then counts as clean. Any HIGH or MED finding tagged `behavior` or `machinery`, wrong behavior for the card class, a false CR claim, or missing required evidence stops with no PR.
+**Decline path.** Preserve commits and working changes. Before implementation, a declined case stops the run unless every open finding is `text`, which the orchestrator applies before continuing. After implementation, a finding the change introduces is never a clean residual, at any severity, under the [deferral rule](../../../docs/AI-CONTRIBUTOR.md#5-validate-the-review-actually-happened-and-was-addressed); it closes through Step 6 within the run's authorization. If a declined case leaves only `text` findings and LOW findings that report no wrong behavior open, the PR may still open with each listed as unresolved under its Validation Failures, with its evidence, and no clean final review is claimed ([pr-handoff.md](pr-handoff.md)). An item on the review's Pre-existing list may be listed there as a disclosed item; it is logged and never blocks. A promised outcome the change does not deliver is an introduced incomplete-claim finding, never a pre-existing item. Any HIGH or MED finding tagged `behavior` or `machinery`, wrong behavior for the card class, a false CR claim, or missing required evidence stops with no PR.
 
-**At a stop**, report the original goal, completed product work, open items, each loop's round tags and prediction record, and the smallest next action as an expansion case. When behavior findings stayed at or above their prior count across three or more of the layers types / parser / resolver / targeting / frontend / AI / tests, say so and propose a smaller scope or a decomposition ([chartered.md](chartered.md)). No new phase or charter continues the same work without an accepted case. Required checks and clean final review still govern acceptance, and stops take precedence over the decomposition and text-round routes below.
+**At a stop**, report the original goal, completed product work, open items, each loop's round tags and prediction record, and the smallest next action as an expansion case. When behavior findings stayed at or above their prior count across three or more of the layers types / parser / resolver / targeting / frontend / AI / tests, say so and propose a smaller scope or a decomposition ([chartered.md](chartered.md)). No new phase or charter continues the same work without an accepted case. Required checks and a clean final review still govern acceptance (the decline path's unresolved listing aside), and stops take precedence over the decomposition and text-round routes below.
 
 ### Verification recovery (until-clean only)
 
@@ -259,7 +268,7 @@ A changed fenced code block in a doc comment is a doctest and does not qualify. 
 
 ### Step 7 — Final acceptance
 
-Accept when the plan is clean or closed by the small-change lane; the review returns no `behavior` finding and its `text` findings are applied as Step 6 says (comment-only corrections proven), or only residuals the run limits allow, listed; the checks due at this boundary pass, with later checks explicitly deferred under Step 5; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
+Accept when the plan is clean or closed by the small-change lane; the review returns no `behavior` finding and its `text` findings are applied as Step 6 says (comment-only corrections proven), or, on a declined case, only findings the decline path lets the PR list as unresolved, each listed with no clean review claimed; the checks due at this boundary pass, with later checks explicitly deferred under Step 5; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
 
 After final acceptance of a run a maintainer invoked directly, ship it with `/ship-commits` as [pr-handoff.md](pr-handoff.md#ship-through-the-merge-queue) describes, unless the task says local-only. Otherwise, when the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md).
 
@@ -273,7 +282,7 @@ Return after final acceptance:
 4. `BASE_SHA`, accepted `CANDIDATE_SHA`, the materialized `SCOPE_PATHS` (extensions included), and run-artifact root.
 5. The `START_SHA` each round began from, and parser measurement results or their explicit deferred status when the change touched the parser.
 6. Verification commands run and results, separated into preparatory and completion evidence; checks deferred to PR/CI with their due boundary. Do not label the run fully verified while those remain pending.
-7. Implementation-review rounds with each round's finding tags, reviewed SHA, any Step 6 correction commit with its phase-fit entry, and the final result (clean, corrections applied and proven, or listed residuals).
+7. Implementation-review rounds with each round's finding tags, reviewed SHA, any Step 6 correction commit with its phase-fit entry, and the final result (clean, corrections applied and proven, or findings listed as unresolved under the decline path).
 8. Checkpoint commit hash and staged file list.
 9. Coverage impact for parser changes, or pending measurement at the stated due boundary.
 10. Deviations from the plan with reasons.

@@ -12,8 +12,9 @@
 //! unconditional chain: `else_ability` (the CR 608.2c "Otherwise, ..." leg) and
 //! `mode_abilities` (the CR 700.2 modal alternatives). Whether they belong in
 //! the walk depends on the question being asked, which is what [`AbilityScope`]
-//! names — see its docs. [`collect_scoped_effects`] is the single authority for
-//! both walks; `collect_chain_effects` is the unconditional shorthand. The
+//! names — see its docs. [`collect_scoped_nodes`] is the single authority for
+//! both walks, [`collect_scoped_effects`] is its effects-only view, and
+//! `collect_chain_effects` is the unconditional shorthand. The
 //! scope-parameterized walker lives in the engine
 //! (`engine::analysis::deck_signals::ability_chain`) so deck signals can share
 //! it; this module re-exports it, so every `crate::ability_chain::*` call site
@@ -40,7 +41,7 @@
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
 
 pub(crate) use engine::analysis::deck_signals::ability_chain::{
-    collect_chain_effects, collect_scoped_effects, AbilityScope,
+    collect_chain_effects, collect_scoped_effects, collect_scoped_nodes, AbilityScope,
 };
 
 /// CR 608.2c + CR 111.1: an ability's instructions resolve in order, and each
@@ -440,7 +441,7 @@ mod tests {
         effect(serde_json::json!({
             "type": "DraftFromSpellbook",
             "destination": "Battlefield",
-            "random": true
+            "selection": "Random"
         }))
     }
 

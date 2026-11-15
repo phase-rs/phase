@@ -25,6 +25,7 @@ An online game cannot ask anyone to stare or hold their breath, so both cards us
 | Server | `crates/server-core/src/contest.rs`, `phase-server` (`run_contest_driver`) | clock, rate limit, tick task, broadcast |
 | Local engines | `drive_contest_js` (engine-wasm), `useLocalContestHost` (client) | the same host duties for single-player / P2P host |
 | UI | `client/src/components/contest/ContestOverlay.tsx` | rendering and click input only |
+| Staring eye | `client/src/components/contest/StaringStage.tsx`, `staring.ts`, `.stare-*` in `index.css` | Eye to Eye's presentation only: reads contest time and the settled result, feeds nothing back |
 
 The engine never reads a clock. Every input is stamped by the **host** with a monotonic millisecond counter, so the state machine is deterministic and fully testable without sleeping.
 
@@ -100,6 +101,15 @@ Every contest carries an engine-authored `id`: a 53-bit hash (so every host can 
 
 AI seats click on a human-ish schedule (`phase_ai::contest::ContestClicker`): a 220–380ms cadence for a random 2.5–9s, so the AI can win or lose.
 
+## The staring eye
+
+A staring contest plays under a large eye (`StaringStage`). None of this reaches the engine; the result it shows is the one the engine already settled.
+
+* **Countdown** – half-lidded, with an idle blink. **GO** – the lids snap open.
+* **Strain** – a cosmetic curve of unpaused Active time (`stareStrain`), derived the same way as the engine's `active_elapsed_ms`: `clock_ms - go_at_ms` plus local time since the snapshot, stopped at `paused_since_ms`. The veins, tremble, pupil, tear line and running tears all scale from this one value. It holds through a pause and carries over a resume, because the resume shifts `go_at_ms` by the outage.
+* **Finale** – the settling commit removes the contest, so the stage stays mounted to play a 2.4s closing beat from the strain the eye reached, over a board the engine has already moved on. If the one contestant at this screen won, the eye blinks; if they lost, their own eyelids close across the screen while the eye stays open; on a tie both happen. A screen without exactly one contestant at it (spectators, hotseat's two players) always sees the eye blink. A cancelled contest had no loser, so the stage simply goes. During that beat, and only then, the stage takes pointer input and holds Space/Enter: the winner is still mashing, and the panel's own guard ended with the contest. It is `aria-hidden` throughout: the status line and result banner remain the accessible channel.
+* **Reduced motion** – strain, tears and the blink are kept as still states.
+
 ## Assumptions and known limits
 
 * A contest is only ever between the controller and one other player (both printed cards). "You and each opponent" is deliberately declined by the parser.
@@ -107,3 +117,4 @@ AI seats click on a human-ish schedule (`phase_ai::contest::ContestClicker`): a 
 * P2P guests see opponent click counters only at state transitions (no live `ContestProgress` over the P2P wire).
 * The WASM batch decoder (`decode_contest_clicks`) takes `JsValue` and cannot run in a native unit test; its guarantees are covered at the P2P boundary (`contestClickBuffer`, host adapter tests) and by the engine's own sequence/identity rejection.
 * Server restarts cancel a running contest.
+* The staring-contest animation is frontend-only (`client/src/components/contest/*`); its behaviour is covered by `__tests__/staring.test.ts` and `__tests__/ContestOverlay.test.tsx`.

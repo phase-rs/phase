@@ -10,16 +10,21 @@
  * draft pod instead of a 2-4 player game.
  */
 
-import { DraftAdapter } from "./draft-adapter";
+import { DraftAdapter, draftViewPresentation } from "./draft-adapter";
 import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, SharedStackPileDecision, TournamentFormat } from "./draft-adapter";
+import { Draft27IncompatibilityError, draftEngineRefusal, requireDraft27HostValue } from "./draft-compatibility";
 import type { DraftLobbyMetadata, MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { CommanderSeatDecks, DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { CommanderSeatDecks, DraftCommanderLaunch, DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
-import { loadDraftHostSession } from "../services/draftPersistence";
+import {
+  loadDraftHostSession,
+  type PersistedDraftHostSession,
+} from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import type { DraftWorkspaceState } from "../components/draft/workspace/types";
+import { assertNever } from "../utils/assertNever";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -28,6 +33,7 @@ export type DraftPodHostStatus =
   | "connecting"
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
@@ -96,23 +102,24 @@ export type DraftPodHostEvent =
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
 
 function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
-  switch (view.status) {
-    case "Lobby":
+  switch (draftViewPresentation(view).podPhase) {
+    case "lobby":
       return "lobby";
-    case "Drafting":
-    case "Paused":
+    case "drafting":
       return "drafting";
-    case "Deckbuilding":
+    case "review":
+      return "review";
+    case "deckbuilding":
       return "deckbuilding";
-    case "Pairing":
+    case "pairing":
       return "pairing";
-    case "MatchInProgress":
+    case "matchInProgress":
       return "matchInProgress";
-    case "RoundComplete":
+    case "roundComplete":
       return "roundComplete";
-    case "Complete":
+    case "complete":
       return "complete";
-    case "Abandoned":
+    case "error":
       return "error";
   }
 }
@@ -147,6 +154,61 @@ export interface DraftPodHostConfig {
   backupEndpoint?: string;
   /** Abort signal for cancellation during setup. */
   signal?: AbortSignal;
+  /**
+   * A lifecycle-owned recovery source that was loaded and captured before this
+   * wrapper is entered.  Normal new hosts deliberately omit it.
+   */
+  recovery?: DraftPodHostRecoveryInput;
+}
+
+export interface DraftPodHostRecoveryInput {
+  session: PersistedDraftHostSession;
+  raw: unknown;
+  /**
+   * The lifecycle-owned attempt fence. It is deliberately optional so normal
+   * host construction and legacy wrapper test doubles retain their shape.
+   * Recovery checks it at every allocation boundary, before the wrapper can
+   * make B discoverable.
+   */
+  isCurrent?: () => boolean;
+  /**
+   * The lifecycle store's handover, called before a saved draft session is
+   * restored into the one draft engine session. It retires the installed
+   * owner, waits for that owner's teardown, and returns this host's own
+   * lifetime signal, which alone ends the rest of its initialization.
+   */
+  handover?: () => Promise<AbortSignal>;
+}
+
+export type DraftPodHostRecoveryPreflight =
+  | { type: "admitted" }
+  | { type: "incompatible"; error: Draft27IncompatibilityError };
+
+/**
+ * Allocation-free.  The lifecycle store awaits this before it detaches an
+ * installed owner; initialize repeats it as its own boundary.  A started
+ * session is decided by the draft engine's own legacy admission alone, asked
+ * without restoring it.  A check that cannot answer rejects, so it admits
+ * nothing.
+ */
+export async function preflightDraftPodHostRecovery(
+  recovery: DraftPodHostRecoveryInput | undefined,
+): Promise<DraftPodHostRecoveryPreflight> {
+  if (!recovery) return { type: "admitted" };
+  const sessionJson = recovery.session.draftSessionJson;
+  if (typeof sessionJson !== "string") return { type: "admitted" };
+  const verdict = await new DraftAdapter().checkRestorableSession(sessionJson);
+  switch (verdict.type) {
+    case "Admitted":
+    case "Unreadable":
+      // An unreadable session is not refused here; it meets the restore's own
+      // failure.
+      return { type: "admitted" };
+    case "Incompatible":
+      return { type: "incompatible", error: draftEngineRefusal() };
+    default:
+      return assertNever(verdict);
+  }
 }
 
 // ── DraftPodHostAdapter ────────────────────────────────────────────────
@@ -215,6 +277,17 @@ export class DraftPodHostAdapter {
   async initialize(config: DraftPodHostConfig): Promise<void> {
     this.disposed = false;
     this.setStatus("connecting");
+    let recoveryPreflight: DraftPodHostRecoveryPreflight;
+    try {
+      recoveryPreflight = await preflightDraftPodHostRecovery(config.recovery);
+    } catch (error) {
+      this.setStatus("error");
+      throw error;
+    }
+    if (recoveryPreflight.type === "incompatible") {
+      this.setStatus("error");
+      throw recoveryPreflight.error;
+    }
     let finishInitialization!: () => void;
     const initializationSettled = new Promise<void>((resolve) => {
       finishInitialization = resolve;
@@ -224,9 +297,16 @@ export class DraftPodHostAdapter {
     let pendingHostDisposed = false;
     let pendingHostResult: HostResult | null = null;
     let pendingHostResultDestroyed = false;
+    // Set by a recovery's handover. From then on this host is the installed
+    // owner, and only its own lifetime signal or a dispose ends it.
+    let ownerSignal: AbortSignal | null = null;
 
     const abortIfRequested = () => {
-      if (config.signal?.aborted || this.disposed) {
+      if (ownerSignal) {
+        if (ownerSignal.aborted || this.disposed) throw new Error("Draft pod host initialization aborted");
+        return;
+      }
+      if (config.signal?.aborted || this.disposed || config.recovery?.isCurrent?.() === false) {
         throw new Error("Draft pod host initialization aborted");
       }
     };
@@ -258,6 +338,7 @@ export class DraftPodHostAdapter {
       }
 
       // 1. Create PeerJS host peer
+      abortIfRequested();
       const hostResult = await hostRoom(config.signal, {
         preferredRoomCode: config.preferredRoomCode,
       });
@@ -332,15 +413,31 @@ export class DraftPodHostAdapter {
 
       // 5. Check for persisted session to restore
       if (config.persistenceId) {
-        const persisted = await loadDraftHostSession(config.persistenceId);
+        const persisted = config.recovery
+          ? { type: "admitted" as const, session: config.recovery.session, raw: config.recovery.raw }
+          : await loadDraftHostSession(config.persistenceId);
         abortIfRequested();
-        if (persisted) {
-          const view = await host.restoreFromPersisted(persisted);
+        if (persisted.type === "readFailure") {
+          throw persisted.error;
+        }
+        if (persisted.type === "admitted") {
+          // Restoring a saved draft session writes the one draft engine
+          // session, so a recovery first hands over: the lifecycle store
+          // retires the installed owner and waits for its teardown.
+          if (config.recovery?.handover && typeof persisted.session.draftSessionJson === "string") {
+            ownerSignal = await config.recovery.handover();
+            abortIfRequested();
+          }
+          const view = await host.restoreFromPersisted(persisted.session);
           abortIfRequested();
-          if (view) {
-            this.setStatus(hostStatusForView(view));
+          // `restoreFromPersisted` is an immediate producer too. Keep the
+          // exact returned raw view at this wrapper boundary; a rejected
+          // import may not publish status, workspace, view, or installation.
+          const admittedView = view ? requireDraft27HostValue(view) : null;
+          if (admittedView) {
+            this.setStatus(hostStatusForView(admittedView));
             this.emit({ type: "workspaceRestored", workspaceState: host.getHostWorkspaceState() });
-            this.emit({ type: "viewUpdated", view });
+            this.emit({ type: "viewUpdated", view: admittedView });
           }
         }
       }
@@ -358,7 +455,7 @@ export class DraftPodHostAdapter {
       }
     } catch (err) {
       await disposePending();
-      if (config.signal?.aborted || this.disposed) {
+      if ((ownerSignal ?? config.signal)?.aborted || this.disposed) {
         this.setStatus("idle");
         throw err;
       }
@@ -636,9 +733,8 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: every deck the completed Commander pod's launch needs. Sends
-   * nothing — pair it with `sendCommanderLaunches` once the game is up. `view`
-   * must be read at call time — see `P2PDraftHost.commanderSeatDecks`.
+   * CR 903.13a: prepare every deck once from a bound pod view. Sends nothing; the host
+   * finalizer decides transport participation after the game is initialized.
    */
   async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
     if (!this.host) throw new Error("Host not initialized");
@@ -646,17 +742,19 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: put the pod's launch on every live human seat, the host's own
-   * included, from decks `commanderSeatDecks` already computed.
+   * CR 903.13a: install engine seats and dispatch invitations using the host's current
+   * transport roster. Resolves after all selected sends settle.
    */
-  sendCommanderLaunches(
+  async sendCommanderLaunches(
     view: DraftPlayerView,
     gameId: string,
     roomCode: string,
     decks: CommanderSeatDecks,
-  ): void {
+    installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
-    this.host.sendCommanderLaunches(view, gameId, roomCode, decks);
+    return this.host.sendCommanderLaunches(view, gameId, roomCode, decks, installEngineSeat, signal);
   }
 
   async replaceSeatWithBot(seat: number): Promise<void> {

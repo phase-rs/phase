@@ -74,7 +74,8 @@ fn my_card_does_the_thing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "My Card", /* is_instant */ true, ORACLE)
+        // NAME and ORACLE: a printed card's name and verbatim Scryfall/MTGJSON Oracle text.
+        .add_spell_to_hand_from_oracle(P0, NAME, /* is_instant */ true, ORACLE)
         .id();
     // ... stage targets / mana / library as needed ...
     let mut runner = scenario.build();
@@ -206,13 +207,24 @@ fn my_card_does_the_thing() {
   Paraphrased text can take a different parser branch than the real card, so
   the test goes green while the actual card stays broken until card-data is
   regenerated (see `project_parser_fix_inert_until_data_regen`).
+- **The card under test is a real printed card.** A synthetic card is
+  acceptable only where no printed card exhibits the shape; the test then says so and names the nearest
+  printed card. See [real cards](../engine-implementer/SKILL.md#real-cards).
 - **Regenerate the integration fixture when your parser change touches a card
   it contains.** `add_real_card` reads the committed
-  `crates/engine/tests/fixtures/integration_cards.json` snapshot.
-  `python3 scripts/gen-test-fixture.py --check` verifies **coverage only — that every
-  referenced card is PRESENT (a key-set comparison). It never compares the stored parse
-  VALUES against a fresh export.** So a parser change that alters a fixture card's parse
-  leaves the fixture stale while the gate stays green: the integration test then asserts
-  against the *old* parse and proves nothing about the code you shipped. If your change
-  alters how any fixture card parses, re-run `python3 scripts/gen-test-fixture.py` (no
-  `--check`) and commit the regenerated fixture in the same PR.
+  `crates/engine/tests/fixtures/integration_cards.json.gz` snapshot.
+  `python3 scripts/gen-test-fixture.py --check` rebuilds that snapshot in memory from
+  `client/public/card-data.json` and compares it against the committed fixture, exiting
+  non-zero at the FIRST mismatch, in this order: a referenced card the fixture does not
+  cover (`error: fixture is stale — N card(s) not covered`, followed by the list), a
+  parser-backed card that leaked into the fixture, stored values or keys that differ
+  from the on-disk export (`error: fixture semantic values are stale`), or a payload
+  that is not canonical `gzip -9 -n` output (`error: fixture bytes are not canonical
+  gzip -9 -n output`). On a match it prints `ok: fixture covers all N referenced cards
+  with canonical gzip bytes`. The check is stricter than a key-set comparison, but it
+  does not rerun the parser or refresh `client/public/card-data.json`. After changing
+  the parser, first regenerate that export through the card-data pipeline, then run
+  `--check`. If the fixture differs from the refreshed export, re-run
+  `python3 scripts/gen-test-fixture.py` (no `--check`) and commit the regenerated fixture
+  in the same PR. An unchanged export can leave `--check` green after a parser change.
+  No CI workflow invokes `--check`, so a green build is not proof of fixture freshness.

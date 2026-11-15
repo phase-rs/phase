@@ -337,6 +337,25 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
             state.spells_cast_this_turn = next_turn_count;
             state.spells_cast_this_game.insert(*player, next_game_count);
+            // CR 601.2i + CR 603.4: every finalized cast opens the
+            // since-window of each player for whom the caster is an opponent
+            // ("since your last turn ended" readers). The caster's own window
+            // and teammates' windows are untouched. Team-aware via
+            // `players::is_opponent`, mirroring the scope filters.
+            let caster = *player;
+            let windowed: Vec<PlayerId> = state
+                .players
+                .iter()
+                .map(|candidate| candidate.id)
+                .filter(|id| *id != caster && crate::game::players::is_opponent(state, *id, caster))
+                .collect();
+            for candidate in &mut state.players {
+                if windowed.contains(&candidate.id) {
+                    candidate.opponent_spells_cast_since_own_last_turn = candidate
+                        .opponent_spells_cast_since_own_last_turn
+                        .saturating_add(1);
+                }
+            }
             state
                 .spells_cast_this_turn_by_player
                 .entry(*player)
@@ -701,6 +720,49 @@ mod tests {
         assert_eq!(state.spells_cast_this_turn_by_player, before_turn_history);
         assert_eq!(state.spells_cast_this_game_by_player, before_game_history);
         assert_eq!(state.resolved_rules_journal.entries().len(), before_journal);
+    }
+
+    /// CR 601.2i + CR 603.4: every finalized cast opens the since-window of
+    /// each player for whom the caster is an opponent ("since your last turn
+    /// ended" readers). The caster's own window is untouched by their own
+    /// cast.
+    #[test]
+    fn record_spell_cast_opens_opponents_since_windows_only() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(71),
+            CardId(71),
+            PlayerId(1),
+            "Window Test".to_string(),
+            Zone::Stack,
+        );
+        let record = crate::game::restrictions::spell_cast_record_for(
+            &object,
+            Zone::Hand,
+            crate::types::game_state::CastingVariant::Normal,
+            false,
+        );
+
+        record_spell_cast(&mut state, PlayerId(1), record.clone())
+            .expect("opponent cast is recorded");
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "opponent's cast must open the controller's window"
+        );
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 0,
+            "caster's own window must be untouched by their own cast"
+        );
+
+        record_spell_cast(&mut state, PlayerId(0), record).expect("controller cast is recorded");
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's cast must open the opponent's window"
+        );
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's window must be unchanged by their own cast"
+        );
     }
 
     #[test]

@@ -283,7 +283,7 @@ impl KeywordTriggerInstaller {
             // boundary for what `handle_unless_payment` + the
             // `expand_per_counter` pipeline can pay end-to-end today.
             // Installing the trigger for an unsupported base (Discard, Exile,
-            // EffectCost, etc.) would silently sacrifice the permanent every
+            // unsupported EffectCost shapes, etc.) would silently sacrifice the permanent every
             // upkeep because the payment falls through to `payment_failed =
             // true`, causing the unless-effect (Sacrifice) to always fire.
             // Pre-branch these cards had no trigger at all (silent no-op),
@@ -762,6 +762,8 @@ pub fn synthesize_craft(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Exile),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -1949,6 +1951,8 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
             let mut put_in_hand_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -2033,6 +2037,8 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                 let mut put_in_hand_def = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Library),
                         destination: Zone::Hand,
                         target: TargetFilter::Any,
@@ -2129,6 +2135,8 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
             let mut put_on_battlefield_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Any,
@@ -3052,6 +3060,8 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -3144,6 +3154,8 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::SelfRef,
@@ -4535,6 +4547,8 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
     // from your graveyard to your hand" shape (oracle_effect's Graveyard→Hand
     // ChangeZone). Default flags (no counters, no transform, owner's control).
     let return_to_hand = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Hand,
         target: spirit_in_graveyard,
@@ -6372,6 +6386,8 @@ fn build_dethrone_trigger() -> TriggerDefinition {
 /// (`Zone::Hand` for the pay branch, `Zone::Exile` for the otherwise branch).
 fn build_recover_self_change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination,
         target: TargetFilter::SelfRef,
@@ -6672,6 +6688,8 @@ fn build_dies_return_with_counter_trigger(
     // the object enters the battlefield, via the existing
     // `Effect::ChangeZone.enter_with_counters` plumbing.
     let return_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: TargetFilter::SelfRef,
@@ -8028,6 +8046,8 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
     let exile_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: champion_filter.clone(),
@@ -8088,6 +8108,8 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
     let return_ability = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ExiledBySource,
@@ -9309,6 +9331,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         // chapter number"; the chosen value is persisted on the entering Saga
         // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 // CR 702.155b: the Saga states its own upper bound (the final
@@ -9920,6 +9943,8 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     let put_in_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -10013,6 +10038,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10058,6 +10084,8 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         let exile_then_cast = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -10144,6 +10172,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10207,7 +10236,7 @@ fn extracted_supersedes_base(existing: &Keyword, extracted: &Keyword) -> bool {
 /// applies them and then appends the authoritative parser-recovered keywords.
 /// Fallback: if the parser found zero occurrences of a keyword, no rule runs for
 /// it, so the single MTGJSON copy is preserved.
-pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
+pub fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
     for extracted_kw in &extracted {
         base.retain(|existing| !extracted_supersedes_base(existing, extracted_kw));
     }

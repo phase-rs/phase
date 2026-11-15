@@ -134,6 +134,8 @@ pub fn resolve_bracket_sections<'a>(
         sticker_sheets,
         bracket_tier: _,
         combo_declaration: _,
+        // Display-only owner choices (CR 203.1 + CR 206.1); never a bracket input.
+        printings: _,
     } = deck;
     let _ = (
         sideboard,

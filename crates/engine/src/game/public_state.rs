@@ -519,6 +519,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
@@ -558,6 +559,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // it is rendered from the structured event log, not derived state.
             | GameEvent::DieRollIgnored { .. }
             | GameEvent::CoinFlipped { .. }
+            | GameEvent::UnTellPerformed { .. }
+            | GameEvent::PhraseSaid { .. }
+            | GameEvent::GotchaSaid { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -848,6 +852,7 @@ mod tests {
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
         state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             enters_modified_if: None,
             player: PlayerId(0),
             cards: vec![ObjectId(5), ObjectId(11)],
@@ -870,6 +875,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             duration: None,

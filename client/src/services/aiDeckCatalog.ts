@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { GameFormat, MatchType } from "../adapter/types";
+import type { ChallengeDeck, GameFormat, MatchType } from "../adapter/types";
 import { estimateDeckBracket } from "./bracketEstimate";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
 import {
@@ -9,10 +9,11 @@ import {
   type DeckCatalogSource,
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
-import { expandParsedDeck, type ParsedDeck } from "./deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "./deckParser";
+import { submitParsedDeck, type SubmissionArtSnapshot, type SubmittedDeck } from "./deckSubmission";
 import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { effectiveBracket, isCommanderFamilyFormat, sameComboDeclaration } from "../types/bracket";
-import { bracketToEngineTier } from "../types/bracketEstimate";
+import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import {
   DECKS_CHANGED_EVENT,
   FEED_DECK_ORIGINS_KEY,
@@ -51,6 +52,13 @@ export interface AiDeckCatalogOptions {
   selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType | null;
   /**
+   * The Horde challenge deck AI survivors build against. Passed WITHOUT a
+   * format tag: the engine answers the picked challenge's survivor verdict
+   * per candidate (Commander shape for EDH hordes, unrestricted for
+   * constructed-block hordes).
+   */
+  selectedChallengeDeck?: ChallengeDeck | null;
+  /**
    * Set false when the caller receives the catalog from a hoisted call
    * instead (e.g. `AiOpponentConfig` under `GameSetupPage`, which shares one
    * analysis with the human pool): the hook stays idle and returns empty.
@@ -83,12 +91,17 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   requestKey: string | null;
 }
 
-/** Identity of one legal-catalog scan: the format/match request it answers. */
+/**
+ * Identity of one legal-catalog scan: the format/match/challenge request it
+ * answers. The challenge leg keeps Horde survivor scans (same match type,
+ * different picked deck) from sharing a key.
+ */
 export function catalogRequestKey(
   selectedFormat?: GameFormat | null,
   selectedMatchType?: MatchType | null,
+  selectedChallengeDeck?: ChallengeDeck | null,
 ): string {
-  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}`;
+  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}::${selectedChallengeDeck ?? ""}`;
 }
 
 /**
@@ -150,6 +163,9 @@ async function legalCandidate(
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
+    // Horde survivor scans pass the picked challenge WITHOUT a format tag;
+    // the engine answers the challenge's survivor verdict per candidate.
+    selectedChallengeDeck: options.selectedChallengeDeck,
     summaryOnly: true,
   });
   if (result.selected_format_compatible !== true) return null;
@@ -167,17 +183,39 @@ async function legalCandidate(
   };
 }
 
+/** A seat's owner-declared bracket tag and two-card-combo answer, as the engine receives them. */
+export interface SeatDeclarations {
+  bracket_tier: CommanderBracketTier | null;
+  combo_declaration: ComboDeclaration;
+}
+
 /**
- * What a seat submits for a picked candidate: its list and its owner's
- * declarations, always taken from the same candidate. Every seat built from the
- * catalog goes through here, so none can pair a deck with another deck's answers.
+ * The declarations a seat submits for a picked candidate: always the candidate's
+ * own tag and combo answer, never `bracket` (the pool-filter value) and never
+ * another deck's. Every seat built from the catalog goes through here, so none
+ * can pair a deck with another deck's answers.
  */
-export function candidateSeatDeck(candidate: AiDeckCandidate) {
+export function candidateDeclarations(candidate: AiDeckCandidate): SeatDeclarations {
   return {
-    ...expandParsedDeck(candidate.deck),
     bracket_tier: bracketToEngineTier(candidate.declaredBracket),
     combo_declaration: candidate.comboDeclaration,
   };
+}
+
+/** A candidate's already-submitted deck list, paired with that same candidate's declarations. */
+export function candidateSeatDeck<T extends object>(
+  candidate: AiDeckCandidate,
+  submitted: T,
+): T & SeatDeclarations {
+  return { ...submitted, ...candidateDeclarations(candidate) };
+}
+
+/** `candidateSeatDeck` for a seat whose list is submitted (printings bound) here. */
+export async function submitCandidateSeatDeck(
+  candidate: AiDeckCandidate,
+  snapshot?: SubmissionArtSnapshot,
+): Promise<SubmittedDeck<ExpandedDeck> & SeatDeclarations> {
+  return candidateSeatDeck(candidate, await submitParsedDeck(candidate.deck, snapshot));
 }
 
 export function legacyAiDeckNameToId(name: string): string {
@@ -250,6 +288,7 @@ function isInventoryStorageKey(key: string | null): boolean {
 export function useAiDeckCatalog({
   selectedFormat,
   selectedMatchType,
+  selectedChallengeDeck,
   enabled = true,
 }: AiDeckCatalogOptions): UseAiDeckCatalogResult {
   const [result, setResult] = useState<UseAiDeckCatalogResult>({
@@ -294,10 +333,10 @@ export function useAiDeckCatalog({
 
   useEffect(() => {
     if (!enabled) return;
-    const key = catalogRequestKey(selectedFormat, selectedMatchType);
+    const key = catalogRequestKey(selectedFormat, selectedMatchType, selectedChallengeDeck);
     let cancelled = false;
     setResult((current) => ({ ...current, loading: true, error: null }));
-    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType })
+    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType, selectedChallengeDeck })
       .then((catalog) => {
         if (!cancelled) setResult({ ...catalog, loading: false, error: null, requestKey: key });
       })
@@ -315,7 +354,7 @@ export function useAiDeckCatalog({
     return () => {
       cancelled = true;
     };
-  }, [selectedFormat, selectedMatchType, enabled, libraryRevision]);
+  }, [selectedFormat, selectedMatchType, selectedChallengeDeck, enabled, libraryRevision]);
 
   return result;
 }

@@ -1,9 +1,11 @@
+#![recursion_limit = "512"]
+
 pub mod ai_deck_manifest;
 pub mod ai_support;
 pub mod analysis;
 pub mod database;
 pub mod game;
-pub mod parser;
+pub use phase_parser::parser;
 pub mod starter_decks;
 pub mod testing;
 pub mod types;

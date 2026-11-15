@@ -662,7 +662,7 @@ fn phenomenon_encounter_then_sba_planeswalk() {
     // SBA should NOT planeswalk while the phenomenon's ability is on the stack.
     let mut events = Vec::new();
     let mut any = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no SBA planeswalk while the phenomenon's ability is on the stack"
@@ -677,13 +677,59 @@ fn phenomenon_encounter_then_sba_planeswalk() {
     state.stack.clear();
     let mut events2 = Vec::new();
     let mut any2 = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events2, &mut any2);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events2, &mut any2, &[]);
     assert!(any2, "SBA planeswalks once the ability leaves the stack");
     assert_eq!(
         active_plane(&state),
         Some(next_id),
         "planeswalked to next plane"
     );
+}
+
+/// CR 704.6f: a phenomenon trigger parked in the deferred queue has triggered
+/// but not yet left the stack, so the SBA does not planeswalk.
+#[test]
+fn phenomenon_queued_trigger_blocks_sba_planeswalk() {
+    use super::triggers::{PendingTrigger, PendingTriggerContext};
+    for queued in [true, false] {
+        let mut state = GameState::new_two_player(7);
+        let p0 = PlayerId(0);
+        let phenom = synthesized_planar_face(CoreType::Phenomenon, vec![], vec![]);
+        let next_plane = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+        let (phenom_id, deck_ids) = setup_planechase(
+            &mut state,
+            p0,
+            ("Phenom", &phenom),
+            &[("Next Plane", &next_plane)],
+        );
+        if queued {
+            let ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                phenom_id,
+                p0,
+            );
+            state
+                .deferred_triggers
+                .push(PendingTriggerContext::single(PendingTrigger::ordinary(
+                    phenom_id,
+                    p0,
+                    None,
+                    Box::new(ability),
+                    0,
+                )));
+        }
+
+        let mut events = Vec::new();
+        let mut any = false;
+        check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
+        assert_eq!(any, !queued, "queued={queued}");
+        let expected = if queued { phenom_id } else { deck_ids[0] };
+        assert_eq!(active_plane(&state), Some(expected), "queued={queued}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -758,7 +804,7 @@ fn planar_controller_none_skips_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no Planechase SBA work when planar_controller is None"

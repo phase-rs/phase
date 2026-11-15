@@ -450,6 +450,10 @@ pub enum GameAction {
     ChoosePlayDraw {
         play_first: bool,
     },
+    /// CR 103.1: answer to `WaitingFor::ChooseStartingPlayer` — the seat that takes the first turn.
+    ChooseStartingPlayer {
+        player: PlayerId,
+    },
     ChooseOption {
         choice: String,
     },
@@ -697,6 +701,12 @@ pub enum GameAction {
     HarmonizeTap {
         creature_id: Option<ObjectId>,
     },
+    /// CR 702.106a / CR 702.106f: Answer a secret pregame agenda prompt with all
+    /// of the conspiracy's names at once, so nothing observable distinguishes a
+    /// double agenda from a hidden agenda.
+    ChooseSecretAgendaNames {
+        names: Vec<String>,
+    },
     /// CR 702.139a: Declare a companion during pre-game reveal (or decline).
     DeclareCompanion {
         /// An explicit reveal choice or an explicit decline. This cannot be
@@ -793,6 +803,13 @@ pub enum GameAction {
     /// mirroring `SetPriorityYield`. Pure preference propagation.
     SetMayTriggerAutoChoice {
         op: MayTriggerAutoChoiceOp,
+    },
+    /// Un-card actions (Unglued/Unhinged/Unstable/Unfinity silver-border cards):
+    /// opt in or out, perform a gesture from the Un-actions menu, or call
+    /// "Gotcha!". Legal in any `WaitingFor` state and actor-scoped, like the
+    /// preference actions — a gesture never changes game progression by itself.
+    UnAction {
+        action: super::un_actions::UnAction,
     },
     /// CR 603.3b: Update the acting player's saved trigger-ordering templates.
     /// Legal in any WaitingFor state and routed to the acting player (who may only
@@ -1193,7 +1210,10 @@ pub enum DebugCardCreationKind {
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt, except the player-resource variants that
-/// [`DebugAction::requires_settled_priority`] gates to a Priority window.
+/// [`DebugAction::requires_settled_priority`] gates to a Priority window, and the
+/// payload-dependent checks (`CreateCard { zone: Battlefield, run_etb: true }`,
+/// `MoveToZone { simulate: true }`) that `preflight_debug_action` gates the same
+/// way.
 /// Gated on `GameState::debug_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -1547,8 +1567,9 @@ impl DebugAction {
 
     /// Whether this debug action is a real player-resource event whose
     /// replacements can park a CR 616.1 ordering choice, so it is admitted only
-    /// at a settled Priority boundary. `CreateCard`'s battlefield-ETB entry has
-    /// its own payload-dependent check in `preflight_debug_action`.
+    /// at a settled Priority boundary. Both payload-dependent checks
+    /// (`CreateCard`'s battlefield-ETB entry and `MoveToZone`'s simulated
+    /// processing) live in `preflight_debug_action`.
     pub fn requires_settled_priority(&self) -> bool {
         match self {
             Self::GainLife { .. }
@@ -2053,6 +2074,9 @@ impl GameAction {
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::UnAction {
+                    action: super::un_actions::UnAction::SetEnabled { .. },
+                }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
@@ -2078,6 +2102,7 @@ impl GameAction {
                 GameAction::Debug(_)
                     | GameAction::GrantDebugPermission { .. }
                     | GameAction::RevokeDebugPermission { .. }
+                    | GameAction::UnAction { .. }
             )
     }
 
@@ -2155,6 +2180,7 @@ impl GameAction {
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
+            | Self::ChooseStartingPlayer { .. }
             | Self::ChooseOption { .. }
             | Self::SubmitVoteCandidate { .. }
             | Self::SubmitSpellbookDraft { .. }
@@ -2179,6 +2205,7 @@ impl GameAction {
             | Self::ChooseDungeon { .. }
             | Self::ChooseDungeonRoom { .. }
             | Self::RollPlanarDie
+            | Self::ChooseSecretAgendaNames { .. }
             | Self::DeclareCompanion { .. }
             | Self::CompanionToHand
             | Self::DiscoverChoice { .. }
@@ -2192,6 +2219,7 @@ impl GameAction {
             | Self::CancelAutoPass
             | Self::SetPhaseStops { .. }
             | Self::SetPriorityPassingMode { .. }
+            | Self::UnAction { .. }
             | Self::SetTriggerOrderTemplate { .. }
             | Self::ChooseCountersToRemove { .. }
             | Self::SubmitPayAmount { .. }
@@ -2501,6 +2529,7 @@ impl GameAction {
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
@@ -2528,6 +2557,7 @@ impl GameAction {
             | GameAction::RollPlanarDie
             | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
+            | GameAction::ChooseSecretAgendaNames { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
@@ -2553,6 +2583,7 @@ impl GameAction {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }

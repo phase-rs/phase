@@ -15,7 +15,7 @@
 //!   sweepers. These are **distinct** variants from spot removal — the parser
 //!   emits them separately, so sweeper-vs-spot classification is unambiguous.
 //! - `Effect::Draw { count }` (`ability.rs:14636`), `Effect::Dig { .. }`
-//!   (`ability.rs:15014`) — card advantage variants. CR 120.1.
+//!   (`ability.rs:15014`) — card advantage variants. CR 121.1.
 //! - `CoreType::Instant` / `CoreType::Sorcery` (`card_type.rs:49`).
 //!   CR 117.1a + CR 304.1: instants can be cast any time the player has priority.
 //! - `AbilityKind::Spell` (`ability.rs:22774`) — distinguishes spell effects from
@@ -140,10 +140,12 @@ fn is_counterspell(face: &CardFace) -> bool {
 pub fn is_sweeper_parts(abilities: &[AbilityDefinition]) -> bool {
     abilities.iter().any(|ability| {
         collect_chain_effects(ability).iter().any(|e| {
+            // CR 608.2c: a selected-object library move (Chaos Warp) acts on its
+            // declared target, not on a population.
             matches!(
                 e,
                 Effect::DestroyAll { .. } | Effect::DamageAll { .. } | Effect::ChangeZoneAll { .. }
-            )
+            ) && !crate::game::effects::is_selected_object_library_move(e)
         })
     })
 }
@@ -283,6 +285,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -308,6 +312,25 @@ mod tests {
                 cant_regenerate: false,
             },
         )
+    }
+
+    /// CR 608.2c: Chaos Warp's printed text lowers to a `TargetOnly` declaration
+    /// and a `ChangeZoneAll` bound to that selection. It moves one declared
+    /// permanent, so it is not a sweeper.
+    #[test]
+    fn selected_object_library_move_is_not_a_sweeper() {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            collect_chain_effects(&definition)
+                .iter()
+                .any(|effect| matches!(effect, Effect::ChangeZoneAll { .. })),
+            "reach guard: Chaos Warp's move is the bound ChangeZoneAll"
+        );
+        assert!(!is_sweeper_parts(std::slice::from_ref(&definition)));
+        assert!(is_sweeper_parts(&[destroy_all_ability()]));
     }
 
     fn damage_all_ability() -> AbilityDefinition {
@@ -427,6 +450,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 rest_split_top_count: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -442,7 +466,7 @@ mod tests {
 
     #[test]
     fn impulse_dig_to_exile_excluded_from_card_draw() {
-        // CR 120.1: card draw moves cards to hand. A Dig whose kept-card
+        // CR 121.1: card draw moves cards to hand. A Dig whose kept-card
         // destination is Exile is impulse-cast (e.g., Outpost Siege variant) —
         // it must NOT count as card draw.
         let mut face = card_face_with_types("Outpost-shape", vec![CoreType::Sorcery]);
@@ -458,6 +482,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 rest_split_top_count: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,

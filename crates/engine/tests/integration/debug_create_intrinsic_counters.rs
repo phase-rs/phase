@@ -33,19 +33,25 @@
 //! the zone pipeline's own caller, `ZoneMoveRequest::effect`.
 
 use engine::database::card_db::CardDatabase;
+use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
-use engine::types::ability::AbilityCost;
+use engine::types::ability::{
+    AbilityCost, ControllerRef, Effect, QuantityExpr, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
+};
 use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionFrame;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -58,6 +64,18 @@ const VORINCLEX: &str = "Vorinclex, Monstrous Raider";
 const SPIKE_FEEDER: &str = "Spike Feeder";
 const HISTORY_OF_BENALIA: &str = "History of Benalia";
 const BLOODFELL_CAVES: &str = "Bloodfell Caves";
+const ELVISH_VISIONARY: &str = "Elvish Visionary";
+const BONESPLITTER: &str = "Bonesplitter";
+const PACIFISM: &str = "Pacifism";
+
+/// Verbatim Oracle text of Fylgja, which is not in the committed fixture (the
+/// parked-authority row builds it from this text, as this file already does for
+/// Weathered Runestone).
+const FYLGJA: &str = "Enchant creature\n\
+This Aura enters with four healing counters on it.\n\
+Remove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to \
+enchanted creature this turn.\n\
+{2}{W}: Put a healing counter on this Aura.";
 
 /// Verbatim Oracle text of Shock.
 const SHOCK: &str = "Shock deals 2 damage to any target.";
@@ -67,13 +85,16 @@ const SHOCK: &str = "Shock deals 2 damage to any target.";
 const WEATHERED_RUNESTONE: &str = "Weathered Runestone";
 const WEATHERED_RUNESTONE_ORACLE: &str = "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.";
 
-/// The three Create Card routes that put the created object onto the
-/// battlefield: `(run_etb, creation_kind)`. A token with `run_etb: false`
-/// never reaches the battlefield (CR 111.8), so it is not a row.
-const CREATE_ROUTES: [(bool, DebugCardCreationKind); 3] = [
+/// The four Create Card routes that put the created object onto the
+/// battlefield: `(run_etb, creation_kind)`. A token has no prior zone, so it is
+/// CREATED on the battlefield either way (CR 111.1); `run_etb` selects which
+/// half of its entry runs — the consulting entry, or the forced entry that
+/// installs only the characteristic counters.
+const CREATE_ROUTES: [(bool, DebugCardCreationKind); 4] = [
     (true, DebugCardCreationKind::Card),
     (false, DebugCardCreationKind::Card),
     (true, DebugCardCreationKind::Token),
+    (false, DebugCardCreationKind::Token),
 ];
 
 fn db() -> &'static CardDatabase {
@@ -115,15 +136,17 @@ fn with_weathered_runestone(scenario: &mut GameScenario) {
     scenario.add_artifact_from_oracle(P0, WEATHERED_RUNESTONE, WEATHERED_RUNESTONE_ORACLE);
 }
 
-/// Create one `name` through the engine's debug Create Card entry.
-fn create(
+/// Create one `name` through the engine's debug Create Card entry, optionally
+/// attached to `attach_to`, and return the creation's events.
+fn create_with(
     runner: &mut GameRunner,
     name: &str,
     owner: PlayerId,
     zone: Zone,
     run_etb: bool,
     creation_kind: DebugCardCreationKind,
-) {
+    attach_to: Option<AttachTarget>,
+) -> Vec<GameEvent> {
     let db = db();
     let face = db
         .get_face_by_name(name)
@@ -136,13 +159,26 @@ fn create(
             owner,
             zone,
             count: 1,
-            attach_to: None,
+            attach_to,
             run_etb,
             nonlegendary: false,
             creation_kind,
         },
     )
-    .unwrap_or_else(|error| panic!("the debug creation of {name} is accepted: {error:?}"));
+    .unwrap_or_else(|error| panic!("the debug creation of {name} is accepted: {error:?}"))
+    .events
+}
+
+/// Create one `name` through the engine's debug Create Card entry.
+fn create(
+    runner: &mut GameRunner,
+    name: &str,
+    owner: PlayerId,
+    zone: Zone,
+    run_etb: bool,
+    creation_kind: DebugCardCreationKind,
+) {
+    let _ = create_with(runner, name, owner, zone, run_etb, creation_kind, None);
 }
 
 /// The one object named `name`. A second object would mean a token was
@@ -201,6 +237,36 @@ fn assert_no_entry_events(events: &[GameEvent], row: &str) {
 
 fn incarnation(runner: &GameRunner, id: ObjectId) -> u64 {
     runner.state().objects[&id].incarnation
+}
+
+/// The CR 733 attachment rows `object_id`'s own attach edits journaled, in
+/// append order.
+fn attachment_rows(runner: &GameRunner, object_id: ObjectId) -> Vec<ObjectIncarnationRef> {
+    runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry.command.as_ref()? {
+            ResolvedRulesCommand::Attachment(command)
+                if command.attachment.object_id == object_id =>
+            {
+                Some(command.attachment)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn hand_len(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|state| state.id == player)
+        .expect("the player is in the game")
+        .hand
+        .len()
 }
 
 fn counter(runner: &GameRunner, id: ObjectId, counter_type: CounterType) -> Option<u32> {
@@ -363,6 +429,10 @@ fn debug_moved_planeswalker_enters_with_printed_loyalty_counters() {
 /// control" for P0's Doubling Season, so it enters with five on either
 /// consulting route.
 ///
+/// The raw TOKEN row runs the forced token entry, which opens no replacement
+/// window at all: nothing doubles, so its five stay five and no
+/// `ReplacementChoice` parks (CR 614.1a / CR 616.1 are skipped).
+///
 /// Red at base: no route put any loyalty counter on Comet.
 #[test]
 fn debug_created_planeswalker_loyalty_follows_the_replacement_window() {
@@ -371,6 +441,7 @@ fn debug_created_planeswalker_loyalty_follows_the_replacement_window() {
         (true, DebugCardCreationKind::Card, P0, 10),
         (true, DebugCardCreationKind::Token, P0, 10),
         (false, DebugCardCreationKind::Card, P0, 5),
+        (false, DebugCardCreationKind::Token, P0, 5),
         (true, DebugCardCreationKind::Card, P1, 5),
         (true, DebugCardCreationKind::Token, P1, 5),
     ];
@@ -554,6 +625,38 @@ fn debug_created_battle_enters_with_printed_defense_counters() {
         "run_etb=false: two damage leaves it with defense"
     );
     assert_defense(&runner, siege, 2, "run_etb=false, after Shock");
+
+    // Raw TOKEN row: the forced token entry installs the same printed defense
+    // counters (CR 310.4b + CR 310.4c), asks for no protector (that choice is
+    // CR 614.12a, part of the consult the forced entry skips) and drains no
+    // ETB trigger (CR 603.6a).
+    let row = "run_etb=false, Token";
+    let mut runner = board(|_| {});
+    create(
+        &mut runner,
+        SIEGE,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Token,
+    );
+    let siege = only_object_named(&runner, SIEGE);
+    assert_eq!(zone_of(&runner, siege), Zone::Battlefield, "{row}");
+    assert!(runner.state().objects[&siege].is_token, "{row}");
+    assert_defense(&runner, siege, 4, row);
+    assert!(
+        is_priority(&runner),
+        "{row}: {}",
+        short(&runner.state().waiting_for)
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "{row}: no ETB trigger is put on the stack"
+    );
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "{row}: nothing is parked"
+    );
 }
 
 /// The raw contract installs only the counters CR 306.5c / CR 310.4c make a
@@ -1440,4 +1543,536 @@ fn a_refused_entry_puts_no_loyalty_counters_on_the_card() {
             );
         }
     }
+}
+
+/// CR 603.6a: the forced token entry drains no ETB trigger. A raw-placed Elvish
+/// Visionary token ("When this creature enters, draw a card.") enters as a body
+/// with nothing on the stack and draws nothing, because the raw contract — the
+/// same one `MoveToZone { simulate: false }` and a `DebugCommand` card
+/// placement use — runs no trigger drain and no SBA pass. Paired positive: the
+/// same creation with `run_etb: true` aims the trigger at the token and draws
+/// once it resolves. Hostile sibling: a `count: 2` batch still puts nothing on
+/// the stack.
+///
+/// Red at base: the raw-placed token never reached the battlefield at all.
+#[test]
+fn raw_debug_token_drains_no_etb_trigger() {
+    let with_library = |scenario: &mut GameScenario| {
+        scenario.with_library_top(P0, &["Forest"]);
+    };
+
+    let row = "run_etb=false, Token";
+    let mut runner = board(with_library);
+    let hand = hand_len(&runner, P0);
+    create(
+        &mut runner,
+        ELVISH_VISIONARY,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Token,
+    );
+    let visionary = only_object_named(&runner, ELVISH_VISIONARY);
+    assert_eq!(zone_of(&runner, visionary), Zone::Battlefield, "{row}");
+    assert!(runner.state().objects[&visionary].is_token, "{row}");
+    assert!(
+        runner.state().stack.is_empty(),
+        "{row}: no ETB trigger is put on the stack"
+    );
+    assert_eq!(hand_len(&runner, P0), hand, "{row}: nothing is drawn");
+    assert!(
+        runner.state().objects[&visionary].counters.is_empty(),
+        "{row}: it enters with no counters"
+    );
+    assert!(
+        is_priority(&runner),
+        "{row}: {}",
+        short(&runner.state().waiting_for)
+    );
+
+    // Paired positive: the consulting route does put the trigger on the stack.
+    let row = "run_etb=true, Token";
+    let mut runner = board(with_library);
+    let hand = hand_len(&runner, P0);
+    create(
+        &mut runner,
+        ELVISH_VISIONARY,
+        P0,
+        Zone::Battlefield,
+        true,
+        DebugCardCreationKind::Token,
+    );
+    let visionary = only_object_named(&runner, ELVISH_VISIONARY);
+    assert_eq!(runner.state().stack.len(), 1, "{row}: its ETB trigger");
+    assert!(
+        matches!(
+            runner.state().stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == visionary
+        ),
+        "{row}: the stack entry is the token's triggered ability"
+    );
+    settle(&mut runner);
+    assert_eq!(hand_len(&runner, P0), hand + 1, "{row}: the trigger draws");
+    assert!(is_priority(&runner), "{row}");
+
+    // Hostile sibling: a two-token batch drains no trigger either.
+    let row = "run_etb=false, Token, count=2";
+    let mut runner = board(with_library);
+    let hand = hand_len(&runner, P0);
+    let db = db();
+    let face = db
+        .get_face_by_name(ELVISH_VISIONARY)
+        .expect("Elvish Visionary is in the committed fixture");
+    create_debug_cards(
+        runner.state_mut(),
+        DebugCardCreateRequest {
+            actor: P0,
+            source: debug_card_entry_source(db, face),
+            owner: P0,
+            zone: Zone::Battlefield,
+            count: 2,
+            attach_to: None,
+            run_etb: false,
+            nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Token,
+        },
+    )
+    .unwrap_or_else(|error| panic!("{row}: the batch is accepted: {error:?}"));
+    let tokens = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.name == ELVISH_VISIONARY)
+        .count();
+    assert_eq!(tokens, 2, "{row}: both tokens are created");
+    assert!(
+        runner.state().stack.is_empty(),
+        "{row}: no trigger is put anywhere"
+    );
+    assert_eq!(hand_len(&runner, P0), hand, "{row}: nothing is drawn");
+}
+
+/// CR 303.4f + CR 303.4g on the forced token entry: an Aura token with no
+/// legal host stays on the battlefield unattached when the entry is forced (the
+/// raw command contract consults no as-enters choice, exactly like the raw card
+/// path), while the consulting route applies CR 303.4g's "If the Aura is a
+/// token, it isn't created".
+///
+/// Red at base: the forced row's Aura token was stranded in Hand.
+#[test]
+fn forced_debug_token_aura_stays_unattached() {
+    let row = "run_etb=false, Token";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        PACIFISM,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Token,
+    );
+    let aura = only_object_named(&runner, PACIFISM);
+    assert_eq!(zone_of(&runner, aura), Zone::Battlefield, "{row}");
+    assert!(runner.state().objects[&aura].is_token, "{row}");
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        None,
+        "{row}: the forced entry makes no as-enters host choice"
+    );
+    assert!(
+        is_priority(&runner),
+        "{row}: {}",
+        short(&runner.state().waiting_for)
+    );
+
+    // Consulting sibling: CR 303.4g withholds the token entirely.
+    let row = "run_etb=true, Token";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        PACIFISM,
+        P0,
+        Zone::Battlefield,
+        true,
+        DebugCardCreationKind::Token,
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .all(|object| object.name != PACIFISM),
+        "{row}: CR 303.4g, a token Aura with no legal host isn't created"
+    );
+    assert!(
+        is_priority(&runner),
+        "{row}: the CR 303.4g arm ran and the creation completed: {}",
+        short(&runner.state().waiting_for)
+    );
+}
+
+/// CR 303.4f + CR 701.3a: a debug-created Equipment token's `attach_to` is
+/// applied by its entry finalize, so the token journals exactly ONE attachment
+/// edit and that edit names its LIVE incarnation. The request's host must not
+/// be pre-attached to the staging row: the token route discards that
+/// incarnation and births a new one, so a staging attach would leave a
+/// duplicate row naming an object that no longer exists.
+///
+/// Base-red: the raw cell's token was stranded in Hand. The journal equality is
+/// not base-red (at base it names the stranded token exactly); it discriminates
+/// the entry-fixed-but-staging-attached intermediate, which yields two rows,
+/// the first naming `{id, 0}` while the live token is `{id, 1}`.
+#[test]
+fn raw_debug_token_attaches_once() {
+    for run_etb in [false, true] {
+        let row = format!("run_etb={run_etb}, Token");
+        let mut runner = board(|scenario| {
+            scenario.add_creature(P0, "Host", 2, 2);
+        });
+        let host = only_object_named(&runner, "Host");
+        create_with(
+            &mut runner,
+            BONESPLITTER,
+            P0,
+            Zone::Battlefield,
+            run_etb,
+            DebugCardCreationKind::Token,
+            Some(AttachTarget::Object(host)),
+        );
+        let token = only_object_named(&runner, BONESPLITTER);
+
+        let state = runner.state();
+        assert_eq!(state.objects[&token].zone, Zone::Battlefield, "{row}");
+        assert!(state.objects[&token].is_token, "{row}");
+        assert_eq!(
+            state.objects[&token].attached_to,
+            Some(AttachTarget::Object(host)),
+            "{row}: the entry finalize attached it"
+        );
+        assert_eq!(
+            state.objects[&host]
+                .attachments
+                .iter()
+                .filter(|id| **id == token)
+                .count(),
+            1,
+            "{row}: the host lists it exactly once"
+        );
+        let rows = attachment_rows(&runner, token);
+        assert_eq!(
+            rows.len(),
+            1,
+            "{row}: exactly one attachment edit: {rows:?}"
+        );
+        assert_eq!(
+            rows[0],
+            ObjectIncarnationRef::from_object(&state.objects[&token]),
+            "{row}: the edit names the live incarnation"
+        );
+    }
+
+    // Reach-guard that the journal filter is not matching everything: the same
+    // raw token created WITHOUT a host journals no attachment row.
+    let row = "run_etb=false, Token, no host";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        BONESPLITTER,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Token,
+    );
+    let token = only_object_named(&runner, BONESPLITTER);
+    assert_eq!(
+        zone_of(&runner, token),
+        Zone::Battlefield,
+        "{row}: reach-guard"
+    );
+    assert!(
+        attachment_rows(&runner, token).is_empty(),
+        "{row}: no attachment edit: {:?}",
+        attachment_rows(&runner, token)
+    );
+}
+
+/// CR 400.7: the `staging_attach` CARD arm is today's behaviour, byte for
+/// byte. A raw battlefield CARDS request is pre-attached in the Hand staging
+/// zone — journaling one attachment row naming the staging incarnation — and
+/// its own move then severs the edge, so it lands unattached with one
+/// `Unattached` announced before its `ZoneChanged`.
+///
+/// Red against the plausible wrong split (cards also given no staging
+/// `attach_to`): the card would land with zero attachment rows and no
+/// `Unattached` event.
+#[test]
+fn raw_debug_card_is_severed_by_its_move() {
+    let row = "run_etb=false, Card";
+    let mut runner = board(|scenario| {
+        scenario.add_creature(P0, "Host", 2, 2);
+    });
+    let host = only_object_named(&runner, "Host");
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+
+    let events = create_with(
+        &mut runner,
+        BONESPLITTER,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Card,
+        Some(AttachTarget::Object(host)),
+    );
+    let card = only_object_named(&runner, BONESPLITTER);
+    let state = runner.state();
+
+    assert_eq!(state.objects[&card].zone, Zone::Battlefield, "{row}");
+    assert!(!state.objects[&card].is_token, "{row}");
+    assert_eq!(
+        state.objects[&card].attached_to, None,
+        "{row}: the move severed the staging attachment (CR 400.7)"
+    );
+    assert!(
+        !state.objects[&host].attachments.contains(&card),
+        "{row}: the host keeps no edge"
+    );
+
+    let attachments: Vec<(usize, ObjectIncarnationRef)> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .enumerate()
+        .skip(journal_start)
+        .filter_map(|(index, entry)| match entry.command.as_ref()? {
+            ResolvedRulesCommand::Attachment(command) if command.attachment.object_id == card => {
+                Some((index, command.attachment))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        attachments.len(),
+        1,
+        "{row}: exactly the staging attachment row: {attachments:?}"
+    );
+    let (attachment_index, attachment) = attachments[0];
+    assert_eq!(
+        attachment,
+        ObjectIncarnationRef::of(card, 0),
+        "{row}: the row names the staging incarnation"
+    );
+    assert_ne!(
+        attachment,
+        ObjectIncarnationRef::from_object(&state.objects[&card]),
+        "{row}: not the live incarnation"
+    );
+
+    let zone_changes: Vec<(usize, u64, Zone, Zone)> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .enumerate()
+        .skip(journal_start)
+        .filter_map(|(index, entry)| match entry.command.as_ref()? {
+            ResolvedRulesCommand::ZoneChange(command) if command.object.object_id == card => {
+                Some((index, command.object.incarnation, command.from, command.to))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        zone_changes.len(),
+        1,
+        "{row}: exactly one zone-change row: {zone_changes:?}"
+    );
+    assert_eq!(zone_changes[0].1, 0, "{row}: from the staging incarnation");
+    assert_eq!(zone_changes[0].2, Zone::Hand, "{row}");
+    assert_eq!(zone_changes[0].3, Zone::Battlefield, "{row}");
+    assert!(
+        zone_changes[0].0 > attachment_index,
+        "{row}: the journal is append-only, the attach precedes the move"
+    );
+
+    let unattached: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::Unattached {
+                attachment_id,
+                old_target: TargetRef::Object(target),
+            } if *attachment_id == card && *target == host => Some(index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unattached.len(), 1, "{row}: one Unattached: {events:?}");
+    let zone_changed = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Hand),
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == card
+            )
+        })
+        .unwrap_or_else(|| panic!("{row}: the card's move is announced: {events:?}"));
+    assert!(
+        unattached[0] < zone_changed,
+        "{row}: Unattached precedes ZoneChanged"
+    );
+}
+
+/// CR 303.4f: the forced token entry must not touch a parked entering-Aura
+/// authority. `apply_entering_aura_hosts` clears `state.entering_aura_authority`
+/// before its `NotApplicable` early return, and a raw debug entry is admitted
+/// from any waiting state, so FEEDING that call `NotApplicable` would spend an
+/// unrelated Aura's parked authority and strand its resume on
+/// `EnteringAuraEntrant::Stored`. The forced entry skips the call entirely.
+///
+/// Non-vacuity: the debug token really lands, and the pause still works
+/// afterwards (answering it attaches the copied Aura token to the chosen host).
+#[test]
+fn raw_debug_token_leaves_a_parked_aura_authority_alone() {
+    const COPY_ENGINE: &str = "Copy Engine";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let maker = scenario
+        .add_enchantment_from_oracle(P0, COPY_ENGINE, "")
+        .with_ability(Effect::CopyTokenOf {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+        })
+        .id();
+    let host_0 = scenario.add_creature(P0, "Host 0", 2, 2).id();
+    let host_1 = scenario.add_creature(P0, "Host 1", 2, 2).id();
+    let their_host = scenario.add_creature(P1, "Their Ally", 2, 2).id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P1, "Fylgja", FYLGJA)
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&aura)
+        .expect("Fylgja exists")
+        .attached_to = Some(AttachTarget::Object(their_host));
+    assert_eq!(
+        runner.state().objects[&host_0].zone,
+        Zone::Battlefield,
+        "fixture: P0 has two legal hosts"
+    );
+
+    // Drive the copy activation: answer its target selection with the source
+    // Aura and stop at the CR 303.4f host prompt.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: maker,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the copy ability activates");
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReturnAsAuraTarget { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(aura)),
+                    })
+                    .expect("the source Aura is a legal copy target");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the mana window closes");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the copy ability resolves");
+            }
+            other => panic!(
+                "unexpected window while reaching the host prompt: {}",
+                short(&other)
+            ),
+        }
+    }
+    let WaitingFor::ReturnAsAuraTarget { returned_id, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "reach-guard: the CR 303.4f host prompt is open: {}",
+            short(&runner.state().waiting_for)
+        );
+    };
+    assert!(
+        runner.state().entering_aura_authority.is_some(),
+        "reach-guard: the non-liminal copy parked its entrant authority"
+    );
+
+    create(
+        &mut runner,
+        ELVISH_VISIONARY,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Token,
+    );
+
+    // Positive guard that the negative is not vacuous: the debug token landed.
+    let visionary = only_object_named(&runner, ELVISH_VISIONARY);
+    assert_eq!(
+        zone_of(&runner, visionary),
+        Zone::Battlefield,
+        "the forced token entry landed"
+    );
+    assert!(
+        runner.state().entering_aura_authority.is_some(),
+        "the parked CR 303.4f authority survives the debug creation"
+    );
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ReturnAsAuraTarget {
+                returned_id: current,
+                ..
+            } if *current == returned_id
+        ),
+        "the pause is untouched: {}",
+        short(&runner.state().waiting_for)
+    );
+
+    // Non-vacuity tail: the pause still works — answering it attaches the
+    // copied Aura token to the chosen host.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(host_1)),
+        })
+        .expect("the host choice is accepted");
+    let copy = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.is_token && object.name == "Fylgja")
+        .map(|object| object.id)
+        .expect("the copied Fylgja token exists");
+    assert_eq!(
+        runner.state().objects[&copy].attached_to,
+        Some(AttachTarget::Object(host_1)),
+        "CR 303.4f: the resumed pause attached the copy to the chosen host"
+    );
 }

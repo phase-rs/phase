@@ -17,9 +17,9 @@ use engine::game::printed_cards::apply_card_face_to_object;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChoiceValue,
-    ChooseOneOfKind, ChosenAttribute, ContinuousModification, Duration, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition, TargetFilter,
-    TargetSelectionMode,
+    ChooseOneOfKind, ChosenAttribute, ContinuousModification, ControllerRef, Duration, Effect,
+    ManaProduction, PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition,
+    TargetFilter, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -430,6 +430,7 @@ fn astral_harmonize_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
 
 fn persisted_color_choice() -> Effect {
     Effect::Choose {
+        chooser: ControllerRef::You,
         choice_type: ChoiceType::color(),
         persist: true,
         selection: TargetSelectionMode::Chosen,

@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::Counter { .. }` — counterspell detection
-//!   (`crates/engine/src/types/ability.rs:2118`). CR 701.6.
+//!   (`crates/phase-ast/src/types/ability.rs`). CR 701.6.
 //! - `Effect::Destroy { .. }` — destroy removal
 //!   (`ability.rs:2106`). CR 701.8.
 //! - `Effect::Bounce { destination: None | Some(Hand) }` — bounce removal
@@ -15,7 +15,7 @@
 //!   sweepers. These are **distinct** variants from spot removal — the parser
 //!   emits them separately, so sweeper-vs-spot classification is unambiguous.
 //! - `Effect::Draw { count }` (`ability.rs:2094`), `Effect::Dig { .. }`
-//!   (`ability.rs:2310`) — card advantage variants. CR 120.1.
+//!   (`ability.rs:2310`) — card advantage variants. CR 121.1.
 //! - `CoreType::Instant` / `CoreType::Sorcery` (`card_type.rs:74-77`).
 //!   CR 117.1a + CR 304.1: instants can be cast any time the player has priority.
 //! - `AbilityKind::Spell` (`ability.rs:3749`) — distinguishes spell effects from
@@ -63,7 +63,7 @@ pub struct ControlFeature {
     /// Weighted 2× in the commitment formula because they answer more threats.
     pub sweeper_count: u32,
     /// Spells with `Effect::Draw` or `Effect::Dig` on an `AbilityKind::Spell`
-    /// ability, excluding lands. CR 120.1: drawing cards replenishes hand.
+    /// ability, excluding lands. CR 121.1: drawing cards replenishes hand.
     pub card_draw_count: u32,
     /// Non-land cards with `CoreType::Instant`. Flash creatures are NOT counted
     /// (flash is a keyword, not a core type — keyword detection is out of scope).

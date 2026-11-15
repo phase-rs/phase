@@ -80,11 +80,25 @@ export function buildLlmProbeRequest(endpoint_json: string): any;
 export function build_ai_card_subset(): string;
 
 /**
+ * `actor` withdraws their own open takeback request.
+ */
+export function cancel_takeback_js(actor: number): any;
+
+/**
  * The canonical printed name of each of `names`, index-aligned, `null` where
  * `CardDatabase::canonical_name` has none. Errors if the card database is
  * not loaded.
  */
 export function canonicalCardNames(names: any): any;
+
+/**
+ * Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+ * admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+ * guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+ * (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+ * `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+ */
+export function checkDeckPrintingsBounds(printings: any): void;
 
 /**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
@@ -286,6 +300,13 @@ export function getAiActionProposalFromLlmResponse(player_id: number, fingerprin
  * Returns the engine-authored default AI rung for every Commander bracket.
  */
 export function getBracketDifficultyTable(): any;
+
+/**
+ * Return the authoritative list of selectable Horde challenge decks as a typed
+ * array. The Horde deck picker renders this directly — the client never
+ * maintains a mirrored deck list. Each entry bundles the deck's `HordeRuleset`.
+ */
+export function getChallengeDeckRegistry(): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -511,7 +532,7 @@ export function legal_targets_for_castables_js(object_ids: any): any;
 
 /**
  * Returns the engine-typed catalog of debug-spawnable token presets,
- * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+ * loaded from `crates/phase-ast/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
  */
 export function list_token_presets_js(): any;
@@ -566,6 +587,11 @@ export function load_replay_for_playback(json_str: string): number;
  * blocks a legal add.
  */
 export function maxDeckCopies(name: string, format_config: any): any;
+
+/**
+ * The open takeback vote, or `null`, for replay to a reconnecting guest.
+ */
+export function pending_takeback_js(): any;
 
 /**
  * Verify WASM integration works.
@@ -632,6 +658,17 @@ export function replay_length_js(): number;
  * every other fallible engine entry point that returns `Result<_, JsValue>`.
  */
 export function replay_seek_js(target: number): any;
+
+/**
+ * `actor` asks to take back their own most recent action. Throws
+ * `NOT_INITIALIZED` when no game is installed.
+ */
+export function request_takeback_js(actor: number, ai_players: Uint8Array): any;
+
+/**
+ * `actor` approves or declines the open takeback vote.
+ */
+export function respond_takeback_js(actor: number, approve: boolean, ai_players: Uint8Array): any;
 
 /**
  * Restore the game state from a JSON string.
@@ -837,7 +874,9 @@ export interface InitOutput {
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
+    readonly cancel_takeback_js: (a: number) => [number, number, number];
     readonly canonicalCardNames: (a: any) => [number, number, number];
+    readonly checkDeckPrintingsBounds: (a: any) => [number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
@@ -881,12 +920,15 @@ export interface InitOutput {
     readonly load_combo_table: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
+    readonly pending_takeback_js: () => any;
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
+    readonly request_takeback_js: (a: number, b: number, c: number) => [number, number, number];
+    readonly respond_takeback_js: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
@@ -903,7 +945,6 @@ export interface InitOutput {
     readonly statecodechandle_clone_handle: (a: number) => number;
     readonly statecodechandle_hash: (a: number) => [number, number];
     readonly statecodechandle_json: (a: number) => [number, number];
-    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly statecodechandle_revision: (a: number) => [number, bigint];
     readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
@@ -922,6 +963,7 @@ export interface InitOutput {
     readonly getFormatRegistry: () => any;
     readonly clear_replay_playback: () => void;
     readonly replay_length_js: () => number;
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

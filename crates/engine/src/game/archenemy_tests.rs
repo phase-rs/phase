@@ -22,7 +22,7 @@ use super::triggers::{PendingTrigger, PendingTriggerContext};
 use crate::database::synthesis::synthesize_archenemy;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -416,7 +416,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
     });
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no abandon while the scheme's ability is on the stack"
@@ -431,7 +431,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
     state.stack.clear();
     let mut events2 = Vec::new();
     let mut any2 = false;
-    check_scheme_abandon_sba(&mut state, &mut events2, &mut any2);
+    check_scheme_abandon_sba(&mut state, &mut events2, &mut any2, &[]);
     assert!(any2, "turn down once the ability leaves the stack");
     assert!(
         state.objects.get(&scheme_id).unwrap().face_down,
@@ -508,7 +508,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
     // The abandon SBA must do nothing while the trigger is waiting (CR 904.10).
     let mut events2 = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events2, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events2, &mut any, &[]);
     assert!(
         !any,
         "no abandon while a scheme trigger is waiting to be put on the stack"
@@ -539,7 +539,7 @@ fn ongoing_scheme_not_abandoned_by_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(!any, "ongoing scheme must not be abandoned by the SBA");
     assert!(
         state.command_zone.contains(&scheme_id),
@@ -588,6 +588,112 @@ fn abandon_fires_abandoned_trigger() {
             .any(|d| d.pending.source_id == scheme_id),
         "Abandoned trigger from {scheme_id:?} must be collected, got {:?}",
         state.deferred_triggers
+    );
+}
+
+/// CR 118.12a + CR 701.33a-b: Fear My Authority's upkeep abandon behind "you
+/// discard a card or pay 3 life" — the REAL parsed trigger resolves through
+/// `resolve_ability_chain` into the unless prompt (never straight to
+/// abandon), and both directions behave: declining abandons the face-up
+/// scheme, paying 3 life keeps it face up. DISCRIMINATING: without the
+/// you-disjunction grammar the card gaps at setup (no AbandonScheme body, no
+/// prompt ever raises); without the generic unless interception the decline
+/// path would skip the prompt and the pay path would still abandon.
+#[test]
+fn fear_my_authority_unless_choice_abandons_on_decline_and_stays_on_pay() {
+    use crate::game::effects::resolve_ability_chain;
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::ability::AbilityCost;
+    use crate::types::actions::{GameAction, UnlessCostBranch};
+
+    // Production setup: Fear's VERBATIM upkeep line through the real parser.
+    let trig = parse_trigger_line(
+        "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.",
+        "Fear My Authority",
+    );
+    let execute = trig.execute.clone().expect("trigger has a body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "body must be AbandonScheme, got {:?}",
+        execute.effect
+    );
+    // Mirror the stack-placement transfer (triggers.rs carries trigger-level
+    // `unless_pay` onto the resolving ability).
+    let unless_pay = trig.unless_pay.clone().expect("trigger carries unless_pay");
+
+    // --- Decline branch: the prompt offers both parsed branches; declining
+    // abandons the face-up scheme.
+    let mut state = GameState::new_two_player(7);
+    let arch = PlayerId(0);
+    state.active_player = arch;
+    let face = synthesized_scheme_face(vec![trig.clone()], vec![], vec![Supertype::Ongoing]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Fear My Authority", &face);
+    let mut ability = ResolvedAbility::new((*execute.effect).clone(), vec![], scheme_id, arch);
+    ability.unless_pay = Some(unless_pay.clone());
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("chain resolves into the unless prompt");
+    match &state.waiting_for {
+        WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
+            assert_eq!(*player, arch, "controller must pay, got {player:?}");
+            assert_eq!(costs.len(), 2, "both branches offered, got {costs:?}");
+            assert!(matches!(costs[0], AbilityCost::Discard { .. }));
+            assert!(matches!(costs[1], AbilityCost::PayLife { .. }));
+        }
+        other => panic!("expected UnlessPaymentChooseCost, got {other:?}"),
+    }
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Decline,
+        },
+    )
+    .expect("decline resolves");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "after decline+abandon, priority must restore, got {:?}",
+        result.waiting_for
+    );
+    assert!(
+        !state.command_zone.contains(&scheme_id),
+        "declined scheme must leave the command zone"
+    );
+    assert!(
+        state.objects.get(&scheme_id).is_some_and(|o| o.face_down),
+        "declined scheme must be face down"
+    );
+
+    // --- Pay branch: fresh state, pay 3 life, the scheme stays face up.
+    let mut state = GameState::new_two_player(7);
+    state.active_player = arch;
+    state.players[0].life = 20;
+    let face = synthesized_scheme_face(vec![trig], vec![], vec![Supertype::Ongoing]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Fear My Authority", &face);
+    let mut ability = ResolvedAbility::new((*execute.effect).clone(), vec![], scheme_id, arch);
+    ability.unless_pay = Some(unless_pay);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("chain resolves into the unless prompt");
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Pay { index: 1 },
+        },
+    )
+    .expect("pay-life branch resolves");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "after payment, priority must restore, got {:?}",
+        result.waiting_for
+    );
+    assert_eq!(state.players[0].life, 17, "paying 3 life from 20");
+    assert!(
+        state.command_zone.contains(&scheme_id),
+        "paid scheme must stay in the command zone"
+    );
+    assert!(
+        state.objects.get(&scheme_id).is_some_and(|o| !o.face_down),
+        "paid scheme must stay face up"
     );
 }
 
@@ -653,7 +759,7 @@ fn archenemy_none_skips_abandon_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(!any, "no abandon SBA work when archenemy is None");
     assert!(
         state.command_zone.contains(&scheme_id),
@@ -805,4 +911,647 @@ fn nonongoing_sba_does_not_fire_abandoned_trigger() {
         state.stack,
         state.deferred_triggers,
     );
+}
+
+// ---------------------------------------------------------------------------
+// 14. Effect::AbandonScheme resolves through the real dispatch (DISCRIMINATING)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn abandon_scheme_effect_abandons_face_up_ongoing_scheme() {
+    // DISCRIMINATING: fails if `Effect::AbandonScheme` is unwired from
+    // `resolve_effect`, or stops routing through `archenemy::abandon`.
+    let mut state = GameState::new_two_player(7);
+    let arch = PlayerId(0);
+    let scheme =
+        synthesized_scheme_face(vec![abandoned_trigger()], vec![], vec![Supertype::Ongoing]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Ongoing Scheme", &scheme);
+    assert!(state.stack.is_empty() && state.deferred_triggers.is_empty());
+
+    let ability = ResolvedAbility::new(Effect::AbandonScheme, vec![], scheme_id, arch);
+    let mut events = Vec::new();
+    crate::game::effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+    // CR 701.33b: face down, out of the command zone, on the bottom of the
+    // scheme deck.
+    assert!(
+        state.objects.get(&scheme_id).unwrap().face_down,
+        "abandoned scheme is face down"
+    );
+    assert!(
+        !state.command_zone.contains(&scheme_id),
+        "abandoned scheme left the command zone"
+    );
+    assert_eq!(
+        state.scheme_deck.back().copied(),
+        Some(scheme_id),
+        "abandoned scheme is on the bottom of the scheme deck"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::SchemeAbandoned { scheme_id: s, .. } if *s == scheme_id
+        )),
+        "SchemeAbandoned event emitted, got {events:?}"
+    );
+    // CR 314.4 / CR 904.8: the "when you abandon this scheme" trigger was
+    // self-collected exactly once while the scheme was still face up.
+    assert_eq!(
+        scheme_trigger_instances(&state, scheme_id),
+        1,
+        "Abandoned trigger collected exactly once, got {} (stack={:?}, deferred={:?})",
+        scheme_trigger_instances(&state, scheme_id),
+        state.stack,
+        state.deferred_triggers,
+    );
+}
+
+#[test]
+fn abandon_scheme_effect_noop_on_nonongoing_scheme() {
+    // CR 701.33a: only a face-up ongoing scheme may be abandoned. Resolving
+    // the effect with a non-ongoing source is a no-op — the scheme stays face
+    // up in the command zone with no event and no collected trigger.
+    let mut state = GameState::new_two_player(7);
+    let arch = PlayerId(0);
+    let scheme = synthesized_scheme_face(vec![abandoned_trigger()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Non-Ongoing Scheme", &scheme);
+
+    let ability = ResolvedAbility::new(Effect::AbandonScheme, vec![], scheme_id, arch);
+    let mut events = Vec::new();
+    crate::game::effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+    assert!(
+        !state.objects.get(&scheme_id).unwrap().face_down,
+        "non-ongoing scheme stays face up"
+    );
+    assert!(
+        state.command_zone.contains(&scheme_id),
+        "non-ongoing scheme stays in the command zone"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SchemeAbandoned { .. })),
+        "no SchemeAbandoned event for a non-ongoing scheme, got {events:?}"
+    );
+    assert_eq!(
+        scheme_trigger_instances(&state, scheme_id),
+        0,
+        "no Abandoned trigger collected for a non-ongoing scheme"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. The Fate of the Flammable: targeted chooser + label gates + anaphor
+//    (DISCRIMINATING — the Fix G + Fix B + Fix A runtime proof)
+// ---------------------------------------------------------------------------
+
+/// CR 608.2d + CR 607.2d + CR 608.2c + CR 115.1: the full Fate resolution in a
+/// 3v1 Archenemy Commander game, driven through the apply pipeline from a REAL
+/// production parse of the verbatim Oracle text. P0 (archenemy) set the scheme
+/// in motion targeting P1; P1 — never P0 — is prompted for self-or-others;
+/// answering Self deals 6 to P1 while P2/P3 are untouched.
+///
+/// DISCRIMINATING three ways: fails if the chooser binding is reverted (P0 is
+/// prompted), if the label gates are reverted (both branches fire), or if the
+/// anaphor is reverted (6 to the wrong player, or a fizzle).
+#[test]
+fn fate_of_the_flammable_self_choice_deals_six_to_targeted_opponent() {
+    use crate::game::scenario::GameRunner;
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
+
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy_commander(), 4, 7);
+    let arch = PlayerId(0);
+    let p1 = PlayerId(1);
+    state.active_player = arch;
+
+    // REAL production parse of the verbatim Oracle text (never a paraphrase).
+    let parsed = crate::parser::parse_oracle_text(
+        ORACLE,
+        "The Fate of the Flammable",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "Fate has one trigger");
+    let trigger = parsed.triggers[0].clone();
+    let body = trigger.execute.as_deref().expect("Fate trigger has a body");
+    // Reach-guard (foot-gun 6): the untouched-opponent assertions below are
+    // vacuous if the body never parsed — prove the chain is gap-free first.
+    assert!(
+        !super::coverage::card_face_has_unimplemented_parts(&synthesized_scheme_face(
+            vec![trigger.clone()],
+            vec![],
+            vec![]
+        )),
+        "Fate parse must be gap-free"
+    );
+
+    let face = synthesized_scheme_face(vec![trigger.clone()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "The Fate of the Flammable", &face);
+
+    // Announced target P1 (target announcement is orthogonal machinery with its
+    // own tests; the companion-slot unit test proves the slot surfaces).
+    let ability = super::ability_utils::build_resolved_from_def_with_targets(
+        body,
+        scheme_id,
+        arch,
+        vec![TargetRef::Player(p1)],
+    );
+    state.stack.push_back(StackEntry {
+        id: ObjectId(99_999),
+        source_id: scheme_id,
+        controller: arch,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: scheme_id,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "The Fate of the Flammable".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    });
+
+    let life_before = [
+        state.players[0].life,
+        state.players[1].life,
+        state.players[2].life,
+        state.players[3].life,
+    ];
+
+    // Priority setup: all four pass → the trigger resolves → the choice prompt.
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = arch;
+    state.waiting_for = WaitingFor::Priority { player: arch };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let mut runner = GameRunner::from_state(state);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+
+    // THE chooser assertion (Fix G): the TARGETED opponent is prompted.
+    {
+        let waiting = &runner.state().waiting_for;
+        match waiting {
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                assert_eq!(
+                    *player, p1,
+                    "the TARGETED opponent chooses, not the controller"
+                );
+                assert_eq!(
+                    options,
+                    &vec!["Self".to_string(), "Others".to_string()],
+                    "self-or-others options"
+                );
+            }
+            other => panic!("expected the self-or-others NamedChoice, got {other:?}"),
+        }
+    }
+
+    // P1 answers Self → the Self branch fires (6 to P1), the Others branch is
+    // gated off (Fix A), and the recipient anaphor is P1 (Fix B).
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Self".to_string(),
+        })
+        .unwrap();
+
+    let after = runner.state();
+    assert_eq!(
+        after.players[1].life,
+        life_before[1] - 6,
+        "P1 takes 6 from the Self branch"
+    );
+    assert_eq!(
+        after.players[2].life, life_before[2],
+        "P2 untouched (Others branch gated off)"
+    );
+    assert_eq!(
+        after.players[3].life, life_before[3],
+        "P3 untouched (Others branch gated off)"
+    );
+    assert_eq!(after.players[0].life, life_before[0], "archenemy untouched");
+    assert!(
+        matches!(after.waiting_for, WaitingFor::Priority { .. }),
+        "clean drain back to priority, got {:?}",
+        after.waiting_for
+    );
+}
+
+/// CR 607.2d + CR 608.2c + CR 102.2 + CR 109.4: answering Others fires the
+/// others branch — the drain-side false path must HAND OFF to the label-gated
+/// sibling (the `condition_survives_false_parent_gate` arm), not suppress it.
+/// P2/P3 take 3; P1 (the targeted chooser) is excluded by the
+/// `OpponentExcept { ParentPlayerTarget }` scope — choosing Others is precisely
+/// how the chooser dodges the damage.
+#[test]
+fn fate_of_the_flammable_others_choice_hits_other_opponents() {
+    use crate::game::scenario::GameRunner;
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
+
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy_commander(), 4, 7);
+    let arch = PlayerId(0);
+    let p1 = PlayerId(1);
+    state.active_player = arch;
+
+    let parsed = crate::parser::parse_oracle_text(
+        ORACLE,
+        "The Fate of the Flammable",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers[0].clone();
+    let body = trigger.execute.as_deref().expect("Fate trigger has a body");
+    let face = synthesized_scheme_face(vec![trigger.clone()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "The Fate of the Flammable", &face);
+
+    let ability = super::ability_utils::build_resolved_from_def_with_targets(
+        body,
+        scheme_id,
+        arch,
+        vec![TargetRef::Player(p1)],
+    );
+    state.stack.push_back(StackEntry {
+        id: ObjectId(99_999),
+        source_id: scheme_id,
+        controller: arch,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: scheme_id,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "The Fate of the Flammable".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    });
+
+    let life_before = [
+        state.players[0].life,
+        state.players[1].life,
+        state.players[2].life,
+        state.players[3].life,
+    ];
+
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = arch;
+    state.waiting_for = WaitingFor::Priority { player: arch };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let mut runner = GameRunner::from_state(state);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Others".to_string(),
+        })
+        .unwrap();
+
+    let after = runner.state();
+    // Mutual exclusion AND the other-opponents exclusion: P1 chose Others, so
+    // neither the Self branch (6 to the chooser) nor the Others branch (3 to
+    // each OTHER opponent) touches P1.
+    assert_eq!(
+        after.players[1].life, life_before[1],
+        "P1 chose Others and must be excluded from both branches"
+    );
+    assert_eq!(
+        after.players[2].life,
+        life_before[2] - 3,
+        "P2 takes 3 from the Others branch"
+    );
+    assert_eq!(
+        after.players[3].life,
+        life_before[3] - 3,
+        "P3 takes 3 from the Others branch"
+    );
+    assert_eq!(after.players[0].life, life_before[0], "archenemy untouched");
+}
+
+/// CR 608.2c + CR 607.2d: the SAME scheme object resolving twice with opposite
+/// answers follows the CURRENT answer each time — never the first answer ever
+/// given. Resolution 1 answers Self (6 to P1); resolution 2 — against the same
+/// object, whose persisted labels still lead with "Self" exactly as after a
+/// recycle (the recycle reset clears only chosen PLAYERS, `archenemy.rs`) —
+/// answers Others and must deal 3 to P2/P3 while P1 takes no further damage.
+///
+/// DISCRIMINATING: fails if `AbilityCondition::ChosenLabelIs` reads the
+/// persisted first label instead of the named-choice continuation (resolution 2
+/// then re-fires the Self branch: P1 takes 6 more, P2/P3 nothing).
+#[test]
+fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
+    use crate::game::scenario::GameRunner;
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
+
+    let mut state = GameState::new(crate::types::FormatConfig::archenemy_commander(), 4, 7);
+    let arch = PlayerId(0);
+    let p1 = PlayerId(1);
+    state.active_player = arch;
+
+    let parsed = crate::parser::parse_oracle_text(
+        ORACLE,
+        "The Fate of the Flammable",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers[0].clone();
+    let body = trigger.execute.as_deref().expect("Fate trigger has a body");
+    let face = synthesized_scheme_face(vec![trigger.clone()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "The Fate of the Flammable", &face);
+
+    let push_instance = |state: &mut GameState, entry_id: u64| {
+        let ability = super::ability_utils::build_resolved_from_def_with_targets(
+            body,
+            scheme_id,
+            arch,
+            vec![TargetRef::Player(p1)],
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(entry_id),
+            source_id: scheme_id,
+            controller: arch,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: scheme_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "The Fate of the Flammable".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+    };
+
+    // Resolution 1: P1 answers Self → 6 to P1.
+    push_instance(&mut state, 99_991);
+    let life_before = [
+        state.players[0].life,
+        state.players[1].life,
+        state.players[2].life,
+        state.players[3].life,
+    ];
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = arch;
+    state.waiting_for = WaitingFor::Priority { player: arch };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let mut runner = GameRunner::from_state(state);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Self".to_string(),
+        })
+        .unwrap();
+    let after_first = runner.state();
+    assert_eq!(
+        after_first.players[1].life,
+        life_before[1] - 6,
+        "resolution 1: P1 takes 6 from the Self branch"
+    );
+    assert_eq!(
+        after_first.players[2].life, life_before[2],
+        "resolution 1: P2 untouched"
+    );
+    assert_eq!(
+        after_first.players[3].life, life_before[3],
+        "resolution 1: P3 untouched"
+    );
+    // Trap precondition: the persisted first label is now "Self" — exactly the
+    // stale state a recycled scheme carries into its next resolution.
+    assert_eq!(
+        after_first.objects[&scheme_id].chosen_label(),
+        Some("Self"),
+        "resolution 1 must persist the Self label on the scheme"
+    );
+    let life_after_first = [
+        after_first.players[0].life,
+        after_first.players[1].life,
+        after_first.players[2].life,
+        after_first.players[3].life,
+    ];
+
+    // Resolution 2: the SAME object, the SAME target, the OPPOSITE answer.
+    {
+        let live = runner.state_mut();
+        live.priority_player = arch;
+        live.waiting_for = WaitingFor::Priority { player: arch };
+        live.priority_passes.clear();
+        live.priority_pass_count = 0;
+    }
+    push_instance(runner.state_mut(), 99_992);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the second self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Others".to_string(),
+        })
+        .unwrap();
+
+    let after = runner.state();
+    assert_eq!(
+        after.players[1].life, life_after_first[1],
+        "resolution 2: P1 chose Others and must take no further damage"
+    );
+    assert_eq!(
+        after.players[2].life,
+        life_after_first[2] - 3,
+        "resolution 2: P2 takes 3 from the Others branch"
+    );
+    assert_eq!(
+        after.players[3].life,
+        life_after_first[3] - 3,
+        "resolution 2: P3 takes 3 from the Others branch"
+    );
+    // The stale trap was live the whole time: persistence still leads with the
+    // first answer, so only the named-choice continuation can explain the
+    // Others branch firing.
+    assert_eq!(
+        after.objects[&scheme_id].chosen_label(),
+        Some("Self"),
+        "persisted labels must still lead with the first answer"
+    );
+}
+
+/// CR 102.2 + CR 608.2c + CR 109.4: Surrender Your Thoughts' Others branch
+/// ("each of your other opponents discards two cards") fans out through the
+/// player_scope driver with the `OpponentExcept { ParentPlayerTarget }` scope —
+/// the targeted chooser (P1) is never prompted, while each other opponent
+/// discards two. This is the driver-routing proof for the subject-position arm
+/// (Fate proves the `DamageEachPlayer`-resolver arm).
+#[test]
+fn surrender_your_thoughts_others_choice_discards_other_opponents_only() {
+    use crate::game::scenario::{GameRunner, GameScenario};
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, that player discards four cards. If the player chooses others, each of your other opponents discards two cards.";
+
+    let arch = PlayerId(0);
+    let p1 = PlayerId(1);
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+
+    let mut scenario =
+        GameScenario::new_with_format(crate::types::FormatConfig::archenemy_commander(), 4, 7);
+    // Three cards each: hand > count forces an interactive DiscardChoice
+    // (hand == count auto-discards without prompting).
+    scenario.with_cards_in_hand(p1, &["P1A", "P1B", "P1C"]);
+    scenario.with_cards_in_hand(p2, &["P2A", "P2B", "P2C"]);
+    scenario.with_cards_in_hand(p3, &["P3A", "P3B", "P3C"]);
+    let mut state = scenario.state;
+    state.active_player = arch;
+
+    let parsed = crate::parser::parse_oracle_text(
+        ORACLE,
+        "Surrender Your Thoughts",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers[0].clone();
+    let body = trigger
+        .execute
+        .as_deref()
+        .expect("Surrender trigger has a body");
+    let face = synthesized_scheme_face(vec![trigger.clone()], vec![], vec![]);
+    let scheme_id = setup_active_scheme(&mut state, arch, "Surrender Your Thoughts", &face);
+
+    let ability = super::ability_utils::build_resolved_from_def_with_targets(
+        body,
+        scheme_id,
+        arch,
+        vec![TargetRef::Player(p1)],
+    );
+    state.stack.push_back(StackEntry {
+        id: ObjectId(99_999),
+        source_id: scheme_id,
+        controller: arch,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: scheme_id,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "Surrender Your Thoughts".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    });
+
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = arch;
+    state.waiting_for = WaitingFor::Priority { player: arch };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let mut runner = GameRunner::from_state(state);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected the self-or-others prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Others".to_string(),
+        })
+        .unwrap();
+
+    // Drive every DiscardChoice prompt, recording WHO was prompted. APNAP
+    // order between P2/P3 is not pinned — only the prompted SET is.
+    let mut prompted = Vec::new();
+    for _ in 0..8 {
+        let (player, cards, count) = match &runner.state().waiting_for {
+            WaitingFor::DiscardChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => (*player, cards.clone(), *count),
+            WaitingFor::Priority { .. } => break,
+            other => panic!("expected DiscardChoice or Priority, got {other:?}"),
+        };
+        prompted.push(player);
+        assert_eq!(count, 2, "{player:?} must discard exactly two");
+        let chosen: Vec<_> = cards.into_iter().take(count).collect();
+        assert_eq!(chosen.len(), 2, "{player:?} must have 2 cards to choose");
+        runner
+            .act(GameAction::SelectCards { cards: chosen })
+            .unwrap();
+    }
+    prompted.sort();
+    assert_eq!(
+        prompted,
+        vec![p2, p3],
+        "only the non-choosing opponents must be prompted, got {prompted:?}"
+    );
+
+    let after = runner.state();
+    assert_eq!(
+        after.players[1].hand.len(),
+        3,
+        "P1 chose Others and discards nothing"
+    );
+    assert_eq!(after.players[2].hand.len(), 1, "P2 discards two of three");
+    assert_eq!(after.players[3].hand.len(), 1, "P3 discards two of three");
+    assert_eq!(after.players[0].hand.len(), 0, "archenemy untouched");
 }

@@ -21,7 +21,7 @@ import {
   readFullTerminalResult,
 } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
-import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
+import type { NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
 import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
@@ -31,7 +31,12 @@ import {
 } from "../constants/storage";
 import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
-import { buildLegalAiDeckCatalog, candidateSeatDeck } from "../services/aiDeckCatalog";
+import {
+  buildLegalAiDeckCatalog,
+  candidateDeclarations,
+  candidateSeatDeck,
+  type SeatDeclarations,
+} from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { withCatalogSavedNames } from "../services/randomPoolSelection";
 import { cedhSeatProblem, pickAiSeatDecks, resolveRandomDrawPool } from "../services/aiRandomPool";
@@ -48,7 +53,14 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
-import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
+import {
+  captureSubmissionArtPreferences,
+  submitDeckList,
+  submitParsedDeck,
+  type SubmittedDeck,
+  type SubmissionDeck,
+} from "../services/deckSubmission";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { emptySeatDeck, pileSeatDeck, pileSourceFromParam, type PileSource } from "../services/pileSource";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
@@ -135,10 +147,26 @@ function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNam
   );
 }
 
+/**
+ * Install one commander-derived identity per owner, and report whether it did.
+ *
+ * Derived from EVERY `is_commander` object in the state — deliberately NOT from
+ * `command_zone`, which is only the cards sitting in the command zone at this
+ * instant (`viewmodel/commanderColumn.ts` reads it that way). A commander that
+ * has been cast, that died, or that was exiled is still its owner's commander
+ * (CR 903.3), but it no longer appears in `command_zone` — so gating on that
+ * list made a mid-game reload skip this derivation entirely and keep the random
+ * planeswalker identities `setupRandomAvatars` seeded, swapping every seat's
+ * name and avatar on refresh (issue #8053).
+ *
+ * A state with no commander object at all — a non-Commander game, or a snapshot
+ * that has not loaded yet — writes NOTHING and answers `false`, so a caller's
+ * existing fallback identities survive instead of being erased to empty maps.
+ */
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
-) {
+): boolean {
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
@@ -149,6 +177,8 @@ function setupCommanderAvatars(
     commanderNames.set(obj.owner, obj.name);
   }
 
+  if (commanderNames.size === 0) return false;
+
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
     playerAvatars.set(playerId, { kind: "card", cardName });
@@ -157,6 +187,7 @@ function setupCommanderAvatars(
   useMultiplayerStore.setState(
     preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
+  return true;
 }
 
 function setupDraftMatchAvatars(seed: string) {
@@ -250,19 +281,7 @@ function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number
   return names;
 }
 
-function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
-  return expandParsedDeck(deck);
-}
-
-type ExpandedDeckWithTier = {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck: string[];
-  scheme_deck: string[];
-  signature_spell: string[];
-  companion: string[];
-  sticker_sheets: string[];
+type ExpandedDeckWithTier = SubmittedDeck<ExpandedDeck> & {
   /** The owner's declared bracket; `null` is undeclared (the engine plays the estimate). */
   bracket_tier: CommanderBracketTier | null;
   /** The deck owner's two-card-combo answer; omitted means unanswered (the engine's default). */
@@ -291,7 +310,7 @@ function sameStringArray(value: unknown, expected: readonly string[]): boolean {
     && value.every((entry, index) => typeof entry === "string" && entry === expected[index]);
 }
 
-/** The raw object is forwarded unchanged to the engine, so every key and value must match publication. */
+/** Validate the name-only publication before decorating a separate in-memory submission. */
 function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
   if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
   const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
@@ -312,6 +331,19 @@ function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
     difficulty: deckList.ai_difficulties[index] ?? "Medium",
     deck,
   }));
+}
+
+/** One fresh handoff binds every locally configured seat without changing publication. */
+async function submitLocalHandoff<T extends {
+  player: SubmissionDeck;
+  opponent: SubmissionDeck;
+  ai_decks: SubmissionDeck[];
+}>(payload: T) {
+  const snapshot = captureSubmissionArtPreferences();
+  const [player, opponent, ...ai_decks] = await Promise.all(
+    [payload.player, payload.opponent, ...payload.ai_decks].map((deck) => submitDeckList(deck, snapshot)),
+  );
+  return { ...payload, player, opponent, ai_decks };
 }
 
 /** Restores normal local resume behavior only after native setup has failed. */
@@ -370,7 +402,9 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
   return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
-async function buildLocalAiDeckList(
+// Exported for the Horde payload regression tests; production callers go
+// through the GameProvider start flow.
+export async function buildLocalAiDeckList(
   t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
@@ -393,6 +427,88 @@ async function buildLocalAiDeckList(
       player: { ...pile, bracket_tier: null },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
+  // Horde: the human is a survivor bringing their own constructed deck; the
+  // Horde seats are the self-piloting Horde, whose libraries are the
+  // engine-supplied challenge decks injected by `load_horde_library`. No saved
+  // deck is tagged "Horde", so Horde seats submit empty and must NOT be drawn
+  // from the (empty) Horde-filtered catalog — but AI seats OUTSIDE the Horde
+  // roster are allied survivors and need real decks from the unfiltered
+  // catalog, or they start with an empty library and lose on their first draw.
+  if (formatConfig && formatConfig.format === "Horde") {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+      signature_spell: [],
+      companion: [],
+      sticker_sheets: [],
+      bracket_tier: null,
+    });
+    // One catalog fetch serves the human Random fallback AND the AI survivor
+    // seats: no format tag (the pool is unrestricted), but the picked
+    // challenge deck, so the engine validates each candidate against the
+    // challenge's survivor requirements (Commander shape for EDH hordes,
+    // unrestricted for constructed-block hordes).
+    const survivorCatalog = await buildLegalAiDeckCatalog({
+      selectedMatchType,
+      selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
+    });
+    let hordePlayerDeck = deck;
+    let hordePlayerDeclarations: SeatDeclarations = {
+      bracket_tier: bracketToEngineTier(playerBracket),
+      combo_declaration: comboDeclaration,
+    };
+    if (!hordePlayerDeck) {
+      // Human chose "Random Deck": pick from the unfiltered catalog rather
+      // than the Horde-tagged one (which is empty).
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {});
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      hordePlayerDeck = pick.deck;
+      hordePlayerDeclarations = candidateDeclarations(pick);
+    }
+    // Seat map: player = seat 0 (human survivor), opponent = seat 1 (Horde
+    // primary — the init path remaps archenemy_player onto the first AI seat),
+    // ai_decks[i] = seat 2+i. The Horde roster is the primary plus one seat
+    // per co-Horde deck; roster seats submit empty (the engine injects
+    // challenge libraries), every other AI seat is an allied survivor.
+    const hordeSeatCount =
+      1 + (formatConfig.horde_ruleset?.co_horde_decks?.length ?? 0);
+    const takenDeckIds = new Set<string>();
+    const aiDecks: ExpandedDeckWithTier[] = [];
+    for (let i = 0; i < opponentCount - 1; i++) {
+      if (i < hordeSeatCount - 1) {
+        aiDecks.push(emptySeat());
+        continue;
+      }
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {
+        excludeIds: takenDeckIds,
+      });
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      takenDeckIds.add(pick.id);
+      aiDecks.push(candidateSeatDeck(pick, expandParsedDeck(pick.deck)));
+    }
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: {
+        ...expandParsedDeck(hordePlayerDeck),
+        ...hordePlayerDeclarations,
+      },
+      opponent: emptySeat(),
+      ai_decks: aiDecks,
       ai_difficulties: aiDifficulties,
     };
   }
@@ -452,10 +568,11 @@ async function buildLocalAiDeckList(
   }
 
   const excludeIds = new Set<string>();
-  let player: ExpandedDeckWithTier;
+  let playerDeck: ParsedDeck;
+  let playerDeclarations: SeatDeclarations;
   if (deck) {
-    player = {
-      ...expandParsedDeck(deck),
+    playerDeck = deck;
+    playerDeclarations = {
       bracket_tier: bracketToEngineTier(playerBracket),
       combo_declaration: comboDeclaration,
     };
@@ -479,7 +596,8 @@ async function buildLocalAiDeckList(
           : t("gameProvider.noLegalAiDecks.generic"),
       );
     }
-    player = candidateSeatDeck(playerPick);
+    playerDeck = playerPick.deck;
+    playerDeclarations = candidateDeclarations(playerPick);
     excludeIds.add(playerPick.id);
   }
 
@@ -495,14 +613,18 @@ async function buildLocalAiDeckList(
     excludeIds,
   });
 
+  const snapshot = captureSubmissionArtPreferences();
+  const [playerSubmitted, ...aiSubmitted] = await Promise.all(
+    [playerDeck, ...picks.map((candidate) => candidate.deck)].map((candidate) => submitParsedDeck(candidate, snapshot)),
+  );
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. The plan's difficulties are already cEDH-mapped.
   const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
-    player,
-    opponent: candidateSeatDeck(picks[0]),
-    ai_decks: picks.slice(1).map(candidateSeatDeck),
+    player: { ...playerSubmitted, ...playerDeclarations },
+    opponent: candidateSeatDeck(picks[0], aiSubmitted[0]),
+    ai_decks: aiSubmitted.slice(1).map((submitted, index) => candidateSeatDeck(picks[index + 1], submitted)),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -659,10 +781,13 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
+    // Applies as soon as the state carries a commander, in whatever zone it is
+    // in — see `setupCommanderAvatars` for why the command zone is the wrong
+    // gate. Waits (by answering `false`, so the subscription keeps listening)
+    // until a commander object exists.
     const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
-      setupCommanderAvatars(state.gameState);
-      return true;
+      if (state.gameId !== gameId || !state.gameState) return false;
+      return setupCommanderAvatars(state.gameState);
     };
     const unsub = useGameStore.subscribe((state) => {
       if (applied || !applyCommanderAvatars(state)) return;
@@ -713,12 +838,16 @@ export function GameProvider({
     }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
-      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
-      appliedCommanderAvatars = true;
+      if (!gameState?.format_config?.uses_commander) return;
+      // Same zone-independent derivation as the AI path: `command_zone` is
+      // empty as soon as a commander is on the battlefield, and gating on it
+      // made a mid-game reload keep the random identities (issue #8053).
       // The lobby modes keep their names; the Commander pod game has none to
       // keep and takes commander-derived ones for every seat. Never `false` for
       // `setupRandomAvatars` above — that one would write a literal "You".
-      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
+      if (setupCommanderAvatars(gameState, !isCommanderDraftMatch)) {
+        appliedCommanderAvatars = true;
+      }
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
@@ -827,6 +956,9 @@ export function GameProvider({
       // finishing a retained cleanup needs no deck.
       const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
       const parsedDeck = suppliedFormat ? null : loadActiveDeck();
+      // Keep the active deck's bracket bound to the same pre-preparation selection.
+      const playerBracket = suppliedFormat ? null : loadActiveDeckBracket();
+      const playerComboDeclaration = suppliedFormat ? undefined : loadActiveDeckComboDeclaration();
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         // Host-only: proactively request notification permission while the
@@ -856,6 +988,9 @@ export function GameProvider({
               debugLog(`p2p remote update failed: ${err instanceof Error ? err.message : String(err)}`);
               resyncFromAdapterSafely("delivery rejected");
             });
+          }
+          if (event.type === "stateDelivery") {
+            useMultiplayerStore.getState().setStateWithheld(event.withheld);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -941,28 +1076,6 @@ export function GameProvider({
               return;
             }
           }
-          if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
-            onNoDeckRef.current?.();
-            return;
-          }
-          let player: ExpandedDeckWithTier;
-          if (!suppliedFormat) {
-            player = {
-              ...expandParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
-              bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
-              combo_declaration: loadActiveDeckComboDeclaration(),
-            };
-          } else if (mode === "p2p-host") {
-            const pileDeck = await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile));
-            if (!pileDeck) {
-              if (!signal.aborted) onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
-              return;
-            }
-            player = { ...pileDeck, bracket_tier: null };
-          } else {
-            player = emptySeat();
-          }
-          const deckList = buildPlayerOnlyDeckList(player);
           signal.throwIfAborted();
 
           if (mode === "p2p-host") {
@@ -1051,6 +1164,26 @@ export function GameProvider({
                 return;
               }
               throw new Error("The local native engine is unavailable for this hosted game.");
+            }
+            if (!isResume && !parsedDeck && !suppliedFormat) {
+              onNoDeckRef.current?.();
+              return;
+            }
+            let deckList: unknown = savedSession?.hostDeckData;
+            if (!isResume) {
+              const prepared = suppliedFormat
+                ? await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile))
+                : await submitParsedDeck(parsedDeck!);
+              signal.throwIfAborted();
+              if (!prepared) {
+                onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
+                return;
+              }
+              deckList = buildPlayerOnlyDeckList({
+                ...prepared,
+                bracket_tier: bracketToEngineTier(playerBracket),
+                combo_declaration: playerComboDeclaration,
+              });
             }
 
             // Only open a fresh broker client when starting a fresh
@@ -1191,6 +1324,15 @@ export function GameProvider({
             const { conn, peer } = await joinRoom(code, signal);
             hostPeerHandle = peer;
             signal.throwIfAborted();
+            const player = existing || suppliedFormat
+              ? emptySeat()
+              : {
+                  ...await submitParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
+                  bracket_tier: bracketToEngineTier(playerBracket),
+                  combo_declaration: playerComboDeclaration,
+                };
+            signal.throwIfAborted();
+            const deckList = buildPlayerOnlyDeckList(player);
             const adapter = new P2PGuestAdapter(
               deckList,
               peer,
@@ -1266,6 +1408,7 @@ export function GameProvider({
         if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
         useMultiplayerStore.setState({ playerLatencies: {} });
+        useMultiplayerStore.getState().setStateWithheld(null);
         // `adapter.dispose()` is the SOLE tear-down path for the host/guest
         // Peer (see plan §4 "Peer ownership"). It also closes per-guest
         // sessions, clears timers, and disposes the WASM engine.
@@ -1280,16 +1423,6 @@ export function GameProvider({
     let cancelled = false;
 
     if (isOnline || isReconnect) {
-      const parsedDeck = isSpectate ? null : loadActiveDeck();
-      // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
-      const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
-      const deck = parsedDeck && !suppliedJoin
-        ? {
-            ...parsedDeckToDeckData(parsedDeck),
-            bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
-            combo_declaration: loadActiveDeckComboDeclaration(),
-          }
-        : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
@@ -1453,6 +1586,18 @@ export function GameProvider({
           ?? originUrl
           ?? await detectServerUrl();
         if (cancelled) return;
+        // Reconnect/spectator authority carries no fresh deck; select only at a new join.
+        const suppliedJoin = formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
+        const parsedDeck = !reconnectSession && wsMode === "join" && !suppliedJoin ? loadActiveDeck() : null;
+        const playerBracket = parsedDeck ? loadActiveDeckBracket() : null;
+        const deck = parsedDeck
+          ? {
+              ...await submitParsedDeck(parsedDeck),
+              bracket_tier: bracketToEngineTier(playerBracket),
+              combo_declaration: loadActiveDeckComboDeclaration(),
+            }
+          : emptySeatDeck();
+        if (cancelled) return;
 
         wsAdapter = new WebSocketAdapter(
           serverUrl,
@@ -1480,6 +1625,9 @@ export function GameProvider({
           }
           if (event.type === "actionPendingChanged") {
             useMultiplayerStore.getState().setActionPending(event.pending);
+          }
+          if (event.type === "stateDelivery") {
+            useMultiplayerStore.getState().setStateWithheld(event.withheld);
           }
           if (event.type === "latencyChanged") {
             useMultiplayerStore.getState().setLatency(event.latencyMs);
@@ -1615,6 +1763,7 @@ export function GameProvider({
         if (wsAdapter) wsAdapter.dispose();
         useMultiplayerStore.getState().setConnectionStatus("disconnected");
         useMultiplayerStore.getState().setActionPending(false);
+        useMultiplayerStore.getState().setStateWithheld(null);
         useMultiplayerStore.getState().setLatency(null);
         useMultiplayerStore.getState().setIsSpectator(false);
         useMultiplayerStore.getState().setSpectators([]);
@@ -1630,7 +1779,7 @@ export function GameProvider({
     // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
     // optimized code, card database, and AI worker pool) persist across game sessions.
     // On cleanup, we clear the WASM game state but keep the worker alive.
-    const setupLocal = async () => {
+    const setupLocal = async (preparedDeckList?: DeckListPayload) => {
       if (cancelled) return;
       const adapter = getSharedAdapter();
       const soloDraft = source === "draft" && !!draftId;
@@ -1658,10 +1807,12 @@ export function GameProvider({
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
+          const submission = await submitLocalHandoff(deckList);
+          if (cancelled) return;
           await initGame(
             gameId,
             adapter,
-            deckList,
+            submission,
             formatConfig,
             playerCount,
             matchConfig,
@@ -1699,7 +1850,9 @@ export function GameProvider({
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          const submission = await submitLocalHandoff(deckList);
+          if (cancelled) return;
+          await initGame(gameId, adapter, submission, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
@@ -1723,6 +1876,16 @@ export function GameProvider({
       }
       if (cancelled) return;
 
+      // Horde: the archenemy (Horde) seat is an AI, never the local human (who
+      // is always seat 0 in solo Play-vs-AI). Remap the registry default
+      // (archenemy_player: 0) onto the first AI seat (seat 1) so
+      // `load_horde_library` injects the challenge deck under the AI, not the
+      // player — otherwise the human is dealt the Cyberman library (the
+      // seat-inversion bug). Mirrors the P2PHostAdapter remap on the host path.
+      const initFormatConfig =
+        formatConfig?.format === "Horde"
+          ? { ...formatConfig, archenemy_player: 1 }
+          : formatConfig;
       if (soloDraft) {
         try {
           draftDeckRaw = sessionStorage.getItem(draftDeckKey);
@@ -1823,7 +1986,7 @@ export function GameProvider({
           }
           let deckList: DeckListPayload;
           try {
-            deckList = await buildLocalAiDeckList(
+            deckList = preparedDeckList ?? await buildLocalAiDeckList(
               tRef.current,
               randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
@@ -1838,8 +2001,9 @@ export function GameProvider({
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
             return;
           }
+          if (cancelled) return;
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, initFormatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -1895,7 +2059,7 @@ export function GameProvider({
 
       let deckList: DeckListPayload;
       try {
-        deckList = await buildLocalAiDeckList(
+        deckList = preparedDeckList ?? await buildLocalAiDeckList(
           tRef.current,
           randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
           playerCount ?? 2,
@@ -1910,12 +2074,13 @@ export function GameProvider({
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
         return;
       }
+      if (cancelled) return;
       try {
         await initGame(
           gameId,
           adapter,
           deckList,
-          formatConfig,
+          initFormatConfig,
           playerCount,
           matchConfig,
           firstPlayer,
@@ -1943,6 +2108,43 @@ export function GameProvider({
             isBracketViolation,
           );
         }
+      }
+    };
+
+    const resetLocalStore = () => {
+      // Clear store state but keep the shared WASM worker alive — its V8
+      // TurboFan-compiled code, card database, and AI pool persist for reuse.
+      const adapter = useGameStore.getState().adapter;
+      if (adapter instanceof WasmAdapter) {
+        // Not awaited (cleanup can't be async), but safe: resetGame is posted
+        // to the same worker's FIFO message queue, so it executes before any
+        // subsequent initializeGame call from the next game session.
+        adapter.resetGameState();
+        // Defer the store clear so a StrictMode remount or dep-change re-run
+        // can cancel it before it fires. On real unmount (user navigates
+        // away), the timeout fires on the next macrotask and clears the store.
+        scheduleStoreReset(() => {
+          useGameStore.setState({
+            gameId: null,
+            gameState: null,
+            events: [],
+            eventHistory: [],
+            logHistory: [],
+            nextLogSeq: 0,
+            adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
+            waitingFor: null,
+            legalActions: [],
+            autoPassRecommended: false,
+            endContinuousEffectOffers: [],
+            manaPaymentShortcutActions: [],
+            spellCosts: {},
+            stateHistory: [],
+            turnCheckpoints: [],
+          });
+        });
+      } else {
+        scheduleStoreReset(reset);
       }
     };
 
@@ -2042,6 +2244,9 @@ export function GameProvider({
           );
 
           const handleNativeEvent = (event: WsAdapterEvent) => {
+            if (event.type === "stateDelivery") {
+              useMultiplayerStore.getState().setStateWithheld(event.withheld);
+            }
             if (event.type === "stateChanged") {
               const adapter = nativeAdapter;
               if (!useGameStore.getState().adapter && adapter) {
@@ -2071,6 +2276,7 @@ export function GameProvider({
             if (event.type === "reconnectFailed" || event.type === "error") {
               const adapter = nativeAdapter;
               nativeAdapter = null;
+              useMultiplayerStore.getState().setStateWithheld(null);
               controller?.dispose();
               controller = null;
               adapter?.dispose();
@@ -2178,7 +2384,7 @@ export function GameProvider({
             ),
           );
           saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
-          await setupLocal();
+          await setupLocal(deckList);
         }
       };
 
@@ -2193,9 +2399,10 @@ export function GameProvider({
         // explicit Concede (useConcedeHandler) ends the game. `dispose()` still
         // tears down the socket/loop; it just omits the concede frame.
         nativeAdapter?.dispose();
+        useMultiplayerStore.getState().setStateWithheld(null);
         audioManager.setContext("menu");
         clearPromptOverlayState();
-        scheduleStoreReset(reset);
+        resetLocalStore();
       };
     }
 
@@ -2208,40 +2415,7 @@ export function GameProvider({
       // Issue #2369: drop prompt overlays synchronously so the next mount's
       // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
       clearPromptOverlayState();
-      // Clear store state but keep the shared WASM worker alive — its V8
-      // TurboFan-compiled code, card database, and AI pool persist for reuse.
-      const adapter = useGameStore.getState().adapter;
-      if (adapter instanceof WasmAdapter) {
-        // Not awaited (cleanup can't be async), but safe: resetGame is posted
-        // to the same worker's FIFO message queue, so it executes before any
-        // subsequent initializeGame call from the next game session.
-        adapter.resetGameState();
-        // Defer the store clear so a StrictMode remount or dep-change re-run
-        // can cancel it before it fires. On real unmount (user navigates
-        // away), the timeout fires on the next macrotask and clears the store.
-        scheduleStoreReset(() => {
-          useGameStore.setState({
-            gameId: null,
-            gameState: null,
-            events: [],
-            eventHistory: [],
-            logHistory: [],
-            nextLogSeq: 0,
-            adapter: null,
-            gameSessionGeneration: nextGameSessionGeneration(),
-            waitingFor: null,
-            legalActions: [],
-            autoPassRecommended: false,
-            endContinuousEffectOffers: [],
-            manaPaymentShortcutActions: [],
-            spellCosts: {},
-            stateHistory: [],
-            turnCheckpoints: [],
-          });
-        });
-      } else {
-        scheduleStoreReset(reset);
-      }
+      resetLocalStore();
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
 

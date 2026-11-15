@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
-use crate::game::deck_loading::PlayerDeckList;
+use crate::types::card_printing::DeckPrinting;
 
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
@@ -44,25 +44,17 @@ pub struct DeckData {
     /// which is deliberately NOT the same as a declared absence.
     #[serde(default)]
     pub combo_declaration: ComboDeclaration,
-}
-
-impl From<&DeckData> for PlayerDeckList {
-    fn from(deck: &DeckData) -> Self {
-        Self {
-            main_deck: deck.main_deck.clone(),
-            sideboard: deck.sideboard.clone(),
-            commander: deck.commander.clone(),
-            companion: deck.companion.clone(),
-            attraction_deck: deck.attraction_deck.clone(),
-            planar_deck: deck.planar_deck.clone(),
-            scheme_deck: deck.scheme_deck.clone(),
-            contraption_deck: deck.contraption_deck.clone(),
-            sticker_sheets: deck.sticker_sheets.clone(),
-            signature_spell: deck.signature_spell.clone(),
-            bracket_tier: deck.bracket_tier,
-            combo_declaration: deck.combo_declaration,
-        }
-    }
+    /// The owner's explicit printing choices for this list's cards, keyed by section and
+    /// name. Display-only (CR 203.1 + CR 206.1): no deck validator, format gate or
+    /// bracket estimator reads it. Absent from the wire when empty, so a name-only deck
+    /// serializes unchanged; decoded by `deserialize_deck_printings`: readable malformed
+    /// annotations are dropped; codec errors propagate.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
 }
 
 /// A named starter deck with its card list.
@@ -186,6 +178,7 @@ fn starter_to_deck_data(deck: &StarterDeck) -> DeckData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::deck_loading::PlayerDeckList;
 
     #[test]
     fn player_deck_list_from_deck_data_round_trips_every_field() {
@@ -204,9 +197,10 @@ mod tests {
             combo_declaration: ComboDeclaration::Intended {
                 window: Some(crate::game::bracket_estimate::ComboWindow::EarlyGame),
             },
+            printings: Vec::new(),
         };
 
-        let converted = PlayerDeckList::from(&source);
+        let converted = PlayerDeckList::from(source.clone());
 
         assert_eq!(converted.main_deck, source.main_deck);
         assert_eq!(converted.sideboard, source.sideboard);

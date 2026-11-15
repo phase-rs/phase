@@ -99,6 +99,7 @@ fn alternative_cost_is_mana_free(cost: &AbilityCost) -> bool {
         | AbilityCost::PayLife { .. }
         | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::ExileWithAggregate { .. }

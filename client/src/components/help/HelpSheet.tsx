@@ -41,6 +41,7 @@ const HELP_ENTRIES = [
   { section: "Shortcuts", id: "undo", shortcut: "Z" },
   { section: "Shortcuts", id: "cancel", shortcut: "Esc" },
   { section: "Shortcuts", id: "advancedDebugPanel", shortcut: "`" },
+  { section: "Shortcuts", id: "toggleClickMode", shortcut: "K" },
   { section: "Recovery", id: "reportOrExportState" },
   { section: "Recovery", id: "boardRightClickMenu" },
 ] as const satisfies readonly HelpEntry[];
@@ -262,7 +263,8 @@ export function HelpSheet() {
       })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus(t("help.status.exportFailed"));
+        const detail = err instanceof Error ? err.message : String(err);
+        setStatus(t("help.status.exportFailedDetail", { detail }));
       });
   };
 

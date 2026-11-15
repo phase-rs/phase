@@ -202,6 +202,13 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
   });
 
+  it("accepts Planechase Commander on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=PlanechaseCommander");
+
+    expect(await screen.findByText("Planechase Commander")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
   it("restores a Two-Headed Giant setup preference", async () => {
     act(() => {
       usePreferencesStore.setState({
@@ -383,6 +390,65 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
       await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Standard"));
       await act(async () => {});
       expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
+    });
+  });
+
+  describe("horde co-horde seat floor", () => {
+    async function start(): Promise<string> {
+      const user = userEvent.setup();
+      const startButton = await screen.findByRole("button", { name: /^Start Match/ });
+      await waitFor(() => expect(startButton).toBeEnabled());
+      await user.click(startButton);
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    function playerSlider(): HTMLInputElement {
+      return screen.getByRole("slider", { name: /players/i }) as HTMLInputElement;
+    }
+
+    beforeEach(() => {
+      seedDeck("Survivor");
+      setActiveDeck("Survivor");
+      act(() => {
+        usePreferencesStore.setState({ hordeChallengeDeck: "CybermanHorde" });
+      });
+    });
+
+    it("selecting Two Towers bumps the count to 3 and Start carries players=3", async () => {
+      renderGameSetupPage("/game-setup?format=Horde");
+      const twoTowers = await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("2");
+
+      await userEvent.setup().click(twoTowers);
+      await waitFor(() => expect(playerSlider().value).toBe("3"));
+      expect(playerSlider().min).toBe("3");
+
+      const search = await start();
+      expect(search).toContain("players=3");
+      expect(search).toContain("hordeDeck=LotrTwoTowersHorde");
+    });
+
+    it("entering Horde with a stored Two Towers pick starts at 3, not the stale 2", async () => {
+      act(() => {
+        usePreferencesStore.setState({ hordeChallengeDeck: "LotrTwoTowersHorde" });
+      });
+      renderGameSetupPage("/game-setup?format=Horde");
+      await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("3");
+    });
+
+    it("restoring a Horde session with a stored Two Towers pick bumps the stale count", async () => {
+      act(() => {
+        usePreferencesStore.setState({
+          lastFormat: "Horde",
+          lastPlayerCount: 2,
+          lastMatchType: "Bo1",
+          hordeChallengeDeck: "LotrTwoTowersHorde",
+        });
+      });
+      renderGameSetupPage();
+      await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("3");
     });
   });
 });

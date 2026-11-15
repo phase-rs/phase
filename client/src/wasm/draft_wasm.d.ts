@@ -51,6 +51,19 @@ export function booster_pack_pool_for_game(): any;
 export function buildLlmDraftPickRequests(endpoint_json: string, set_names_json: string): any;
 
 /**
+ * Check a saved draft session against the draft engine's legacy admission
+ * without restoring it.
+ *
+ * Returns `{ type: "Admitted" }` when the session deserializes and the
+ * admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+ * the admission refuses it, and `{ type: "Unreadable" }` when it does not
+ * deserialize as a draft session. It never throws, and it reads and writes no
+ * installed session, random state, pack generator, difficulty or card
+ * database.
+ */
+export function check_restorable_draft_session(json: string): any;
+
+/**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * multiplayer draft of any `DraftKind` with a wire number, with human + bot
  * seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
@@ -394,6 +407,7 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
+    readonly check_restorable_draft_session: (a: number, b: number) => any;
     readonly init_panic_hook: () => void;
     readonly llmProviderCatalog: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

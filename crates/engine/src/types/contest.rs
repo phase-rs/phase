@@ -20,19 +20,11 @@
 //! machine is deterministic and unit-testable without sleeping. All durations
 //! and instants are `u64` milliseconds in that host-defined timebase.
 
+pub use phase_ast::types::contest::*;
+
 use serde::{Deserialize, Serialize};
 
 use super::player::PlayerId;
-
-/// Which printed contest is being adapted. Selects presentation only — the
-/// timing, input, winner and lifecycle logic is identical for every kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ContestKind {
-    /// Eye to Eye: "You and target creature's controller have a staring contest."
-    Staring,
-    /// Mouth to Mouth: "You and that player have a breath-holding contest."
-    BreathHolding,
-}
 
 /// Lifecycle of a contest. See `ContestPhase::can_transition_to` for the legal
 /// edges; `Completed` and `Cancelled` are terminal.

@@ -69,11 +69,11 @@ fn guard_booster_pack_pool(pool: &Option<Vec<String>>, ranked: bool) -> Result<(
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
-/// `mode` is used for variants whose policy differs between Full and LobbyOnly
-/// (currently none reject here — mode gating stays in `reject_if_disabled`).
+/// `mode` is used for variants whose policy differs between Full and LobbyOnly.
+/// Full mode re-runs the strict format-config gate that lobby decoding relaxes.
 pub fn guard_client_message_before_dispatch(
     msg: &ClientMessage,
-    _mode: ServerMode,
+    mode: ServerMode,
 ) -> Result<(), String> {
     match msg {
         ClientMessage::ClientHello {
@@ -169,7 +169,13 @@ pub fn guard_client_message_before_dispatch(
                 requested_code: requested_code.as_deref(),
             })?;
             guard_create_ai_seats(ai_seats, *player_count)?;
-            guard_booster_pack_pool(booster_pack_pool, *ranked)
+            guard_booster_pack_pool(booster_pack_pool, *ranked)?;
+            if matches!(mode, ServerMode::Full) {
+                if let Some(config) = format_config {
+                    config.check_strict_admission()?;
+                }
+            }
+            Ok(())
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -198,7 +204,7 @@ pub fn guard_client_message_before_dispatch(
         }),
         ClientMessage::Emote { emote } => guard_emote(emote),
         ClientMessage::SpectatorJoin { game_code } => guard_spectator_join(game_code),
-        ClientMessage::Ping { .. } => Ok(()),
+        ClientMessage::Ping { .. } | ClientMessage::ResyncState => Ok(()),
         ClientMessage::UpdateLobbyMetadata {
             game_code,
             current_players,
@@ -376,6 +382,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -571,6 +578,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede
@@ -709,6 +717,35 @@ mod tests {
             requested_code: requested_code.map(str::to_string),
             booster_pack_pool,
         }
+    }
+
+    /// CR 903.12h: Full mode runs the config, so a recorded Brawl threshold the
+    /// lobby relay admits is refused there; today's configs pass.
+    #[test]
+    fn full_mode_refuses_a_recorded_legacy_format_config() {
+        use engine::types::format::FormatConfig;
+        let with_config = |config: FormatConfig| {
+            let mut msg = create_game_with_settings(false, None, None);
+            if let ClientMessage::CreateGameWithSettings { format_config, .. } = &mut msg {
+                *format_config = Some(config);
+            }
+            msg
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let legacy = with_config(FormatConfig {
+                commander_damage_threshold: Some(21),
+                ..config.clone()
+            });
+            assert!(guard_client_message_before_dispatch(&legacy, ServerMode::LobbyOnly).is_ok());
+            let err = guard_client_message_before_dispatch(&legacy, ServerMode::Full).unwrap_err();
+            assert!(err.contains("commander_damage_threshold"), "{err}");
+            assert!(
+                guard_client_message_before_dispatch(&with_config(config), ServerMode::Full)
+                    .is_ok()
+            );
+        }
+        let commander = with_config(FormatConfig::commander());
+        assert!(guard_client_message_before_dispatch(&commander, ServerMode::Full).is_ok());
     }
 
     /// Both native dispatch guards carry the requested-code shape rule, in

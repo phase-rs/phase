@@ -33,7 +33,7 @@ use engine::game::deck_loading::{
     create_object_from_card_face, load_and_hydrate_decks, resolve_deck_list, DeckList,
 };
 use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFamily};
-use engine::game::engine::{apply, start_game};
+use engine::game::engine::{apply, start_game_winner_plays_first};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
@@ -580,7 +580,7 @@ fn bootstrap_4p_game(db: &CardDatabase) -> GameState {
     let mut state = GameState::new(FormatConfig::commander(), 4, RNG_SEED);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
 
-    start_game(&mut state);
+    start_game_winner_plays_first(&mut state);
     assert!(
         matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
         "start_game with real libraries must open the mulligan (got {:?})",
@@ -1635,10 +1635,8 @@ fn one_shot_bootstrap_accepted_state() -> GameState {
 /// The store and cash-out guards below are what make the surviving row HONEST rather than merely
 /// present, and they are more load-bearing here than they were when this arm asserted absence: a
 /// kept row is a claim about growth that will still land, so the test drives the real CR 500.5
-/// boundary and mints. They are also the anti-"register enablers instead" tripwire: routing this
-/// through `zones`' defuse would call `clear_unbounded_loop`, which also wipes
-/// `pending_unbounded_materialization` and its CR 732.2c bound — i.e. one dying token would
-/// cancel the collapse the whole table accepted. These rows go red the moment that happens.
+/// boundary and mints. A departure that called `clear_unbounded_loop` would also wipe
+/// `pending_unbounded_materialization` and its CR 732.2c bound, and the STORE asserts would fail.
 #[test]
 fn accepted_object_growth_row_survives_losing_its_entire_pile() {
     use engine::analysis::resource::ResourceAxis;
@@ -1797,7 +1795,7 @@ fn accepted_object_growth_row_survives_losing_its_entire_pile() {
     );
 
     // STORE: a DISPLAY revocation only. Nothing here may touch the accepted-collapse stash,
-    // the mark, or the pile — the boundary and the zone-exit defuse still read all three.
+    // the mark, or the pile.
     assert!(
         subject.pending_unbounded_materialization.contains_key(&P0),
         "the accepted-collapse stash must SURVIVE — dropping a row may not cancel growth the \

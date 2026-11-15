@@ -143,6 +143,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
+        coin_branches: None,
         detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
@@ -221,6 +222,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         parent_target_missing_reason: None,
         activation_cost_reduction: None,
         activation_record: None,
+        control_change_instruction: None,
     }
 }
 

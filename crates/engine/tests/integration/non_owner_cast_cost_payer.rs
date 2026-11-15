@@ -444,18 +444,12 @@ fn deferred_sacrifice_additional_cost_reads_the_caster() {
             tap_lands: false,
             aim: Aim::Opponent,
         };
-        // One creature each: the parsed "all" cost carries a count of one.
         let mut b = board(spec, owner, |sc| {
             (sc.add_vanilla(P0, 2, 2), sc.add_vanilla(P1, 2, 2))
         });
         b.cast().unwrap();
-        assert_eq!(
-            b.pay_cost(),
-            (PayCostKind::Sacrifice, vec![b.mine]),
-            "owner {owner:?}"
-        );
-        b.select_mine_and_finish();
-        assert_eq!(b.zone(b.mine), Zone::Graveyard);
+        b.assert_cast_on_stack();
+        assert_eq!(b.zone(b.mine), Zone::Graveyard, "owner {owner:?}");
         assert_eq!(b.zone(b.theirs), Zone::Battlefield);
     }
 }

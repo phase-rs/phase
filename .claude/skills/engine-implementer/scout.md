@@ -35,7 +35,7 @@ Task: <the original task, verbatim, with the card's Oracle text when one is name
 
 Locate, for this task:
 1. The existing feature most similar to it, and each site that feature touches across types, parser, resolver or effect handler, and tests.
-2. Existing helpers that already do part of the work, under crates/engine/src/parser/ and crates/engine/src/game/.
+2. Existing helpers that already do part of the work, under crates/phase-parser/src/parser/ and crates/engine/src/game/.
 3. Sibling implementations of the same pattern, including the nearest one that already works.
 
 Cite a file only at a line that is itself relevant. Do not cite a file to say it was checked.

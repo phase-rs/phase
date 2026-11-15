@@ -67,6 +67,8 @@ const {
       aiBracketFilter: [] as number[],
       cedhMode: false,
       nativeEngineEnabled: false,
+      artChain: [] as unknown[],
+      artOverrides: {} as Record<string, unknown>,
     },
     recorded,
     useGameStore,

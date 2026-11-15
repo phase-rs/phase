@@ -175,6 +175,12 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // preview" link on the preview site itself. dev + staging → false (hidden);
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
+    // True only for the preview deploy (deploy.yml stamps ENGINE_FINGERPRINT;
+    // PREVIEW_BUILD is also accepted as an explicit override). Gates showing
+    // the commit hash next to the version in the UI.
+    __IS_PREVIEW_BUILD__: JSON.stringify(
+      process.env.PREVIEW_BUILD === "true" || Boolean(process.env.ENGINE_FINGERPRINT),
+    ),
     // Supabase cloud-sync config. Anon key is public by design (RLS is the
     // access control), so it ships in the bundle. Empty when unset → cloud sync
     // is disabled, leaving file backup as the only data-portability path. This

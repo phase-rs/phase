@@ -53,6 +53,7 @@ mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
+pub mod decks;
 pub mod derived;
 pub mod derived_views;
 pub mod devotion;
@@ -119,7 +120,9 @@ mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
+pub mod boss;
 pub mod conspiracy;
+pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in
 // `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
 #[cfg(test)]
@@ -201,6 +204,7 @@ pub mod stickers;
 #[cfg(test)]
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
+pub mod takeback;
 pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;
@@ -218,6 +222,7 @@ pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;
 pub mod turns;
+pub mod un_actions;
 pub mod visibility;
 pub(crate) mod wish_scope;
 pub mod zone_pipeline;
@@ -280,7 +285,7 @@ pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,
     preflight_debug_action_with_rejection, require_explicit_debug_permission,
     resolve_all_ready_prefix_with_rejection, start_game, start_game_skip_mulligan,
-    start_game_with_starting_player, EngineError,
+    start_game_winner_plays_first, start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::{
     create_debug_cards, create_debug_cards_with_rejection, debug_card_entry_source,

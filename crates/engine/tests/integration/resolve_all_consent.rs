@@ -807,6 +807,7 @@ fn final_grant_prompt_restores_the_preconsent_overlay_before_waiting_for_choice(
         1,
         P0,
         Effect::Choose {
+            chooser: engine::types::ability::ControllerRef::You,
             choice_type: ChoiceType::BasicLandType,
             persist: false,
             selection: TargetSelectionMode::Chosen,

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 const DECK_CATALOG_PATH: &str = "client/public/decks.json";
 const BUNDLED_CEDH_PATH: &str = "data/bundled_cedh_decks.json";
 const BRACKET_LISTS_PATH: &str = "data/bracket_lists.json";
-const VINTAGE_PATH: &str = "crates/engine/data/mtgjson-vintage";
+const VINTAGE_PATH: &str = "crates/phase-ast/data/mtgjson-vintage";
 const BASELINE_DIRECTORY: &str = "data/baselines";
 
 fn main() -> ExitCode {

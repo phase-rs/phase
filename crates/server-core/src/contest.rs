@@ -698,6 +698,22 @@ mod tests {
         }
     }
 
+    /// Start the contest on an explicit host clock and return the instant at
+    /// which it is `Active`.
+    ///
+    /// A test that starts the contest and then sleeps races the engine's
+    /// inactivity deadline: on a starved runner a 10 ms sleep can overshoot the
+    /// 400 ms timeout, and the contest legitimately ends before the test's own
+    /// assertions. Stamping every input (as the transport does in production)
+    /// keeps the timeline exact no matter how the test process is scheduled.
+    fn start_active_contest(session: &mut GameSession) -> Instant {
+        let now = session.contest.clock.epoch + std::time::Duration::from_secs(1);
+        session.tick_contest_at(now - std::time::Duration::from_millis(10));
+        session.tick_contest_at(now);
+        assert_eq!(phase(session), ContestPhase::Active, "countdown completed");
+        now
+    }
+
     fn phase(session: &GameSession) -> ContestPhase {
         match &session.state.waiting_for {
             WaitingFor::PhysicalContest { contest, .. } => contest.phase,
@@ -862,27 +878,25 @@ mod tests {
     fn clicks_resolve_the_sender_from_the_token_and_never_before_go() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
+        let pending_at = session.contest.clock.epoch;
         assert_eq!(
-            session.handle_contest_click("nobody", 1, 1),
+            session.handle_contest_click_at("nobody", 1, 1, pending_at),
             ContestClickReceipt::UnknownSeat
         );
         // Pending: not started, so not counted.
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, pending_at),
             ContestClickReceipt::Ignored
         );
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Ignored,
             "a duplicate delivery is not counted twice"
         );
@@ -902,12 +916,11 @@ mod tests {
         };
         let mut mgr = session_with_contest(policy);
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        let now = start_active_contest(session);
 
+        // Every click lands at the same host instant, so only the burst can pass.
         let receipts: Vec<_> = (1..=50)
-            .map(|seq| session.handle_contest_click(HOST, 1, seq))
+            .map(|seq| session.handle_contest_click_at(HOST, 1, seq, now))
             .collect();
         assert!(receipts.contains(&ContestClickReceipt::Throttled));
         assert!(
@@ -924,12 +937,10 @@ mod tests {
     fn a_seat_dropping_pauses_the_contest_and_returning_resumes_it() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        let now = start_active_contest(session);
         session.drain_contest_outbox();
 
-        session.mark_disconnected(PlayerId(1));
+        session.mark_disconnected_at(PlayerId(1), now);
         session.flush_contest_connections();
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");
@@ -940,14 +951,15 @@ mod tests {
         );
         assert_eq!(session.drain_contest_outbox().transitions.len(), 1);
 
-        std::thread::sleep(std::time::Duration::from_millis(450));
-        session.tick_contest();
+        // Well past the inactivity deadline: the pause has to hold it off.
+        let later = now + std::time::Duration::from_millis(450);
+        session.tick_contest_at(later);
         assert!(
             session.contest_active(),
             "paused: no one lapses while a seat is away"
         );
 
-        session.mark_connected(PlayerId(1));
+        session.mark_connected_at(PlayerId(1), later);
         session.flush_contest_connections();
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");
@@ -1473,7 +1485,10 @@ mod tests {
                 None,
             )
             .expect("a connected player can concede during a contest");
-        assert!(matches!(result.0.waiting_for, WaitingFor::GameOver { .. }));
+        assert!(matches!(
+            result.result.0.waiting_for,
+            WaitingFor::GameOver { .. }
+        ));
         session.advance_state_revision();
         let drain = session.drain_contest_outbox();
         assert!(
@@ -1546,18 +1561,15 @@ mod tests {
     fn a_click_addressed_to_another_contest_is_ignored() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 99, 1),
+            session.handle_contest_click_at(HOST, 99, 1, now),
             ContestClickReceipt::Ignored,
             "a prior contest's frame is not activity in this one"
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted,
             "and it did not burn the sequence number the real click needs"
         );
@@ -1602,13 +1614,14 @@ mod tests {
         let session = only_session(&mut mgr);
         session.connected[1] = false;
 
-        session.tick_contest();
+        // The first tick records the absence. The second exceeds the 30 ms grace.
+        let now = session.contest.clock.epoch;
+        session.tick_contest_at(now);
         assert!(
             session.contest_active(),
             "within grace the contest only waits"
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        session.tick_contest();
+        session.tick_contest_at(now + std::time::Duration::from_millis(60));
 
         assert!(
             !session.contest_active(),
@@ -1659,10 +1672,7 @@ mod tests {
             error.contains("contest"),
             "refused for the contest: {error}"
         );
-        assert!(
-            session.pending_takeback.is_none(),
-            "and no vote was installed"
-        );
+        assert!(!session.takeback.is_pending(), "and no vote was installed");
     }
 
     #[test]
@@ -1674,9 +1684,7 @@ mod tests {
         assert!(session.claim_contest_driver());
         assert!(!session.claim_contest_driver(), "one driver per contest");
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        start_active_contest(session);
 
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");

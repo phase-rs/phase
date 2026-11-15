@@ -1,4 +1,5 @@
-//! Bounds for engine snapshot components before clone-heavy `StateUpdate` fan-out.
+//! Bounds for engine snapshot components before clone-heavy `StateUpdate` fan-out,
+//! and for the encoded bytes of every frame the server sends.
 //!
 //! Inbound `GameAction` payloads are capped by `game_action_payload_guard`, but a
 //! single reducer step can still produce very large `GameState` / log / legal-action
@@ -29,6 +30,9 @@ pub const MAX_SNAPSHOT_SPELL_COSTS: usize = 1_000;
 /// Max total legal actions across all per-object buckets in one update.
 pub const MAX_SNAPSHOT_LEGAL_ACTIONS_BY_OBJECT_TOTAL: usize = MAX_ACTION_LIST_LEN;
 
+/// The largest frame the server sends; the desktop bridge's read bound equals it.
+pub const MAX_SERVER_FRAME_BYTES: usize = 256 << 20;
+
 /// Borrowed snapshot components from an [`crate::session::ActionResult`]-shaped tuple.
 pub struct StateSnapshotParts<'a> {
     pub state: &'a GameState,
@@ -43,6 +47,17 @@ fn bound_count(field: &str, len: usize, max: usize) -> Result<(), String> {
     if len > max {
         Err(format!(
             "{field} has {len} entries; at most {max} allowed for broadcast"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate one encoded frame's payload length against the frame bound.
+pub fn guard_frame_bytes(bytes: usize, max: usize) -> Result<(), String> {
+    if bytes > max {
+        Err(format!(
+            "too large to send: {bytes} bytes; at most {max} allowed"
         ))
     } else {
         Ok(())
@@ -221,6 +236,14 @@ mod tests {
         };
         let err = guard_state_snapshot_broadcast(parts).unwrap_err();
         assert!(err.contains("legal_actions"));
+    }
+
+    #[test]
+    fn frame_bytes_accepts_the_bound_and_refuses_one_byte_over() {
+        let max = 1024;
+        assert_eq!(guard_frame_bytes(max, max), Ok(()));
+        let err = guard_frame_bytes(max + 1, max).unwrap_err();
+        assert_eq!(err, "too large to send: 1025 bytes; at most 1024 allowed");
     }
 
     #[test]

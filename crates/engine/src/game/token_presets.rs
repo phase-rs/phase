@@ -1121,8 +1121,10 @@ mod tests {
 
     #[test]
     fn committed_overlay_rows_merge_clean_against_the_catalog() {
-        let overlay = parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
-            .expect("known-tokens.overlay.toml parses as a catalog file");
+        let overlay = parse_overlay(include_str!(
+            "../../../phase-ast/data/known-tokens.overlay.toml"
+        ))
+        .expect("known-tokens.overlay.toml parses as a catalog file");
         let overlay_ids: Vec<&str> = overlay.iter().map(|row| row.id.as_str()).collect();
         let generated: Vec<TokenPreset> = known_token_presets()
             .iter()
@@ -1182,8 +1184,10 @@ mod tests {
 
     #[test]
     fn committed_overlay_rows_are_present_in_the_catalog() {
-        let overlay = parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
-            .expect("known-tokens.overlay.toml parses as a catalog file");
+        let overlay = parse_overlay(include_str!(
+            "../../../phase-ast/data/known-tokens.overlay.toml"
+        ))
+        .expect("known-tokens.overlay.toml parses as a catalog file");
 
         // A membership loop over an empty list confirms nothing — but an empty
         // overlay is this hatch's healthy steady state rather than a lost row

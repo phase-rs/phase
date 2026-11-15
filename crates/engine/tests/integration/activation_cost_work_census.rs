@@ -45,6 +45,11 @@ const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
     ),
     (
         "game/casting_costs.rs",
+        "handle_sacrifice_for_cost",
+        Class::Guarded("SacrificeSource"),
+    ),
+    (
+        "game/casting_costs.rs",
         "finish_counter_cost_payment",
         Class::Guarded("CounterCostTail"),
     ),
@@ -52,6 +57,11 @@ const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
         "game/casting_costs.rs",
         "push_activated_ability_to_stack",
         Class::Guarded("PushToStack"),
+    ),
+    (
+        "game/casting_costs.rs",
+        "surface_next_interactive_activation_cost_leg",
+        Class::Guarded("LibraryAggregateTierOne"),
     ),
     (
         "game/planeswalker.rs",

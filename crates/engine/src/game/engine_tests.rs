@@ -3004,6 +3004,9 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Any),
         );
@@ -5560,29 +5563,51 @@ fn start_game_counts_the_starting_players_first_turn() {
     assert_eq!(state.players[0].turns_taken, 1);
 }
 
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),
@@ -9304,7 +9329,9 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
-        deferred_random_discard_cost: None,
+        activation_cost_paused_on_draw: false,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9753,7 +9780,9 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
-        deferred_random_discard_cost: None,
+        activation_cost_paused_on_draw: false,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -11746,6 +11775,9 @@ fn grant_graveyard_creature_cast_and_bury(
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -13235,4 +13267,229 @@ fn modal_land_face_election_requires_a_modal_land_back_face() {
     assert!(!modal_land_face_election_available(&transform_land));
     assert!(!modal_land_face_election_available(&spell_spell));
     assert!(!modal_land_face_election_available(&single_land));
+}
+
+/// CR 732.1b + CR 704.5a + CR 800.4a: a take's record keeps its first and last repetition and every
+/// seat that lost and left in between, modelled on Phyrexian Altar recurring Gravecrawler beside
+/// Zulaport Cutthroat, where P1 and P2 leave in repetition 5 of six.
+#[test]
+fn elide_middle_repetitions_keeps_the_ends_and_each_departure_between() {
+    let marker = |repetition| GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition,
+    };
+    let step = |count| GameEvent::CardsDrawn {
+        player_id: P0,
+        count,
+    };
+    let lost = |seat| GameEvent::PlayerLost {
+        player_id: PlayerId(seat),
+    };
+    let left = |seat| GameEvent::PlayerEliminated {
+        player_id: PlayerId(seat),
+    };
+    for unchanged in [
+        vec![step(0), lost(1)],
+        vec![step(0), marker(1), step(1)],
+        vec![step(0), marker(1), step(1), lost(1), marker(2), step(2)],
+    ] {
+        let mut events = unchanged.clone();
+        elide_middle_repetitions(&mut events);
+        assert_eq!(events, unchanged);
+    }
+
+    let mut events = vec![step(0)];
+    for repetition in 1..=6 {
+        events.extend([marker(repetition), step(repetition)]);
+        if repetition == 5 {
+            events.extend([lost(1), lost(2), step(50), left(1), left(2)]);
+        }
+    }
+    events.push(step(7));
+    elide_middle_repetitions(&mut events);
+    assert_eq!(
+        events,
+        [
+            step(0),
+            marker(1),
+            step(1),
+            lost(1),
+            lost(2),
+            left(1),
+            left(2),
+            marker(6),
+            step(6),
+            step(7),
+        ]
+    );
+}
+
+/// The resolution land-play board with a spell (sorcery) // land card in exile
+/// instead of a plain land. `back_layout` selects a modal or transform back.
+fn resolution_spell_land_board(
+    back_layout: crate::types::card::LayoutKind,
+) -> (GameState, ObjectId) {
+    let mut state = setup_game_at_main_phase();
+    state.stack.push_back(no_op_stack_entry(7_920, PlayerId(0)));
+    let card = create_object(
+        &mut state,
+        CardId(7_921),
+        PlayerId(0),
+        "Spell Front".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&card).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.base_card_types = obj.card_types.clone();
+    let mut card_types = CardType::default();
+    card_types.core_types.push(CoreType::Land);
+    obj.back_face = Some(BackFaceData {
+        name: "Land Back".to_string(),
+        card_types,
+        layout_kind: Some(back_layout),
+        ..Default::default()
+    });
+    (state, card)
+}
+
+/// Put a P0 permanent carrying a "can't play lands" static (CR 101.2) onto
+/// the battlefield.
+fn add_cant_play_land_static(state: &mut GameState, card_id: u64) {
+    let source = create_object(
+        state,
+        CardId(card_id),
+        PlayerId(0),
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string())).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ),
+        );
+}
+
+/// B6a — CR 712.12 + CR 305.2a + CR 116.2a: the land back face of a
+/// spell//land modal card is played during resolution by that face, from the
+/// zone it was in, and counts as the turn's land play.
+#[test]
+fn play_land_face_during_resolution_enters_by_its_back_face() {
+    let (mut state, card) = resolution_spell_land_board(crate::types::card::LayoutKind::Modal);
+    let mut events = Vec::new();
+    let commit = play_land_face_during_resolution(&mut state, PlayerId(0), card, &mut events);
+    assert_eq!(commit, Some(LandPlayCommit::Entered));
+    let obj = &state.objects[&card];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.name, "Land Back");
+    assert!(obj.modal_back_face);
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert_eq!(state.players[0].lands_played_this_turn, 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: PlayerId(0),
+            from_zone: Zone::Exile,
+        } if *object_id == card
+    )));
+}
+
+/// B6b — CR 712.12 + CR 101.2 + CR 305.2b + CR 305.3: the land face of a
+/// spell//land card may be played during resolution only for a modal land back
+/// face, on the player's turn, with no "can't play lands" prohibition, and
+/// below the allowance.
+#[test]
+fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_allowance() {
+    use crate::types::card::LayoutKind;
+    let (state, card) = resolution_spell_land_board(LayoutKind::Modal);
+    assert!(
+        resolution_back_land_face_play_is_legal(&state, PlayerId(0), card),
+        "positive baseline: a modal land back face on P0's turn below the allowance"
+    );
+    assert!(
+        !resolution_land_play_is_legal(&state, PlayerId(0), card),
+        "the front face itself is not a land (CR 712.8a)"
+    );
+    assert!(
+        !state.objects[&card].modal_back_face,
+        "the probe does not mutate the real object"
+    );
+
+    let (transform, transform_card) = resolution_spell_land_board(LayoutKind::Transform);
+    assert!(
+        !resolution_back_land_face_play_is_legal(&transform, PlayerId(0), transform_card),
+        "a transform land back face is not a modal land face"
+    );
+
+    let mut single = state.clone();
+    single.objects.get_mut(&card).unwrap().back_face = None;
+    assert!(
+        !resolution_back_land_face_play_is_legal(&single, PlayerId(0), card),
+        "a single-faced card has no land face"
+    );
+
+    let mut at_allowance = state.clone();
+    at_allowance.lands_played_this_turn = 1;
+    at_allowance.players[0].lands_played_this_turn = 1;
+    assert!(!resolution_back_land_face_play_is_legal(
+        &at_allowance,
+        PlayerId(0),
+        card
+    ));
+
+    let mut opponents_turn = state.clone();
+    opponents_turn.active_player = PlayerId(1);
+    assert!(!resolution_back_land_face_play_is_legal(
+        &opponents_turn,
+        PlayerId(0),
+        card
+    ));
+
+    let mut prohibited = state.clone();
+    add_cant_play_land_static(&mut prohibited, 7_922);
+    assert!(
+        crate::game::static_abilities::player_has_static_other(
+            &prohibited,
+            PlayerId(0),
+            "CantPlayLand"
+        ),
+        "reach-guard: the prohibition is in force"
+    );
+    assert!(
+        !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
+        "CR 101.2: a \"can't play lands\" static refuses the land face"
+    );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
+    );
 }

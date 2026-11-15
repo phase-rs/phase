@@ -69,7 +69,8 @@ fn defending_player_anchor_polarity_names_every_arm() {
     // every line's comment half is removed by the SHARED rule before the
     // source is read, so a doc comment quoting an irrefutable arm cannot be
     // read as one.
-    let stripped = crate::source_census::code_lines(include_str!("../../src/types/statics.rs"));
+    let stripped =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/statics.rs"));
     let file = syn::parse_file(&stripped)
         .expect("this file must parse as Rust for the structural row to mean anything");
 

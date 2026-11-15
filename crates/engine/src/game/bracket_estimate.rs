@@ -726,6 +726,8 @@ pub fn estimate_bracket(
         sticker_sheets,    // NOT counted — Unfinity stickers, not cards in the deck
         bracket_tier: _,   // the player's declaration, not a card list
         combo_declaration, // the owner's barometer answer, not a card list
+        // Display-only owner choices (CR 203.1 + CR 206.1); never a bracket input.
+        printings: _,
     } = deck;
     let _ = (
         sideboard,

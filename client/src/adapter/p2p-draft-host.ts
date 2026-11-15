@@ -9,9 +9,10 @@
  * Requirements: P2P-01, P2P-03, P2P-05, P2P-06, P2P-07.
  */
 
-import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS, isSharedStackDistribution } from "./draft-adapter";
+import { DraftAdapter, draftViewPresentation, EMPTY_DRAFT_POOL_GROUPS, isSharedStackDistribution } from "./draft-adapter";
 import type { DraftCardInstance, DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import type { DraftKind, DraftProcedure, PackDistribution, PodPolicy, TournamentFormat } from "./draft-adapter";
+import { Draft27IncompatibilityError, requireDraft27HostValue } from "./draft-compatibility";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
@@ -285,6 +286,19 @@ export type DraftHostEvent =
 
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
+/**
+ * The deck funnel has three deliberately different callers.  Inbound wire
+ * commands own an exact connection/submission pair; the long-standing direct
+ * helper is a test/persistence seam which retains the addressed seat's legacy
+ * notification; and the public host-local API has no wire recipient at all.
+ * Keeping that distinction explicit prevents a seat-zero peer from becoming a
+ * synthetic recipient for a host-local reducer failure.
+ */
+type DeckSubmissionOrigin =
+  | { kind: "network"; deliverySession: DraftPeerSession | undefined }
+  | { kind: "legacyDirect" }
+  | { kind: "hostLocal" };
+
 /** Default grace window for guest reconnect during draft. */
 const DRAFT_GRACE_PERIOD_MS = 60_000;
 
@@ -548,6 +562,8 @@ export class P2PDraftHost {
   private settlementReceipts = new Map<string, { receiptId: string; revision: number }>();
   /** Submission id → immutable payload receipt. Persisted before its acknowledgement. */
   private deckSubmissionReceipts = new Map<string, { seat: number; payloadFingerprint: string }>();
+  /** The still-delivering command for a live peer session, never a receipt. */
+  private pendingDeckSubmissionBySession = new WeakMap<DraftPeerSession, string>();
   /** Prevent duplicate local visibility while a connected guest retries its receipt. */
   private publishedDeckSubmissions = new Set<string>();
 
@@ -622,6 +638,26 @@ export class P2PDraftHost {
     for (const listener of this.listeners) {
       listener(event);
     }
+  }
+
+  /**
+   * Keep every reducer-return seam on one raw admission boundary.  A caller
+   * must use the value returned here; a later `getViewForSeat` cannot bless an
+   * already refused mutation result.  Only `resumeDraftingAfterRestore`'s last
+   * read is returned unread, to the wrapper's own `requireDraft27HostValue`.
+   */
+  private admitHostView(view: DraftPlayerView): DraftPlayerView {
+    return requireDraft27HostValue(view);
+  }
+
+  private async awaitAdmittedHostView(
+    producer: () => Promise<DraftPlayerView>,
+  ): Promise<DraftPlayerView> {
+    return this.admitHostView(await producer());
+  }
+
+  private admittedLobbyView(): DraftPlayerView {
+    return this.admitHostView(this.buildLobbyView());
   }
 
   /**
@@ -885,7 +921,7 @@ export class P2PDraftHost {
     });
 
     // Send welcome with empty view (draft hasn't started)
-    const emptyView: DraftPlayerView = this.buildLobbyView();
+    const emptyView: DraftPlayerView = this.admittedLobbyView();
 
     await session.send({
       type: "draft_welcome",
@@ -964,11 +1000,11 @@ export class P2PDraftHost {
       // the recovered connection is merely tentative. A close between the
       // engine update and durable save is rolled back below rather than
       // producing a connected-looking, unrecoverable seat.
-      if (this.draftStarted) await this.adapter.setSeatConnected(reconnectSeat, true);
+      if (this.draftStarted) await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(reconnectSeat, true));
       await this.persistSessionStrict();
       if (!live) {
         if (this.draftStarted) {
-          await this.adapter.setSeatConnected(reconnectSeat, false);
+          await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(reconnectSeat, false));
           await this.persistSessionStrict();
         }
         return;
@@ -976,7 +1012,7 @@ export class P2PDraftHost {
       const grace = this.disconnectedSeats.get(reconnectSeat);
       if (!grace) {
         if (this.draftStarted) {
-          await this.adapter.setSeatConnected(reconnectSeat, false);
+          await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(reconnectSeat, false));
           await this.persistSessionStrict();
         }
         await this.rejectAndClose(session, "NoReconnectWindow", "Reconnect window expired", "Reconnect window expired");
@@ -996,8 +1032,8 @@ export class P2PDraftHost {
       await this.persistSessionStrict();
 
       const view = this.draftStarted
-        ? await this.adapter.getViewForSeat(reconnectSeat)
-        : this.buildLobbyView();
+        ? await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(reconnectSeat))
+        : this.admittedLobbyView();
       // Fetching a view yields to the transport. A close or grace expiry that
       // occurs meanwhile must not publish a recovered workspace or ack.
       if (!live || this.guestSessions.get(reconnectSeat) !== session) {
@@ -1021,7 +1057,7 @@ export class P2PDraftHost {
         this.guestSessions.delete(reconnectSeat);
       }
       if (this.draftStarted) {
-        try { await this.adapter.setSeatConnected(reconnectSeat, false); } catch { /* best-effort rollback */ }
+        try { await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(reconnectSeat, false)); } catch { /* best-effort rollback */ }
       }
       if (!this.disconnectedSeats.has(reconnectSeat) && reconnectDeadlineAt !== null) {
         if (reconnectDeadlineAt > Date.now()) {
@@ -1181,7 +1217,20 @@ export class P2PDraftHost {
           });
           return;
         }
-        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId);
+        // Hold the delivery identity across the reducer-producing await.  A
+        // replacement connection — or a later command on this connection —
+        // must never receive this command's outcome.
+        if (originatingSession) this.pendingDeckSubmissionBySession.set(originatingSession, msg.submissionId);
+        try {
+          await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, {
+            kind: "network",
+            deliverySession: originatingSession,
+          });
+        } finally {
+          if (originatingSession && this.pendingDeckSubmissionBySession.get(originatingSession) === msg.submissionId) {
+            this.pendingDeckSubmissionBySession.delete(originatingSession);
+          }
+        }
         break;
       }
       case "draft_workspace_update": {
@@ -1322,7 +1371,7 @@ export class P2PDraftHost {
       procedure.distribution,
       seats.filter((seat) => seat.type === "Bot").length,
     );
-    await this.adapter.createMultiplayerDraft(
+    await this.awaitAdmittedHostView(() => this.adapter.createMultiplayerDraft(
       this.poolInput,
       seats,
       this.kind,
@@ -1331,7 +1380,7 @@ export class P2PDraftHost {
       this.tournamentFormat,
       this.podPolicy,
       this.botDifficulty,
-    );
+    ));
 
     // The started flags go up FIRST, because the bot loop and the persist below
     // run against a host that has to look started to them -- and they come back
@@ -1347,8 +1396,9 @@ export class P2PDraftHost {
     this.activePodSize = seats.length;
     this.picksThisRound.clear();
     try {
-      const startView = await this.adapter.getViewForSeat(0);
-      if (startView.status === "Drafting") {
+      const startView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
+      const startPresentation = draftViewPresentation(startView);
+      if (startPresentation.podPhase === "drafting" && !startPresentation.isReadOnly) {
         await this.resolveBotPicks({ emit: false, persist: false });
       }
 
@@ -1381,16 +1431,17 @@ export class P2PDraftHost {
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
       try {
-        const view = await this.adapter.getViewForSeat(seat);
+        const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
         session.send({ type: "draft_state_update", view });
       } catch (err) {
         console.error(`[P2PDraftHost] Failed to send start view to seat ${seat}:`, err);
       }
     }
 
-    const freshHostView = await this.adapter.getViewForSeat(0);
+    const freshHostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     this.emit({ type: "draftStarted", view: freshHostView });
-    if (freshHostView.status === "Drafting") {
+    const freshPresentation = draftViewPresentation(freshHostView);
+    if (freshPresentation.podPhase === "drafting" && !freshPresentation.isReadOnly) {
       this.startPickTimer(0);
     }
   }
@@ -1431,11 +1482,27 @@ export class P2PDraftHost {
       // resubmit that changes only the commander reuse the prior receipt and
       // resolve straight to the recovered-receipt branch, never reaching the
       // reducer with the new designation.
+      //
+      // The receipt is reused only for a retry of seat 0's LATEST accepted
+      // submission (an IDB-failure retry, or serialized concurrent submits).
+      // A revert to an earlier composition (A -> B -> A) is a new submission
+      // and must reach the reducer, or `submitted_decks` keeps B. Receipts are
+      // set only under new ids and persisted/restored in insertion order, so
+      // the last seat-0 entry is the latest accepted one.
       const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
-      const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
-        ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
-      )?.[0];
-      return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID());
+      const latestReceipt = [...this.deckSubmissionReceipts.entries()]
+        .filter(([, receipt]) => receipt.seat === 0)
+        .pop();
+      const retrySubmission = latestReceipt?.[1].payloadFingerprint === payloadFingerprint
+        ? latestReceipt[0]
+        : undefined;
+      return this.handleDeckSubmission(
+        0,
+        mainDeck,
+        commanders,
+        retrySubmission ?? crypto.randomUUID(),
+        { kind: "hostLocal" },
+      );
     });
   }
 
@@ -1455,7 +1522,7 @@ export class P2PDraftHost {
     seat: number,
     isLive: () => boolean = () => true,
   ): Promise<Record<string, number>> {
-    const view = await this.adapter.getViewForSeat(seat);
+    const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
     if (!isLive()) throw new Error("Guest session is no longer current");
     if (view.status !== "Deckbuilding") {
       throw new Error("Land suggestions are available only during deckbuilding");
@@ -1480,7 +1547,7 @@ export class P2PDraftHost {
     state: DraftWorkspaceState,
     sourceSession?: DraftPeerSession,
   ): Promise<void> {
-    const view = await this.adapter.getViewForSeat(seat);
+    const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
     // The adapter view await is a transport boundary: a superseded guest may
     // not mutate its replacement's retained state after it returns.
     if (sourceSession && this.guestSessions.get(seat) !== sourceSession) return;
@@ -1601,7 +1668,9 @@ export class P2PDraftHost {
   ): Promise<DraftPlayerView> {
     this.assertPickAllowed();
     try {
-      const view = await this.adapter.submitSharedStackDecisionForSeat(seat, pile, decision);
+      const view = await this.awaitAdmittedHostView(
+        () => this.adapter.submitSharedStackDecisionForSeat(seat, pile, decision),
+      );
 
       // Same fence as `applyPick`: no client may observe an acknowledged
       // mutation before a host reload can restore the reducer result.
@@ -1649,7 +1718,7 @@ export class P2PDraftHost {
       // the draft into Deckbuilding, and if they did not, the seat the clock
       // must be armed against is the HUMAN seat their chain stopped on, not the
       // seat that was active when this decision was applied.
-      const hostView = await this.adapter.getViewForSeat(0);
+      const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       if (hostView.status === "Deckbuilding") {
         this.clearActiveTimer();
         this.emit({ type: "draftComplete" });
@@ -1695,7 +1764,7 @@ export class P2PDraftHost {
     submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceIds),
   ): Promise<DraftPlayerView> {
     try {
-      const view = await submitPick();
+      const view = await this.awaitAdmittedHostView(submitPick);
       this.picksThisRound.add(seat);
 
       // A pick acknowledgement is externally authoritative: never publish it
@@ -1731,20 +1800,23 @@ export class P2PDraftHost {
         await this.broadcastViews();
 
         // Check if draft is complete (deckbuilding)
-        const hostView = await this.adapter.getViewForSeat(0);
+        const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
         if (hostView.status === "Deckbuilding") {
           this.clearActiveTimer();
           this.emit({ type: "draftComplete" });
-        } else if (hostView.status === "Drafting") {
+        } else {
+          const presentation = draftViewPresentation(hostView);
+          if (presentation.podPhase === "drafting" && !presentation.isReadOnly) {
           this.startPickTimer(hostView.pick_number);
+          }
         }
       }
 
       // Return the host's updated view if this was the host's pick
       if (seat === 0) {
-        return await this.adapter.getViewForSeat(0);
+        return await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       }
-      return await this.adapter.getViewForSeat(0);
+      return await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const session = this.guestSessions.get(seat);
@@ -1760,6 +1832,7 @@ export class P2PDraftHost {
     mainDeck: string[],
     commanders: string[],
     submissionId: string,
+    origin: DeckSubmissionOrigin = { kind: "legacyDirect" },
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
     let receiptDurable = false;
@@ -1772,14 +1845,14 @@ export class P2PDraftHost {
           throw new Error("Deck submission id does not match its original payload");
         }
         submissionAccepted = true;
-        view = await this.adapter.getViewForSeat(seat);
+        view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
         // This is also the retry path after an IDB failure: it flushes the
         // immutable pending snapshot before issuing a receipt, without ever
         // submitting the deck to the reducer again.
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders);
+        view = await this.awaitAdmittedHostView(() => this.adapter.submitDeckForSeat(seat, mainDeck, commanders));
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.
@@ -1798,14 +1871,37 @@ export class P2PDraftHost {
       }
       await this.publishAcceptedDeckSubmission(seat, submissionId, previous !== undefined);
 
-      return seat === 0 ? view : await this.adapter.getViewForSeat(0);
+      return seat === 0 ? view : await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const session = this.guestSessions.get(seat);
-      if (session && !submissionAccepted) {
-        session.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Rejected" });
-      } else if (session && !receiptDurable) {
-        session.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Retryable" });
+      // A network command may receive an outcome only through the exact
+      // connection and pending submission that originated it.  The direct
+      // helper retains its legacy current-seat notification (it is how its
+      // persisted retry seam reports an IDB failure), while the public
+      // host-local API has no network recipient whatsoever.
+      const isExactNetworkDelivery = origin.kind === "network"
+        && origin.deliverySession !== undefined
+        && session === origin.deliverySession
+        && this.pendingDeckSubmissionBySession.get(origin.deliverySession) === submissionId;
+      const notificationSession = origin.kind === "legacyDirect"
+        ? session
+        : isExactNetworkDelivery
+          ? session
+          : undefined;
+      if (
+        err instanceof Draft27IncompatibilityError
+        && notificationSession
+        && !submissionAccepted
+      ) {
+        // The durable guest command remains untouched: the exact live caller
+        // may retry after compatibility changes, but it has no receipt or
+        // success acknowledgement from this refused reducer result.
+        notificationSession.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Retryable" });
+      } else if (notificationSession && !submissionAccepted) {
+        notificationSession.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Rejected" });
+      } else if (notificationSession && !receiptDurable) {
+        notificationSession.send({ type: "draft_error", reason, submissionId, submissionDisposition: "Retryable" });
       }
       throw err;
     }
@@ -1827,7 +1923,7 @@ export class P2PDraftHost {
     recovered: boolean,
   ): Promise<void> {
     if (this.publishedDeckSubmissions.has(submissionId)) return;
-    const hostView = await this.adapter.getViewForSeat(0);
+    const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     // A terminal status means the downstream work already ran — but only for a
     // RECOVERED receipt. `publishedDeckSubmissions` is in-memory, so after a
     // host reload it cannot answer this and the status is the only signal
@@ -1846,13 +1942,15 @@ export class P2PDraftHost {
       // admits only Deckbuilding | Pairing | RoundComplete). State what every
       // status does rather than sweeping the rest into a fallback.
       //
-      // `Pairing` is PostDraftPlay::TournamentPairings, the only status this
-      // funnel really reaches besides `Complete`; `generatePairingsInner`
-      // republishes and overwrites it. The other seven are unreachable here —
+      // `Pairing` is PostDraftPlay::TournamentPairings, which this funnel
+      // reaches besides `Complete`; `generatePairingsInner` republishes and
+      // overwrites it. `RoundComplete` is reached by a between-rounds revision
+      // in a Casual pod (MTR 7.3): every seat already submitted, so this
+      // all-submitted branch fires on each revision, and its own arm below
+      // handles it. The remaining six are unreachable here —
       // `apply_submit_deck`'s last-deck arm assigns only Complete or Pairing,
-      // and this branch runs only once every seat has submitted or is a bot —
-      // so they route to the reducer, which refuses whatever it will not
-      // accept.
+      // and a revision leaves the status untouched — so they route to the
+      // reducer, which refuses whatever it will not accept.
       switch (hostView.status) {
         // PostDraftPlay::CompleteImmediately (Quick Draft, Commander Draft).
         // The reducer already assigned Complete and `apply_generate_pairings`
@@ -1868,17 +1966,27 @@ export class P2PDraftHost {
           await this.broadcastViews();
           await this.generatePairingsInner();
           break;
+        // Review never reaches here: this host's admission
+        // (`awaitAdmittedHostView`) refuses it. The arm exists for
+        // exhaustiveness and must never fall through to a pairing action.
+        case "Review":
+          await this.broadcastViews();
+          break;
+        // A between-rounds revision (MTR 7.3) republishes the pod and never
+        // generates pairings: round advancement stays the host's AdvanceRound.
+        case "RoundComplete":
+          await this.broadcastViews();
+          break;
         case "Lobby":
         case "Drafting":
         case "Paused":
         case "Deckbuilding":
         case "MatchInProgress":
-        case "RoundComplete":
         case "Abandoned":
           await this.generatePairingsInner();
           break;
         // The exhaustiveness guard: `assertNever`'s parameter is `never`, so
-        // THIS LINE is what fails to compile if a tenth DraftStatus is added
+        // THIS LINE is what fails to compile if an eleventh DraftStatus is added
         // upstream and left unhandled.
         default:
           assertNever(hostView.status);
@@ -1906,7 +2014,7 @@ export class P2PDraftHost {
     for (const [seat, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(seat)) continue;
       try {
-        const view = await this.adapter.getViewForSeat(seat);
+        const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
         await session.send({ type: "draft_state_update", view });
       } catch (err) {
         console.error(`[P2PDraftHost] broadcast view error seat ${seat}:`, err);
@@ -1914,7 +2022,7 @@ export class P2PDraftHost {
     }
     // Update host's own view
     try {
-      const hostView = await this.adapter.getViewForSeat(0);
+      const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       this.emit({ type: "viewUpdated", view: hostView });
     } catch { /* best-effort */ }
   }
@@ -1990,7 +2098,7 @@ export class P2PDraftHost {
         // A rejected adapter call can still have changed the engine. Treat the
         // attempted transition as needing compensation either way.
         attemptedDisconnect = true;
-        await this.adapter.setSeatConnected(seat, false);
+        await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, false));
       }
 
       // Leave is a compensating transaction: unlike a reducer command, its
@@ -2022,7 +2130,7 @@ export class P2PDraftHost {
       else this.expiredDisconnectedSeats.delete(seat);
       if (this.draftStarted && attemptedDisconnect && !sessionEnded) {
         try {
-          await this.adapter.setSeatConnected(seat, true);
+          await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, true));
         } catch (rollbackError) {
           // The durable state and every local recovery record have already
           // been restored. Surface the adapter failure without sacrificing the
@@ -2038,7 +2146,7 @@ export class P2PDraftHost {
             // A connection that closed during the failed leave is still gone.
             // Keep the engine paused/disconnected for its recovered grace
             // window instead of compensating it back to a live seat.
-            await this.adapter.setSeatConnected(seat, false);
+            await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, false));
           } catch (disconnectError) {
             this.reportDetachedMutationFailure("leave disconnect recovery", disconnectError);
           }
@@ -2093,7 +2201,7 @@ export class P2PDraftHost {
     // The socket callback is synchronous, but all externally visible state
     // follows the one durable queue: connected bitmap → snapshot → views/pause.
     this.runDetachedMutation("guest disconnect", async () => {
-      if (this.draftStarted) await this.adapter.setSeatConnected(seat, false);
+      if (this.draftStarted) await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, false));
       await this.persistSessionStrict();
       if (this.draftStarted) {
         await this.broadcastViews();
@@ -2143,8 +2251,11 @@ export class P2PDraftHost {
     if (this.draftStarted && this.podPolicy === "Competitive") {
       void (async () => {
         try {
-          const view = await this.adapter.getViewForSeat(0);
-          if (view.status === "Drafting") this.startPickTimer(view.pick_number);
+          const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
+          const presentation = draftViewPresentation(view);
+          if (presentation.podPhase === "drafting" && !presentation.isReadOnly) {
+            this.startPickTimer(view.pick_number);
+          }
         } catch { /* A later authoritative operation will retry timer setup. */ }
       })();
     }
@@ -2166,7 +2277,7 @@ export class P2PDraftHost {
       this.emit({ type: "seatDisconnected", seatIndex: seat });
       return;
     }
-    await this.adapter.setSeatConnected(seat, false);
+    await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, false));
     this.expiredDisconnectedSeats.add(seat);
     await this.persistSessionStrict();
     this.broadcastToGuests({
@@ -2299,8 +2410,10 @@ export class P2PDraftHost {
     for (let seat = 0; seat < this.activePodSize; seat++) {
       if (this.picksThisRound.has(seat)) continue;
       try {
-        const view = await this.adapter.getViewForSeat(seat);
-        if (view.current_pack && view.current_pack.length > 0) {
+        const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat));
+        const presentation = draftViewPresentation(view);
+        if (presentation.podPhase === "drafting" && !presentation.isReadOnly
+          && view.current_pack && view.current_pack.length > 0) {
           // CR 903.13b: the sweep owes one whole pick step, not one card.
           await this.handlePick(
             seat,
@@ -2355,7 +2468,7 @@ export class P2PDraftHost {
    */
   private async autoDecideSharedStackTurn(): Promise<void> {
     try {
-      const hostView = await this.adapter.getViewForSeat(0);
+      const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       if (hostView.status !== "Drafting") return;
       const stack = hostView.shared_stack;
       if (!stack) return;
@@ -2396,8 +2509,9 @@ export class P2PDraftHost {
    * one tracks the turn structure this method has to service.
    */
   private async resolveBotPicks(options: PickOptions = { emit: true, persist: true }): Promise<void> {
-    const hostView = await this.adapter.getViewForSeat(0);
-    if (hostView.status !== "Drafting") return;
+    const hostView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
+    const presentation = draftViewPresentation(hostView);
+    if (presentation.podPhase !== "drafting" || presentation.isReadOnly) return;
 
     if (this.procedure !== null && isSharedStackDistribution(this.procedure.distribution)) {
       await this.resolveSharedStackBotTurns(hostView, options);
@@ -2406,7 +2520,7 @@ export class P2PDraftHost {
 
     for (const seat of hostView.seats) {
       if (!seat.is_bot) continue;
-      const view = await this.adapter.getViewForSeat(seat.seat_index);
+      const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(seat.seat_index));
       const pack = view.current_pack;
       if (!pack || pack.length === 0) continue;
 
@@ -2495,7 +2609,7 @@ export class P2PDraftHost {
 
   private async generatePairingsInner(): Promise<void> {
     try {
-      const view = await this.adapter.generatePairings();
+      const view = await this.awaitAdmittedHostView(() => this.adapter.generatePairings());
       await this.persistSessionStrict();
       // The engine owns the round. Read it back; never compute it here.
       const round = view.current_round;
@@ -2513,7 +2627,7 @@ export class P2PDraftHost {
         }
       }
 
-      const postBotView = await this.adapter.getViewForSeat(0);
+      const postBotView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       for (const pairing of postBotView.pairings) {
         if (pairing.round !== round) continue;
         if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
@@ -2527,7 +2641,7 @@ export class P2PDraftHost {
         await this.dispatchMatchLaunch(pairing, postBotView);
       }
 
-      const latestView = await this.adapter.getViewForSeat(0);
+      const latestView = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
 
       // Launch records may have changed while dispatching. Fence that final
       // snapshot before either broadcasts or the host UI observe it.
@@ -2569,7 +2683,7 @@ export class P2PDraftHost {
       this.guestSessions.get(submittingSeat)?.send({ type: "draft_error", reason: "Invalid match binding" });
       return;
     }
-    const view = await this.adapter.getViewForSeat(0);
+    const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     const pairing = view.pairings.find(
       (candidate) => candidate.match_id === binding.matchId && candidate.round === binding.round,
     );
@@ -2643,23 +2757,12 @@ export class P2PDraftHost {
   }
 
   /**
-   * Partition a completed Commander pod's seats into the ones a human will
-   * actually pilot and the ones the engine must.
-   *
-   * A seat is a LIVE HUMAN iff `!is_bot && connected`; everything else — a bot,
-   * or a human who dropped before the launch — is ENGINE-PILOTED. This is the
-   * single authority for that classification.
-   *
-   * `is_bot` is load bearing and `connected` alone would be wrong: the engine
-   * reports `connected` as `true` UNCONDITIONALLY for bot seats
-   * (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a `connected`-only
-   * test classifies every bot as a live human and dispatches launches into the
-   * void.
-   *
-   * Seat 0 (the host) is always live: humans read `get_or(i, true)` over
-   * `connected_seats`, which starts all-true at pod size, and the engine's
-   * `apply_set_seat_connected` rejects bot seats — every client-side
-   * `setSeatConnected(x, false)` site is guest-keyed, so the host never flips.
+   * Provisional deck-preparation split from the captured view. Bot kind binds
+   * deck provenance; connectivity does not bind the eventual recipient set.
+   * `sendCommanderLaunches` finalizes that set against current transports.
+   * `is_bot` is load-bearing: the engine reports `connected: true` unconditionally
+   * for bot seats (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a
+   * `connected`-only test would prepare bots as live humans.
    */
   private commanderSeatPlan(view: DraftPlayerView): {
     liveHumanSeats: number[];
@@ -2682,15 +2785,9 @@ export class P2PDraftHost {
    * all) BEFORE any guest is invited into it: a guest that joins early takes
    * the first waiting seat and the mutation then kicks it.
    *
-   * `view` MUST be the freshest published view, read at call time rather than
-   * taken from a captured closure. There is a real stale-view window this does
-   * not close: `handleGuestDisconnect` deletes the `guestSessions` entry
-   * synchronously while the engine's `connected` flag flips only inside the
-   * detached mutation and reaches the store later still. A launch dispatched
-   * against a view captured inside that window classifies the departed seat
-   * LIVE, `sendToSeat` then silently no-ops for it (no session), the seat gets
-   * no engine pilot either, and the game never fills. Reading the view at call
-   * time is the caller's responsibility.
+   * `view` binds seat identities and deck provenance for this attempt. Its
+   * connectivity can lag transport callbacks or change during these awaits;
+   * `sendCommanderLaunches` reclassifies participation using both deck arrays.
    *
    * Modelled on `dispatchMatchLaunch`: `exportDraftSession()` is called EXACTLY
    * ONCE and threaded through, so every deck is synthesized exactly once. That
@@ -2732,41 +2829,92 @@ export class P2PDraftHost {
   }
 
   /**
-   * CR 903.13a: put one `draft_commander_launch` on every seat a human will
-   * pilot, from decks `commanderSeatDecks` already computed.
+   * CR 903.13a: finalize transport participation using the prepared decks, then invite.
+   * Every engine seat is installed BEFORE any invitation: a guest invited early
+   * takes the first waiting game seat, and a later `SetKind` on that index kicks it.
+   * Engine assignments are latched for this attempt, including reconnects
+   * during installation. Each missing candidate is removed once, so rescans
+   * after assignment awaits are bounded by the pod size.
    *
-   * The recipient set is exactly `decks.liveSeatDecks` and INCLUDES the local
-   * seat — the host is always pod seat 0, and `sendToSeat`'s seat-0 arm turns
-   * that send into a local `commanderLaunch` event, which is the ONLY path by
-   * which the host learns of its own launch.
-   *
-   * Takes no `localSeat`: `liveSeatDecks` already carries every live seat's own
-   * deck, the local seat's being the same object as `hostDeck`, so this list is
-   * the single authority for both the recipients and their decks. Re-running
-   * `commanderSeatPlan` here would create a second authority that a view drifting
-   * between the two calls could disagree with, yielding a recipient with no deck.
+   * Capture current endpoints and enqueue all remote invitations in one turn.
+   * Drops after dispatch are ordinary post-invitation failures; rejected sends
+   * fail the attempt rather than silently leaving a WaitingHuman hole.
+   * A guest whose connection has closed but whose disconnect `DraftPeerSession`
+   * has not yet reported is still deliverable here; its rejected send fails the
+   * whole attempt (the host cancels and relaunches) instead of installing an
+   * engine pilot.
    */
-  sendCommanderLaunches(
+  async sendCommanderLaunches(
     view: DraftPlayerView,
     gameId: string,
     roomCode: string,
     decks: CommanderSeatDecks,
-  ): void {
-    for (const { seat, deck } of decks.liveSeatDecks) {
-      this.sendToSeat(seat, {
-        type: "draft_commander_launch",
-        launch: {
-          gameId,
-          roomCode,
-          localDeck: deck,
-          playerCount: view.seats.length,
-          // CR 903.13f(3): carry the host's own value through. The view's field
-          // is optional while the wire's is required-nullable, so `?? null` is
-          // the required narrowing — NOT `?? []`, which would assert "the draft
-          // contained zero sets" where the host already knows the answer.
-          draftSetCodes: view.draft_set_codes ?? null,
-        },
-      });
+    installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const candidates = new Map<number, DraftDeckPayload>();
+    let engineSeats: Array<{ seat: number; deck: DraftDeckPayload }> = [];
+    for (const entry of [...decks.liveSeatDecks, ...decks.engineSeatDecks]) {
+      // The host is always pod seat 0 and occupies game seat 0 itself: it is
+      // never installed as an engine seat nor sent over the wire. Its launch is
+      // the local emit below (`sendToSeat`'s seat-0 arm), which is the ONLY path
+      // by which the host learns of its own launch. Seat 0 is always live: the
+      // engine's `apply_set_seat_connected` rejects bot seats and every
+      // client-side `setSeatConnected(x, false)` site is guest-keyed.
+      if (entry.seat === 0) continue;
+      if (this.isBotSeatFromView(view, entry.seat) || !this.deliverableSession(entry.seat)) {
+        engineSeats.push(entry);
+      } else {
+        candidates.set(entry.seat, entry.deck);
+      }
+    }
+
+    const endpoints: Array<{ deck: DraftDeckPayload; session: DraftPeerSession }> = [];
+    for (;;) {
+      for (const { seat, deck } of engineSeats) {
+        await installEngineSeat(seat, deck);
+        signal.throwIfAborted();
+      }
+      engineSeats = [];
+      endpoints.length = 0;
+      for (const [seat, deck] of candidates) {
+        const session = this.deliverableSession(seat);
+        if (!session) {
+          candidates.delete(seat);
+          engineSeats.push({ seat, deck });
+        } else {
+          endpoints.push({ deck, session });
+        }
+      }
+      if (engineSeats.length === 0) break;
+    }
+
+    signal.throwIfAborted();
+    const launchFor = (deck: DraftDeckPayload): DraftP2PMessage => ({
+      type: "draft_commander_launch",
+      launch: {
+        gameId,
+        roomCode,
+        localDeck: deck,
+        playerCount: view.seats.length,
+        // CR 903.13f(3): carry the host's own value through. The view's field
+        // is optional while the wire's is required-nullable, so `?? null` is
+        // the required narrowing — NOT `?? []`, which would assert "the draft
+        // contained zero sets" where the host already knows the answer.
+        draftSetCodes: view.draft_set_codes ?? null,
+      },
+    });
+    const sends = endpoints.map(({ deck, session }) => session.send(launchFor(deck)));
+    const hostDeck =
+      decks.liveSeatDecks.find(({ seat }) => seat === 0)?.deck ??
+      decks.engineSeatDecks.find(({ seat }) => seat === 0)?.deck;
+    if (!hostDeck) throw new Error("Seat 0 has no prepared Commander deck");
+    this.sendToSeat(0, launchFor(hostDeck));
+    const results = await Promise.allSettled(sends);
+    signal.throwIfAborted();
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
     }
   }
 
@@ -3024,7 +3172,7 @@ export class P2PDraftHost {
    */
   async reportMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
     try {
-      const view = await this.adapter.reportMatchResult(matchId, winnerSeat);
+      const view = await this.awaitAdmittedHostView(() => this.adapter.reportMatchResult(matchId, winnerSeat));
       await this.persistSessionStrict();
       this.emit({ type: "matchResultReceived", matchId, winnerSeat });
 
@@ -3058,7 +3206,7 @@ export class P2PDraftHost {
 
   private async advanceRoundInner(): Promise<void> {
     try {
-      await this.adapter.advanceRound();
+      await this.awaitAdmittedHostView(() => this.adapter.advanceRound());
       await this.persistSessionStrict();
       this.emit({ type: "roundAdvanced" });
       await this.generatePairingsInner();
@@ -3078,7 +3226,7 @@ export class P2PDraftHost {
   private async replaceSeatWithBotInner(seat: number): Promise<void> {
     try {
       const seed = this.draftSeed ?? hashStringToSeed(this.draftCode || this.roomCode || "draft");
-      const replaced = await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
+      const replaced = await this.awaitAdmittedHostView(() => this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed)));
       const stillDrafting = replaced.status === "Drafting";
       const grace = this.disconnectedSeats.get(seat);
       if (grace) this.clearReconnectGrace(seat);
@@ -3215,7 +3363,7 @@ export class P2PDraftHost {
     message: Extract<DraftP2PMessage, { type: "draft_bo3_between_games" }>,
   ): Promise<void> {
     const binding = this.matchBindings.get(message.matchId);
-    const view = await this.adapter.getViewForSeat(0);
+    const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
     const pairing = view.pairings.find(
       (candidate) => candidate.match_id === message.matchId && candidate.round === binding?.round,
     );
@@ -3471,6 +3619,12 @@ export class P2PDraftHost {
     this.emit({ type: "bo3GameStarted", matchId, gameNumber: state.gameNumber });
   }
 
+  /** Single delivery-eligibility authority shared by the Commander finalizer and sendToSeat. */
+  private deliverableSession(seat: number): DraftPeerSession | undefined {
+    const session = this.guestSessions.get(seat);
+    return session && !this.disconnectedSeats.has(seat) ? session : undefined;
+  }
+
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
@@ -3520,8 +3674,8 @@ export class P2PDraftHost {
       }
       return;
     }
-    const session = this.guestSessions.get(seat);
-    if (session && !this.disconnectedSeats.has(seat)) {
+    const session = this.deliverableSession(seat);
+    if (session) {
       session.send(msg);
     }
   }
@@ -3579,7 +3733,7 @@ export class P2PDraftHost {
       // and was simply stranded. Pause/Resume is a control the host always has.
       //
       // Contained, because a resume must not fail on the retry it is offering.
-      const view = await this.adapter.getViewForSeat(0);
+      const view = await this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       if (view.shared_stack && view.seats.some((seat) => seat.is_bot)) {
         try {
           await this.resolveBotPicks({ emit: false, persist: true });
@@ -3822,10 +3976,11 @@ export class P2PDraftHost {
       await this.enqueuePersistSession(this.buildPersistedSnapshot(session.draftSessionJson));
     }
 
-    if (session.draftSessionJson) {
-      const view = await this.adapter.importSession(session.draftSessionJson, 2);
+    const draftSessionJson = session.draftSessionJson;
+    if (draftSessionJson) {
+      const view = await this.awaitAdmittedHostView(() => this.adapter.importSession(draftSessionJson, 2));
       for (const seat of this.expiredDisconnectedSeats) {
-        await this.adapter.setSeatConnected(seat, false);
+        await this.awaitAdmittedHostView(() => this.adapter.setSeatConnected(seat, false));
       }
       if (this.reconcileRetainedWorkspace(0, view.pool).changed) this.persistSession();
       await this.recoverSettlementOutbox(view);
@@ -3855,7 +4010,7 @@ export class P2PDraftHost {
         // round never enters (it transitions straight to `Complete`), so there
         // is no round past the last one for this branch to invent.
         await this.generatePairingsInner();
-        return this.adapter.getViewForSeat(0);
+        return this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
       } else if (view.status === "Drafting") {
         return await this.resumeDraftingAfterRestore(view);
       }
@@ -4207,8 +4362,8 @@ export class P2PDraftHost {
 
   /** Get the host's current view. */
   async getHostView(): Promise<DraftPlayerView> {
-    if (!this.draftStarted) return this.buildLobbyView();
-    return this.adapter.getViewForSeat(0);
+    if (!this.draftStarted) return this.admittedLobbyView();
+    return this.awaitAdmittedHostView(() => this.adapter.getViewForSeat(0));
   }
 
   /** Whether the draft pod is full. */

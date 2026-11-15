@@ -456,6 +456,15 @@ impl Default for PolicyRegistry {
     }
 }
 
+/// A registry total split around one held-out policy ([`PolicyRegistry::score_holding_out`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PolicyScore {
+    /// Every other policy's summed delta, or `NEG_INFINITY` when any policy rejects.
+    pub rest: f64,
+    /// The held-out policy's delta.
+    pub held: f64,
+}
+
 impl PolicyRegistry {
     fn from_policies(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
@@ -471,6 +480,19 @@ impl PolicyRegistry {
     #[allow(dead_code)]
     pub(crate) fn for_tests(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         Self::from_policies(policies)
+    }
+
+    /// The default registry's policies whose id is in `ids`, in default order: a test registry
+    /// holding real policies that modules private to `policies` define.
+    #[cfg(test)]
+    pub(crate) fn default_subset_for_tests(ids: &[PolicyId]) -> Self {
+        Self::from_policies(
+            Self::default()
+                .policies
+                .into_iter()
+                .filter(|policy| ids.contains(&policy.id()))
+                .collect(),
+        )
     }
 
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
@@ -570,15 +592,36 @@ impl PolicyRegistry {
     /// `f64::NEG_INFINITY` so the candidate is excluded by downstream
     /// softmax/argmax.
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
+        self.fold_scores(ctx, None).rest
+    }
+
+    /// [`Self::score`] split in two: `held` is the `Score` delta policy `held` contributed
+    /// (0.0 when it is absent or abstains), `rest` the sum of every other policy's, in the same
+    /// order. A `Reject` from any policy, the held one included, gives
+    /// `{ rest: NEG_INFINITY, held: 0.0 }`, so `rest + held` is always `score()`.
+    pub(crate) fn score_holding_out(&self, ctx: &PolicyContext<'_>, held: PolicyId) -> PolicyScore {
+        self.fold_scores(ctx, Some(held))
+    }
+
+    fn fold_scores(&self, ctx: &PolicyContext<'_>, held: Option<PolicyId>) -> PolicyScore {
         let verdicts = self.verdicts(ctx);
-        let mut total = 0.0;
-        for (_id, verdict) in verdicts {
+        let mut score = PolicyScore {
+            rest: 0.0,
+            held: 0.0,
+        };
+        for (id, verdict) in verdicts {
             match verdict {
-                PolicyVerdict::Reject { .. } => return f64::NEG_INFINITY,
-                PolicyVerdict::Score { delta, .. } => total += delta,
+                PolicyVerdict::Reject { .. } => {
+                    return PolicyScore {
+                        rest: f64::NEG_INFINITY,
+                        held: 0.0,
+                    }
+                }
+                PolicyVerdict::Score { delta, .. } if Some(id) == held => score.held += delta,
+                PolicyVerdict::Score { delta, .. } => score.rest += delta,
             }
         }
-        total
+        score
     }
 
     /// Returns `true` if any registered policy has the given `PolicyId`.
@@ -901,6 +944,113 @@ mod shared_invariant_tests {
             "critical delta x activation 2.6 must clamp to -CRITICAL_MAX ({}), got {delta}",
             -CRITICAL_MAX
         );
+    }
+
+    /// A policy with a fixed verdict on activations: `Some(delta)` scores, `None` rejects.
+    struct FixedVerdictPolicy {
+        id: PolicyId,
+        delta: Option<f64>,
+    }
+
+    impl TacticalPolicy for FixedVerdictPolicy {
+        fn id(&self) -> PolicyId {
+            self.id
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _features: &DeckFeatures,
+            _state: &GameState,
+            _player: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, _ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            match self.delta {
+                Some(delta) => PolicyVerdict::score(delta, PolicyReason::new("fixed_score")),
+                None => PolicyVerdict::reject(PolicyReason::new("fixed_reject")),
+            }
+        }
+    }
+
+    fn fixed_registry(verdicts: &[(PolicyId, Option<f64>)]) -> PolicyRegistry {
+        PolicyRegistry::for_tests(
+            verdicts
+                .iter()
+                .map(|&(id, delta)| {
+                    Box::new(FixedVerdictPolicy { id, delta }) as Box<dyn TacticalPolicy>
+                })
+                .collect(),
+        )
+    }
+
+    /// `score_holding_out` splits `score()` around one policy: the held policy's delta in
+    /// `held`, every other policy's in `rest`, summing back to `score()`. An absent id leaves
+    /// `rest` bit-equal to `score()`, and a `Reject` from any policy, the held one included,
+    /// is `{ NEG_INFINITY, 0.0 }`.
+    #[test]
+    fn score_holding_out_partitions_the_registry_total() {
+        let action = GameAction::ActivateAbility {
+            source_id: ObjectId(1),
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+        let cand = candidate(action, TacticalClass::Ability);
+        let decision = priority_decision(vec![cand.clone()]);
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &cand,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        let held = PolicyId::ActivationPatience;
+
+        let registry = fixed_registry(&[
+            (PolicyId::AntiSelfHarm, Some(0.3)),
+            (held, Some(-0.8)),
+            (PolicyId::CopyValue, Some(0.2)),
+        ]);
+        let total = registry.score(&ctx);
+        let split = registry.score_holding_out(&ctx, held);
+        assert!(
+            (split.rest + split.held - total).abs() < 1e-12,
+            "rest + held must be score(): {split:?} vs {total}"
+        );
+        assert!((split.held + 0.8).abs() < 1e-12, "held: {split:?}");
+        assert!((split.rest - 0.5).abs() < 1e-12, "rest: {split:?}");
+
+        let absent = registry.score_holding_out(&ctx, PolicyId::EffectTiming);
+        assert_eq!(
+            absent,
+            PolicyScore {
+                rest: total,
+                held: 0.0,
+            },
+            "an absent id holds nothing out"
+        );
+
+        let rejected = PolicyScore {
+            rest: f64::NEG_INFINITY,
+            held: 0.0,
+        };
+        let other_rejects = fixed_registry(&[(PolicyId::AntiSelfHarm, None), (held, Some(-0.8))]);
+        assert_eq!(other_rejects.score(&ctx), f64::NEG_INFINITY);
+        assert_eq!(other_rejects.score_holding_out(&ctx, held), rejected);
+        let held_rejects = fixed_registry(&[(PolicyId::AntiSelfHarm, Some(0.3)), (held, None)]);
+        assert_eq!(held_rejects.score(&ctx), f64::NEG_INFINITY);
+        assert_eq!(held_rejects.score_holding_out(&ctx, held), rejected);
     }
 
     /// Regression for the #5478 review (copy_value saturation): rescaling a wide

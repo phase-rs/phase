@@ -17,7 +17,7 @@ _SPEC.loader.exec_module(rd)
 
 
 def hits(src):
-    return rd.find_discards("crates/engine/src/parser/probe.rs", src.splitlines())
+    return rd.find_discards("crates/phase-parser/src/parser/probe.rs", src.splitlines())
 
 
 class DiscardTests(unittest.TestCase):
@@ -708,7 +708,7 @@ class DiscardTests(unittest.TestCase):
                             patch("sys.argv", ["detector", "--list", "--root", tmp]), \
                             redirect_stderr(stderr):
                         self.assertEqual(rd.main(), 1)
-                    self.assertIn("detector internal error at crates/engine/src/parser/probe.rs",
+                    self.assertIn("detector internal error at crates/phase-parser/src/parser/probe.rs",
                                   stderr.getvalue())
                     self.assertIn("RuntimeError: injected failure", stderr.getvalue())
                     self.assertNotIn("Traceback", stderr.getvalue())

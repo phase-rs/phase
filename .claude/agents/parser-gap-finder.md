@@ -50,10 +50,10 @@ Capture both the JSON output (stdout) and summary (stderr). The JSON's `categori
 
 For each high-`fixes_alone` family in a `parser:*` category (its `key` is the rejected phrase under the coverage report's pattern normalizer, which turns numbers into `N` and mana symbols into `{M}`; for `parser:unparsed_verb_arguments` it is `<verb>: <arguments>`):
 
-1. **Find the grammar that rejected it.** The category names the verdict: `parser:unparsed_condition`, `parser:unparsed_quantity`, `parser:unparsed_replacement`, `parser:unparsed_verb_arguments` (a known clause-head verb whose arguments failed), or `parser:unrecognized_clause_head` (no known verb or subject heads the clause). Verdicts are produced in `crates/engine/src/parser/oracle_effect/gap_diagnosis.rs`. Then read the grammar that handles the phrase:
-   - `crates/engine/src/parser/oracle_effect/imperative.rs` (verb dispatch)
-   - `crates/engine/src/parser/oracle_effect/mod.rs` (pre-dispatch patterns)
-   - `crates/engine/src/parser/oracle_nom/` (condition, quantity and other shared combinators)
+1. **Find the grammar that rejected it.** The category names the verdict: `parser:unparsed_condition`, `parser:unparsed_quantity`, `parser:unparsed_replacement`, `parser:unparsed_verb_arguments` (a known clause-head verb whose arguments failed), or `parser:unrecognized_clause_head` (no known verb or subject heads the clause). Verdicts are produced in `crates/phase-parser/src/parser/oracle_effect/gap_diagnosis.rs`. Then read the grammar that handles the phrase:
+   - `crates/phase-parser/src/parser/oracle_effect/imperative.rs` (verb dispatch)
+   - `crates/phase-parser/src/parser/oracle_effect/mod.rs` (pre-dispatch patterns)
+   - `crates/phase-parser/src/parser/oracle_nom/` (condition, quantity and other shared combinators)
 2. **Identify current patterns** — what text patterns does that grammar currently support?
 3. **Compare with the family's phrase** and with the Oracle text of a few of its `fixes_alone_cards`.
 4. **Identify the gap** — what specific text structure is missing?
@@ -62,7 +62,7 @@ For each high-`fixes_alone` family in a `parser:*` category (its `key` is the re
 ### Step 3: Analyze unrecognized clause heads
 
 For `parser:unrecognized_clause_head` families:
-1. Read `crates/engine/src/parser/oracle_effect/subject.rs`
+1. Read `crates/phase-parser/src/parser/oracle_effect/subject.rs`
 2. Check `starts_with_subject_prefix` — does the clause open with a subject phrase the prefix list lacks?
 3. Check `find_predicate_start` — is the verb recognized but the subject prefix missing?
 
@@ -107,11 +107,11 @@ Coverage: [current coverage %]
 
 | File | Purpose |
 |------|---------|
-| `crates/engine/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (`parse_imperative_family_ast`) |
-| `crates/engine/src/parser/oracle_effect/mod.rs` | Pre-dispatch patterns, `parse_effect_clause` |
-| `crates/engine/src/parser/oracle_effect/subject.rs` | Subject stripping, `PREDICATE_VERBS`, `starts_with_subject_prefix` |
-| `crates/engine/src/parser/oracle_nom/primitives.rs` | Shared nom combinators (numbers, mana, colors, P/T, counters) |
-| `crates/engine/src/parser/oracle_nom/error.rs` | `parse_or_unimplemented` error boundary, `OracleResult` type |
+| `crates/phase-parser/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (`parse_imperative_family_ast`) |
+| `crates/phase-parser/src/parser/oracle_effect/mod.rs` | Pre-dispatch patterns, `parse_effect_clause` |
+| `crates/phase-parser/src/parser/oracle_effect/subject.rs` | Subject stripping, `PREDICATE_VERBS`, `starts_with_subject_prefix` |
+| `crates/phase-parser/src/parser/oracle_nom/primitives.rs` | Shared nom combinators (numbers, mana, colors, P/T, counters) |
+| `crates/phase-parser/src/parser/oracle_nom/error.rs` | Error boundary, `OracleResult` type |
 | `crates/engine/src/game/gap_analysis.rs` | Regroups gaps by typed diagnosis (`GapClass`, `analyze_gaps`) |
 | `crates/engine/src/game/coverage.rs` | Coverage types and semantic audit pipeline (`audit_semantic`, `SemanticFinding`) |
 

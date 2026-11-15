@@ -29,7 +29,7 @@ impl GameSession {
                 fault: Some(fault),
             });
         }
-        if self.ai_seats.is_empty() || self.pending_takeback.is_some() || !self.ai_seat_can_act() {
+        if self.ai_seats.is_empty() || self.takeback.is_pending() || !self.ai_seat_can_act() {
             return ControlFlow::Break(AiRunOutcome {
                 transitions: Vec::new(),
                 failure: None,

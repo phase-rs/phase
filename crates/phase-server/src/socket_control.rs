@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::extract::ws::CloseFrame;
 use parking_lot::Mutex;
-use server_core::protocol::WireFormat;
+use server_core::protocol::{StateCodec, WireFormat};
 use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
@@ -72,6 +72,7 @@ struct Shared {
     changed: Notify,
     application_activity: Notify,
     encoding: AtomicU8,
+    state_codec: Mutex<Option<StateCodec>>,
     heartbeat: Mutex<crate::socket_heartbeat::HeartbeatProbe>,
 }
 
@@ -94,6 +95,17 @@ impl ControlLane {
             2 => Encoding::GzipEnvelope,
             _ => unreachable!("only typed negotiated encodings are stored"),
         }
+    }
+
+    pub(crate) fn accept_state_codec(&self, codec: Option<StateCodec>) {
+        let mut selected = self.0.state_codec.lock();
+        if selected.is_none() && codec == Some(StateCodec::StateCodecV1) {
+            *selected = codec;
+        }
+    }
+
+    pub(crate) fn state_codec(&self) -> Option<StateCodec> {
+        *self.0.state_codec.lock()
     }
 
     pub(crate) fn probe_heartbeat(&self, frame: &axum::extract::ws::Message) -> Option<u64> {

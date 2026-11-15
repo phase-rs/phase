@@ -463,6 +463,17 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             }
         }
 
+        // Un-card actions: the only client-supplied free-form text is the spoken
+        // word or number of a gesture.
+        GameAction::UnAction { action } => {
+            if let engine::types::un_actions::UnAction::PerformTell {
+                tell: engine::types::un_actions::UnTell::Said { text },
+            } = action
+            {
+                bound_string("UnAction.PerformTell.text", text)?;
+            }
+        }
+
         GameAction::CastSpell { targets, .. } => {
             bound_list("CastSpell.targets", targets.len())?;
         }
@@ -548,7 +559,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             // here so its wire bound is a conscious decision, not a silent gap.
             match count {
                 IterationCount::Fixed(n) => bound_batch_count("DeclareShortcut.count", *n)?,
-                IterationCount::UntilLethal => {}
+                IterationCount::UntilLethal | IterationCount::WithoutEnd => {}
             }
             if let Some(template) = template {
                 bound_list("DeclareShortcut.template.decisions", template.decisions.len())?;
@@ -683,6 +694,19 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::RetargetSpell { new_targets, .. } => {
             bound_list("RetargetSpell.new_targets", new_targets.len())?;
         }
+        // CR 702.106a / CR 702.106f: an agenda names at most two cards; the
+        // reducer validates the exact count, this only bounds the wire payload.
+        GameAction::ChooseSecretAgendaNames { names } => {
+            if names.len() > 2 {
+                return Err(format!(
+                    "ChooseSecretAgendaNames.names has {} entries; at most 2 allowed",
+                    names.len()
+                ));
+            }
+            for (index, name) in names.iter().enumerate() {
+                bound_string(&format!("ChooseSecretAgendaNames.names[{index}]"), name)?;
+            }
+        }
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
         }
@@ -732,6 +756,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PlayFaceDown { .. }
         | GameAction::TurnFaceUp { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
