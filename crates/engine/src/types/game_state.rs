@@ -9288,7 +9288,7 @@ pub struct ChangeZoneBatchTail {
         default,
         skip_serializing_if = "crate::game::triggers::EntryOccurrenceCollector::is_owner"
     )]
-    pub entry_collector: crate::game::triggers::EntryOccurrenceCollector,
+    pub(crate) entry_collector: crate::game::triggers::EntryOccurrenceCollector,
 }
 
 /// CR 608.2c: whether this population consumes its source's existing exile links.
