@@ -22243,8 +22243,18 @@ mod handshake_tests {
             }
             other => panic!("expected the strict refusal, got {other:?}"),
         }
+        // The strict format-config rules start at lobby version 23 (the
+        // broker's fixed `MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES`), so
+        // the legacy boundary is pinned rather than derived from the current
+        // version, which moves with every lobby bump.
+        match create(23).as_slice() {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, .. })] => {
+                assert!(message.contains("commander_damage_threshold"), "{message}");
+            }
+            other => panic!("expected the strict refusal at version 23, got {other:?}"),
+        }
         assert!(matches!(
-            create(LOBBY_PROTOCOL_VERSION - 1).first(),
+            create(22).first(),
             Some(Outbound::ToSelf(LobbyServerMessage::GameCreated { .. }))
         ));
     }
