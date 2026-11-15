@@ -2108,7 +2108,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     let (_, (name, rest)) = split_once_on(text, " ").ok()?;
     let rest = rest.trim();
 
-    // CR 702.1 + CR 702.6c: a keyword declaration is the ability's name plus its
+    // CR 702.1 + CR 702.6a: a keyword declaration is the ability's name plus its
     // parameter. "<keyword> abilities …" ("equip abilities you activate cost {1}
     // less") instead REFERS to abilities with that keyword, so it is never a
     // declaration. Without this guard the generic path below reads the noun
@@ -3721,7 +3721,7 @@ mod tests {
         assert_eq!(kw, Keyword::Cascade);
     }
 
-    /// CR 702.1 + CR 702.6c: "<keyword> abilities …" refers to abilities with that
+    /// CR 702.1 + CR 702.6a: "<keyword> abilities …" refers to abilities with that
     /// keyword and is never a declaration. The generic name/parameter path read the
     /// noun phrase as the parameter and fabricated `Equip {0}` (Nahiri, Storm of
     /// Stone's "equip abilities you activate cost {1} less to activate").
