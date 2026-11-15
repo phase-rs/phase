@@ -61,6 +61,7 @@ fn enter_via_change_zone(runner_state: &mut engine::types::game_state::GameState
 fn entry_from_hand(card: ObjectId) -> ResolvedAbility {
     ResolvedAbility::new(
         engine::types::ability::Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: card },

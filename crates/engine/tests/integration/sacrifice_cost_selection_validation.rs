@@ -602,6 +602,7 @@ fn normal_and_replacement_sacrifice_settle_once_and_survive_checked_restore() {
                                 .execute(AbilityDefinition::new(
                                     AbilityKind::Spell,
                                     Effect::ChangeZone {
+                                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                                         library_shuffle: Default::default(),
                                         origin: None,
                                         destination: Zone::Exile,

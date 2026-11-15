@@ -2735,7 +2735,9 @@ fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
     const WINDOW_METHODS: [&str; 4] = [
         "pub(crate) fn clear_loop_detect_window(",
         "pub(crate) fn record_shrinking_beat(",
-        "pub(crate) fn normalize_for_loop(",
+        // The strict entry's shared body: the sample form defers identity ranks, so the
+        // one clone/transient-prune body (including its ring clear) lives here now.
+        "fn normalize_for_loop_with_rank(",
         "pub(crate) fn loop_detect_live_sample(",
     ];
     const KEEPS_JOURNAL: &str = "pub(crate) fn record_shrinking_beat(";
