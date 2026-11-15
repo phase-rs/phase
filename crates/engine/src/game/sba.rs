@@ -6065,6 +6065,7 @@ mod tests {
                         object_id,
                         counter_type,
                         count,
+                        ..
                     } if *object_id == id && *counter_type == kind => Some(*count),
                     _ => None,
                 })

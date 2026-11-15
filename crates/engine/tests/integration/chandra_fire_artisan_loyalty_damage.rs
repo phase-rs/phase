@@ -858,6 +858,7 @@ fn removed_loyalty(events: &[GameEvent], id: ObjectId) -> u32 {
                 object_id,
                 counter_type: CounterType::Loyalty,
                 count,
+                ..
             } if *object_id == id => Some(*count),
             _ => None,
         })
@@ -1060,4 +1061,209 @@ fn chandra_token_trigger_survives_a_claimed_exile_record() {
     pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
     assert_eq!(runner.life(P1), 15, "4 from Chandra and 1 from Nightblade");
     assert_eq!(runner.life(P0), 21, "Nightblade's 1 life");
+}
+
+// ---------------------------------------------------------------------------
+// Cloudsculpt Armorer and Austere Command: "Whenever one or more counters are
+// removed from a permanent you control, seek a nonland card."
+//
+// CR 603.2c: an ability triggers once each time its trigger event occurs. The
+// two destroy-all instructions of Austere Command are two events, so shield
+// counters removed by different instructions are different occurrences, while
+// counters one instruction removes together are one. CR 608.2c: the
+// instructions happen in the order written. CR 603.10: an ability checks the
+// objects that exist immediately after the event, so an Armorer that the
+// second instruction destroys did not exist after the second instruction's
+// removal and does not see it (counter removal is not a CR 603.10a look-back
+// event). CR 122.1c: a shield counter is removed instead of destroying.
+// ---------------------------------------------------------------------------
+
+const AUSTERE_COMMAND: &str = "Choose two —\n• Destroy all artifacts.\n• Destroy all enchantments.\n• Destroy all creatures with mana value 3 or less.\n• Destroy all creatures with mana value 4 or greater.";
+const MODE_DESTROY_ARTIFACTS: usize = 0;
+const MODE_DESTROY_ENCHANTMENTS: usize = 1;
+const MODE_DESTROY_MV_THREE_OR_LESS: usize = 2;
+const MODE_DESTROY_MV_FOUR_OR_MORE: usize = 3;
+
+/// P0 casts Austere Command choosing `modes`; returns the number of Cloudsculpt
+/// Armorer triggers that reach the stack.
+fn armorer_triggers_after_austere_command(
+    runner: &mut GameRunner,
+    command: ObjectId,
+    armorer: ObjectId,
+    modes: &[usize],
+) -> usize {
+    add_mana(runner, P0, &[ManaType::White, ManaType::White], 4);
+    let mut events = runner.cast(command).modes(modes).commit().events().to_vec();
+    pass_until(runner, &mut events, |r| {
+        !r.state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == command)
+    });
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        drain_order_triggers_with_identity(runner.state_mut());
+    }
+    triggers_from(runner, armorer).len()
+}
+
+fn shield_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Shield)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// F1: the Armorer is destroyed by the second instruction (mana value four or
+/// greater), in the same event that removes Air Elemental's shield. It saw the
+/// first instruction's removal (Ornithopter's shield) and not the second's, so
+/// it triggers once.
+#[test]
+fn armorer_destroyed_by_the_second_instruction_does_not_see_its_removals() {
+    let mut scenario = main_phase();
+    let ornithopter = scenario
+        .add_creature(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+    let air_elemental = scenario
+        .add_creature(P0, "Air Elemental", 4, 4)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 5,
+        })
+        .id();
+    let armorer = scenario
+        .add_creature_from_oracle(P0, "Cloudsculpt Armorer", 2, 2, CLOUDSCULPT_ARMORER)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Austere Command", false, AUSTERE_COMMAND)
+        .id();
+    scenario.with_counter(ornithopter, CounterType::Shield, 1);
+    scenario.with_counter(air_elemental, CounterType::Shield, 1);
+    let mut runner = scenario.build();
+
+    let triggers = armorer_triggers_after_austere_command(
+        &mut runner,
+        command,
+        armorer,
+        &[MODE_DESTROY_ARTIFACTS, MODE_DESTROY_MV_FOUR_OR_MORE],
+    );
+
+    // Reach: both shields were removed, the Armorer died, the others lived.
+    assert_eq!(shield_counters(&runner, ornithopter), 0);
+    assert_eq!(shield_counters(&runner, air_elemental), 0);
+    assert!(!runner.state().battlefield.contains(&armorer));
+    assert!(runner.state().battlefield.contains(&ornithopter));
+    assert!(runner.state().battlefield.contains(&air_elemental));
+    assert_eq!(
+        triggers, 1,
+        "the Armorer saw the first removal only, not the one that destroyed it"
+    );
+}
+
+/// F2: two instructions each remove one shield counter from the same permanent
+/// and the Armorer survives both — two removal events, two triggers.
+#[test]
+fn sequential_removals_from_one_permanent_trigger_the_armorer_each_time() {
+    let mut scenario = main_phase();
+    let ornithopter = scenario
+        .add_creature(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+    let armorer = scenario
+        .add_creature_from_oracle(P0, "Cloudsculpt Armorer", 2, 2, CLOUDSCULPT_ARMORER)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Austere Command", false, AUSTERE_COMMAND)
+        .id();
+    scenario.with_counter(ornithopter, CounterType::Shield, 2);
+    let mut runner = scenario.build();
+
+    let triggers = armorer_triggers_after_austere_command(
+        &mut runner,
+        command,
+        armorer,
+        &[MODE_DESTROY_ARTIFACTS, MODE_DESTROY_MV_THREE_OR_LESS],
+    );
+
+    assert_eq!(
+        shield_counters(&runner, ornithopter),
+        0,
+        "reach: each instruction removed one shield counter"
+    );
+    assert!(runner.state().battlefield.contains(&ornithopter));
+    assert!(runner.state().battlefield.contains(&armorer));
+    assert_eq!(
+        triggers, 2,
+        "two instructions are two removal events, so two triggers"
+    );
+}
+
+/// Control for the aggregation F2 must keep: one instruction that removes
+/// shield counters from two permanents is one simultaneous event with two
+/// recipients, so the Armorer triggers once per recipient permanent (the
+/// batched "one or more counters … from a permanent" occurrence is per
+/// recipient, CR 603.2c). The second chosen mode (enchantments) removes nothing.
+#[test]
+fn one_instruction_removing_shields_from_two_permanents_triggers_per_recipient() {
+    let mut scenario = main_phase();
+    let first = scenario
+        .add_creature(P0, "First Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+    let armorer = scenario
+        .add_creature_from_oracle(P0, "Cloudsculpt Armorer", 2, 2, CLOUDSCULPT_ARMORER)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    let command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Austere Command", false, AUSTERE_COMMAND)
+        .id();
+    scenario.with_counter(first, CounterType::Shield, 1);
+    scenario.with_counter(second, CounterType::Shield, 1);
+    let mut runner = scenario.build();
+
+    let triggers = armorer_triggers_after_austere_command(
+        &mut runner,
+        command,
+        armorer,
+        &[MODE_DESTROY_ARTIFACTS, MODE_DESTROY_ENCHANTMENTS],
+    );
+
+    assert_eq!(shield_counters(&runner, first), 0);
+    assert_eq!(shield_counters(&runner, second), 0);
+    assert_eq!(
+        triggers, 2,
+        "one instruction's simultaneous removals fire once per recipient permanent"
+    );
 }

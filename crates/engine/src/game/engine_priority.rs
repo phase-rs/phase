@@ -382,7 +382,7 @@ fn run_post_action_pipeline_core(
             // CR 603.6a + CR 611.3c: entries of an entering instruction that is
             // still suspended wait for it; entries held from earlier answers of
             // one that has completed join this scan ahead of this action's own.
-            filtered_events = triggers::settle_entry_batch_scan(state, filtered_events);
+            unconsumed_events = unconsumed_events.settle_entry_batch(state);
         }
         // CR 603.10 + CR 608.2c: the action's battlefield departures, found in
         // its whole raw list. A departure an earlier collector claimed is
@@ -392,6 +392,7 @@ fn run_post_action_pipeline_core(
             events,
             event_start,
             unconsumed_events.positions(),
+            unconsumed_events.leading(),
         );
         let filtered_events = unconsumed_events.events;
         // CR 603.3b: If the resolution step that just ran paused for a player

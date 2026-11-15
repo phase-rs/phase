@@ -12202,7 +12202,7 @@ card into your hand at the beginning of your next end step.";
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 }
+                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. }
                     if *object_id == obj_id
             )),
             "CounterRemoved event should be emitted"

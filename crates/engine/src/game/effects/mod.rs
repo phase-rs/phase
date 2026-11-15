@@ -48112,6 +48112,7 @@ mod tests {
             object_id: ObjectId(100),
             counter_type: CounterType::Generic("study".to_string()),
             count: 2,
+            instruction_lead: None,
         }];
 
         // The suppression case: mandatory, no record, no witness event.
@@ -73031,6 +73032,7 @@ mod saturating_amount_tests {
             object_id: ObjectId(1),
             counter_type: CounterType::Generic("charge".to_string()),
             count,
+            instruction_lead: None,
         }
     }
 

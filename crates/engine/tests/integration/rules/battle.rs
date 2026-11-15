@@ -928,6 +928,7 @@ fn defense_removals(events: &[GameEvent], battle: ObjectId) -> Vec<u32> {
                 object_id,
                 counter_type: CounterType::Defense,
                 count,
+                ..
             } if *object_id == battle => Some(*count),
             _ => None,
         })

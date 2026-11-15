@@ -1634,10 +1634,14 @@ pub(crate) fn apply_counter_removal(
         .record_object_counter(command)
         .expect("resolved counter removal must have a live journal cause");
 
+    // CR 608.2c: stamp the open instruction so removals of different
+    // instructions of one resolution stay separate events.
+    let instruction_lead = crate::game::zones::open_instruction_lead(state, events.len());
     events.push(GameEvent::CounterRemoved {
         object_id,
         counter_type,
         count: removed,
+        instruction_lead,
     });
     removed
 }
@@ -7100,7 +7104,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
     }
@@ -7173,7 +7177,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
         assert!(events.iter().any(|event| matches!(

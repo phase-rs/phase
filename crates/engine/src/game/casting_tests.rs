@@ -38036,7 +38036,7 @@ mod remove_counter_cost {
                 GameEvent::CounterRemoved {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
-                    count: 2,
+                    count: 2, ..
                 } if *object_id == source
             )),
             "CounterRemoved event for 2 P1P1 should be emitted, got {events:?}"
@@ -38122,6 +38122,7 @@ mod remove_counter_cost {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
                     count,
+                    ..
                 } if *object_id == source => Some(*count),
                 _ => None,
             })

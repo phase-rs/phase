@@ -77,6 +77,7 @@ fn removals(events: &[GameEvent]) -> Vec<(ObjectId, CounterType, u32)> {
                 object_id,
                 counter_type,
                 count,
+                ..
             } => Some((*object_id, counter_type.clone(), *count)),
             _ => None,
         })

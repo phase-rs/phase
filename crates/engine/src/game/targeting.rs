@@ -10301,6 +10301,7 @@ mod counter_event_amount_tests {
             object_id: ObjectId(1),
             counter_type: CounterType::Generic("charge".to_string()),
             count,
+            instruction_lead: None,
         }
     }
 

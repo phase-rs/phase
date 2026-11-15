@@ -1459,10 +1459,14 @@ fn matching_counter_added_events_by_recipient(
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
     conditions: FiringConditions<'_>,
 ) -> Vec<Vec<(usize, GameEvent)>> {
-    let mut groups: Vec<(ObjectId, Vec<(usize, GameEvent)>)> = Vec::new();
+    let mut groups: Vec<(CounterOccurrenceKey, Vec<(usize, GameEvent)>)> = Vec::new();
     for (index, candidate) in event_batch.iter().enumerate() {
         let Some(object_id) = counter_event_object(candidate) else {
             continue;
+        };
+        let key = CounterOccurrenceKey {
+            object_id,
+            instruction_start: counter_event_instruction_start(index, candidate),
         };
         if !candidate_passes_batched_filters(
             state,
@@ -1476,12 +1480,36 @@ fn matching_counter_added_events_by_recipient(
         ) {
             continue;
         }
-        match groups.iter_mut().find(|(id, _)| *id == object_id) {
+        match groups.iter_mut().find(|(group_key, _)| *group_key == key) {
             Some((_, events)) => events.push((index, candidate.clone())),
-            None => groups.push((object_id, vec![(index, candidate.clone())])),
+            None => groups.push((key, vec![(index, candidate.clone())])),
         }
     }
     groups.into_iter().map(|(_, events)| events).collect()
+}
+
+/// CR 603.2c + CR 608.2c: one occurrence of a batched counter trigger — the
+/// recipient and the instruction that changed its counters. Removals of
+/// different instructions of one resolution are different events and fire
+/// separately; removals of one instruction are simultaneous and fold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CounterOccurrenceKey {
+    object_id: ObjectId,
+    /// Batch index at which the removing instruction began. `None` for an
+    /// event with no watched instruction (placements, unscoped removals).
+    instruction_start: Option<usize>,
+}
+
+/// CR 608.2c: the batch index at which the instruction that removed the
+/// counters began, from the removal's own lead (`None` when it carries none).
+fn counter_event_instruction_start(index: usize, event: &GameEvent) -> Option<usize> {
+    match event {
+        GameEvent::CounterRemoved {
+            instruction_lead: Some(lead),
+            ..
+        } => Some(lead.start_index(index)),
+        _ => None,
+    }
 }
 
 /// CR 122.1: the object a counter placement or removal event acts on — the
@@ -2041,6 +2069,7 @@ impl FiringGroup {
         if let Some(GameEvent::CounterRemoved {
             object_id,
             counter_type,
+            instruction_lead,
             ..
         }) = group.events.first().cloned()
         {
@@ -2048,6 +2077,7 @@ impl FiringGroup {
                 object_id,
                 counter_type,
                 count: total,
+                instruction_lead,
             }];
         }
         group
@@ -4462,14 +4492,24 @@ impl ActionDepartures {
     /// `raw[raw_start..]` is the action's event list; `positions` holds,
     /// ascending, the raw index of each event the collector receives (a
     /// subsequence of `raw[raw_start..]`).
-    pub(crate) fn from_positions(raw: &[GameEvent], raw_start: usize, positions: &[usize]) -> Self {
+    ///
+    /// `leading` events with no position in the raw list head the collector's
+    /// slice (entries released from earlier answers), so each positioned
+    /// event's collector index is offset by it.
+    pub(crate) fn from_positions(
+        raw: &[GameEvent],
+        raw_start: usize,
+        positions: &[usize],
+        leading: usize,
+    ) -> Self {
         debug_assert!(
             positions.windows(2).all(|pair| pair[0] < pair[1])
                 && positions.first().is_none_or(|first| *first >= raw_start)
                 && positions.last().is_none_or(|last| *last < raw.len()),
             "collector positions must be an ascending subsequence of the raw action list"
         );
-        let collector_index = |raw_idx: usize| positions.partition_point(|&p| p < raw_idx);
+        let collector_index =
+            |raw_idx: usize| leading + positions.partition_point(|&p| p < raw_idx);
         let departures = raw
             .iter()
             .enumerate()
@@ -4548,7 +4588,7 @@ impl ActionDepartures {
     /// The collector receives the action's whole event list.
     pub(crate) fn from_events(events: &[GameEvent]) -> Self {
         let positions: Vec<usize> = (0..events.len()).collect();
-        Self::from_positions(events, 0, &positions)
+        Self::from_positions(events, 0, &positions, 0)
     }
 
     /// The departures whose exact battlefield-departure row is in the ledger,
@@ -4641,6 +4681,85 @@ impl DepartureAdmission {
 struct DepartureWindowObserver {
     departure: ObservedDeparture,
     admission: DepartureAdmission,
+}
+
+/// Whether a departed observer sees one event of its window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowSight {
+    Sees,
+    /// An event of the observer's own departing instruction that only a
+    /// look-back trigger sees (CR 603.10), and this event is not one.
+    InstructionCut,
+    Unseen,
+}
+
+impl DepartureWindowObserver {
+    /// CR 603.10 + CR 608.2c: the single admission predicate for an event at
+    /// collector index `idx`, shared by the initiating-event scan and by the
+    /// batch every batched candidate is drawn from, so a candidate the
+    /// observer could not have seen is never grouped into one of its firings.
+    fn sight(&self, state: &GameState, idx: usize, event: &GameEvent) -> WindowSight {
+        let departure = &self.departure;
+        if !departure.window_contains(idx) || !self.admission.admits(event, state) {
+            return WindowSight::Unseen;
+        }
+        // Its own departure and any departure simultaneous with it are the
+        // CR 603.10a arms' events.
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if *object_id == departure.object_id()
+                || record.co_departed.contains(&departure.object_id())
+            {
+                return WindowSight::Unseen;
+            }
+        }
+        // CR 608.2c + CR 603.10: an event of the observer's own departing
+        // instruction happened as part of the event that moved it, so it did
+        // not exist immediately after it; only a look-back trigger sees it.
+        if departure.in_instruction(idx) && !self.admission.admits_in_instruction(event, state) {
+            return WindowSight::InstructionCut;
+        }
+        WindowSight::Sees
+    }
+
+    /// CR 603.2c + CR 603.10: the events this observer sees, in order, as the
+    /// batch its batched triggers group. A counter removal's instruction lead
+    /// is rebased onto the kept list so removals still separate by instruction.
+    fn visible_batch(&self, state: &GameState, events: &[GameEvent]) -> Vec<GameEvent> {
+        let kept: Vec<(usize, &GameEvent)> = events
+            .iter()
+            .enumerate()
+            .filter(|(idx, event)| self.sight(state, *idx, event) == WindowSight::Sees)
+            .collect();
+        kept.iter()
+            .enumerate()
+            .map(|(new_idx, (orig_idx, event))| match event {
+                GameEvent::CounterRemoved {
+                    object_id,
+                    counter_type,
+                    count,
+                    instruction_lead: Some(lead),
+                } => {
+                    let new_start = kept
+                        .partition_point(|(kept_idx, _)| *kept_idx < lead.start_index(*orig_idx));
+                    GameEvent::CounterRemoved {
+                        object_id: *object_id,
+                        counter_type: counter_type.clone(),
+                        count: *count,
+                        instruction_lead: Some(crate::types::game_state::InstructionLead(
+                            new_idx - new_start,
+                        )),
+                    }
+                }
+                other => (*other).clone(),
+            })
+            .collect()
+    }
 }
 
 /// CR 603.10 + CR 400.7: every level of a matched trigger's ability carries a
@@ -6581,6 +6700,10 @@ fn collect_pending_triggers_with_collection(
     // per departed incarnation, so a batched trigger fires at most once per
     // incarnation's window and never consumes `batched_this_pass`.
     let mut departure_window_batched: HashMap<usize, HashSet<(ObjectId, usize)>> = HashMap::new();
+    let departure_window_events: Vec<Vec<GameEvent>> = departure_window
+        .iter()
+        .map(|observer| observer.visible_batch(state, events))
+        .collect();
 
     for (event_idx, event) in events.iter().enumerate() {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -7868,32 +7991,14 @@ fn collect_pending_triggers_with_collection(
         // and the same printed trigger never fires twice for one event.
         for (ordinal, observer) in departure_window.iter().enumerate() {
             let departure = &observer.departure;
-            if !departure.window_contains(event_idx) || !observer.admission.admits(event, state) {
-                continue;
-            }
-            if let GameEvent::ZoneChanged {
-                object_id,
-                from: Some(Zone::Battlefield),
-                record,
-                ..
-            } = event
-            {
-                if *object_id == departure.object_id()
-                    || record.co_departed.contains(&departure.object_id())
-                {
+            match observer.sight(state, event_idx, event) {
+                WindowSight::Unseen => continue,
+                WindowSight::InstructionCut => {
+                    #[cfg(feature = "test-support")]
+                    super::perf_counters::record_departure_window_in_instruction_cut();
                     continue;
                 }
-            }
-            // CR 608.2c + CR 603.10: an event of the observer's own departing
-            // instruction happened as part of the event that moved it, so it
-            // did not exist immediately after it; only a look-back trigger
-            // sees it.
-            if departure.in_instruction(event_idx)
-                && !observer.admission.admits_in_instruction(event, state)
-            {
-                #[cfg(feature = "test-support")]
-                super::perf_counters::record_departure_window_in_instruction_cut();
-                continue;
+                WindowSight::Sees => {}
             }
             let Some(source_context) = departure.record.trigger_source_context() else {
                 continue;
@@ -7917,7 +8022,7 @@ fn collect_pending_triggers_with_collection(
                 observer_id,
                 departure.record.attached_to,
                 event,
-                &events[departure.presence_start..departure.before_count],
+                &departure_window_events[ordinal],
                 source_context,
                 batched_for_window,
                 &mut registered_for_window,
@@ -11411,10 +11516,32 @@ pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
 ) -> Vec<GameEvent> {
+    settle_entry_batch_scan_tracked(state, candidates).scan
+}
+
+/// The settled scan of [`settle_entry_batch_scan`] with its provenance: the
+/// scan is `leading` entries released from earlier answers followed by the
+/// candidates that were not held, in order, whose indices in the input are
+/// `kept`.
+struct SettledEntryBatchScan {
+    scan: Vec<GameEvent>,
+    leading: usize,
+    kept: Vec<usize>,
+}
+
+fn settle_entry_batch_scan_tracked(
+    state: &mut GameState,
+    candidates: Vec<GameEvent>,
+) -> SettledEntryBatchScan {
     state.released_entry_rows.clear();
     let unsettled = !action_has_settled(state) && battlefield_entry_in_progress(state);
     if !unsettled && state.unsettled_entry_batch_events.is_empty() {
-        return candidates;
+        let kept = (0..candidates.len()).collect();
+        return SettledEntryBatchScan {
+            scan: candidates,
+            leading: 0,
+            kept,
+        };
     }
     let held = std::mem::take(&mut state.unsettled_entry_batch_events);
     let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
@@ -11422,10 +11549,13 @@ pub(crate) fn settle_entry_batch_scan(
         .into_iter()
         .partition(|event| !unsettled || battlefield_entry_instruction_completed(state, event));
     state.unsettled_entry_batch_events = still_held;
+    let leading = scan.len();
+    let mut kept = Vec::new();
     let mut owner_retained: Option<Vec<GameEvent>> = None;
-    for event in candidates {
+    for (candidate_idx, event) in candidates.into_iter().enumerate() {
         let Some(key) = battlefield_entry_key(&event) else {
             scan.push(event);
+            kept.push(candidate_idx);
             continue;
         };
         // The same occurrence, re-read from a buffer this gate already saw.
@@ -11434,18 +11564,24 @@ pub(crate) fn settle_entry_batch_scan(
         }
         if !unsettled || battlefield_entry_instruction_completed(state, &event) {
             scan.push(event);
+            kept.push(candidate_idx);
             continue;
         }
         let owner_retained = owner_retained
             .get_or_insert_with(|| super::engine_priority::retained_logical_zone_events(state));
         if owner_retained.contains(&event) {
             scan.push(event);
+            kept.push(candidate_idx);
         } else {
             state.unsettled_entry_batch_events.push(event);
         }
     }
     note_released_entry_cohorts(state, &scan, &held_keys);
-    scan
+    SettledEntryBatchScan {
+        scan,
+        leading,
+        kept,
+    }
 }
 
 /// CR 603.6a + CR 608.2c: the entries of `scan` in an instruction that held an entry across
@@ -15680,9 +15816,33 @@ pub(crate) fn filter_consumed_trigger_events_from(
 pub(crate) struct UnclaimedTriggerEvents {
     pub(crate) events: Vec<GameEvent>,
     positions: Vec<usize>,
+    /// Events at the head of `events` that are not in this action's buffer
+    /// (entries released from earlier answers by the settlement gate); they
+    /// shift every positioned event's index in the collector's slice.
+    leading: usize,
 }
 
 impl UnclaimedTriggerEvents {
+    /// Events at the head of the collector's slice that have no position in
+    /// the action's buffer.
+    pub(crate) fn leading(&self) -> usize {
+        self.leading
+    }
+
+    /// CR 603.6a + CR 611.3c: settle the entry batch (`settle_entry_batch_scan`),
+    /// keeping each surviving event's buffer position.
+    pub(crate) fn settle_entry_batch(self, state: &mut GameState) -> Self {
+        let Self {
+            events, positions, ..
+        } = self;
+        let settled = settle_entry_batch_scan_tracked(state, events);
+        Self {
+            events: settled.scan,
+            positions: settled.kept.iter().map(|&idx| positions[idx]).collect(),
+            leading: settled.leading,
+        }
+    }
+
     /// Each kept event's position in the full buffer, ascending.
     pub(crate) fn positions(&self) -> &[usize] {
         &self.positions
@@ -15745,7 +15905,11 @@ pub(crate) fn unclaimed_trigger_events_from(
             }
         })
         .unzip();
-    UnclaimedTriggerEvents { events, positions }
+    UnclaimedTriggerEvents {
+        events,
+        positions,
+        leading: 0,
+    }
 }
 
 /// CR 603.2 + CR 603.2c + CR 603.7: [`collect_delayed_triggers_into_deferred`]

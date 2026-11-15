@@ -2443,7 +2443,10 @@ pub(crate) fn open_instruction_start(state: &GameState, events_len: usize) -> us
 /// innermost open instruction's buffer. `None` when no instruction is open, or
 /// when the buffer is shorter than the instruction's start (a shadow-state
 /// probe that cloned the open scopes and emits into a fresh local buffer).
-fn open_instruction_lead(state: &GameState, events_len: usize) -> Option<InstructionLead> {
+pub(crate) fn open_instruction_lead(
+    state: &GameState,
+    events_len: usize,
+) -> Option<InstructionLead> {
     state
         .instruction_scopes
         .last()
