@@ -500,11 +500,6 @@ fn restore_sparse_cast_fields(
     // Otherwise the refresh would take a fresh snapshot for an effect that
     // started long before the canceled cast.
     crate::game::effects::attach::migrate_legacy_protection_start_snapshots(&mut restored);
-    // CR 602.2a: the inverse may reintroduce legacy journal keys (a `before`
-    // recorded by the older writer). This decode is the second place a
-    // serialized state enters the game, so it runs the same marker migration
-    // before the restored fields are installed.
-    crate::game::restrictions::migrate_legacy_tuple_usage_keys(&mut restored);
     state.restore_cast_fields(restored, &changed);
     state.layers_dirty.mark_full();
     Ok(())

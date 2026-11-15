@@ -1000,85 +1000,6 @@ pub enum ResolvedOncePerTurnPermission {
     TopOfLibraryCast,
 }
 
-/// CR 602.2a: the two wire shapes of `ResolvedLedgerEdit::AbilityActivated`.
-/// `Current` is the occurrence-keyed writer; `Legacy` is main's
-/// `(source, ability_index)` writer, whose slot becomes a migration-marker
-/// key (see `legacy_tuple_usage_marker`). Untagged tries `Current` first: a
-/// legacy payload lacks `key` and falls through, a current payload lacks
-/// `source` so it never misroutes the other way.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum AbilityActivatedWire {
-    Current {
-        key: super::game_state::AbilityUsageKey,
-        expected_turn_count: u32,
-        expected_game_count: u32,
-        #[serde(default)]
-        record: Option<Box<super::game_state::AbilityActivationRecord>>,
-        #[serde(default)]
-        expected_turn_history_len: Option<u32>,
-    },
-    Legacy {
-        source: super::identifiers::ObjectId,
-        ability_index: usize,
-        expected_turn_count: u32,
-        expected_game_count: u32,
-        #[serde(default)]
-        record: Option<Box<super::game_state::AbilityActivationRecord>>,
-        #[serde(default)]
-        expected_turn_history_len: Option<u32>,
-    },
-}
-
-/// Variant-level `deserialize_with` returns the variant's fields, which the
-/// derived enum body wraps back into `ResolvedLedgerEdit::AbilityActivated`.
-#[allow(clippy::type_complexity)]
-fn deserialize_ability_activated<'de, D>(
-    deserializer: D,
-) -> Result<
-    (
-        super::game_state::AbilityUsageKey,
-        u32,
-        u32,
-        Option<Box<super::game_state::AbilityActivationRecord>>,
-        Option<u32>,
-    ),
-    D::Error,
->
-where
-    D: Deserializer<'de>,
-{
-    match AbilityActivatedWire::deserialize(deserializer)? {
-        AbilityActivatedWire::Current {
-            key,
-            expected_turn_count,
-            expected_game_count,
-            record,
-            expected_turn_history_len,
-        } => Ok((
-            key,
-            expected_turn_count,
-            expected_game_count,
-            record,
-            expected_turn_history_len,
-        )),
-        AbilityActivatedWire::Legacy {
-            source,
-            ability_index,
-            expected_turn_count,
-            expected_game_count,
-            record,
-            expected_turn_history_len,
-        } => Ok((
-            super::game_state::legacy_tuple_usage_marker(source, ability_index),
-            expected_turn_count,
-            expected_game_count,
-            record,
-            expected_turn_history_len,
-        )),
-    }
-}
-
 /// A composable per-event ledger mutation.
 ///
 /// Each payload changes only one exact key or append position. Turn-boundary
@@ -1102,12 +1023,6 @@ pub enum ResolvedLedgerEdit {
     /// `expected_turn_history_len`. Absent: a command written before the
     /// journal existed; it replays its counts and appends nothing (never a
     /// defaulted historical activation). A half-present pair is refused.
-    ///
-    /// CR 602.2a: the wire form is custom (`deserialize_ability_activated`)
-    /// so a command written before the occurrence keys (`source` plus
-    /// `ability_index`, no `key`) still decodes — as a migration-marker key
-    /// `migrate_legacy_tuple_usage_keys` resolves at the restore boundary.
-    #[serde(deserialize_with = "deserialize_ability_activated")]
     AbilityActivated {
         key: super::game_state::AbilityUsageKey,
         expected_turn_count: u32,
@@ -2474,13 +2389,6 @@ impl<'de> Deserialize<'de> for ResolvedRulesJournal {
 impl ResolvedRulesJournal {
     pub fn entries(&self) -> &im::Vector<ResolvedCommandJournalEntry> {
         &self.entries
-    }
-
-    /// CR 602.2a: mutable entries for the legacy usage-key restore migration
-    /// only. Rewriting a stored command's key in place keeps every ordinal,
-    /// node, and index stable; no live path appends through this handle.
-    pub(crate) fn entries_mut(&mut self) -> &mut im::Vector<ResolvedCommandJournalEntry> {
-        &mut self.entries
     }
 
     pub fn nodes(&self) -> &im::Vector<SettlementNode> {
