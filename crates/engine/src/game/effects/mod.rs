@@ -28753,26 +28753,28 @@ pub(crate) fn evaluate_condition(
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
             state.last_zone_changed_ids.iter().any(|&id| {
-                // CR 400.7 + CR 608.2c: the noun ("a creature") names the object as
-                // it was when moved. A permanent that left the battlefield has
-                // lost any temporary types (a crewed Vehicle, CR 702.122a), so
-                // the exit last-known information of the incarnation that this
-                // very move ended also answers the noun. Every zone change bumps
-                // the incarnation, so that incarnation is the one directly before
-                // the current one; an older departure at the same storage id (a
-                // creature that died earlier, then was exiled from the graveyard)
-                // is a different move and is never consulted.
+                // CR 400.7 + CR 608.2c: "a creature is put into exile this way"
+                // (Mysterious Limousine) names the exiled permanent, which lost any
+                // temporary types (a crewed Vehicle, CR 702.122a) on leaving the
+                // battlefield, so for an exile arrival the exit last-known
+                // information of the incarnation this very move ended also answers
+                // the noun. Every zone change bumps the incarnation, so that is
+                // the one directly before the current one; an older departure at
+                // the same storage id is a different move and is never consulted.
+                // Every other rider keeps the live reading: a "creature card"
+                // put into a graveyard is a card in that zone (CR 109.2a).
                 (crate::game::filter::matches_target_filter(state, id, filter, &ctx)
-                    || state.objects.get(&id).is_some_and(|obj| {
-                        obj.incarnation.checked_sub(1).is_some_and(|prior| {
-                            crate::game::filter::exit_lki_for_incarnation(state, id, prior)
-                                .is_some_and(|lki| {
-                                    crate::game::filter::matches_target_filter_on_lki_snapshot(
-                                        state, id, lki, filter, &ctx,
-                                    )
-                                })
-                        })
-                    }))
+                    || (*destination == Some(Zone::Exile)
+                        && state.objects.get(&id).is_some_and(|obj| {
+                            obj.incarnation.checked_sub(1).is_some_and(|prior| {
+                                crate::game::filter::exit_lki_for_incarnation(state, id, prior)
+                                    .is_some_and(|lki| {
+                                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                            state, id, lki, filter, &ctx,
+                                        )
+                                    })
+                            })
+                        })))
                     // CR 608.2c + CR 122.1h + CR 614.6: a destination-bound
                     // wording ("put into a graveyard / dies this way") needs the
                     // ARRIVAL, not just the move — a replacement that redirected

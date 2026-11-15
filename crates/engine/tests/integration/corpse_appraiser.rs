@@ -557,3 +557,62 @@ fn deathgorge_scavenger_stale_exit_snapshot_does_not_count_as_a_creature_card() 
         "a noncreature card was exiled this way: no creature-card life gain"
     );
 }
+
+const COME_BACK_WRONG: &str = "Destroy target creature. If a creature card is put into a graveyard this way, return it to the battlefield under your control. Sacrifice it at the beginning of your next end step.";
+
+fn come_back_wrong_scenario(crewed_vehicle: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Come Back Wrong", false, COME_BACK_WRONG)
+        .id();
+    let victim = if crewed_vehicle {
+        scenario
+            .add_creature(P0, "Mysterious Limousine", 4, 4)
+            .as_artifact()
+            .with_subtypes(vec!["Vehicle"])
+            .from_oracle_text(MYSTERIOUS_LIMOUSINE)
+            .id()
+    } else {
+        scenario.add_creature(P1, "Doomed Bear", 2, 2).id()
+    };
+    let crewer = crewed_vehicle.then(|| scenario.add_creature(P0, "Crewer", 2, 2).id());
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    if let Some(crewer) = crewer {
+        crew(&mut runner, victim, crewer);
+    }
+    runner.cast(spell).target_object(victim).resolve();
+    (runner, spell, victim)
+}
+
+/// CR 109.2a + CR 608.2c: "a creature card is put into a graveyard this way"
+/// describes a card in that zone. A crewed Vehicle destroyed by Come Back Wrong
+/// is a noncreature artifact card in the graveyard (the temporary creature type
+/// is gone), so it must stay there; the exile-arrival last-known reading that
+/// Mysterious Limousine needs must not leak into graveyard-destination riders.
+#[test]
+fn come_back_wrong_leaves_a_destroyed_crewed_vehicle_in_the_graveyard() {
+    let (runner, _spell, vehicle) = come_back_wrong_scenario(true);
+    assert_eq!(
+        runner.state().objects[&vehicle].zone,
+        Zone::Graveyard,
+        "a noncreature card was put into a graveyard: no return"
+    );
+}
+
+/// Positive witness for the sibling above: an actual creature card is returned.
+#[test]
+fn come_back_wrong_returns_a_destroyed_creature_card() {
+    let (runner, _spell, bear) = come_back_wrong_scenario(false);
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "a creature card was put into a graveyard this way: it returns"
+    );
+}
