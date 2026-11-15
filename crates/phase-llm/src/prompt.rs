@@ -133,7 +133,10 @@ pub fn difficulty_brief(difficulty: AiDifficulty) -> &'static str {
 /// in progress verbatim, earlier cycles as one line per turn. The two lowest
 /// difficulties deliberately reason from a near-term window, which is a large
 /// part of what makes them beatable; every budget is bounded, so no difficulty's
-/// prompt grows with the length of the game.
+/// prompt grows with the length of the game. For the same reason a message
+/// thread ([`crate::game_thread`]), which holds every earlier turn, is used
+/// only by a difficulty that keeps summarized cycles, and it is bounded by its
+/// own token budget.
 pub fn history_budget(difficulty: AiDifficulty) -> HistoryBudget {
     let (summarized_cycles, current_cycle_entries) = match difficulty {
         AiDifficulty::VeryEasy => (0, 0),

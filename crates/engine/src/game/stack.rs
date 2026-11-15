@@ -104,6 +104,13 @@ pub(super) fn finish_resolving_stack_entry(
     if let Some(entry) = entry.as_ref() {
         state.release_stack_bound_reveals(entry.id);
     }
+    // CR 701.20a: instruction-owned transient reveals end at the resolution
+    // completion boundary before publishing viewer projections.
+    if !super::engine::transient_reveal_outlives_action_boundary(state)
+        && !super::engine::ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     debug_assert!(
         firing.is_none()
             || entry
@@ -191,6 +198,10 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
+    // CR 614.12a: these entries had not happened yet; abandoning the family
+    // abandons them. Entries held in `unsettled_entry_batch_events` did happen
+    // (CR 603.2), so they stay and are checked at the next collector; CR 800.4a
+    // removes the departed player's own abilities there.
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -4866,6 +4877,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -5127,6 +5139,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -5367,6 +5380,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -5435,6 +5449,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
             count: QuantityExpr::Fixed { .. },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            ..
         }
     );
 
@@ -5781,6 +5796,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_target_slots: a_chosen_target_slots,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
+        announced_usage_key: _, // transport only; never participates
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
@@ -5876,6 +5892,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_target_slots: b_chosen_target_slots,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
+        announced_usage_key: _, // transport only; never participates
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
@@ -11025,6 +11042,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         }
 

@@ -2459,19 +2459,19 @@ fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
 
 #[test]
 fn parse_post_spell_modifier_cast_origin_from_nonhand() {
-    // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
-    // cast-capable zones except the hand.
-    let expected = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+    // CR 601.2a + CR 400.11: "from anywhere other than your hand" → the negation of
+    // `InZone(Hand)`, so a cast from outside the game (no zone) satisfies it.
+    let expected = FilterProp::Not {
+        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+    };
     let filter = parse_post_spell_modifier("from anywhere other than your hand")
         .expect("expected a cast-origin filter");
     let TargetFilter::Typed(tf) = filter else {
         panic!("expected Typed filter");
     };
     assert!(
-        tf.properties.contains(&FilterProp::InAnyZone {
-            zones: expected.clone()
-        }),
-        "expected InAnyZone({expected:?}), got {:?}",
+        tf.properties.contains(&expected),
+        "expected {expected:?}, got {:?}",
         tf.properties
     );
 }
@@ -6344,6 +6344,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(*target, TargetFilter::Player);
             assert_eq!(*destination, Zone::Graveyard);
@@ -6385,6 +6386,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(*target, TargetFilter::Player);
             assert_eq!(*destination, Zone::Graveyard);
@@ -23080,6 +23082,7 @@ fn fraying_sanity_mills_zone_change_count_this_turn() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(
                 *target,
@@ -30547,13 +30550,14 @@ fn combinator_handles_played_land_or_cast_spell_from_outside_hand_this_turn() {
             conditions[1]
         );
     };
-    let zones = properties.iter().find_map(|prop| match prop {
-        FilterProp::InAnyZone { zones } => Some(zones),
-        _ => None,
-    });
-    let zones = zones.expect("expected InAnyZone origin qualifier");
-    assert!(!zones.contains(&crate::types::zones::Zone::Hand));
-    assert!(zones.contains(&crate::types::zones::Zone::Exile));
+    assert!(
+        properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::InZone {
+                zone: crate::types::zones::Zone::Hand
+            }),
+        }),
+        "expected Not(InZone(Hand)) origin qualifier, got {properties:?}"
+    );
 }
 
 #[test]
@@ -40527,6 +40531,7 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         selection: CardSelectionMode::default(),
         choice_optional,
         reveal: true,
+        cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
     };
     assert!(introduces_chosen_object_target(&reveal(
         TargetFilter::Typed(TypedFilter::creature()),

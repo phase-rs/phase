@@ -265,6 +265,26 @@ pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
     }
 }
 
+/// Mutable counterpart of [`layout_faces`], in the same face order.
+pub fn layout_faces_mut(layout: &mut CardLayout) -> Vec<&mut CardFace> {
+    match layout {
+        CardLayout::Single(face) => vec![face],
+        CardLayout::Split(a, b)
+        | CardLayout::Flip(a, b)
+        | CardLayout::Transform(a, b)
+        | CardLayout::Meld(a, b)
+        | CardLayout::Adventure(a, b)
+        | CardLayout::Modal(a, b)
+        | CardLayout::Omen(a, b)
+        | CardLayout::Prepare(a, b) => vec![a, b],
+        CardLayout::Specialize(base, variants) => {
+            let mut faces = vec![base];
+            faces.extend(variants.iter_mut());
+            faces
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Synthesize functions — keyword → ability/trigger expansion
 // ---------------------------------------------------------------------------
@@ -3180,6 +3200,7 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
             count: QuantityExpr::Fixed { value: n as i32 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         },
     );
     mill.sub_ability = Some(Box::new(return_to_hand));

@@ -325,6 +325,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -862,6 +863,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             target,
             destination: _,
+            position: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -1463,6 +1465,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -2275,6 +2278,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::Conjure { .. } => Axes::CONSERVATIVE,
+        // CR 707.13: a copy created from a NAME reads no object in the game, so
+        // there is no axis to scan — same verdict as `Conjure` above.
+        Effect::CreateCardCopyByName { .. } => Axes::CONSERVATIVE,
         Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -5986,6 +5992,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6134,6 +6141,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // dynamic board read — no resolution-time axis.
+        grant_chain: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -7784,6 +7794,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7993,6 +8004,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile

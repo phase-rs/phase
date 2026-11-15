@@ -2062,7 +2062,8 @@ fn outside_selection_projection(
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
                 // CR 400.11b + CR 406.3: a single physical card each.
                 OutsideGameChoiceSource::FaceUpExile { .. }
-                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
+                | OutsideGameChoiceSource::BoosterPack { .. }
+                | OutsideGameChoiceSource::Companion { .. } => 1,
             })
         }
     });
@@ -2090,11 +2091,13 @@ fn outside_selection_projection(
                         pack_slot: *pack_slot,
                     }
                 }
+                OutsideGameChoiceSource::Companion { .. } => OutsideGameSelection::Companion,
             };
             let copies = match &choice.source {
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
                 OutsideGameChoiceSource::FaceUpExile { .. }
-                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
+                | OutsideGameChoiceSource::BoosterPack { .. }
+                | OutsideGameChoiceSource::Companion { .. } => 1,
             };
             (0..copies).map(move |_| OutsideSelectionCandidate {
                 selection: selection.clone(),
@@ -2162,7 +2165,10 @@ fn text_choice_projection(
     }
     Ok(Some(TextChoiceProjection {
         options: options.clone(),
-        allow_arbitrary: matches!(choice_type, ChoiceType::CardName),
+        // CR 201.4: free entry is the OPEN card-name prompt only. A closed
+        // Oracle-listed domain (Garth One-Eye) enumerates its options, and a
+        // domain that still accepted an arbitrary name would not be a domain.
+        allow_arbitrary: matches!(choice_type, ChoiceType::CardName { options, .. } if options.is_empty()),
         count: 1,
         action: TextChoiceAction::ChooseOption,
         source_name: source
@@ -5673,6 +5679,7 @@ fn core_type_code(core_type: CoreType) -> &'static str {
         CoreType::Conspiracy => "conspiracy",
         CoreType::Boss => "boss",
         CoreType::Event => "event",
+        CoreType::Vanguard => "vanguard",
     }
 }
 
@@ -6185,6 +6192,12 @@ fn project_action_payload(
                     // its slot in the opened pack is the surfaced identity.
                     OutsideGameSelection::BoosterPack { pack_slot } => {
                         push_value_surface(surfaces, InteractionRoleCode::CandidateIndex, pack_slot)
+                    }
+                    // CR 702.139a: the revealed companion is not an in-game
+                    // object and there is at most one, so it surfaces as its
+                    // own role.
+                    OutsideGameSelection::Companion => {
+                        push_value_surface(surfaces, InteractionRoleCode::Companion, "companion")
                     }
                 }
             }
@@ -7834,6 +7847,15 @@ fn outside_selection_choices(
                     push_value_surface(
                         &mut surfaces,
                         InteractionRoleCode::CardName,
+                        &candidate.name,
+                    );
+                }
+                // CR 702.139a: identified by its role and printed name; a
+                // player has at most one revealed companion.
+                OutsideGameSelection::Companion => {
+                    push_value_surface(
+                        &mut surfaces,
+                        InteractionRoleCode::Companion,
                         &candidate.name,
                     );
                 }

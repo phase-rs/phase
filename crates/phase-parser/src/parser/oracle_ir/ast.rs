@@ -1787,7 +1787,16 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        /// CR 608.2d + CR 107.1c: how many `card_filter` cards are selected
+        /// (`AnyNumber` for "reveal any number of [type] cards").
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
     },
+    /// CR 107.1c + CR 701.20a: "reveal any number of [type] cards" whose card
+    /// type phrase the parser cannot read (Sacellum Godspeaker's "creature cards
+    /// with power 5 or greater", Rosheen's "cards with {X} in their mana cost").
+    /// Without a filter the selection could reveal nothing, so it lowers to an
+    /// explicit unimplemented gap rather than a silently empty reveal.
+    UnreadableAnyNumberFilter { fragment: String },
     /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
     /// hand, where X is …", "reveals a card at random from their hand". `target`
     /// is the hand's owner; `selection` is `Random` exactly when the text says
@@ -1934,9 +1943,13 @@ pub(crate) enum ChooseImperativeAst {
 pub(crate) enum PutImperativeAst {
     /// CR 701.17a: "put the top <count> cards of <owner> library into <owner>
     /// graveyard" — a mill whose owner and count are carried, never assumed.
+    /// CR 401.2: `position` names the library edge the clause reads, so the
+    /// "bottom card of <owner> library" class (Grenzo, Dungeon Warden; Cellar
+    /// Door) takes the bottommost card instead of a chosen one.
     Mill {
         count: QuantityExpr,
         target: TargetFilter,
+        position: LibraryPosition,
     },
     /// A put clause the engine cannot yet model (e.g. CR 404.1 "put the top
     /// card of <possessive> graveyard …", a graveyard-sourced move it cannot
@@ -3460,6 +3473,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

@@ -45,8 +45,8 @@ use super::lower::{
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
     attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant,
-    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_modifier_rider,
-    chain_references_chosen_card, clone_would_transplant_gated_referent,
+    attach_land_enters_tapped_to_previous_play_from_exile, bind_cast_of_created_card_copy,
+    cast_cost_modifier_rider, chain_references_chosen_card, clone_would_transplant_gated_referent,
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
@@ -62,15 +62,15 @@ use super::lower::{
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
-    patch_self_ref_head_tap_anaphor, rebind_zone_changed_this_way_pronoun_to_moved_object,
-    relink_gated_token_referent_consumers, relink_gated_tracked_set_consumers,
-    resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
-    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
-    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
-    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
-    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
-    timed_clause_sub_chain,
+    patch_self_ref_head_tap_anaphor, rebind_revealed_card_type_pronoun_to_moved_object,
+    rebind_zone_changed_this_way_pronoun_to_moved_object, relink_gated_token_referent_consumers,
+    relink_gated_tracked_set_consumers, resolve_populated_token_anaphors,
+    resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
+    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
+    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
+    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
+    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
+    thread_chosen_damage_source_into_oneshot_effects, timed_clause_sub_chain,
 };
 use super::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, def_bears_retargetable_copy,
@@ -144,6 +144,39 @@ fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition
     }
     if let Some(else_ability) = def.else_ability.as_mut() {
         stamp_forward_result_on_battlefield_attach_return(else_ability);
+    }
+}
+
+/// CR 608.2c + CR 701.3d: "attach <attachment> to <host>. … unattach it" — the
+/// unattach anaphor names the object the Attach just attached, not the host
+/// the earlier instructions targeted. Stamp `forward_result` on an Attach whose
+/// immediate next instruction (directly or inside its delayed payload, Unexpected
+/// Request's "unattach it at the beginning of the next end step") unattaches a
+/// `ParentTarget`, so the runtime hands that instruction the attached object.
+fn stamp_forward_result_on_attach_for_unattach_anaphor(def: &mut AbilityDefinition) {
+    fn unattaches_parent_anaphor(def: &AbilityDefinition) -> bool {
+        match &*def.effect {
+            Effect::UnattachAll {
+                attachment: TargetFilter::ParentTarget,
+                ..
+            } => true,
+            Effect::CreateDelayedTrigger { effect, .. } => unattaches_parent_anaphor(effect),
+            _ => false,
+        }
+    }
+    if matches!(&*def.effect, Effect::Attach { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .is_some_and(unattaches_parent_anaphor)
+    {
+        def.forward_result = true;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(else_ability);
     }
 }
 
@@ -4513,6 +4546,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // ("If …, for each opponent, choose …. Destroy the chosen permanents.").
     relink_gated_tracked_set_consumers(&mut defs);
 
+    // CR 707.13 + CR 608.2c: "Create a copy of the card with the chosen name.
+    // You may cast the copy." — bind the cast to the copy this chain created
+    // before the fold below, which looks for a `CopySpell` head and must not see
+    // a rewritten one.
+    bind_cast_of_created_card_copy(&mut defs);
+
     // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
     // copy (CR 707.10). It creates a card copy in the source zone, then casts
     // that copy during resolution. Fold the two parsed imperative clauses into
@@ -4754,6 +4793,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // but a primary SelfRef names the creating source and cannot be rebound by
     // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
+    stamp_forward_result_on_attach_for_unattach_anaphor(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
     // sub-ability's bare "it" pronoun parses to the generic `ParentTarget`
@@ -4763,6 +4803,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // moved object instead, and do so before `oracle_trigger::lower_trigger_ir`
     // can otherwise blindly lift that same `ParentTarget` to `TriggeringSource`.
     rebind_zone_changed_this_way_pronoun_to_moved_object(&mut result);
+    // CR 608.2c: a leading "If it's a [type] card" rider on a single-card
+    // library-edge move names the moved card. Bare "it" lowers to `ParentTarget`,
+    // which a `Mill` head cannot resolve. Rebind it before trigger lowering can
+    // lift that sentinel to `TriggeringSource` (Grenzo, Dungeon Warden).
+    rebind_revealed_card_type_pronoun_to_moved_object(&mut result);
     // CR 603.7a + CR 608.2c + CR 702.170c: fold the exile-instead "If you do,
     // ..." continuation (Feather's return-to-hand, Lilah's become-plotted) onto
     // the exile-resolving carrier's typed `on_exile` rider so the consequence is

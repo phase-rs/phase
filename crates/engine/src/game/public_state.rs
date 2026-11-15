@@ -293,6 +293,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 }
             }
             GameEvent::TokenCreated { object_id, .. }
+            | GameEvent::CardCopyCreated { object_id, .. }
             | GameEvent::ObjectConjured { object_id, .. } => {
                 // Mana-aware: a creature token (Scute storm) does NOT raise the
                 // mana signal, so the board-wide auto-tap sweep is skipped; a
