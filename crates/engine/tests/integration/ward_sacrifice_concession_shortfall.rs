@@ -348,3 +348,78 @@ fn payable_ward_sacrifices_both_and_bolt_resolves() {
         "stack is empty at the end"
     );
 }
+
+/// Post-spend sequel: P0 sacrifices the Agent (committed), the prompt
+/// re-offers the Mountain alone (`remaining: 1`), then P2 concedes. The
+/// departed selection settles the Ward unpaid — the committed Agent stays
+/// sacrificed (paper cannot un-sacrifice), Bolt is countered, and Priority
+/// is answerable.
+#[test]
+fn conceded_mountain_after_first_sacrifice_settles_with_spend_standing() {
+    let mut fixture = setup();
+    assert_post_steal_split(&fixture);
+    drive_bolt_to_ward_prompt(&mut fixture);
+
+    fixture
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![fixture.agent],
+        })
+        .expect("the first sacrifice must succeed");
+    assert!(
+        matches!(
+            fixture.runner.state().waiting_for,
+            WaitingFor::WardSacrificeChoice { remaining: 1, .. }
+        ),
+        "one sacrifice must be owed after the first, got {:?}",
+        fixture.runner.state().waiting_for
+    );
+    fixture
+        .runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    assert!(
+        !fixture.runner.state().battlefield.contains(&fixture.mountain),
+        "reach-guard: the P2-owned Mountain must leave with P2 (CR 800.4a)"
+    );
+
+    fixture
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![fixture.mountain],
+        })
+        .expect("the departed selection must settle, not strand");
+    drive_to_quiet(&mut fixture.runner);
+
+    assert_eq!(
+        fixture.runner.state().objects[&fixture.agent].zone,
+        Zone::Graveyard,
+        "the pre-concession sacrifice stands: paper cannot un-sacrifice"
+    );
+    assert_eq!(
+        fixture.runner.state().objects[&fixture.bolt].zone,
+        Zone::Graveyard,
+        "Lightning Bolt must be countered to the graveyard without resolving"
+    );
+    assert_eq!(
+        fixture.runner.state().objects[&fixture.ulamog].damage_marked,
+        0,
+        "Ulamog must take no damage from the countered Bolt"
+    );
+    assert!(
+        fixture.runner.state().stack.is_empty(),
+        "stack is empty at the end"
+    );
+    assert!(
+        matches!(
+            fixture.runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ),
+        "Priority boundary, got {:?}",
+        fixture.runner.state().waiting_for
+    );
+    fixture
+        .runner
+        .act(GameAction::PassPriority)
+        .expect("the next state must be answerable");
+}

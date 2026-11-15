@@ -1262,6 +1262,7 @@ mod tests {
                 )),
                 remaining: 1,
                 min_total_power: None,
+                trigger_event: None,
             },
             candidates: Vec::new(),
         };

@@ -3268,12 +3268,20 @@ pub(super) fn resume_ward_sacrifice_payment(
 
     match resume {
         WardSacrificePaymentResume::MultiSacrifice { remaining } => {
-            // CR 118.3: the replacement pause is a live-board window — a bar
-            // granted while parked fails the resume BEFORE the first resumed
-            // sacrifice spends. The replay list is fixed (no selection to
-            // retry), so the Ward settles unpaid rather than stranding.
+            // CR 118.3 + CR 701.21a: the replacement pause is a live-board
+            // window — a bar granted while parked, or a listed permanent
+            // leaving the battlefield (concession, removal), fails the resume
+            // BEFORE the first resumed sacrifice spends. The replay list is
+            // fixed (no selection to retry), so the Ward settles unpaid
+            // rather than stranding.
             if remaining.iter().any(|id| {
-                crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, *id)
+                !state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    || crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
             }) {
                 return settle_ward_sacrifice_payment_unpaid(
                     state,
@@ -3670,19 +3678,63 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Duplicate selections are not allowed".to_string(),
             ));
         }
+        // CR 118.3 + CR 701.21a: the prompt's `permanents` snapshot predates
+        // this action. Revalidate against the LIVE pool: nothing below may
+        // spend a departed or barred permanent, and a submission no live set
+        // can still satisfy settles the Ward unpaid (no successful answer
+        // exists) instead of stranding the payer.
+        let live_pool: Vec<ObjectId> = permanents
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
+            })
+            .collect();
+        // `min_total_power` is `Some` only for TotalPower/GE (see the offer),
+        // so the threshold below is a total-power floor.
+        let no_live_set_meets_threshold = !sacrifice_pool_meets_aggregate_constraint(
+            state,
+            &live_pool,
+            crate::types::ability::SacrificeAggregateStat::TotalPower,
+            crate::types::ability::Comparator::GE,
+            threshold,
+        );
         if crate::game::sacrifice::selected_total_power(state, &chosen) < threshold {
+            if no_live_set_meets_threshold {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             return Err(EngineError::InvalidAction(format!(
                 "Selected permanents' total power must be at least {threshold}"
             )));
         }
-        // CR 118.3: revalidate the LIVE bar on submission — the prompt's
-        // `permanents` snapshot predates this action, and a bar granted in
-        // the window (replacement pause, mana-ability board change) must
-        // reject the submission BEFORE anything is spent, not strand the
-        // payer at the Prohibited arm mid-batch.
-        if chosen.iter().any(|id| {
-            crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, *id)
-        }) {
+        // CR 118.3: revalidate the LIVE selection on submission — a bar
+        // granted (or a permanent lost) in the window must reject the
+        // submission BEFORE anything is spent. Settle unpaid only when no
+        // live set can still meet the threshold; otherwise the payer retries
+        // with a live set. (Membership in the offered snapshot was checked
+        // above, so anything missing from the live pool is dead or barred.)
+        if chosen.iter().any(|id| !live_pool.contains(id)) {
+            if no_live_set_meets_threshold {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             return Err(EngineError::InvalidAction(
                 "A selected permanent can't be sacrificed by this player".to_string(),
             ));
@@ -3690,9 +3742,40 @@ pub(super) fn handle_ward_sacrifice_choice(
         for (index, id) in chosen.iter().enumerate() {
             match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                 crate::game::sacrifice::SacrificeOutcome::Complete => {}
-                // CR 601.2h: a mid-payment bar fails the Ward cost instead
-                // of recording an unsacrificed permanent as paid.
+                // CR 601.2h: a mid-batch bar fails the Ward cost instead of
+                // recording an unsacrificed permanent as paid. Settle unpaid
+                // when no live set can still meet the threshold (earlier
+                // batch spends stand); otherwise the payer retries with a
+                // different set.
                 crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    let live_pool: Vec<ObjectId> = permanents
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            state
+                                .objects
+                                .get(id)
+                                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                                && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                                    state, player, *id,
+                                )
+                        })
+                        .collect();
+                    if !sacrifice_pool_meets_aggregate_constraint(
+                        state,
+                        &live_pool,
+                        crate::types::ability::SacrificeAggregateStat::TotalPower,
+                        crate::types::ability::Comparator::GE,
+                        threshold,
+                    ) {
+                        return settle_ward_sacrifice_payment_unpaid(
+                            state,
+                            player,
+                            pending_effect,
+                            trigger_event,
+                            events,
+                        );
+                    }
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot sacrifice this permanent as a cost".to_string(),
                     ));
@@ -3717,9 +3800,40 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Must select exactly one permanent to sacrifice".to_string(),
             ));
         }
-        // CR 118.3: same live-bar submission revalidation as the aggregate
-        // branch — reject before the sacrifice, never strand after it.
-        if crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, chosen[0]) {
+        // CR 118.3 + CR 701.21a: same live-board submission revalidation as
+        // the aggregate branch — a departed or barred selection rejects
+        // before the sacrifice, never strands after it. Settle unpaid only
+        // when the live pool can no longer cover the remaining count;
+        // otherwise the payer retries with a live permanent.
+        let selection_dead_or_barred = !state
+            .objects
+            .get(&chosen[0])
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            || crate::game::static_abilities::object_cant_be_sacrificed_by(
+                state, player, chosen[0],
+            );
+        if selection_dead_or_barred {
+            let live_count = permanents
+                .iter()
+                .filter(|&id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, *id,
+                        )
+                })
+                .count();
+            if live_count < remaining as usize {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             return Err(EngineError::InvalidAction(
                 "The selected permanent can't be sacrificed by this player".to_string(),
             ));
@@ -7998,7 +8112,7 @@ mod tests {
         let outcome =
             handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
         assert!(
-            matches!(outcome, Ok(_)),
+            outcome.is_ok(),
             "a pool shrunk below remaining-1 must settle (not error), got {outcome:?}"
         );
         assert_eq!(
@@ -8074,7 +8188,7 @@ mod tests {
         let outcome =
             handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
         assert!(
-            matches!(outcome, Ok(_)),
+            outcome.is_ok(),
             "a Ward whose second permanent is barred must settle (not error), got {outcome:?}"
         );
         assert_eq!(
@@ -8149,7 +8263,7 @@ mod tests {
         });
         let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
         assert!(
-            matches!(outcome, Ok(_)),
+            outcome.is_ok(),
             "a resume whose pool shrank below remaining-1 must settle (not error), got {outcome:?}"
         );
         assert!(
@@ -8161,6 +8275,272 @@ mod tests {
             state.pending_cost_move_resume.is_none(),
             "the consumed continuation must not be re-installed, got {:?}",
             state.pending_cost_move_resume
+        );
+    }
+
+    /// CR 118.3 + CR 701.21a: a MultiSacrifice resume whose fixed replay list
+    /// lost a member during the pause (concession, removal) settles unpaid
+    /// BEFORE replaying — replaying the departed member would error out of
+    /// the consumed continuation. The fully-live control replays to
+    /// completion.
+    ///
+    /// Revert-to-red: deleting the liveness pre-check replays rock_b off the
+    /// battlefield, `sacrifice_permanent` errors, and the first assertion
+    /// fails.
+    #[test]
+    fn ward_multi_resume_settles_unpaid_when_listed_permanent_left() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Departed leg: rock_b leaves during the pause.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::MultiSacrifice {
+                remaining: vec![rock_a, rock_b],
+            },
+            trigger_event: None,
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a replay list that lost a member must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when the replay list is unpayable"
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the consumed continuation must not be re-installed, got {:?}",
+            state.pending_cost_move_resume
+        );
+
+        // Live control: both replay and the payment completes.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::MultiSacrifice {
+                remaining: vec![rock_a, rock_b],
+            },
+            trigger_event: None,
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a fully-live replay list must complete, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the first replayed sacrifice must be spent"
+        );
+        assert_eq!(
+            state.objects[&rock_b].zone,
+            Zone::Graveyard,
+            "the second replayed sacrifice must be spent"
+        );
+    }
+
+    fn ward_one_prompt(state: &mut GameState, permanents: Vec<ObjectId>, pending: ResolvedAbility) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 1,
+            min_total_power: None,
+            trigger_event: None,
+        };
+    }
+
+    /// CR 118.3 + CR 701.21a: selecting the departed permanent settles unpaid
+    /// when the live pool can no longer cover the remaining count — the
+    /// sequel to the concession regression one round trip later (the
+    /// `remaining: 1` re-prompt's only candidate leaves before the answer).
+    ///
+    /// Revert-to-red: without the liveness split the spend errors and the
+    /// first assertion fails.
+    #[test]
+    fn ward_sequential_answer_settles_unpaid_when_selection_departed_and_pool_short() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_one_prompt(&mut state, vec![rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a departed selection with no live alternative must settle (not error), got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// CR 118.3 + CR 701.21a: a departed selection with a live alternative
+    /// stays a retryable rejection — failing the whole Ward on one stale
+    /// click would punish the payer for the window, not the board.
+    #[test]
+    fn ward_sequential_answer_rejects_departed_selection_when_live_alternative_exists() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_one_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::InvalidAction(_))),
+            "a departed selection with a live alternative must stay retryable, got {outcome:?}"
+        );
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "retrying with the live permanent must complete the Ward, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the live retry selection must be spent"
+        );
+    }
+
+    fn ward_rock_powered(
+        state: &mut GameState,
+        name: &str,
+        card: u64,
+        power: i32,
+    ) -> ObjectId {
+        let id = ward_rock(state, name, card);
+        state.objects.get_mut(&id).unwrap().power = Some(power);
+        id
+    }
+
+    fn ward_aggregate_prompt(
+        state: &mut GameState,
+        permanents: Vec<ObjectId>,
+        pending: ResolvedAbility,
+        threshold: i32,
+    ) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 0,
+            min_total_power: Some(threshold),
+            trigger_event: None,
+        };
+    }
+
+    /// CR 118.3 + CR 701.21a + CR 118.12a: an aggregate submission no live set
+    /// can satisfy settles unpaid — both when the chosen set is dead and when
+    /// the live pool shrank below the threshold.
+    ///
+    /// Revert-to-red: without the no-alternative settle, the dead selection
+    /// errors and the first assertion fails; without the threshold settle,
+    /// the under-threshold submission errors and the third assertion fails.
+    #[test]
+    fn ward_aggregate_answer_settles_unpaid_when_no_live_set_meets_threshold() {
+        // Dead-selection leg: the only candidate left the battlefield.
+        let mut state = GameState::new_two_player(42);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_b], pending, 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a dead selection with no live alternative must settle (not error), got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+
+        // Shrunk-pool leg: the live pool totals below the threshold.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock_powered(&mut state, "Rock A", 7_201, 2);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_a, rock_b], pending, 4);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "an unsatisfiable threshold must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when no live set meets the threshold"
+        );
+    }
+
+    /// CR 118.3 + CR 118.12a: a dead aggregate selection with a live set
+    /// available stays retryable, and the retry completes the payment.
+    #[test]
+    fn ward_aggregate_answer_rejects_dead_selection_when_live_set_exists() {
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock_powered(&mut state, "Rock A", 7_201, 2);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_a, rock_b], pending, 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::InvalidAction(_))),
+            "a dead selection with a live alternative must stay retryable, got {outcome:?}"
+        );
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "retrying with the live set must complete the Ward, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the live retry set must be spent"
         );
     }
 }
