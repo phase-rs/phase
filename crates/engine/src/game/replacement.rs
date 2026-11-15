@@ -129,7 +129,7 @@ const GRANTED_BLOODTHIRST_INDEX: u64 = u64::MAX - 8;
 /// exactly like the object-carried definitions it mirrors — the SAME
 /// definition shape, built by `database::synthesis::dredge_replacement_definition`
 /// (extracted from `synthesize_dredge` for this reuse).
-const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
+const GRANTED_DREDGE_INDEX: u64 = u64::MAX - 9;
 /// CR 614.1d + CR 607.1c + CR 616.1: the enters-tapped rider of the graveyard
 /// cast permission a spell was cast through ("If you cast a spell this way,
 /// that artifact enters tapped." — Edgar, Master Machinist). The rider is a
@@ -139,7 +139,7 @@ const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
 /// cast's terms (CR 601.2a), so it is keyed on the ENTERING spell, which carries
 /// the latched rider in `GameObject::cast_permission_enter_tapped` until it
 /// leaves the stack.
-const CAST_PERMISSION_ENTER_TAPPED_INDEX: usize = usize::MAX - 11;
+const CAST_PERMISSION_ENTER_TAPPED_INDEX: u64 = u64::MAX - 11;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
