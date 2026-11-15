@@ -161,24 +161,11 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
-    // General "X or Y or Z..." choice: the alternative-list grammar (`, or ` /
-    // `, ` / ` or `) is parsed with nom, and `parse_single_cost` stays the
-    // authority for each leg's cost. Oxford-comma lists (Dusk Mangler:
-    // "sacrifice a creature, discard a card, or pay 4 life") and plain two-way
-    // alternates are one production with N legs, so no arm is needed per length.
-    if let Some(legs) = split_additional_cost_alternative_legs(body_raw) {
-        if legs.len() >= 2 {
-            let costs: Vec<AbilityCost> = legs
-                .iter()
-                .map(|leg| super::oracle_cost::parse_single_cost(leg.trim()))
-                .collect();
-            if costs
-                .iter()
-                .all(|cost| !matches!(cost, AbilityCost::Unimplemented { .. }))
-            {
-                return Some(AdditionalCost::Choice(costs));
-            }
-        }
+    // General alternative-cost choice: an Oxford-comma list ("A, B, or C") or a
+    // two-way "A or B". Nom owns the list grammar; `parse_single_cost` stays the
+    // authority for each leg's cost.
+    if let Some(costs) = parse_additional_cost_alternatives(body_raw) {
+        return Some(AdditionalCost::Choice(costs));
     }
 
     if let Some(cost) = super::oracle_cost::parse_binary_cost_conjunction_nom(body_lower) {
@@ -231,29 +218,68 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     None
 }
 
-/// CR 601.2b + CR 601.2h: Split an additional-cost body into its top-level
-/// alternatives on the printed separator grammar — `", or "` (Oxford comma),
-/// `", "` (middle legs) and `" or "` (two-way) — consuming the whole body.
+/// CR 601.2b + CR 601.2h: Parse an additional-cost body that names alternative
+/// costs the caster chooses among, returning every alternative in printed order.
 ///
-/// This owns the list grammar only; each returned leg is still parsed by
-/// `parse_single_cost`, the cost authority. A body with no separator is not a
-/// list and declines, and an empty leg fails the parse instead of emitting a
-/// phantom cost.
-fn split_additional_cost_alternative_legs(body: &str) -> Option<Vec<&str>> {
-    fn separator(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-        alt((tag(", or "), tag(", "), tag(" or "))).parse(i)
+/// Two productions, each consuming the whole body:
+/// - An Oxford-comma list of three or more alternatives, `A, B, or C` (Dusk
+///   Mangler: "sacrifice a creature, discard a card, or pay 4 life"). Commas
+///   separate the alternatives, so a leg may itself contain " or " ("sacrifice
+///   an artifact or creature").
+/// - A two-way `A or B`. " or " also joins the types inside one cost ("pay 5
+///   life or sacrifice a creature or enchantment"), so each " or " is tried as
+///   the alternative boundary, leftmost first, and the first split whose two
+///   sides are both readable costs wins.
+///
+/// Each leg is read by `parse_single_cost`, the cost authority; a list with any
+/// unreadable leg declines rather than emitting a partial choice.
+fn parse_additional_cost_alternatives(body: &str) -> Option<Vec<AbilityCost>> {
+    fn read_all(legs: &[&str]) -> Option<Vec<AbilityCost>> {
+        legs.iter()
+            .map(|leg| {
+                let cost = super::oracle_cost::parse_single_cost(leg.trim());
+                (!matches!(cost, AbilityCost::Unimplemented { .. })).then_some(cost)
+            })
+            .collect()
     }
-    fn leg(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    fn list_leg(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         nom::combinator::recognize(nom::multi::many1(preceded(
-            nom::combinator::not(nom::combinator::peek(separator)),
+            nom::combinator::not(nom::combinator::peek(tag(", "))),
             nom::character::complete::anychar,
         )))
         .parse(i)
     }
-    let (_, legs) = all_consuming(separated_list1(separator, leg))
-        .parse(body)
-        .ok()?;
-    Some(legs)
+    fn oxford_list(i: &str) -> nom::IResult<&str, Vec<&str>, OracleError<'_>> {
+        let (i, first) = list_leg(i)?;
+        let (i, middle) = nom::multi::many1(preceded(
+            terminated(tag(", "), nom::combinator::not(tag("or "))),
+            list_leg,
+        ))
+        .parse(i)?;
+        let (i, last) = preceded(tag(", or "), list_leg).parse(i)?;
+        let mut legs = Vec::with_capacity(middle.len() + 2);
+        legs.push(first);
+        legs.extend(middle);
+        legs.push(last);
+        Ok((i, legs))
+    }
+
+    if let Ok((_, legs)) = all_consuming(oxford_list).parse(body) {
+        return read_all(&legs);
+    }
+
+    // Two-way: walk each " or " boundary left to right with nom's cursor.
+    let mut boundary = 0;
+    while let Ok((_, before)) = take_until::<_, _, OracleError<'_>>(" or ").parse(&body[boundary..])
+    {
+        let split = boundary + before.len();
+        let (left, right) = (&body[..split], &body[split + " or ".len()..]);
+        if let Some(costs) = read_all(&[left, right]) {
+            return Some(costs);
+        }
+        boundary = split + " or ".len();
+    }
+    None
 }
 
 /// CR 701.4a: Detect the *opening* of a spelled-out choose-behold cost —
@@ -2332,6 +2358,78 @@ Trample";
             }
             other => panic!("Expected Choice with 3 options, got {other:?}"),
         }
+    }
+
+    /// CR 601.2b: in a two-way choice whose second leg joins types with " or "
+    /// (Annihilating Glare / Deadly Precision: "pay {4} or sacrifice an
+    /// artifact or creature"; Final Payment: "pay 5 life or sacrifice a
+    /// creature or enchantment"), that " or " stays inside the sacrifice leg —
+    /// the line is still a two-way `Choice`, not three legs or one cost.
+    #[test]
+    fn parse_additional_cost_two_way_choice_keeps_type_disjunction_in_leg() {
+        for (raw, first_is_mana, second_types) in [
+            (
+                "As an additional cost to cast this spell, pay {4} or sacrifice an artifact or creature.",
+                true,
+                [TypeFilter::Artifact, TypeFilter::Creature],
+            ),
+            (
+                "As an additional cost to cast this spell, pay 5 life or sacrifice a creature or enchantment.",
+                false,
+                [TypeFilter::Creature, TypeFilter::Enchantment],
+            ),
+        ] {
+            let lower = raw.to_lowercase();
+            let Some(AdditionalCost::Choice(costs)) = parse_additional_cost_line(&lower, raw)
+            else {
+                panic!("{raw}: expected a two-way Choice");
+            };
+            assert_eq!(costs.len(), 2, "{raw}: {costs:?}");
+            if first_is_mana {
+                assert!(
+                    matches!(&costs[0], AbilityCost::Mana { cost } if cost.mana_value() == 4),
+                    "{raw}: {:?}",
+                    costs[0]
+                );
+            } else {
+                assert!(
+                    matches!(
+                        costs[0],
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 5 }
+                        }
+                    ),
+                    "{raw}: {:?}",
+                    costs[0]
+                );
+            }
+            let AbilityCost::Sacrifice(sac) = &costs[1] else {
+                panic!("{raw}: expected a sacrifice leg, got {:?}", costs[1]);
+            };
+            let rendered = format!("{:?}", sac.target);
+            for type_filter in &second_types {
+                assert!(
+                    rendered.contains(&format!("{type_filter:?}")),
+                    "{raw}: sacrifice leg must keep {type_filter:?}, got {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A single cost whose object joins types with " or " ("sacrifice an
+    /// artifact or creature") is not a choice: no split yields two readable costs.
+    #[test]
+    fn parse_additional_cost_type_disjunction_alone_is_required() {
+        let raw = "As an additional cost to cast this spell, sacrifice an artifact or creature.";
+        let lower = raw.to_lowercase();
+        assert!(
+            matches!(
+                parse_additional_cost_line(&lower, raw),
+                Some(AdditionalCost::Required(AbilityCost::Sacrifice(_)))
+            ),
+            "got {:?}",
+            parse_additional_cost_line(&lower, raw)
+        );
     }
 
     // CR 118.9: Alternative-cost arms — verb-agnostic prefix delegates to `parse_oracle_cost`.
