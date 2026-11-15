@@ -5784,10 +5784,10 @@ fn softmax_select_index_with(
             .map(|(index, _)| index);
     }
 
-    // CR-agnostic selection invariant: a zero-weight row (a policy Reject's −∞
-    // score) is never selected while a positive-weight row exists. A zero draw
-    // lands on the first positive-weight row, and float shortfall at the top of
-    // the walk falls back to the last positive-weight row.
+    // Selection invariant: a zero-weight row (a policy Reject's −∞ score) is
+    // never selected while a positive-weight row exists. A zero draw lands on
+    // the first positive-weight row, and float shortfall at the top of the walk
+    // falls back to the last positive-weight row.
     let threshold: f64 = uniform() * total;
     let mut cumulative = 0.0;
     let mut last_positive = None;

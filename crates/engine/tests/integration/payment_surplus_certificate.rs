@@ -881,9 +881,11 @@ fn cast_during_resolution_has_no_priority_window() {
     );
 }
 
-/// Q3: four Treasure {R} plus three Wastes {C} pay Jaded Sell-Sword, whose
-/// rider reads mana from a Treasure. An Ogre {R} is not spend-equivalent to a
-/// Treasure {R} (different source characteristics), so it is unsaturated.
+/// Q3 (a refusal control): four Treasure {R} plus three Wastes {C} pay Jaded
+/// Sell-Sword, whose rider reads mana from a Treasure. An Ogre {R} is not
+/// spend-equivalent to a Treasure {R}: a Treasure's unit already carries the
+/// could-produce-two-or-more-colours marker, so the shapes differ before the
+/// source characteristics are compared (Q3b isolates those).
 #[test]
 fn ogre_red_is_not_equivalent_to_treasure_red() {
     let mut sc = GameScenario::new();
@@ -1179,4 +1181,93 @@ fn ability_roots_are_not_certified() {
         );
     }
     let _ = &mut runner;
+}
+
+const RAMUNAP_RUINS: &str = "{T}: Add {C}.\n{T}, Pay 1 life: Add {R}.\n{2}{R}{R}, {T}, Sacrifice a Desert: This land deals 2 damage to each opponent.";
+const CATACLYSMIC_PROSPECTING: &str = "Cataclysmic Prospecting deals X damage to each creature. For each mana from a Desert spent to cast this spell, create a tapped Treasure token.";
+
+/// Q3b: two Ramunap Ruins (Deserts) pay Cataclysmic Prospecting's {R}{R}
+/// (X=0). An Ogre {R} has the same mana shape as a Desert {R} but not the same
+/// source characteristics, which the spell reads ("for each mana from a
+/// Desert"): a directed spend of the Ogre's red would make one Treasure fewer.
+#[test]
+fn ogre_red_is_not_equivalent_to_desert_red() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let deserts: Vec<_> = (0..2)
+        .map(|_| {
+            sc.add_land_from_oracle(P0, "Ramunap Ruins", RAMUNAP_RUINS)
+                .with_subtypes(vec!["Desert"])
+                .id()
+        })
+        .collect();
+    let ogre = add_ogre(&mut sc, P0);
+    let prospecting = sc
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Cataclysmic Prospecting",
+            false,
+            CATACLYSMIC_PROSPECTING,
+        )
+        .with_mana_cost(cost(
+            vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Red],
+            0,
+        ))
+        .id();
+    let mut runner = sc.build();
+    cast_to_payment(
+        &mut runner,
+        prospecting,
+        Answers {
+            x: Some(0),
+            ..Answers::default()
+        },
+    );
+    produce(
+        &mut runner,
+        &[
+            (deserts[0], Some(ManaType::Red)),
+            (deserts[1], Some(ManaType::Red)),
+        ],
+    );
+    let desert_red = runner.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.color == ManaType::Red && deserts.contains(&unit.source_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        desert_red.len(),
+        2,
+        "reach: two Desert-sourced red in the pool"
+    );
+    // CR 118.3a: pin both Desert units, so the default finisher spends them
+    // with or without the Ogre's red and only the certificate's equivalence
+    // can tell the two pools apart.
+    for unit in &desert_red {
+        act(
+            &mut runner,
+            GameAction::SpendPoolMana {
+                pip_id: unit.pip_id,
+            },
+        );
+    }
+    let mut ogre_unit_probe = GameRunner::from_state(runner.state().clone());
+    act(&mut ogre_unit_probe, ogre_activation(ogre));
+    let ogre_red = ogre_unit_probe.state().players[0]
+        .mana_pool
+        .units()
+        .find(|unit| unit.source_id == ogre)
+        .expect("reach: the Ogre adds {R}");
+    let (mut desert_shape, _) = desert_red[0].clone().into_shape_and_pip();
+    let (mut ogre_shape, _) = ogre_red.into_shape_and_pip();
+    desert_shape.source_id = ogre;
+    ogre_shape.source_id = ogre;
+    assert_eq!(
+        desert_shape, ogre_shape,
+        "reach: only the source characteristics tell the two reds apart"
+    );
+    assert_eq!(
+        certificate(&runner, &ogre_activation(ogre)),
+        NotCertified(SurplusNotCertified::Unsaturated)
+    );
 }
