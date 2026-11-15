@@ -1508,6 +1508,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::RemoveFromCombat { .. } => {}
         Effect::BecomeBlocked { .. } => {}
         Effect::Conjure { .. } => {}
+        Effect::CreateCardCopyByName { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DraftFromSpellbook { .. } => {}

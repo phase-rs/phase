@@ -2,7 +2,7 @@ use crate::database::card_db::CardDbHandle;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityDefinition, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
+    AbilityDefinition, ChoiceType, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
     StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
 };
@@ -547,28 +547,36 @@ pub fn intrinsic_etb_counters(
 pub fn self_etb_counter_replacements(
     replacements: &[ReplacementDefinition],
 ) -> Vec<(CounterType, u32)> {
-    replacements
-        .iter()
-        .filter_map(|repl| {
-            if repl.event != ReplacementEvent::Moved
-                || repl.destination_zone != Some(Zone::Battlefield)
-                || !matches!(repl.mode, ReplacementMode::Mandatory)
-                || repl.condition.is_some()
-                || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
-            {
-                return None;
-            }
-            let Effect::PutCounter {
-                counter_type,
-                count: QuantityExpr::Fixed { value },
-                target: TargetFilter::SelfRef,
-            } = &*repl.execute.as_ref()?.effect
-            else {
-                return None;
-            };
-            (*value > 0).then(|| (counter_type.clone(), *value as u32))
-        })
+    self_etb_counter_replacement_entries(replacements)
+        .map(|(_, counter_type, count)| (counter_type, count))
         .collect()
+}
+
+/// CR 614.1c: [`self_etb_counter_replacements`] with each entry's own definition, so a
+/// caller can ask whether the entrant still has that ability as it would exist on the
+/// battlefield (CR 614.12) before applying its counters.
+pub fn self_etb_counter_replacement_entries(
+    replacements: &[ReplacementDefinition],
+) -> impl Iterator<Item = (&ReplacementDefinition, CounterType, u32)> {
+    replacements.iter().filter_map(|repl| {
+        if repl.event != ReplacementEvent::Moved
+            || repl.destination_zone != Some(Zone::Battlefield)
+            || !matches!(repl.mode, ReplacementMode::Mandatory)
+            || repl.condition.is_some()
+            || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
+        {
+            return None;
+        }
+        let Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } = &*repl.execute.as_ref()?.effect
+        else {
+            return None;
+        };
+        (*value > 0).then(|| (repl, counter_type.clone(), *value as u32))
+    })
 }
 
 pub(crate) fn base_trigger_printed_origins(
@@ -1193,11 +1201,13 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // ---------------------------------------------------------------------------
 
 /// Outside-the-game card names a game's faces can reach, split by what kind of
-/// card can produce them. The meld leg is paper (CR 701.42); the digital leg
-/// exists only on Arena-only cards.
+/// card can produce them. The paper leg is every format's (meld's third card,
+/// CR 701.42; a CR 707.13 copy created from a name); the digital leg exists only
+/// on Arena-only cards. Named for the AXIS rather than for its first producer,
+/// so a second paper producer does not have to seed a leg called `meld`.
 #[derive(Default)]
 struct OutsideGameSeeds {
-    meld: Vec<String>,
+    paper: Vec<String>,
     digital: Vec<String>,
 }
 
@@ -1221,7 +1231,7 @@ impl OutsideGameLegs {
 impl OutsideGameSeeds {
     /// Move into `out` the seed legs `legs` admits.
     fn drain_admitted_by(self, legs: OutsideGameLegs, out: &mut Vec<String>) {
-        out.extend(self.meld);
+        out.extend(self.paper);
         match legs {
             OutsideGameLegs::Paper => {}
             OutsideGameLegs::PaperAndDigital => out.extend(self.digital),
@@ -1263,13 +1273,32 @@ fn collect_conjure_names(effect: &Effect, out: &mut OutsideGameSeeds) {
                 }
             }
         }
+        // CR 707.13: the literal form of "create a copy of a card named X" has a
+        // static name to seed, exactly like a named conjure. The chosen-name form
+        // (`name: None`) has none HERE — its candidate names live on the choice,
+        // seeded by the `Choose` arm below.
+        Effect::CreateCardCopyByName {
+            name: Some(name), ..
+        } => out.paper.push(name.clone()),
+        // CR 201.4 + CR 707.13: a CLOSED card-name domain is an Oracle-printed
+        // list of cards the ability can materialize (Garth One-Eye's six), so
+        // every one of them has to be in the registry before the copy is created —
+        // otherwise the resolver looks up a name that was never preloaded and
+        // creates nothing. Scoped to the closed domain on purpose: the OPEN
+        // "choose a card name" prompt ranges over every card in Magic, which is
+        // the reason `card_face_registry` is a scoped preload and not the whole
+        // database.
+        Effect::Choose {
+            choice_type: ChoiceType::CardName { options, .. },
+            ..
+        } => out.paper.extend(options.iter().cloned()),
         // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
         // card's characteristics, but `result` is an outside-the-game third card.
         // Seed its name so `build_conjure_registry` preloads its `CardFace` into
         // `card_face_registry`. `source` and `partner` are live battlefield
         // objects the resolver finds by printed identity — they need no registry
         // seeding.
-        Effect::Meld { result, .. } => out.meld.push(result.clone()),
+        Effect::Meld { result, .. } => out.paper.push(result.clone()),
         _ => {}
     }
 }

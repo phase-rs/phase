@@ -11788,7 +11788,10 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
 }
 
 /// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
-/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+/// zone. Used for the "can't cast spells from anywhere other than <zone>"
+/// PROHIBITION (`CantCastFrom`'s prohibited-zone list). Cast-origin FILTERS ("spell you
+/// cast from anywhere other than your hand") are `Not(InZone(<zone>))` instead, so a
+/// cast from outside the game (CR 707.13 + CR 400.11) satisfies them.
 pub fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
     const CAST_CAPABLE_ZONES: [Zone; 5] = [
         Zone::Hand,
