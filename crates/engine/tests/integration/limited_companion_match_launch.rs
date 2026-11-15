@@ -2291,3 +2291,113 @@ fn limited_admission_checks_jegantha_hybrid_symbols_and_zirda_land_cards() {
         );
     }
 }
+
+/// CR 709.4b + CR 702.139a: Jegantha sees the separate symbols of every half of a split card, so
+/// Fire // Ice ({1}{R} and {1}{U}) contains {1} twice and fails it, while Wear // Tear ({1}{R} and
+/// {W}) shares no symbol and passes. Both the public deck-compatibility check and the pregame
+/// reveal of a two-player Limited game must agree.
+#[test]
+fn limited_jegantha_reads_every_split_half_at_admission_and_reveal() {
+    use engine::game::deck_loading::{resolve_deck_list, DeckList, PlayerDeckList};
+    use engine::types::mana::ManaCostShard;
+
+    const JEGANTHA: &str = "Jegantha, the Wellspring";
+    let face =
+        |name: &str, shard: Option<ManaCostShard>, generic: u32, types: &[CoreType]| CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: shard.into_iter().collect(),
+                generic,
+            },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: types.to_vec(),
+                subtypes: vec![],
+            },
+            ..Default::default()
+        };
+    let mut jegantha = face(JEGANTHA, None, 5, &[CoreType::Creature]);
+    jegantha.keywords = vec![Keyword::Companion(
+        CompanionCondition::NoRepeatedManaSymbols,
+    )];
+    let mut mountain = face("Mountain", None, 0, &[CoreType::Land]);
+    mountain.mana_cost = ManaCost::NoCost;
+    mountain.card_type.subtypes = vec!["Mountain".to_string()];
+
+    // (face, split oracle id, position within the split card)
+    let halves = [
+        ("Fire", Some(ManaCostShard::Red), 1, "fire-ice", 0),
+        ("Ice", Some(ManaCostShard::Blue), 1, "fire-ice", 1),
+        ("Wear", Some(ManaCostShard::Red), 1, "wear-tear", 0),
+        ("Tear", Some(ManaCostShard::White), 0, "wear-tear", 1),
+    ];
+    let mut export = serde_json::Map::new();
+    for single in [&jegantha, &mountain] {
+        export.insert(
+            single.name.to_lowercase(),
+            serde_json::to_value(single).expect("CardFace serializes"),
+        );
+    }
+    for (name, shard, generic, oracle_id, order) in halves {
+        let mut half = face(name, shard, generic, &[CoreType::Instant]);
+        half.scryfall_oracle_id = Some(oracle_id.to_string());
+        let mut value = serde_json::to_value(&half).expect("CardFace serializes");
+        value["layout"] = "split".into();
+        value["face_index"] = order.into();
+        export.insert(name.to_lowercase(), value);
+    }
+    let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("synthetic export parses");
+
+    for (split_card, legal) in [("Fire // Ice", false), ("Wear // Tear", true)] {
+        let mut main_deck = vec![split_card.to_string()];
+        main_deck.extend(vec!["Mountain".to_string(); 39]);
+
+        // Public deck submission.
+        let request: DeckCompatibilityRequest = serde_json::from_value(serde_json::json!({
+            "main_deck": main_deck,
+            "companion": [JEGANTHA],
+            "selected_format": "Limited",
+        }))
+        .expect("request deserializes");
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(result.unknown_cards.is_empty(), "every card resolves");
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(legal),
+            "{split_card}: {:?}",
+            result.selected_format_reasons
+        );
+
+        // Pregame reveal of the same deck through the production loader.
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck,
+                companion: vec![JEGANTHA.to_string()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: vec!["Mountain".to_string(); 40],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &list);
+        let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        let offered: Vec<String> = match start.waiting_for {
+            WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } => eligible_companions.into_iter().map(|c| c.name).collect(),
+            WaitingFor::MulliganDecision { .. } => Vec::new(),
+            other => panic!("unexpected waiting state: {other:?}"),
+        };
+        assert_eq!(
+            offered.iter().any(|name| name == JEGANTHA),
+            legal,
+            "{split_card}: offered {offered:?}"
+        );
+    }
+}

@@ -19,6 +19,7 @@ use crate::types::display_only::DisplayOnly;
 use crate::types::format::CompanionSlot;
 use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
 use crate::types::identifiers::CardId;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -52,7 +53,24 @@ impl DeckEntry {
         if combined != face.mana_cost.mana_value() {
             card.metadata.off_stack_mana_value_override = Some(combined);
         }
+        // CR 709.4b: a split card keeps each half's cost for symbol-reading checks.
+        let halves = db.off_stack_mana_costs_for_face(face);
+        if halves.len() > 1 {
+            card.metadata.off_stack_mana_costs = halves;
+        }
         Self { card, count }
+    }
+
+    /// CR 709.4b: the mana costs whose symbols this entry exposes — one per half
+    /// for a split card (cached by `from_resolved_face`), else the face's own.
+    /// The single accessor for effects that refer specifically to the symbols in
+    /// a mana cost (Jegantha), as `off_stack_mana_value` is for mana value.
+    pub fn off_stack_mana_costs(&self) -> &[ManaCost] {
+        if self.card.metadata.off_stack_mana_costs.is_empty() {
+            std::slice::from_ref(&self.card.mana_cost)
+        } else {
+            &self.card.metadata.off_stack_mana_costs
+        }
     }
 
     /// CR 202.3d + CR 709.4b: This entry's OFF-STACK mana value — the load-time

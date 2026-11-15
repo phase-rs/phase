@@ -88,7 +88,7 @@ pub fn validate_companion_condition_with_min_deck_size(
 
         CompanionCondition::NoRepeatedManaSymbols => main_deck
             .iter()
-            .all(|entry| !has_repeated_mana_symbols(&entry.card)),
+            .all(|entry| !has_repeated_mana_symbols(entry)),
 
         CompanionCondition::CreatureTypeRestriction(allowed_types) => {
             main_deck.iter().all(|entry| {
@@ -174,18 +174,36 @@ pub fn validate_companion_condition_with_min_deck_size(
     }
 }
 
+/// One mana symbol of a mana cost as Jegantha compares them. The generic
+/// amount is a single symbol per cost ({2} is the symbol {2}, not two {1}s).
+#[derive(PartialEq, Eq, Hash)]
+enum CostSymbol {
+    Generic(u32),
+    Shard(ManaCostShard),
+}
+
 /// CR 702.139a (Jegantha): whether a card's mana cost repeats a mana symbol.
 /// Every symbol counts, not only the five colors: a hybrid symbol is one symbol,
 /// so {R/W}{R/W}{R/W} (Boros Reckoner) repeats it, as do {X}{X}, {C}{C}, and
-/// repeated Phyrexian or snow symbols (Wizards' Ikoria release notes). The
-/// generic number is a single symbol per cost and cannot repeat.
-fn has_repeated_mana_symbols(face: &CardFace) -> bool {
-    let shards = match &face.mana_cost {
-        crate::types::mana::ManaCost::Cost { shards, .. } => shards,
-        _ => return false,
-    };
-    let unique: HashSet<&ManaCostShard> = shards.iter().collect();
-    shards.len() != unique.len()
+/// repeated Phyrexian or snow symbols (Wizards' Ikoria release notes).
+/// CR 709.4b: a split card's symbols are those of every half, so Fire // Ice
+/// ({1}{R} and {1}{U}) contains the symbol {1} twice.
+fn has_repeated_mana_symbols(entry: &DeckEntry) -> bool {
+    let mut seen: HashSet<CostSymbol> = HashSet::new();
+    entry
+        .off_stack_mana_costs()
+        .iter()
+        .filter_map(|cost| match cost {
+            ManaCost::Cost { shards, generic } => Some((shards, *generic)),
+            _ => None,
+        })
+        .flat_map(|(shards, generic)| {
+            (generic > 0)
+                .then_some(CostSymbol::Generic(generic))
+                .into_iter()
+                .chain(shards.iter().copied().map(CostSymbol::Shard))
+        })
+        .any(|symbol| !seen.insert(symbol))
 }
 
 // ── Pre-game Reveal Flow ────────────────────────────────────────────────
@@ -1338,6 +1356,52 @@ mod tests {
                 .map(|entry| entry.card.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["Main Card"]
+        );
+    }
+
+    /// CR 709.4b + CR 702.139a: Jegantha reads every half's symbols. Each half's
+    /// generic amount is ONE symbol: {1} and {1} repeat, {1} and {2} do not.
+    #[test]
+    fn jegantha_counts_each_split_half_generic_amount_as_one_symbol() {
+        use crate::types::mana::ManaCostShard;
+        let half = |shard: ManaCostShard, generic: u32| ManaCost::Cost {
+            shards: vec![shard],
+            generic,
+        };
+        let split = |halves: Vec<ManaCost>| {
+            let mut entry = creature("Split", 4, vec![]);
+            entry.card.metadata.off_stack_mana_costs = halves;
+            entry
+        };
+        let repeats = |halves| has_repeated_mana_symbols(&split(halves));
+
+        assert!(
+            repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::Blue, 1)
+            ]),
+            "{{1}}{{R}} and {{1}}{{U}} contain {{1}} twice"
+        );
+        assert!(
+            !repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::Blue, 2)
+            ]),
+            "{{2}} is one symbol, not two {{1}}s"
+        );
+        assert!(
+            repeats(vec![
+                half(ManaCostShard::Red, 0),
+                half(ManaCostShard::Red, 3)
+            ]),
+            "a shard repeated across halves repeats"
+        );
+        assert!(
+            !repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::White, 0)
+            ]),
+            "halves sharing no symbol do not repeat"
         );
     }
 }
