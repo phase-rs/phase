@@ -112,6 +112,7 @@ fn opponent_mill_ability() -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: 5 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     )
 }
