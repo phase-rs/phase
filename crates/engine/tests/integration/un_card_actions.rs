@@ -14,8 +14,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::{StaticMode, TriggerCause};
@@ -1756,7 +1756,19 @@ const VILE_BILE: &str =
     "Whenever a player's skin or fingernail touches this creature, that player loses 2 life.";
 
 fn touch(runner: &mut GameRunner, actor: engine::types::player::PlayerId, object_id: ObjectId) {
-    un_action(runner, actor, UnAction::TouchObject { object_id });
+    let incarnation = runner
+        .state()
+        .objects
+        .get(&object_id)
+        .map(|o| o.incarnation)
+        .unwrap_or(0);
+    un_action(
+        runner,
+        actor,
+        UnAction::TouchObject {
+            target: ObjectIncarnationRef::of(object_id, incarnation),
+        },
+    );
 }
 
 /// P0 controls two Vile Biles and a vanilla Grizzly Bears; both players opted
@@ -1796,11 +1808,15 @@ fn vile_bile_parses_to_a_touch_trigger_on_itself() {
 #[test]
 fn each_touch_of_vile_bile_makes_the_touching_player_lose_two_life() {
     let (mut runner, bile, other_bile, bears) = vile_bile_scenario();
-    let mut expected_touchable = vec![bile, other_bile];
+    let mut expected_touchable = vec![
+        ObjectIncarnationRef::of(bile, 0),
+        ObjectIncarnationRef::of(other_bile, 0),
+    ];
     expected_touchable.sort();
+    let mut actual = runner.state().un_actions.touchable.clone();
+    actual.sort();
     assert_eq!(
-        runner.state().un_actions.touchable,
-        expected_touchable,
+        actual, expected_touchable,
         "only the Vile Biles respond to a touch, not {bears:?}"
     );
 
@@ -1857,7 +1873,9 @@ fn a_touch_needs_an_opted_in_player_and_an_object_that_responds() {
         runner.state_mut(),
         P1,
         GameAction::UnAction {
-            action: UnAction::TouchObject { object_id: bile },
+            action: UnAction::TouchObject {
+                target: ObjectIncarnationRef::of(bile, 0),
+            },
         },
     );
     assert!(
@@ -1868,7 +1886,7 @@ fn a_touch_needs_an_opted_in_player_and_an_object_that_responds() {
     un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
     assert_eq!(
         runner.state().un_actions.touchable,
-        vec![bile],
+        vec![ObjectIncarnationRef::of(bile, 0)],
         "the copy in hand has no functioning ability (CR 113.6) and the Bears have none"
     );
     for object_id in [bears, bile_in_hand] {
@@ -1876,7 +1894,9 @@ fn a_touch_needs_an_opted_in_player_and_an_object_that_responds() {
             runner.state_mut(),
             P1,
             GameAction::UnAction {
-                action: UnAction::TouchObject { object_id },
+                action: UnAction::TouchObject {
+                    target: ObjectIncarnationRef::of(object_id, 0),
+                },
             },
         );
         assert!(
@@ -1974,11 +1994,19 @@ fn touch_result(
     actor: engine::types::player::PlayerId,
     object_id: ObjectId,
 ) -> Result<engine::types::game_state::ActionResult, EngineError> {
+    let incarnation = runner
+        .state()
+        .objects
+        .get(&object_id)
+        .map(|o| o.incarnation)
+        .unwrap_or(0);
     apply(
         runner.state_mut(),
         actor,
         GameAction::UnAction {
-            action: UnAction::TouchObject { object_id },
+            action: UnAction::TouchObject {
+                target: ObjectIncarnationRef::of(object_id, incarnation),
+            },
         },
     )
 }
@@ -2776,7 +2804,7 @@ fn derived_un_action_lists_do_not_reveal_another_seats_opt_in() {
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
     assert_eq!(
         runner.state().un_actions.touchable,
-        vec![bile],
+        vec![ObjectIncarnationRef::of(bile, 0)],
         "reach guard: P0's opt-in derives the touchable list"
     );
     assert!(
@@ -2791,7 +2819,10 @@ fn derived_un_action_lists_do_not_reveal_another_seats_opt_in() {
 
     // The opted-in viewer still receives both lists.
     let own = engine::game::filter_state_for_viewer(runner.state(), P0);
-    assert_eq!(own.un_actions.touchable, vec![bile]);
+    assert_eq!(
+        own.un_actions.touchable,
+        vec![ObjectIncarnationRef::of(bile, 0)]
+    );
     assert_eq!(own.un_actions.menu, runner.state().un_actions.menu);
 }
 
@@ -2839,4 +2870,103 @@ fn a_touch_commits_the_batch_it_counted_exactly_once() {
     runner.resolve_top();
     assert_eq!(runner.life(P1), 18);
     assert_settled(&runner, "after the one touch trigger resolves");
+}
+
+#[test]
+fn a_delayed_touch_of_old_incarnation_after_cloudshift_is_rejected_while_fresh_touch_triggers_once()
+{
+    const CLOUDSHIFT: &str =
+        "Exile target creature you control, then return that card to the battlefield under your control.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .id();
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    let old_incarnation = runner.state().objects[&bile].incarnation;
+    let old_target = ObjectIncarnationRef::of(bile, old_incarnation);
+    assert_eq!(runner.state().un_actions.touchable, vec![old_target]);
+
+    // P0 casts Cloudshift targeting Vile Bile.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: cloudshift,
+            card_id: runner.state().objects[&cloudshift].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P0 casts Cloudshift");
+
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bile)),
+            })
+            .expect("target Vile Bile");
+    }
+
+    // Both players pass priority to resolve Cloudshift.
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // Under CR 400.7, the returned creature is a new object with a new incarnation.
+    let new_incarnation = runner.state().objects[&bile].incarnation;
+    assert_ne!(
+        new_incarnation, old_incarnation,
+        "CR 400.7: zone change creates a new incarnation"
+    );
+    let new_target = ObjectIncarnationRef::of(bile, new_incarnation);
+    assert_eq!(
+        runner.state().un_actions.touchable,
+        vec![new_target],
+        "the published touchable list updates to the returned creature's new incarnation"
+    );
+
+    // A delayed touch action carrying the old incarnation (e.g. queued before Cloudshift resolved)
+    // is rejected by the engine.
+    let stale_touch = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::TouchObject { target: old_target },
+        },
+    );
+    assert!(
+        matches!(stale_touch, Err(EngineError::InvalidAction(_))),
+        "delayed touch for the old incarnation is rejected: {stale_touch:?}"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "stale touch does not trigger"
+    );
+    assert_eq!(runner.life(P1), 20);
+
+    // A fresh touch targeting the new incarnation triggers once.
+    touch(&mut runner, P1, bile);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "a fresh touch on the returned creature triggers once"
+    );
+    runner.resolve_top();
+    assert_eq!(runner.life(P1), 18, "P1 loses 2 life from the fresh touch");
+
+    // Same-snapshot repeats on the new incarnation continue to work.
+    touch(&mut runner, P1, bile);
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.resolve_top();
+    assert_eq!(
+        runner.life(P1),
+        16,
+        "repeated touch on current incarnation works"
+    );
 }

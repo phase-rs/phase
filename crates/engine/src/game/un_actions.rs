@@ -15,12 +15,12 @@
 //!   return ..." clause (CR 603.12 reflexive trigger shape) puts the return on
 //!   the stack through the ordinary trigger pipeline.
 
-use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
+use crate::game::game_object::{GameObject, ObjectIdentityBindingExt, ObjectIncarnationRefExt};
 use crate::game::triggers::{PendingActivationTriggerCollection, PendingTriggerContext};
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
-use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
+use crate::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::un_actions::{
@@ -404,17 +404,19 @@ pub fn refresh_menu(state: &mut GameState) {
     let touchable = if state.un_actions.enabled_players.is_empty() {
         Vec::new()
     } else {
-        let mut ids: Vec<ObjectId> = super::targeting::zone_object_ids(state, Zone::Battlefield)
-            .into_iter()
-            .filter(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(|obj| has_functioning_touch_ability(state, obj))
-            })
-            .collect();
-        ids.sort();
-        ids
+        let mut refs: Vec<ObjectIncarnationRef> =
+            super::targeting::zone_object_ids(state, Zone::Battlefield)
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .filter(|obj| has_functioning_touch_ability(state, obj))
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect();
+        refs.sort();
+        refs
     };
     if state.un_actions.touchable != touchable {
         state.un_actions.touchable = touchable;
@@ -479,7 +481,7 @@ pub fn apply_un_action(
             record_tell(state, actor, &tell);
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
-        UnAction::TouchObject { object_id } => touch_object(state, actor, object_id),
+        UnAction::TouchObject { target } => touch_object(state, actor, target),
         UnAction::SayGotcha { source_id, returns } => {
             // CR 102.1, CR 800.4: an eliminated player has left the game and
             // cannot take game actions.
@@ -547,7 +549,7 @@ fn settle_triggers_at_priority(
     Ok(settled)
 }
 
-/// `actor` touched `object_id` (the client reports the player's cursor entering
+/// `actor` touched `target` (the client reports the player's cursor entering
 /// the card). The touch is an event like any other: abilities that trigger on it
 /// (`TriggerMode::Touched`) trigger the moment it happens (CR 603.2). At a
 /// priority boundary they go on the stack at once through the ordinary trigger
@@ -556,7 +558,7 @@ fn settle_triggers_at_priority(
 fn touch_object(
     state: &mut GameState,
     actor: PlayerId,
-    object_id: ObjectId,
+    target: ObjectIncarnationRef,
 ) -> Result<ActionResult, EngineError> {
     // CR 102.1, CR 800.4: an eliminated player has left the game.
     if !super::players::is_alive(state, actor) {
@@ -573,14 +575,22 @@ fn touch_object(
     if state.game_end.is_some() {
         return Err(EngineError::InvalidAction("The game is over".to_string()));
     }
-    if !responds_to_touch(state, object_id) {
+    // CR 400.7: an object that changed zones (even one blinked straight back)
+    // is a new object with no relation to the one the touch targeted. A delayed
+    // report for an earlier incarnation must not trigger the returned permanent.
+    if !target.is_current(state) {
+        return Err(EngineError::InvalidAction(
+            "That object is no longer on the battlefield".to_string(),
+        ));
+    }
+    if !responds_to_touch(state, target.object_id) {
         return Err(EngineError::InvalidAction(
             "Nothing happens when that object is touched".to_string(),
         ));
     }
     let mut events = vec![GameEvent::ObjectTouched {
         player: actor,
-        object_id,
+        object_id: target.object_id,
     }];
     // CR 603.2d: collect the touch's whole batch, with every additional time an
     // ability triggers (Roaming Throne), on a staged copy of the game. The cap

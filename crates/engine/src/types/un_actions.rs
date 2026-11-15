@@ -6,7 +6,7 @@ pub use phase_ast::types::un_actions::*;
 
 use serde::{Deserialize, Serialize};
 
-use super::identifiers::{ObjectId, ObjectIdentityBinding};
+use super::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use super::player::PlayerId;
 
 #[inline]
@@ -56,7 +56,7 @@ pub struct UnActionState {
     /// `TriggerMode::Touched` ability, derived by `game::un_actions::refresh_menu`
     /// after every action. The client reports a touch only for these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub touchable: Vec<ObjectId>,
+    pub touchable: Vec<ObjectIncarnationRef>,
     /// Next unique identifier minted for a [`GotchaOffer`].
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_offer_id: u64,
@@ -103,7 +103,7 @@ pub enum UnAction {
         returns: ObjectId,
     },
     /// Touch an object (the player's cursor entered the card).
-    TouchObject { object_id: ObjectId },
+    TouchObject { target: ObjectIncarnationRef },
 }
 
 #[cfg(test)]
