@@ -26714,6 +26714,7 @@ fn trigger_coalition_relic_charge_counter_drain() {
             counter_type,
             count,
             target,
+            scope: crate::types::ability::EffectScope::Single,
         } => {
             assert_eq!(
                 counter_type,
@@ -27974,14 +27975,244 @@ fn trigger_opponent_dealt_noncombat_damage() {
 
 #[test]
 fn trigger_time_counter_removed_exile() {
-    // CR 122.1: "a time counter is removed from ~ while it's exiled"
+    // CR 122.1: "a time counter is removed from this card while it's exiled"
+    // carries its printed kind as a typed filter.
     let def = parse_trigger_line(
-            "Whenever a time counter is removed from ~ while it's exiled, you may cast a copy of ~ without paying its mana cost.",
-            "Rift Bolt",
-        );
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
     assert_eq!(def.mode, TriggerMode::CounterRemoved);
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+    assert_eq!(
+        def.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: None,
+        })
+    );
+}
+
+/// CR 122.1 + CR 702.62a: the passive "a time counter is removed from" head
+/// lowers the printed kind to a typed `counter_filter`, so the suspend cards'
+/// trigger fires only for removals of time counters, from exile.
+#[test]
+fn trigger_passive_time_counter_removed_keeps_typed_filter() {
+    for (name, text) in [
+        (
+            "Aeon Chronicler",
+            "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        ),
+        (
+            "Benalish Commander",
+            "Whenever a time counter is removed from this card while it's exiled, create a 1/1 white Soldier creature token.",
+        ),
+        (
+            "Dinosaurs on a Spaceship",
+            "Whenever a time counter is removed from this card while it's exiled, create a 2/2 red and white Dinosaur creature token with flying and haste.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::CounterRemoved, "{name}");
+        assert_eq!(
+            def.counter_filter,
+            Some(crate::types::ability::CounterTriggerFilter {
+                counter_type: CounterType::Time,
+                threshold: None,
+            }),
+            "{name}"
+        );
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(def.trigger_zones, vec![Zone::Exile], "{name}");
+    }
+}
+
+/// CR 122.1 + CR 603.2c: the singular "a [kind] counter is removed from
+/// [subject]" head lowers to a live `CounterRemoved` trigger whose printed
+/// kind is a typed `counter_filter` (a shield removal never fires a +1/+1
+/// trigger). It fires once per removal event; a single event carrying N
+/// counters of the printed kind therefore under-fires (the 2009-10-01
+/// Protean Hydra ruling wants N), the same as the time-counter producers;
+/// tracked in #10901. The untyped form stays unparsed, and a multi-word kind
+/// yields no counter-removal trigger.
+#[test]
+fn trigger_passive_typed_counter_removed_lowers_to_typed_filter() {
+    // Positive reach guard: the time-kind passive head reaches the same arm.
+    let chronicler = parse_trigger_line(
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
+    assert_eq!(chronicler.mode, TriggerMode::CounterRemoved);
+
+    // Protean Hydra, verbatim: a live self-bound typed +1/+1 trigger whose
+    // body sets up a delayed trigger at the next end step.
+    let hydra = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        "Protean Hydra",
+    );
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
+    assert_eq!(hydra.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hydra.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Plus1Plus1,
+            threshold: None,
+        })
+    );
+    assert_eq!(hydra.trigger_zones, vec![Zone::Battlefield]);
+    assert!(
+        matches!(
+            hydra.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: crate::types::phase::Phase::End
+                },
+                ..
+            })
+        ),
+        "{:?}",
+        hydra.execute
+    );
+
+    // Building-block rows across the kind, subject and voice axes. No printed
+    // card has a passive shield-kind removal trigger, a non-self subject on
+    // this head, or an active-voice typed "you remove a +1/+1 counter"
+    // trigger; these test the arms, not a card.
+    let plus1 = Some(crate::types::ability::CounterTriggerFilter {
+        counter_type: CounterType::Plus1Plus1,
+        threshold: None,
+    });
+    let shield = parse_trigger_line(
+        "Whenever a shield counter is removed from ~, draw a card.",
+        "Test Removal Card",
+    );
+    assert_eq!(shield.mode, TriggerMode::CounterRemoved);
+    assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        shield.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Shield,
+            threshold: None,
+        })
+    );
+
+    let subject = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from a creature you control, draw a card.",
+        "Test Removal Card",
+    );
+    assert_eq!(subject.mode, TriggerMode::CounterRemoved);
+    assert_eq!(subject.counter_filter, plus1);
+    let (expected_subject, _) =
+        parse_single_subject("a creature you control", &mut ParseContext::default());
+    assert_eq!(subject.valid_card, Some(expected_subject));
+    assert_ne!(subject.valid_card, Some(TargetFilter::SelfRef));
+
+    let active = parse_trigger_line(
+        "Whenever you remove a +1/+1 counter from ~, draw a card.",
+        "Test Removal Card",
+    );
+    assert_eq!(active.mode, TriggerMode::CounterRemoved);
+    assert_eq!(active.counter_filter, plus1);
+    assert_eq!(active.valid_card, Some(TargetFilter::SelfRef));
+
+    // An untyped removal and a multi-word kind yield no counter-removal
+    // trigger.
+    for text in [
+        "Whenever a counter is removed from ~, draw a card.",
+        "Whenever a red creature counter is removed from ~, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Negative Card");
+        assert_ne!(def.mode, TriggerMode::CounterRemoved, "{text}");
+    }
+}
+
+/// CR 603.2c: the batched "one or more counters are removed" form fires once
+/// per event (Chandra, Fire Artisan ruling 2019-05-03) and the "last counter"
+/// threshold form fires once when the last counter goes. Neither is modelled
+/// by the singular passive arm: each of the four printed clauses lowers to
+/// exactly one honest `TriggerMode::Unknown` definition (never fires) with
+/// its printed body. The pin is exact, so a changed mode, filter, subject,
+/// body or a missing definition fails.
+#[test]
+fn trigger_batched_and_threshold_counter_removal_forms_are_unchanged() {
+    // Reach guards: the singular passive arm is live for the time kind and for
+    // Protean Hydra's +1/+1 kind.
+    let chronicler = parse_trigger_line(
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
+    assert_eq!(chronicler.mode, TriggerMode::CounterRemoved);
+    let hydra = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        "Protean Hydra",
+    );
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
+
+    // (card name, printed trigger line, expected Unknown payload, body-effect check)
+    type BatchedRow = (
+        &'static str,
+        &'static str,
+        &'static str,
+        fn(&Effect) -> bool,
+    );
+    let rows: [BatchedRow; 4] = [
+        (
+            "Chandra, Fire Artisan",
+            "Whenever one or more loyalty counters are removed from Chandra, she deals that much damage to target opponent or planeswalker.",
+            "Whenever one or more loyalty counters are removed from ~",
+            |e| matches!(e, Effect::DealDamage { .. }),
+        ),
+        (
+            "Cloudsculpt Armorer",
+            "Whenever one or more counters are removed from a permanent you control, seek a nonland card.",
+            "Whenever one or more counters are removed from a permanent you control",
+            |e| matches!(e, Effect::Seek { .. }),
+        ),
+        (
+            "Regenerations Restored",
+            "Whenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one.",
+            "Whenever one or more time counters are removed from ~",
+            |e| matches!(e, Effect::Scry { .. }),
+        ),
+        (
+            "Orcish Mine",
+            "When the last ore counter is removed from this Aura, destroy enchanted land and this Aura deals 2 damage to that land's controller.",
+            "When the last ore counter is removed from ~",
+            |e| matches!(e, Effect::Destroy { .. }),
+        ),
+    ];
+    for (name, text, payload, body) in rows {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}: {defs:?}");
+        let def = &defs[0];
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unknown(payload.to_string()),
+            "{name}"
+        );
+        assert!(def.counter_filter.is_none(), "{name}");
+        assert!(def.valid_card.is_none(), "{name}");
+        assert!(!def.batched, "{name}");
+        let effect = def
+            .execute
+            .as_deref()
+            .map(|a| &*a.effect)
+            .unwrap_or_else(|| panic!("{name}: no execute"));
+        assert!(body(effect), "{name}: {effect:?}");
+    }
+
+    // Regenerations Restored's body continues into the life gain.
+    let restored = parse_trigger_line(rows[2].1, rows[2].0);
+    let gain = restored
+        .execute
+        .as_deref()
+        .and_then(|a| a.sub_ability.as_deref())
+        .map(|a| &*a.effect);
+    assert!(
+        matches!(gain, Some(Effect::GainLife { .. })),
+        "{:?}",
+        restored.execute
+    );
 }
 
 #[test]
@@ -28894,6 +29125,51 @@ fn trigger_active_milled_an_opponent_scopes_controller() {
         ),
         other => panic!("expected Typed opponent-scoped filter, got {other:?}"),
     }
+}
+
+#[test]
+fn trigger_active_milled_intervening_if_it_binds_source_not_milled_card() {
+    // Issue #8003 — Infesting Radroach, verbatim Oracle. CR 603.4 + CR 608.2k:
+    // "it" names the intervening-if's subject (this creature, in the graveyard),
+    // not the milled card the `Milled` event is about. `TriggeringSource` would
+    // resolve through `extract_source_from_event` to the milled card.
+    let oracle = "Flying\n\
+            This creature can't block.\n\
+            Whenever this creature deals combat damage to a player, they get that many rad counters.\n\
+            Whenever an opponent mills a nonland card, if this creature is in your graveyard, you may return it to your hand.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Infesting Radroach",
+        &[],
+        &["Creature".to_string()],
+        &["Insect".to_string(), "Mutant".to_string()],
+    );
+    let milled = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Milled)
+        .expect("the mill trigger must parse to TriggerMode::Milled");
+    assert_eq!(
+        milled.condition,
+        Some(TriggerCondition::SourceInZone {
+            zone: Zone::Graveyard
+        })
+    );
+    assert!(milled.trigger_zones.contains(&Zone::Graveyard));
+    let execute = milled.execute.as_ref().expect("mill trigger has a body");
+    assert!(execute.optional, "\"you may\" makes the return optional");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+                ..
+            }
+        ),
+        "\"return it to your hand\" must bounce the source, got {:?}",
+        execute.effect
+    );
 }
 
 #[test]
@@ -43193,6 +43469,7 @@ fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() 
                 counter_type: Some(counter_type),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             "{name}"
         );
@@ -43241,6 +43518,7 @@ fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() 
                 counter_type: Some(counter_type.clone()),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             "{name}"
         );

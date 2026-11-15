@@ -123,6 +123,12 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Complex Automaton: ObjectCount{Permanent} intervening-if read × self-Bounce
     // whose moved census (permanent) overlaps the read filter.
     "complex automaton",
+    // Fraying Line ("Otherwise, exile this artifact and each creature without a rope
+    // counter on it, then remove all rope counters from all creatures"): the first
+    // copy's mass RemoveCounter strips every rope counter, so the second copy's
+    // "each creature without a rope counter" census then matches every creature —
+    // which creatures are exiled depends on order (CR 603.3b + CR 608.2h).
+    "fraying line",
 ];
 
 /// §7 documented-conservative over-prompts: cards whose sweep decision-diff is a
@@ -1226,6 +1232,7 @@ fn ordering_parity_sweep() {
         let expected_cat1: BTreeSet<String> = [
             "complex automaton",
             "docent of perfection",
+            "fraying line",
             "marauding raptor",
             "ouroboroid",
             "promise of tomorrow",
