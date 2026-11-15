@@ -36,24 +36,17 @@ impl PriorityCompanionAnnouncement {
     }
 }
 
-/// Permanent card types for companion condition evaluation.
-const PERMANENT_TYPES: [CoreType; 5] = [
-    CoreType::Artifact,
-    CoreType::Creature,
-    CoreType::Enchantment,
-    CoreType::Planeswalker,
-    CoreType::Land,
-];
-
 fn is_land(face: &CardFace) -> bool {
     face.card_type.core_types.contains(&CoreType::Land)
 }
 
+/// CR 110.4a: a permanent card is an artifact, battle, creature, enchantment,
+/// land, or planeswalker card.
 fn is_permanent(face: &CardFace) -> bool {
     face.card_type
         .core_types
         .iter()
-        .any(|ct| PERMANENT_TYPES.contains(ct))
+        .any(|ct| ct.is_permanent_type())
 }
 
 fn is_creature(face: &CardFace) -> bool {

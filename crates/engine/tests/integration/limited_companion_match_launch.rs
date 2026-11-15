@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use engine::ai_support::legal_actions;
 use engine::database::CardDatabase;
 use engine::game::companion::can_activate_companion;
-use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
+use engine::game::deck_loading::{
+    load_deck_into_state, resolve_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
+    PlayerDeckPayload,
+};
 use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
 use engine::game::match_flow::{handle_choose_play_draw, handle_submit_sideboard};
 use engine::game::scenario::{GameRunner, GameScenario};
@@ -18,7 +21,7 @@ use engine::types::game_state::{
     WaitingFor,
 };
 use engine::types::keywords::{CompanionCondition, Keyword};
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::match_config::{DeckCardCount, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -2187,7 +2190,6 @@ fn commander_cube_pregame_offers_yorion_at_the_session_configured_minimum() {
 /// non-repeating hybrid symbols, and a deck of basic lands (CR 305.6 intrinsic mana ability).
 #[test]
 fn limited_admission_checks_jegantha_hybrid_symbols_and_zirda_land_cards() {
-    use engine::types::mana::ManaCostShard;
     let companion = |name: &str, condition| DeckEntry {
         card: CardFace {
             name: name.to_string(),
@@ -2298,9 +2300,6 @@ fn limited_admission_checks_jegantha_hybrid_symbols_and_zirda_land_cards() {
 /// reveal of a two-player Limited game must agree.
 #[test]
 fn limited_jegantha_reads_every_split_half_at_admission_and_reveal() {
-    use engine::game::deck_loading::{resolve_deck_list, DeckList, PlayerDeckList};
-    use engine::types::mana::ManaCostShard;
-
     const JEGANTHA: &str = "Jegantha, the Wellspring";
     let face =
         |name: &str, shard: Option<ManaCostShard>, generic: u32, types: &[CoreType]| CardFace {
@@ -2399,5 +2398,144 @@ fn limited_jegantha_reads_every_split_half_at_admission_and_reveal() {
             legal,
             "{split_card}: offered {offered:?}"
         );
+    }
+}
+
+/// CR 110.4a: "permanent card" means an artifact, battle, creature, enchantment, land, or
+/// planeswalker card, so a battle counts for the permanent-card companion conditions. Invasion
+/// of Zendikar ({3}{G}, Battle -- Siege) has no activated ability and mana value 4, so it fails
+/// both Zirda, the Dawnwaker ("each permanent card in your starting deck has an activated
+/// ability") and Lurrus of the Dream-Den ("each permanent card in your starting deck has mana
+/// value 2 or less"). Explosive Vegetation, a {3}{G} sorcery with the same effect, is the legal
+/// control: it is not a permanent card, so neither condition reads it. Both the public deck
+/// submission and the pregame reveal of a two-player Limited game must agree.
+#[test]
+fn limited_companion_permanent_card_conditions_count_battles() {
+    const ZIRDA: &str = "Zirda, the Dawnwaker";
+    const LURRUS: &str = "Lurrus of the Dream-Den";
+    let face =
+        |name: &str, shards: Vec<ManaCostShard>, generic: u32, types: &[CoreType]| CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::Cost { shards, generic },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: types.to_vec(),
+                subtypes: vec![],
+            },
+            ..Default::default()
+        };
+    let mut zirda = face(
+        ZIRDA,
+        vec![ManaCostShard::RedWhite, ManaCostShard::RedWhite],
+        1,
+        &[CoreType::Creature],
+    );
+    zirda.keywords = vec![Keyword::Companion(
+        CompanionCondition::PermanentsHaveActivatedAbilities,
+    )];
+    let mut lurrus = face(
+        LURRUS,
+        vec![ManaCostShard::WhiteBlack, ManaCostShard::WhiteBlack],
+        1,
+        &[CoreType::Creature],
+    );
+    lurrus.keywords = vec![Keyword::Companion(
+        CompanionCondition::MaxPermanentManaValue(2),
+    )];
+    let mut invasion = face(
+        "Invasion of Zendikar",
+        vec![ManaCostShard::Green],
+        3,
+        &[CoreType::Battle],
+    );
+    invasion.card_type.subtypes = vec!["Siege".to_string()];
+    let vegetation = face(
+        "Explosive Vegetation",
+        vec![ManaCostShard::Green],
+        3,
+        &[CoreType::Sorcery],
+    );
+    // CR 305.6: a basic Mountain has an intrinsic mana ability, so it satisfies Zirda.
+    let mut mountain = face("Mountain", vec![], 0, &[CoreType::Land]);
+    mountain.mana_cost = ManaCost::NoCost;
+    mountain.card_type.subtypes = vec!["Mountain".to_string()];
+
+    let export: serde_json::Map<String, serde_json::Value> =
+        [&zirda, &lurrus, &invasion, &vegetation, &mountain]
+            .into_iter()
+            .map(|card| {
+                (
+                    card.name.to_lowercase(),
+                    serde_json::to_value(card).expect("CardFace serializes"),
+                )
+            })
+            .collect();
+    let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("synthetic export parses");
+
+    for companion in [ZIRDA, LURRUS] {
+        for (odd_card, legal) in [
+            ("Invasion of Zendikar", false),
+            ("Explosive Vegetation", true),
+        ] {
+            let mut main_deck = vec![odd_card.to_string()];
+            main_deck.extend(vec!["Mountain".to_string(); 39]);
+
+            // Public deck submission.
+            let request: DeckCompatibilityRequest = serde_json::from_value(serde_json::json!({
+                "main_deck": main_deck,
+                "companion": [companion],
+                "selected_format": "Limited",
+            }))
+            .expect("request deserializes");
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert!(result.unknown_cards.is_empty(), "every card resolves");
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(legal),
+                "{companion} with {odd_card}: {:?}",
+                result.selected_format_reasons
+            );
+            assert_eq!(
+                result
+                    .selected_format_reasons
+                    .iter()
+                    .any(|reason| reason.contains("not a legal companion")),
+                !legal,
+                "{companion} with {odd_card}: {:?}",
+                result.selected_format_reasons
+            );
+
+            // Pregame reveal of the same deck through the production loader.
+            let list = DeckList {
+                player: PlayerDeckList {
+                    main_deck,
+                    companion: vec![companion.to_string()],
+                    ..Default::default()
+                },
+                opponent: PlayerDeckList {
+                    main_deck: vec!["Mountain".to_string(); 40],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let payload = resolve_deck_list(&db, &list);
+            let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+            load_deck_into_state(&mut state, &payload);
+            let start = start_game_with_starting_player(&mut state, P0);
+            let offered: Vec<String> = match start.waiting_for {
+                WaitingFor::CompanionReveal {
+                    eligible_companions,
+                    ..
+                } => eligible_companions.into_iter().map(|c| c.name).collect(),
+                WaitingFor::MulliganDecision { .. } => Vec::new(),
+                other => panic!("unexpected waiting state: {other:?}"),
+            };
+            assert_eq!(
+                offered.iter().any(|name| name == companion),
+                legal,
+                "{companion} with {odd_card}: offered {offered:?}"
+            );
+        }
     }
 }
