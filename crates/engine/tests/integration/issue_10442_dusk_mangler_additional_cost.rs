@@ -13,6 +13,7 @@ use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 /// Verbatim Oracle text (Scryfall, 2026-11-15).
 const DUSK_MANGLER_ORACLE: &str = "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.\nWhen this creature enters, each opponent sacrifices a creature of their choice, discards a card, and loses 4 life.";
@@ -177,4 +178,121 @@ fn out_of_range_index_is_rejected_without_mutating_the_prompt() {
     runner
         .act(GameAction::DecideOptionalCost { index: 2 })
         .expect("the prompt must remain answerable after a rejected index");
+}
+
+/// Adds a creature the caster could sacrifice, so every one of Dusk Mangler's
+/// three alternatives is payable and the prompt is a real three-way election.
+fn add_sacrifice_fodder(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id()
+}
+
+/// Asserts the cast committed: Dusk Mangler is on the stack, priority is open,
+/// and all seven Swamps paid its {5}{B}{B}.
+fn assert_cast_committed(runner: &engine::game::scenario::GameRunner, mangler: ObjectId) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must complete, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&mangler].zone, Zone::Stack);
+    let swamps: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].name == "Swamp")
+        .collect();
+    assert_eq!(swamps.len(), 7, "presence guard: the seven Swamps");
+    assert!(
+        swamps.iter().all(|id| runner.state().objects[id].tapped),
+        "the printed {{5}}{{B}}{{B}} must be paid in full"
+    );
+}
+
+/// CR 601.2b + CR 601.2h: index 0 sacrifices a creature and pays nothing else.
+#[test]
+fn sacrifice_option_is_the_first_index() {
+    let (mut scenario, mangler, fodder) = dusk_mangler_board(8);
+    let bear = add_sacrifice_fodder(&mut scenario);
+    let mut runner = scenario.build();
+    cast_mangler(&mut runner, mangler);
+
+    runner
+        .act(GameAction::DecideOptionalCost { index: 0 })
+        .expect("sacrificing a creature must be a selectable option");
+    if let WaitingFor::PayCost { kind, choices, .. } = &runner.state().waiting_for {
+        assert!(
+            matches!(kind, PayCostKind::Sacrifice),
+            "index 0 must ask for a sacrifice, got {kind:?}"
+        );
+        assert_eq!(choices, &vec![bear], "only the creature can be sacrificed");
+        runner
+            .act(GameAction::SelectCards { cards: vec![bear] })
+            .expect("sacrificing the creature must pay the cost");
+    }
+
+    assert_cast_committed(&runner, mangler);
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Graveyard,
+        "the sacrificed creature is the cost paid"
+    );
+    assert_eq!(
+        runner.state().objects[&fodder].zone,
+        Zone::Hand,
+        "index 0 discards nothing"
+    );
+    assert_eq!(runner.state().players[0].life, 8, "index 0 pays no life");
+}
+
+/// CR 601.2b + CR 601.2h: index 1 discards a card through the prompt — the
+/// option the two-way parse used to drop — and leaves the creature and life
+/// untouched.
+#[test]
+fn discard_option_is_the_second_index() {
+    let (mut scenario, mangler, fodder) = dusk_mangler_board(8);
+    let bear = add_sacrifice_fodder(&mut scenario);
+    let keeper = scenario.add_card_to_hand(P0, "Second Hand Card");
+    let mut runner = scenario.build();
+    cast_mangler(&mut runner, mangler);
+
+    runner
+        .act(GameAction::DecideOptionalCost { index: 1 })
+        .expect("discarding a card must be a selectable option");
+    let WaitingFor::PayCost { kind, choices, .. } = &runner.state().waiting_for else {
+        panic!(
+            "index 1 must ask which card to discard, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(kind, PayCostKind::Discard),
+        "index 1 must ask for a discard, got {kind:?}"
+    );
+    assert!(
+        choices.contains(&fodder) && choices.contains(&keeper),
+        "both other cards in hand must be discardable, got {choices:?}"
+    );
+    assert!(
+        !choices.contains(&mangler),
+        "the spell being cast is not in hand to discard"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("discarding the chosen card must pay the cost");
+
+    assert_cast_committed(&runner, mangler);
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&keeper].zone,
+        Zone::Hand,
+        "only the chosen card is discarded"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "index 1 sacrifices nothing"
+    );
+    assert_eq!(runner.state().players[0].life, 8, "index 1 pays no life");
 }
