@@ -241,17 +241,15 @@ function cardDescriptors(
   //
   // Two situations reach it. No printing was selected: the card is absent from
   // `scryfall-printings.json`, or the chain found no winner. Or a printing was
-  // selected and stores no image — `scryfall-printings.json` holds 696 such
-  // printings, null on `art_crop` as well as `normal` across every face, and
-  // 211 cards have no renderable printing at all. `faceImages` skips every rung
-  // for those, so the older `printings.length === 0` gate left them
-  // contributing nothing at all while the renderer, whose `overrideUrl` is null
-  // for the same reason, falls through to canonical art — 211 cards needing the
-  // network in an offline-play feature. All 211 do carry an image in
-  // `scryfall-data.json`, which is what the canonical form serves. Three more
-  // cards own image-less and renderable printings both, and fall back only when
-  // the chain picks an image-less one — which, measured under a `newest` chain,
-  // is all three of them.
+  // selected and stores no image, null on `art_crop` as well as `normal` across
+  // every face. `faceImages` skips every rung for those, so the older
+  // `printings.length === 0` gate left them contributing nothing at all while
+  // the renderer, whose `overrideUrl` is null for the same reason, falls
+  // through to canonical art — a network fetch in an offline-play feature.
+  // `gen-scryfall-printings.sh` wrote that shape for split, adventure, flip and
+  // prepare printings whose faces carry no `image_uris`, until it fell back to
+  // the card's top-level `image_uris`; the branch stays as the guard for a
+  // printing served without images.
   //
   // A card with SEVERAL selected printings, only some of them image-less, still
   // emits the exact form alone. Its image-less render context falls back to

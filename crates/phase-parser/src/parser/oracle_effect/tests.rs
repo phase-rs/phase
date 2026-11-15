@@ -13578,6 +13578,76 @@ fn class_wide_graveyard_cast_grant_excludes_resolution_casts_and_riders() {
     }
 }
 
+/// CR 614.1a + CR 611.2a: Forgotten Cellar's "…, and if a card would be put into
+/// your graveyard from anywhere this turn, exile it instead" is its own
+/// replacement-creating instruction beside the grant: the chunker cuts it off
+/// after its "and " with its whole "if …, …" antecedent.
+#[test]
+fn and_joined_windowed_graveyard_redirect_is_its_own_chunk() {
+    let chunks = super::sequence::split_clause_sequence(
+        "you may cast spells from your graveyard this turn, and if a card would be put \
+         into your graveyard from anywhere this turn, exile it instead.",
+    );
+    let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "you may cast spells from your graveyard this turn",
+            "if a card would be put into your graveyard from anywhere this turn, exile it instead",
+        ]
+    );
+}
+
+/// CR 601.3 + CR 614.1a: Forgotten Cellar's unlock trigger grants the casts and
+/// installs the graveyard redirect until end of turn. Its "may" is the later
+/// cast, so neither the trigger nor the resolving ability is optional: the
+/// redirect applies whatever its controller casts.
+#[test]
+fn forgotten_cellar_unlock_trigger_grants_casts_and_installs_the_redirect() {
+    let parsed = parse_oracle_text(
+        "When you unlock this door, you may cast spells from your graveyard this turn, and \
+         if a card would be put into your graveyard from anywhere this turn, exile it instead.",
+        "Forgotten Cellar",
+        &[],
+        &["Enchantment".to_string()],
+        &["Room".to_string()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("one trigger, got {:?}", parsed.triggers);
+    };
+    assert!(!trigger.optional);
+    let execute = trigger.execute.as_ref().expect("execute");
+    assert!(!execute.optional);
+    let (permission, window) = graveyard_grant_parts(&execute.effect)
+        .unwrap_or_else(|| panic!("a graveyard cast permission grant, got {execute:?}"));
+    assert_eq!(*window, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            pool: GraveyardPermissionPool::OwnGraveyard,
+            graveyard_destination_replacement: None,
+            ..
+        }
+    ));
+    let redirect = execute.sub_ability.as_ref().expect("the redirect clause");
+    let Effect::AddTargetReplacement {
+        replacement,
+        target: TargetFilter::None,
+    } = redirect.effect.as_ref()
+    else {
+        panic!("a resolution-installed replacement, got {redirect:?}");
+    };
+    assert_eq!(replacement.destination_zone, Some(Zone::Graveyard));
+    assert!(replacement.expiry.is_some(), "\"this turn\" ends it");
+    let Some(TargetFilter::Typed(card)) = replacement.valid_card.as_ref() else {
+        panic!("typed card filter, got {:?}", replacement.valid_card);
+    };
+    assert!(card.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You
+    }));
+    assert!(redirect.sub_ability.is_none());
+}
+
 /// B7-negative — with a typed-target leg as the NEAREST publisher, the
 /// singular recall keeps the chain tracked set (nearest-first scan does not
 /// see the earlier self-exile).
@@ -58876,6 +58946,63 @@ fn cast_this_way_enters_with_counter_accepts_stacked_type_anaphor() {
         "if you cast a spell this way, that card enters with a finality counter on it."
     )
     .is_none());
+}
+
+/// CR 607.1c + CR 614.1d (C5p): the enters-tapped rider shares the counter
+/// rider's gate and subject grammar (one authority): every gate ("if you cast a
+/// spell this way", "if you cast it this way", "if you do", none) and every
+/// subject (stacked "that" type anaphors, `~`, "it", and the raw self-reference
+/// forms `swallow_check` passes) is accepted, both verb templates parse, and the
+/// remainder is returned for the caller's completeness check. The counter
+/// recognizer is unchanged on the same subjects.
+#[test]
+fn cast_this_way_rider_subjects_tapped() {
+    for gate in [
+        "if you cast a spell this way, ",
+        "if you cast it this way, ",
+        "if you do, ",
+        "",
+    ] {
+        for subject in [
+            "that artifact",
+            "that artifact creature",
+            "that permanent",
+            "~",
+            "it",
+            "this creature",
+            "this permanent",
+            "this artifact",
+        ] {
+            for verb in ["enters tapped", "enters the battlefield tapped"] {
+                let text = format!("{gate}{subject} {verb}.");
+                assert_eq!(
+                    parse_cast_this_way_enters_tapped(&text),
+                    Some("."),
+                    "{text:?}"
+                );
+            }
+            let counter = format!("{gate}{subject} enters with a +1/+1 counter on it.");
+            assert!(
+                parse_cast_this_way_enters_with_counter(&counter).is_some(),
+                "{counter:?}"
+            );
+        }
+    }
+    assert_eq!(
+        parse_cast_this_way_enters_tapped("if you do, it enters tapped and attacking."),
+        Some(" and attacking."),
+        "the remainder is the caller's to refuse"
+    );
+    for refused in [
+        "if you cast a spell this way, that card enters tapped.",
+        "if you cast a spell this way, that artifact enters untapped.",
+        "if you cast a spell this way, that artifact enters with a finality counter on it.",
+    ] {
+        assert!(
+            parse_cast_this_way_enters_tapped(refused).is_none(),
+            "{refused:?}"
+        );
+    }
 }
 
 /// Whole-card production-path parse: Osteomancer Adept's residual rider
