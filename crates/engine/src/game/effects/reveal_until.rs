@@ -228,6 +228,7 @@ fn resolve_reveal(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
+        occurrences: state.disclosed_occurrences(&revealed_in_order),
         card_ids: revealed_in_order.clone(),
         card_names,
     });
@@ -248,28 +249,10 @@ fn resolve_reveal(
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
     if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
-        // CR 701.20a: a card remains revealed for as long as necessary to complete
-        // the parts of the effect that card is relevant to. When RevealOnly has no
-        // subsequent instruction (Mind Funeral's partial resolution where the graveyard
-        // delivery is unsupported), its reveal lifetime concludes when the instruction
-        // completes. Retire the transient reveal so opponent and spectator snapshots
-        // conceal the library occurrences and positions before any additional action.
-        // Downstream placements (Erratic Mutation, Charbelcher) keep reveals visible
-        // across their execution and prompts.
-        let has_downstream_consumer = ability
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| !matches!(&sub.effect, Effect::Unimplemented { .. }));
-        if !has_downstream_consumer {
-            state
-                .resolve_and_apply_information(
-                    &revealed_in_order,
-                    ResolvedInformationAudience::Controller(ability.controller),
-                    ResolvedInformationLifetime::UntilActionBoundary,
-                    ResolvedInformationEdit::Hide,
-                )
-                .expect("resolved reveal-only occurrences must be live and distinct");
-        }
+        // CR 701.20a: the cards stay revealed while later parts of the effect
+        // still need them; the transient reveal ends at the resolution's
+        // completion boundary (`stack::finish_resolving_stack_entry`), before
+        // any viewer projection is published.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
@@ -669,6 +652,7 @@ fn resolve_choose_any_number(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
+        occurrences: state.disclosed_occurrences(&revealed),
         card_ids: revealed.clone(),
         card_names,
     });

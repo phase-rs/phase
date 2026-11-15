@@ -169,6 +169,7 @@ pub(crate) fn resolve_offer(
     // CR 702.47a: the card is revealed and stays in hand.
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[card]),
         card_ids: vec![card],
         card_names: vec![card_name],
     });

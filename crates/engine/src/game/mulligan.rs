@@ -460,6 +460,7 @@ fn reveal_hand(state: &GameState, player: PlayerId, events: &mut Vec<GameEvent>)
         .collect();
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: Vec::new(),
         card_ids: Vec::new(),
         card_names,
     });
@@ -1336,7 +1337,7 @@ mod tests {
         assert!(
             matches!(
                 events.first(),
-                Some(GameEvent::CardsRevealed { player, card_ids, card_names })
+                Some(GameEvent::CardsRevealed { player, card_ids, card_names, .. })
                     if *player == PlayerId(0) && card_ids.is_empty() && *card_names == old_names
             ),
             "the reveal comes first, by name only: {events:?}"

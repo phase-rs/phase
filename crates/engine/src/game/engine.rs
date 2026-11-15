@@ -9801,15 +9801,20 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
             _ => None,
         })
         .flatten()
-        .map(|occurrence| occurrence.object_id)
+        .copied()
         .collect::<HashSet<_>>();
 
     for event in events {
-        if let GameEvent::CardsRevealed { card_ids, .. } = event {
-            let unpublished = card_ids
+        // CR 400.7 + CR 701.20a/d: bind the publication to the occurrence the
+        // event disclosed, never to whatever object now holds that storage id.
+        // A card the same action reordered within its library afterwards is a
+        // new object nobody was shown, so it gets no public reveal or identity
+        // fact; the event's names keep the historical record.
+        if let GameEvent::CardsRevealed { occurrences, .. } = event {
+            let unpublished = occurrences
                 .iter()
-                .copied()
-                .filter(|card_id| !controller_reveals.contains(card_id))
+                .filter(|occurrence| !controller_reveals.contains(occurrence))
+                .filter_map(|&occurrence| state.disclosure_survivor(occurrence))
                 .collect::<Vec<_>>();
             state
                 .resolve_and_apply_information(
@@ -17507,6 +17512,7 @@ fn apply_non_priority_pass_action(
                 .unwrap_or_default();
             events.push(crate::types::events::GameEvent::CardsRevealed {
                 player: p,
+                occurrences: state.disclosed_occurrences(&[source]),
                 card_ids: vec![source],
                 card_names: vec![card_name],
             });

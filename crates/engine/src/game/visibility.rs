@@ -3664,10 +3664,13 @@ pub fn filter_events_for_viewer(
             // CR 401.2: a revealed card that now sits in a library at a hidden
             // position keeps its name (reveal order, no position) but loses the
             // object id that would locate it in the projected library order.
+            // The disclosed occurrences are engine bookkeeping for the
+            // knowledge finalizer; no viewer receives them.
             GameEvent::CardsRevealed {
                 player,
                 card_ids,
                 card_names,
+                occurrences: _,
             } => GameEvent::CardsRevealed {
                 player: *player,
                 card_ids: card_ids
@@ -3676,6 +3679,7 @@ pub fn filter_events_for_viewer(
                     .filter(|id| !hidden_library.contains(id))
                     .collect(),
                 card_names: card_names.clone(),
+                occurrences: Vec::new(),
             },
             GameEvent::EffectResolved { .. } => {
                 let mut event = event.clone();
@@ -15290,6 +15294,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![bottomed, still_revealed, in_hand],
             card_names: names.clone(),
+            occurrences: state.disclosed_occurrences(&[bottomed, still_revealed, in_hand]),
         };
         for viewer in [PlayerId(0), PlayerId(1), PlayerId(99)] {
             assert_eq!(
@@ -15298,6 +15303,8 @@ mod tests {
                     player: PlayerId(0),
                     card_ids: vec![still_revealed, in_hand],
                     card_names: names.clone(),
+                    // The disclosed occurrences are never sent to a viewer.
+                    occurrences: Vec::new(),
                 }],
                 "viewer {viewer:?}"
             );

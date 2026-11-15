@@ -41950,6 +41950,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![card],
             card_names: vec!["Three Mana Spell".to_string()],
+            occurrences: state.disclosed_occurrences(&[card]),
         }];
 
         let snapshot = revealed_object_context_from_events(&state, &events)
@@ -41969,6 +41970,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![a, b],
             card_names: vec!["A".into(), "B".into()],
+            occurrences: state.disclosed_occurrences(&[a, b]),
         }];
         assert!(revealed_object_context_from_events(&state, &events).is_none());
     }
@@ -42067,11 +42069,13 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![a],
                 card_names: vec!["A".into()],
+                occurrences: state.disclosed_occurrences(&[a]),
             },
             GameEvent::CardsRevealed {
                 player: PlayerId(0),
                 card_ids: vec![b],
                 card_names: vec!["B".into()],
+                occurrences: state.disclosed_occurrences(&[b]),
             },
         ];
         assert!(revealed_object_context_from_events(&state, &events).is_none());
@@ -42121,6 +42125,7 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![revealed],
                 card_names: vec!["Revealed".into()],
+                occurrences: state.disclosed_occurrences(&[revealed]),
             },
             GameEvent::PermanentSacrificed {
                 object_id: sacrificed,
@@ -46329,6 +46334,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![top, second],
             card_names: vec!["Top Card".to_string(), "Second Card".to_string()],
+            occurrences: state.disclosed_occurrences(&[top, second]),
         }];
         let effect = Effect::RevealTop {
             player: TargetFilter::Controller,

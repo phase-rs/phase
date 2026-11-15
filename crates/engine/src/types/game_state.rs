@@ -10358,6 +10358,36 @@ impl GameState {
         }
     }
 
+    /// CR 400.7 + CR 701.20a: The exact occurrence of each live card a reveal
+    /// is disclosing right now, in `card_ids` order. Captured into
+    /// [`GameEvent::CardsRevealed`] where the event is built, so knowledge
+    /// finalized later in the action attaches to the disclosed object and not
+    /// to a new object that reuses its storage id (CR 701.20d reorders).
+    ///
+    /// [`GameEvent::CardsRevealed`]: crate::types::events::GameEvent::CardsRevealed
+    pub fn disclosed_occurrences(&self, card_ids: &[ObjectId]) -> Vec<ObjectIncarnationRef> {
+        card_ids
+            .iter()
+            .filter_map(|id| self.objects.get(id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect()
+    }
+
+    /// CR 400.7 + CR 701.20a/d: The storage id through which a disclosure of
+    /// `occurrence` still identifies a card, or `None` once that object is gone.
+    ///
+    /// The disclosed object itself qualifies while it is still current. Once it
+    /// has become a new object, only a move into a hand carries the disclosure
+    /// along: the table saw which card was put there (CR 701.20a), the same
+    /// destination rule `clear_revealed_information_on_zone_exit` applies to a
+    /// publication made before the move. A card reordered within its library
+    /// (CR 701.20d) or moved anywhere else is a new object nobody was shown.
+    pub(crate) fn disclosure_survivor(&self, occurrence: ObjectIncarnationRef) -> Option<ObjectId> {
+        let object = self.objects.get(&occurrence.object_id)?;
+        (ObjectIncarnationRef::from_object(object) == occurrence || object.zone == Zone::Hand)
+            .then_some(occurrence.object_id)
+    }
+
     /// Returns whether `viewer` learned this exact still-current card
     /// occurrence. A library fact is valid only for the library generation in
     /// which it was disclosed; other-zone facts are unaffected by library churn.
@@ -41562,11 +41592,10 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
-        // CR 701.20a: When RevealOnly has no downstream consumer (such as Mind Funeral
-        // where the subsequent graveyard instruction is unsupported), its reveal lifetime
-        // concludes when the instruction completes. The transient reveal is retired
-        // so opponent and spectator snapshots conceal library occurrences at priority.
-        assert!(!state.revealed_cards.contains(&revealed));
+        // CR 701.20a: the reveal lasts while the effect still needs it. The
+        // resolver records only the controller reveal; the resolution's completion
+        // boundary ends it, and a reveal-only pile is never published durably.
+        assert!(state.revealed_cards.contains(&revealed));
         assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
@@ -41577,10 +41606,8 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // Both the Controller Reveal and terminal Hide UntilActionBoundary commands are recorded
-        assert_eq!(information.len(), 2);
+        assert_eq!(information.len(), 1);
         assert_eq!(information[0].edit, ResolvedInformationEdit::Reveal);
-        assert_eq!(information[1].edit, ResolvedInformationEdit::Hide);
 
         let mut replay = pre_state;
         for command in &information {

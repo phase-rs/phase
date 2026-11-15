@@ -662,6 +662,7 @@ fn reveal_search_found_survivors(
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: batch.searcher,
+            occurrences: state.disclosed_occurrences(&card_ids),
             card_ids,
             card_names,
         });
@@ -6071,6 +6072,7 @@ pub(super) fn handle_resolution_choice(
                     .collect();
                 events.push(GameEvent::CardsRevealed {
                     player,
+                    occurrences: state.disclosed_occurrences(&chosen_ids),
                     card_ids: chosen_ids.clone(),
                     card_names,
                 });
