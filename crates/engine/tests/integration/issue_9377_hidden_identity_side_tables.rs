@@ -102,7 +102,7 @@ fn commit_cast(runner: &mut GameRunner, spell: ObjectId, target: Option<TargetRe
             // Capsize's Buyback is an optional additional cost; decline it.
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("declining an optional cost must be accepted");
             }
             other => panic!("unexpected waiting_for while committing cast: {other:?}"),
@@ -2981,6 +2981,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
         trigger_event,
         effect_description,
         remaining,
+        ..
     } = &raw.waiting_for
     else {
         panic!("reach-guard: expected UnlessPayment");
@@ -3031,6 +3032,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
             trigger_event: view_event,
             effect_description: view_description,
             remaining: view_remaining,
+            ..
         } = &view.waiting_for
         else {
             panic!("{label}: the prompt is still UnlessPayment");

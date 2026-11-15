@@ -3,7 +3,7 @@
 //! second player-chosen X.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{AbilityCost, AdditionalCost};
+use engine::types::ability::AdditionalCost;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};

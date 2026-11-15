@@ -27,26 +27,27 @@ use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{
-    audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
+    audit_units, history_for_unit, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
-    parse_block_pairing_clause, parse_source_blocked_history_clause, BlockPairingForm,
-    CombatRelationSubjectWord,
+    parse_block_history_clause, parse_block_pairing_clause, restricting_block_pairings,
+    BlockPairingForm, CombatRelationSubjectWord,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
-    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
+    CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
+    CombatRelationSubject, Comparator, ContinuousModification, CopyManaValueLimit,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -167,8 +168,10 @@ fn stamp_provenance(unit_diagnostics: &mut [OracleDiagnostic], unit: &AuditUnit<
 pub(crate) fn check_swallowed_clauses(
     items: &[OracleItemIr],
     source_text: &str,
+    card_name: &str,
     result: &ParsedAbilities,
     tracks: &ItemIdTracks<'_>,
+    history: &[super::oracle_ir::history_provenance::DocumentHistory],
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     for unit in audit_units(items, source_text) {
@@ -228,8 +231,13 @@ pub(crate) fn check_swallowed_clauses(
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
-        detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
+        let history = history_for_unit(history, &unit, result, tracks);
+        let history_cleaned = strip_parens(
+            &super::oracle_util::normalize_card_name_refs(fragment, card_name).to_ascii_lowercase(),
+        );
+        detect_combat_history_relation(&history_cleaned, fragment, &history, &mut found);
         detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
+        detect_cast_mana_source_qualifier(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
@@ -295,14 +303,24 @@ fn detect_replacement(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
+    // CR 106.6a + CR 614.1c: remove only the represented mana-spend rider's own
+    // sentence before raising the replacement expectation. This replaces the
+    // earlier whole-unit `EntersWithCounters` exemption: `UnitEvidence` proves the
+    // carrier exists but not which sentence produced it, so a unit that also
+    // prints an unrelated replacement marker (an orphaned "Activate only if …"
+    // line is enough — audit units own every line up to the next item's start)
+    // must keep reporting it.
+    let without_mana_rider = strip_represented_mana_entry_counter_rider(cleaned, evidence);
+    let marker_text: &str = without_mana_rider.as_deref().unwrap_or(cleaned);
+
     // CR 614.1b: "skip" — scoped to the verb form, so "skipped" / a card NAMED
     // "Skip" cannot raise the expectation.
     // allow-noncombinator: swallow detector marker scan on classified text
-    let has_skip = cleaned.contains("skip your ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skip their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skip the next ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skips their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("skips his or her "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_skip = marker_text.contains("skip your ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skip their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skip the next ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skips their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || marker_text.contains("skips his or her "); // allow-noncombinator: swallow detector marker scan on classified text
 
     // CR 614.1c: the three explicit enters-replacement templates. "as ~ enters" is
     // matched per LINE (a line whose first word is "as" and which mentions entering),
@@ -315,14 +333,14 @@ fn detect_replacement(
     // REPLACEMENT reading raises a CR 614 expectation, so the trigger reading is excluded
     // per line: when the phrase sits inside the trigger's condition clause (ahead of the
     // comma that closes it) on a line that opens with "when"/"whenever", it is a filter.
-    let has_enters_with = cleaned
+    let has_enters_with = marker_text
         .lines()
         // allow-noncombinator: swallow detector marker scan on classified text
         .filter(|line| line.contains("enters with "))
         .any(|line| !enters_with_is_trigger_filter(line)); // allow-noncombinator: swallow detector marker scan on classified text
                                                            // allow-noncombinator: swallow detector marker scan on classified text
-    let has_enters_as = cleaned.contains(" enters as "); // allow-noncombinator: swallow detector marker scan on classified text
-    let has_as_enters = cleaned.lines().any(|line| {
+    let has_enters_as = marker_text.contains(" enters as "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_enters = marker_text.lines().any(|line| {
         let l = line.trim_start();
         // allow-noncombinator: swallow detector marker scan on classified text
         l.starts_with("as ") && l.contains(" enters")
@@ -520,6 +538,98 @@ fn enters_with_counter_carrier_is_only_enters_with_marker(
         // allow-noncombinator: swallow detector marker scan on classified text
         !sentence.contains("enters with ") || enters_with_is_trigger_filter(sentence)
     })
+}
+
+/// CR 106.6a + CR 614.1c: a mana unit's "that creature enters with an additional
+/// counter on it" rider is the replacement itself, carried on the produced mana
+/// as `ManaSpellGrant::EntersWithCounters` and registered when that mana is
+/// spent (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace).
+///
+/// Typed evidence only proves the unit CONTAINS such a carrier; it carries no
+/// sentence-level provenance. When exactly one sentence is the grant's own
+/// mana-spend clause, evidence and syntax necessarily agree on which sentence
+/// produced the carrier, so removing exactly that one is sound (`Some`). When
+/// two or more sentences match the rider's shape, removing them all could
+/// swallow an unrelated rider, so `None` is returned and nothing is removed —
+/// the caller's residual scan then keeps reporting, which is the honest
+/// direction. Mirrors `enters_with_counter_rider_residual_sentences` and
+/// `alt_cost_rider_residual_sentences`.
+fn mana_entry_counter_grant_residual_sentences(cleaned: &str) -> Option<Vec<&str>> {
+    let sentences = crate::parser::oracle_nom::primitives::split_sentence_units(cleaned);
+    let is_mana_spend_rider = |sentence: &str| {
+        crate::parser::oracle_effect::mana::parse_conditional_enters_with_counters_grant(
+            sentence.trim_start(),
+        )
+        .is_some()
+    };
+    let matching_rider_count = sentences
+        .iter()
+        .filter(|sentence| is_mana_spend_rider(sentence))
+        .count();
+    if matching_rider_count != 1 {
+        return None;
+    }
+    Some(
+        sentences
+            .into_iter()
+            .filter(|sentence| !is_mana_spend_rider(sentence))
+            .collect(),
+    )
+}
+
+/// CR 106.6a + CR 614.1c: true when the unit contains the `EntersWithCounters`
+/// mana rider at all. Presence alone is NOT sufficient to suppress a finding —
+/// the detectors below always pair it with the sentence-scoped residual from
+/// `mana_entry_counter_grant_residual_sentences`.
+fn mana_entry_counter_grant_is_present(evidence: &UnitEvidence) -> bool {
+    evidence.any_effect(|e| {
+        matches!(
+            e,
+            Effect::Mana { grants, .. }
+                if grants
+                    .iter()
+                    .any(|grant| matches!(grant, ManaSpellGrant::EntersWithCounters { .. }))
+        )
+    })
+}
+
+/// CR 106.6a + CR 614.1c: the unit's text with the represented mana-spend
+/// rider's own sentence removed, or `None` when the unit has no such carrier
+/// (or removal would be unsound — see
+/// `mana_entry_counter_grant_residual_sentences`).
+fn strip_represented_mana_entry_counter_rider(
+    cleaned: &str,
+    evidence: &UnitEvidence,
+) -> Option<String> {
+    if !mana_entry_counter_grant_is_present(evidence) {
+        return None;
+    }
+    // Sentence units keep their terminating periods; rejoin per LINE so the
+    // line-scoped marker scans below (`enters_with_is_trigger_filter`) still see
+    // one physical clause per line.
+    Some(
+        mana_entry_counter_grant_residual_sentences(cleaned)?
+            .join("\n")
+            .trim()
+            .to_string(),
+    )
+}
+
+/// CR 106.6 + CR 608.2c: true when the unit's remaining conditional text is
+/// accounted for by the mana unit's own "if this/that mana is spent …" clause.
+/// Sentence-scoped on purpose: an audit unit can absorb several physical lines,
+/// so an unrelated conditional that shares the unit (an orphaned "Activate only
+/// if …" line, for instance — the parser skips those without an IR item) must
+/// still produce its own `Condition_If` finding.
+fn mana_entry_counter_grant_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let Some(residual) = strip_represented_mana_entry_counter_rider(stripped, evidence) else {
+        return false;
+    };
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
 }
 
 /// CR 701.6a + CR 614.1a: true when this def tree carries a typed
@@ -1981,6 +2091,13 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    // CR 106.6: "If that mana is spent on [a filter] spell, it gains <keyword>"
+    // is the spend event gating a keyword grant carried on the mana unit itself —
+    // represented by the grant's restriction/filter, not a swallowed condition.
+    // The sibling `EntersWithCounters` rider (CR 106.6a + CR 614.1c) is NOT
+    // exempted unit-wide here: see `mana_entry_counter_grant_is_only_if_marker`,
+    // which removes only that rider's own sentence so an unrelated conditional
+    // sharing the audit unit is still detected.
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(
@@ -2846,6 +2963,65 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
     raised > 0 && represented >= raised
 }
 
+/// CR 614.1c + CR 601.2h: the number of copy mana-value ceilings `def`'s tree
+/// represents that read a dynamic amount, one per `BecomeCopy` whose
+/// `mana_value_limit` names one.
+///
+/// "You may have ~ enter as a copy of any creature on the battlefield with mana
+/// value less than or equal to the amount of mana spent to cast ~" (Mockingbird)
+/// stores its ceiling as the typed `CopyManaValueLimit`, not as a `QuantityExpr`,
+/// so the generic quantity probes cannot see it.
+///
+/// EXHAUSTIVE on purpose: a future `CopyManaValueLimit` variant must decide whether
+/// it represents a dynamic amount.
+fn def_tree_copy_mana_value_limit_count(def: &AbilityDefinition) -> usize {
+    let mut count = 0usize;
+    let _ = visit_ability_def(def, &mut |effect| {
+        if let Effect::BecomeCopy {
+            mana_value_limit: Some(limit),
+            ..
+        } = effect
+        {
+            count += match limit {
+                CopyManaValueLimit::AmountSpentToCastSource => 1,
+            };
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// CR 614.1c + CR 601.2h: true when every dynamic-quantity marker the line raises
+/// is an `" equal to "` occurrence that opens "the amount of mana spent to cast",
+/// each discharged by its own represented copy ceiling.
+///
+/// Occurrence-counted, not set-like (as
+/// [`ward_power_life_payments_cover_all_equal_to_markers`]): one ceiling consumes
+/// one raised occurrence, and any other `" equal to "` clause in the unit fails
+/// the gate, so an unrepresented quantity beside the ceiling still warns.
+fn copy_mana_value_limits_cover_all_equal_to_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    scoped: &ParsedAbilities,
+) -> bool {
+    if markers.len() != 1 || markers[0] != " equal to " {
+        return false;
+    }
+    let mut raised = 0usize;
+    // allow-noncombinator: swallow detector marker scan on classified text
+    for (idx, _) in cleaned.match_indices(" equal to ") {
+        let rest = &cleaned[idx + " equal to ".len()..];
+        if tag::<_, _, nom::error::Error<&str>>("the amount of mana spent to cast ")
+            .parse(rest)
+            .is_err()
+        {
+            return false;
+        }
+        raised += 1;
+    }
+    raised > 0 && root_aware_count(scoped, def_tree_copy_mana_value_limit_count) >= raised
+}
+
 /// CR 205.2 + CR 608.2c/d: the number of card-type iterations `def`'s tree
 /// represents, one per `DistinctCardTypes` `ChooseFromZone` constraint.
 ///
@@ -3217,6 +3393,13 @@ fn detect_dynamic_qty(
     if ward_power_life_payments_cover_all_equal_to_markers(cleaned, &markers, evidence) {
         return;
     }
+    //   CR 614.1c + CR 601.2h  "with mana value less than or equal to the amount of
+    //              mana spent to cast ~" (Mockingbird) is the typed
+    //              `CopyManaValueLimit` on `BecomeCopy`; each ceiling discharges one
+    //              raised " equal to " (`copy_mana_value_limits_cover_all_equal_to_markers`).
+    if copy_mana_value_limits_cover_all_equal_to_markers(cleaned, &markers, scoped) {
+        return;
+    }
     // Slot-shaped carriers: the fact IS "the parser filled this slot", and the slot's
     // value carries no further discrimination this detector needs.
     //   CR 207.2c + CR 601.2f  strive_cost — "{N} more for each target beyond the first"
@@ -3359,6 +3542,28 @@ fn detect_dynamic_qty(
     // Meteor) realizes its iteration as a per-opponent `ChooseFromZone`
     // population; one choice discharges one raised "for each " occurrence.
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
+        return;
+    }
+    // CR 406.3a + CR 611.2a: "For each card exiled this way, the player who
+    // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
+    // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
+    // binding, not a `QuantityExpr`.
+    if markers == ["for each "]
+        && cleaned
+            .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+            .all(|(idx, _)| {
+                crate::parser::oracle_effect::is_object_exiler_play_grant(&cleaned[idx..])
+            })
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )
+        })
+    {
         return;
     }
     // CR 608.2c: each printed "For each <population>," is represented by its own
@@ -4793,6 +4998,15 @@ fn detect_condition_if(
     if enters_with_finality_this_way_is_only_if_marker(&stripped, evidence) {
         return;
     }
+    // CR 106.6 + CR 608.2c: the leading "If this/that mana is spent …" of an
+    // entry-counter mana rider is the spend event the `EntersWithCounters`
+    // grant's filter represents. Sentence-scoped, not unit-scoped: a conditional
+    // that shares the audit unit but that the grant does not represent (for
+    // example an orphaned "Activate only if …" line) still produces its own
+    // finding — see `mana_entry_counter_grant_is_only_if_marker`.
+    if mana_entry_counter_grant_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
     // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
     // — represented by the typed `AddPendingEntersModifications` carrier
     // (Strago and Relm). Scopes the carrier to a `CastFromZone` parent's
@@ -5004,6 +5218,11 @@ fn detect_condition_if(
     {
         return;
     }
+    // CR 106.6a: when this unit carries the `EntersWithCounters` mana rider, the
+    // rider's own clause is represented, so report the gap from the RESIDUAL text —
+    // otherwise the finding names the clause this detector just decided is
+    // represented instead of the one that actually survived.
+    let gap_residual = strip_represented_mana_entry_counter_rider(&stripped, evidence);
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionIf.detector_label(),
         truncate(original, 140),
@@ -5011,7 +5230,10 @@ fn detect_condition_if(
         // CR-implicit "if" sentences, the represented replacement-antecedent sentences and the
         // represented tiered counter pairs removed. Reporting from `cleaned` here would name a
         // guard this detector has already decided is represented.
-        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped),
+        swallowed_clause_gap(
+            SwallowedAxis::Guard(GuardWord::If),
+            gap_residual.as_deref().unwrap_or(&stripped),
+        ),
     ));
 }
 
@@ -5601,6 +5823,7 @@ fn detect_duration_this_turn(
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
+                | QuantityRef::EnergyPaidOrLostThisTurn
                 | QuantityRef::BendTypesThisTurn
                 | QuantityRef::LifeGainedThisTurn { .. }
                 | QuantityRef::CardsDrawnThisTurn { .. }
@@ -6282,39 +6505,70 @@ fn detect_damage_subject_conjunction(
 
 // ── Detector Q: CombatHistoryRelation ───────────────────────────────────
 
-/// CR 509.1g + CR 608.2i: "creatures it blocked this combat" / "all creatures it
-/// blocked this turn" (Cathedral Membrane, Defiant Vanguard) is a look-back
+/// CR 509.1g + CR 608.2i: a block-history clause ("creatures it blocked this
+/// combat", "all creatures that blocked or were blocked by it this turn",
+/// "creatures that were blocked by that creature this combat") is a look-back
 /// restriction on the affected object set. Every clause the shared recognizer
-/// `parse_source_blocked_history_clause` finds must surface as a
-/// `CombatRelation::BlockedBySubject` filter with the same window; otherwise the
-/// relative clause was dropped and the mass effect silently widened to every
-/// creature (#9179). The duration-ownership guard in `strip_trailing_duration`
-/// keeps the window from reappearing as a spurious effect duration, so without
-/// this detector a declined clause would leave no trace at all.
-fn detect_combat_history_relation(
+/// `parse_block_history_clause` finds, whatever its partner, must surface as a
+/// `CombatRelation::BlockPairing` filter with the clause's own direction and
+/// window, one filter per clause, so a one-way filter cannot vouch for a two-way
+/// clause and one clause's filter cannot vouch for another's; otherwise the
+/// relative clause was dropped and the effect silently widened (#9179). The
+/// duration-ownership guard in `strip_trailing_duration` keeps the window from
+/// reappearing as a spurious effect duration, so without this detector a
+/// declined clause would leave no trace at all. An effect instruction that drops
+/// the clause already fails closed (`instruction_drops_block_partner`) and is
+/// skipped before this runs; the detector is the backstop for every other path.
+///
+/// Every recognized occurrence needs a provenance record from its own lowering.
+/// The record's expected subject was bound there, never reconstructed from words
+/// or inferred from the final tree. Only its producer's own operands can vouch.
+pub(crate) fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,
-    evidence: &UnitEvidence,
+    provenance: &[super::oracle_ir::history_provenance::HistoryAudit<'_>],
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    let represented = |scope: CombatHistoryScope| {
-        evidence.any::<FilterProp>(|prop| {
-            matches!(
-                prop,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: found },
-                    ..
-                } if *found == Some(scope)
-            )
-        })
-    };
-    let mut remaining = cleaned;
     let mut swallowed = false;
-    while let Some((_, (_, scope), rest)) =
-        scan_preceded(remaining, parse_source_blocked_history_clause)
-    {
-        swallowed |= !represented(scope);
+    let mut remaining = cleaned;
+    while let Some((before, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
+        let start = cleaned.len() - remaining.len() + before.len();
+        let end = cleaned.len() - rest.len();
+        // Fan-out may produce many instructions for one printed occurrence.
+        // Every one is checked below; none can stand in for a later occurrence.
+        if !provenance.iter().any(|evidence| {
+            evidence.record.occurrence.clause == clause
+                && evidence.record.occurrence.printed.offsets_in(cleaned) == Some((start, end))
+        }) {
+            swallowed = true;
+        }
         remaining = rest;
+    }
+    for (index, evidence) in provenance.iter().enumerate() {
+        if provenance[..index].iter().any(|previous| {
+            previous.document_root == evidence.document_root
+                && previous.record.producer == evidence.record.producer
+                && previous.record.occurrence == evidence.record.occurrence
+        }) {
+            swallowed = true;
+        }
+        let represented = evidence.record.expected.is_some_and(|expected| {
+            evidence.instruction.is_some_and(|instruction| {
+                !evidence.record.occurrence.operands.is_empty()
+                    && evidence.record.occurrence.operands.iter().all(|operand| {
+                        super::oracle_effect::own_instruction_population(
+                            &instruction.effect,
+                            *operand,
+                        )
+                        .is_some_and(|filter| {
+                            restricting_block_pairings(filter).contains(&expected)
+                        })
+                    })
+            })
+        });
+        if !represented {
+            swallowed = true;
+        }
     }
     if swallowed {
         diagnostics.push(OracleDiagnostic::swallowed_clause(
@@ -6347,22 +6601,12 @@ fn detect_combat_pairing_relation(
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     let represented = |form: BlockPairingForm, subject: CombatRelationSubject| {
-        evidence.count::<FilterProp>(|prop| match (form, prop) {
-            (
-                BlockPairingForm::BlockingOrBlockedBy,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
-                    subject: found,
-                },
+        evidence.count::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation { relation, subject: found }
+                    if *relation == form.relation() && *found == subject
             )
-            | (
-                BlockPairingForm::BlockedBy,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: None },
-                    subject: found,
-                },
-            ) => *found == subject,
-            _ => false,
         })
     };
     let mut clauses: Vec<(BlockPairingForm, CombatRelationSubject)> = Vec::new();
@@ -6401,6 +6645,41 @@ fn detect_combat_pairing_relation(
     }
 }
 
+// ── Detector S: CastManaSourceQualifier ─────────────────────────────────
+
+/// CR 106.3 + CR 601.2h: "whenever you cast <spell> using mana produced by <source>"
+/// restricts the trigger event to spells paid for with that source's mana. The clause
+/// must surface as a `FromSource` read of the triggering spell's payment; otherwise the
+/// trigger fires on every matching spell. The audit reads un-normalized text, so only
+/// the name-independent head is scanned: `cleaned` holds the card's name, never `~`.
+/// CR 201.5: the source named is the card itself, so only a `SelfRef` source filter
+/// represents the clause; a `FromSource` read of some other source does not.
+fn detect_cast_mana_source_qualifier(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = evidence.any_quantity_ref(|qty| {
+        matches!(
+            qty,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            }
+        )
+    });
+    if !represented && scan_preceded(cleaned, parse_using_mana_produced_by_head).is_some() {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CastManaSourceQualifier.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
 /// The `CombatRelationSubject` a pairing clause's subject denotes when it is
 /// represented: the source for "it" / "~" / "this creature", the parent
 /// target for "target creature".
@@ -6410,6 +6689,9 @@ fn pairing_subject_of(word: CombatRelationSubjectWord) -> CombatRelationSubject 
             CombatRelationSubject::Source
         }
         CombatRelationSubjectWord::TargetCreature => CombatRelationSubject::ParentTarget,
+        // The pairing grammar never produces the demonstrative; the arm keeps the
+        // match exhaustive.
+        CombatRelationSubjectWord::Demonstrative => CombatRelationSubject::AnaphoricTarget,
     }
 }
 
@@ -6565,13 +6847,74 @@ fn effect_name(effect: &Effect) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::oracle_ir::history_provenance::{
+        audit_history, capture_own_history, HistoryProvenance, InstructionIdentity, InstructionPath,
+    };
     use crate::parser::swallow_evidence::UnitEvidence;
+
+    fn history_filter_diagnostics(text: &str, filters: Vec<TargetFilter>) -> Vec<OracleDiagnostic> {
+        let mut clause = crate::parser::oracle_ir::ast::parsed_clause(Effect::DestroyAll {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        });
+        let ctx = crate::parser::oracle_ir::context::ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        capture_own_history(&mut clause, text, &ctx);
+        let definitions = filters
+            .into_iter()
+            .map(|target| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DestroyAll {
+                        target,
+                        cant_regenerate: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        // The clause was lowered bare, so each record's operand is its own
+        // definition's population, the one the hand-built filter restricts.
+        let records = clause
+            .history
+            .into_iter()
+            .enumerate()
+            .take(definitions.len())
+            .map(|(index, pending)| HistoryProvenance {
+                occurrence: crate::parser::oracle_ir::history_provenance::HistoryOccurrence {
+                    operands: crate::parser::oracle_effect::own_instruction_population_operands(
+                        &definitions[index].effect,
+                    ),
+                    ..pending.occurrence
+                },
+                expected: pending.expected,
+                producer: InstructionIdentity {
+                    clause: crate::parser::oracle_ir::effect_chain::ClauseId(index as u32),
+                    lineage: Vec::new(),
+                    instruction: InstructionPath::default(),
+                },
+                locator: Some(InstructionPath::default()),
+            })
+            .collect::<Vec<_>>();
+        let evidence = records
+            .iter()
+            .zip(&definitions)
+            .flat_map(|(record, definition)| {
+                audit_history(std::slice::from_ref(record), definition)
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = Vec::new();
+        detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
+        diagnostics
+    }
 
     use super::{
         any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
         def_tree_has_optional, def_tree_has_target_replacement, def_tree_has_unimplemented,
-        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
-        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
+        detect_combat_history_relation, detect_replacement,
+        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -6580,13 +6923,15 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
-        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BlockPairDirection,
+        CardPlayMode, CardSelectionMode, CastFromZoneDriver, CastManaObjectScope,
+        CastManaSpentMetric, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
+        CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
+        ContinuousModification, CopyManaValueLimit, CopyRetargetPermission, DamageModification,
+        Effect, EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool,
+        ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypedFilter,
+        UnlessPayModifier, ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -6993,12 +7338,14 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
-    /// The ten detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
-    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
-    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
-    /// can reach them. They are bought by the compiler instead — the constructor's new
-    /// parameter makes omission a compile error.
+    /// The nine detector labels that pass `None` and are measured present in the phase-base
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped`, `CombatHistoryRelation` and
+    /// `CastManaSourceQualifier` are deliberately absent: none has a corpus warning.
+    /// Every printed `CombatHistoryRelation` clause is represented or fails closed,
+    /// its filter-subject form included; all three `CastManaSourceQualifier` clauses
+    /// are represented. No corpus fixture can reach these detectors. They are bought
+    /// by the compiler instead — the constructor's new parameter makes omission a
+    /// compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -7993,7 +8340,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     fn optional_you_may_accepts_teferi_flash_grant_generic_effect() {
         // CR 117.3a + CR 702.8a: Teferi, Time Raveler's [+1] ("you may cast
         // sorcery spells as though they had flash") lowers to a `GenericEffect`
-        // granting `StaticMode::CastWithKeyword { Flash }`. The granted casting
+        // granting `StaticMode::CastWithFlash`. The granted casting
         // permission IS the "you may cast" opt-in, so the "you may " marker must
         // NOT be reported as a swallowed clause.
         let parsed = parse_named(
@@ -8015,7 +8362,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .any(def_tree_grants_cast_with_keyword),
             "expected Teferi [+1] to lower to a GenericEffect granting \
-             CastWithKeyword, parsed abilities: {:#?}",
+             CastWithFlash, parsed abilities: {:#?}",
             parsed.abilities
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
@@ -8231,7 +8578,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         }
     }
 
-    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` (directly
+    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` or `CastWithFlash` (directly
     /// or via `GrantStaticAbility`) — the flash-grant shape Teferi's [+1] lowers
     /// to and the swallow-check exemption keys on.
     fn def_tree_grants_cast_with_keyword(def: &AbilityDefinition) -> bool {
@@ -8241,15 +8588,20 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         } = &*def.effect
         {
             static_abilities.iter().any(|s| {
-                matches!(s.mode, StaticMode::CastWithKeyword { .. })
-                    || s.modifications.iter().any(|m| {
-                        matches!(
-                            m,
-                            crate::types::ability::ContinuousModification::GrantStaticAbility {
-                                definition,
-                            } if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                matches!(
+                    s.mode,
+                    StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+                ) || s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::GrantStaticAbility {
+                            definition,
+                        } if matches!(
+                            definition.mode,
+                            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
                         )
-                    })
+                    )
+                })
             })
         } else {
             false
@@ -8950,6 +9302,46 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the bare 'for each player, choose' idiom must not be reported as a \
              swallowed dynamic quantity — its carrier is ChooseAndSacrificeRest, \
              not a QuantityExpr. Warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 406.3a: Vulcan Mind-Meld's "For each card exiled this way, the player
+    /// who exiled it may play it" is carried by the per-object `ObjectExiler`
+    /// grant. Reach-guard: that grant must be present (not `Unimplemented`)
+    /// before the negative; revert-to-red: dropping the exiler suppression
+    /// reintroduces the warning while the guard holds.
+    #[test]
+    fn vulcan_mind_meld_exiler_grant_does_not_flag_dynamic_qty() {
+        let parsed = parse_named(
+            "Target opponent looks at the top card of your library, then exiles it face down. \
+             You look at the top two cards of their library, then exile them face down. For \
+             each card exiled this way, the player who exiled it may play it for as long as it \
+             remains exiled. Mana of any type can be spent to cast spells this way.",
+            "Vulcan Mind-Meld",
+            &["Sorcery"],
+        );
+        let mut effects = Vec::new();
+        let mut node = parsed.abilities.first();
+        while let Some(def) = node {
+            effects.push(def.effect.as_ref());
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GrantCastingPermission {
+                    grantee: crate::types::ability::PermissionGrantee::ObjectExiler,
+                    ..
+                }
+            )) && !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "premise: the exiler grant parses: {effects:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "{:?}",
             parsed.parse_warnings
         );
     }
@@ -10655,6 +11047,136 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         }
     }
 
+    /// CR 106.6 + CR 614.1c: the leading "If this/that mana is spent …" of an
+    /// entry-counter mana rider is the spend event the `EntersWithCounters`
+    /// grant's filter represents, and its "enters with" is the replacement the
+    /// grant carries — neither is a swallowed `Condition_If` / `Replacement`
+    /// (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace — verbatim
+    /// Oracle text).
+    #[test]
+    fn mana_entry_counter_grant_if_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "Genomic Enhancement — {T}: Add one mana of any color. If this mana is spent \
+                 to cast a creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Biophagus",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add one mana of any color. If that mana is spent to cast a non-Human \
+                 creature spell, that creature enters with an additional +1/+1 counter on it.",
+                "Animal Attendant",
+                &["Creature"],
+            ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. If that mana is spent on \
+                 a multicolored creature spell, that creature enters with an additional +1/+1 \
+                 counter on it.",
+                "Guildmages' Forum",
+                &["Land"],
+            ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's color \
+                 identity. If you spend this mana to cast your commander, it enters with a \
+                 number of additional +1/+1 counters on it equal to the number of times it's \
+                 been cast from the command zone this game.",
+                "Opal Palace",
+                &["Land"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &|effect: &Effect| matches!(
+                    effect,
+                    Effect::Mana { grants, .. }
+                        if matches!(grants.as_slice(), [ManaSpellGrant::EntersWithCounters { .. }])
+                )),
+                "{name} reach guard: the EntersWithCounters grant must be present"
+            );
+            for detector in ["Condition_If", "Replacement"] {
+                assert!(
+                    !has_swallowed_detector(&parsed, detector),
+                    "{name} must account for its {detector} marker through the mana grant; \
+                     warnings: {:?}",
+                    parsed.parse_warnings
+                );
+            }
+        }
+    }
+
+    /// CR 106.6 + CR 608.2c: the mana-spend exemption is SENTENCE-scoped, not
+    /// unit-scoped. An audit unit owns every line up to the next item's start, and
+    /// the parser skips a standalone `Activate only …` restriction with no IR item
+    /// and no `Unimplemented`, so that orphan line joins the preceding mana
+    /// ability's unit. The grant represents only its own rider's clause; the
+    /// restriction's conditional must still raise `Condition_If`.
+    ///
+    /// This is a MIXED-UNIT probe, not a printed card: Opal Palace's real mana
+    /// ability (verbatim) followed by an activation restriction whose wording is
+    /// printed on Blazemire Verge. The combined card does not exist and no runtime
+    /// behavior is asserted — only that the audit stays honest about the orphan
+    /// line the parser silently skipped.
+    #[test]
+    fn mana_entry_counter_grant_does_not_exempt_an_unrelated_conditional_in_its_unit() {
+        let oracle = "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's \
+                      color identity. If you spend this mana to cast your commander, it enters \
+                      with a number of additional +1/+1 counters on it equal to the number of \
+                      times it's been cast from the command zone this game.\nActivate only if \
+                      you control a Swamp or a Mountain.";
+        let parsed = parse_named(oracle, "Opal Palace", &["Land"]);
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            unit_has_effect(&parsed, &|effect: &Effect| matches!(
+                effect,
+                Effect::Mana { grants, .. }
+                    if grants
+                        .iter()
+                        .any(|grant| matches!(grant, ManaSpellGrant::EntersWithCounters { .. }))
+            )),
+            "reach guard: the entry-counter mana grant must parse: {parsed:#?}"
+        );
+        // The finding is stamped with its audit unit rather than the individual
+        // clause, so assert on the unit span: the mana ability's unit starts at line 1
+        // and owns the orphaned restriction line 2. A unit-wide
+        // `EntersWithCounters` exemption removes this finding entirely.
+        let condition_findings = swallows_for(&parsed, "Condition_If");
+        assert_eq!(
+            condition_findings.len(),
+            1,
+            "exactly one Condition_If finding is expected — the orphaned 'Activate only if …' \
+             line the mana grant does not represent; warnings: {:?}",
+            parsed.parse_warnings
+        );
+        let OracleDiagnostic::SwallowedClause { unit_span, .. } = condition_findings[0] else {
+            unreachable!("swallows_for only returns SwallowedClause diagnostics")
+        };
+        let span = unit_span
+            .as_ref()
+            .expect("the audit stamps a unit span on every finding it emits");
+        assert_eq!(
+            (span.first_line, span.last_line),
+            (1, 2),
+            "the finding must be scoped to the mana ability's unit (line 1) plus the orphaned \
+             restriction line (line 2); warnings: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Replacement"),
+            "the grant's own 'enters with' rider IS represented, so no Replacement finding may \
+             survive the sentence-scoped strip; warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// Hostile sibling of `mana_spend_grant_optionality_is_evidence`: the same
     /// `Mana → TriggerOnSpend` carrier shape with the retarget permission removed
     /// (`CopySpell { retarget: KeepOriginalTargets }`). The printed "you may" is
@@ -11795,6 +12317,143 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             "the DistinctCardTypes constraint IS the per-card-type iteration: {diagnostics:?}"
         );
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    const MOCKINGBIRD_ORACLE: &str = "Flying\nYou may have this creature enter as a copy of \
+        any creature on the battlefield with mana value less than or equal to the amount of \
+        mana spent to cast this creature, except it's a Bird in addition to its other types and \
+        it has flying.";
+
+    fn parse_mockingbird() -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            MOCKINGBIRD_ORACLE,
+            "Mockingbird",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Bird".to_string(), "Bard".to_string()],
+        )
+    }
+
+    /// CR 614.1c + CR 601.2h: Mockingbird's copy ceiling ("mana value less than or
+    /// equal to the amount of mana spent to cast this creature") is represented by
+    /// `CopyManaValueLimit::AmountSpentToCastSource`, so its " equal to " is not a
+    /// swallowed quantity.
+    #[test]
+    fn dynamic_qty_accepts_mockingbird_copy_mana_value_limit() {
+        // Detector-liveness control, same run.
+        let dropped = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&dropped, "DynamicQty"),
+            "control: the DynamicQty detector must be live in this test"
+        );
+
+        let parsed = parse_mockingbird();
+        // Reach guard: the ceiling is the typed carrier this leg counts.
+        assert!(
+            parsed.replacements.iter().any(|r| matches!(
+                r.execute.as_deref().map(|d| &*d.effect),
+                Some(Effect::BecomeCopy {
+                    mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
+                    ..
+                })
+            )),
+            "Mockingbird must parse its copy ceiling: {:#?}",
+            parsed.replacements
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "the represented copy ceiling must not warn: {:#?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Occurrence-counted: one copy ceiling discharges ONE " equal to ". The same
+    /// evidence with a second, unrepresented " equal to " clause still warns, and so
+    /// does a second copy-ceiling phrase the one carrier cannot cover.
+    ///
+    /// SYNTHETIC: no printed card pairs a copy ceiling with a second " equal to "
+    /// clause; the nearest printed card is Mockingbird, whose parse is the evidence.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_second_equal_to_beside_a_copy_ceiling() {
+        let parsed = parse_mockingbird();
+        let evidence = UnitEvidence::of(&parsed);
+        // Reach guard: the root-aware count sees exactly one ceiling carrier.
+        assert_eq!(
+            super::root_aware_count(&parsed, super::def_tree_copy_mana_value_limit_count),
+            1,
+            "Mockingbird must expose exactly one represented copy ceiling"
+        );
+
+        let ceiling_only = "you may have ~ enter as a copy of any creature on the battlefield \
+                            with mana value less than or equal to the amount of mana spent to \
+                            cast ~, except it's a bird in addition to its other types and it \
+                            has flying.";
+        assert_eq!(
+            super::active_dynamic_markers(ceiling_only, &evidence),
+            vec![" equal to "],
+            "fixture must raise exactly the marker this leg can discharge"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            ceiling_only,
+            ceiling_only,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "one occurrence, one ceiling: {diagnostics:?}"
+        );
+
+        let second_equal_to = "you may have ~ enter as a copy of any creature on the battlefield \
+                               with mana value less than or equal to the amount of mana spent to \
+                               cast ~. whenever ~ attacks, it deals damage equal to its power to \
+                               any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_equal_to,
+            second_equal_to,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second unrepresented \" equal to \" clause must warn: {diagnostics:?}"
+        );
+
+        let two_ceilings = "you may have ~ enter as a copy of any creature on the battlefield \
+                            with mana value less than or equal to the amount of mana spent to \
+                            cast ~, or of any artifact with mana value less than or equal to \
+                            the amount of mana spent to cast ~.";
+        assert_eq!(
+            super::active_dynamic_markers(two_ceilings, &evidence),
+            vec![" equal to "],
+            "fixture must raise exactly the marker this leg can discharge"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            two_ceilings,
+            two_ceilings,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "two ceiling phrases, one represented ceiling: {diagnostics:?}"
+        );
     }
 
     /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
@@ -13623,6 +14282,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -13713,6 +14373,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -14296,6 +14957,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
         );
         reveal.player_scope = Some(reveal_scope);
@@ -14303,6 +14965,8 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             let mut exile = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target,
@@ -14923,6 +15587,8 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::ParentTarget,
@@ -15025,14 +15691,18 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     // ── Detector Q: CombatHistoryRelation ───────────────────────────────
 
-    /// Does the parse carry a `CombatRelation::BlockedBySubject` filter anywhere?
+    /// Does the parse carry a windowed `SubjectIsBlocker` `CombatRelation` filter
+    /// anywhere?
     fn parse_has_blocked_history_filter(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
         use crate::types::ability::CombatRelation;
         UnitEvidence::of(parsed).any::<FilterProp>(|prop| {
             matches!(
                 prop,
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: Some(_) },
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: Some(_),
+                    },
                     ..
                 }
             )
@@ -15065,116 +15735,65 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     }
 
     /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
-    /// antecedent declines the blocked-history clause and must be REPORTED, in
-    /// both windows: a typed trigger subject in an anaphoric compound (a), a
-    /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
-    /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
-    /// negative (no `BlockedBySubject` in the parse) with its reach guard — the
-    /// mass effect parsed with its unrestricted creature filter — and with the
-    /// detector firing, which itself proves the unit was not skipped as
-    /// unimplemented.
+    /// antecedent declines the blocked-history clause, and the mass instruction
+    /// then FAILS CLOSED as `Unimplemented { block_history_partner }` rather than
+    /// widening to every creature, in both windows: a typed trigger subject in an
+    /// anaphoric compound (a), a spell's chosen target in the same instruction
+    /// (b), a typed subject in a delayed body (d), and a typed dies-trigger
+    /// subject (e). A chain-pinned target (c) binds as an earlier instruction's
+    /// target (`combat_history_relation_binds_a_chain_pinned_target`). Each row
+    /// pairs the negatives (no widened mass effect, no windowed `BlockPairing`)
+    /// with the fail-closed marker as its reach guard.
     #[test]
-    fn combat_history_relation_detector_reports_every_declined_clause() {
-        // (a) Typed trigger subject, anaphoric compound: the primary acted on the
-        // triggering creature, so the continuation gets no `SelfRef` pin.
-        let parsed = parse_named(
-            "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
-            "Test Card",
-            &["Enchantment"],
-        );
-        let execute = parsed.triggers[0]
-            .execute
-            .as_deref()
-            .expect("reach guard: the trigger body parsed");
-        assert!(
-            matches!(
-                &*execute.effect,
-                Effect::Destroy {
-                    target: TargetFilter::TriggeringSource,
-                    ..
-                }
-            ),
-            "reach guard: primary must destroy the triggering creature, got {:?}",
-            execute.effect
-        );
-        assert!(
-            execute
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
-            "reach guard: the DestroyAll continuation must exist"
-        );
-
-        // (b) A spell's chosen target: the continuation's "it" names a target,
-        // which has no sound combat-relation subject.
-        let spell = parse_named(
-            "Destroy target creature and all creatures it blocked this turn.",
-            "Test Card",
-            &["Instant"],
-        );
-        let primary = &spell.abilities[0];
-        assert!(
-            matches!(
-                &*primary.effect,
-                Effect::Destroy {
-                    target: TargetFilter::Typed(_),
-                    ..
-                }
-            ),
-            "reach guard: primary must destroy the chosen target, got {:?}",
-            primary.effect
-        );
-        assert!(
-            primary
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
-            "reach guard: the DestroyAll continuation must exist"
-        );
-
-        for (label, parsed, is_mass_effect) in [
-            ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
-            ("(b) spell target", spell, destroy_all_target),
+    fn combat_history_relation_declined_clause_fails_closed() {
+        let fails_closed = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any::<AbilityDefinition>(|def| {
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                )
+            })
+        };
+        for (label, text, types, is_mass_effect) in [
             (
-                "(c) chain-pinned target",
-                parse_named(
-                    "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
-                    "Test Card",
-                    &["Creature"],
-                ),
+                "(a) typed compound",
+                "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
+                &["Enchantment"][..],
+                destroy_all_target as fn(&Effect) -> Option<&TargetFilter>,
+            ),
+            (
+                "(b) spell target",
+                "Destroy target creature and all creatures it blocked this turn.",
+                &["Instant"][..],
                 destroy_all_target,
             ),
             (
                 "(d) typed delayed body",
-                parse_named(
-                    "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
-                    "Test Card",
-                    &["Enchantment"],
-                ),
+                "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
+                &["Enchantment"][..],
                 destroy_all_target,
             ),
             (
                 "(e) typed dies subject, this combat",
-                parse_named(
-                    "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
-                    "Test Card",
-                    &["Enchantment"],
-                ),
+                "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
+                &["Enchantment"][..],
                 damage_all_target,
             ),
         ] {
+            let parsed = parse_named(text, "Test Card", types);
             assert!(
-                parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
-                "{label}: reach guard — the mass effect must parse with its bare creature filter"
+                fails_closed(&parsed),
+                "{label}: reach guard — the instruction must fail closed; {:?} {:?}",
+                parsed.abilities,
+                parsed.triggers
+            );
+            assert!(
+                !parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
+                "{label}: no widened mass effect may remain"
             );
             assert!(
                 !parse_has_blocked_history_filter(&parsed),
                 "{label}: a non-source antecedent must not bind the clause"
-            );
-            assert!(
-                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
-                "{label}: the declined clause must be reported; warnings = {:?}",
-                parsed.parse_warnings
             );
         }
     }
@@ -15206,7 +15825,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             assert!(
                 crate::parser::oracle_nom::primitives::scan_preceded(
                     &cleaned,
-                    crate::parser::oracle_target::parse_source_blocked_history_clause,
+                    crate::parser::oracle_target::parse_block_history_clause,
                 )
                 .is_some(),
                 "{name}: reach guard — the recognizer must find the clause"
@@ -15252,6 +15871,509 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
+    /// Does the parse carry a windowed `BlockPairing` filter of exactly this shape?
+    fn parse_has_history_relation(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        direction: BlockPairDirection,
+        scope: crate::types::ability::CombatHistoryScope,
+        subject: crate::types::ability::CombatRelationSubject,
+    ) -> bool {
+        let wanted = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction,
+                scope: Some(scope),
+            },
+            subject,
+        };
+        UnitEvidence::of(parsed).any::<FilterProp>(|prop| *prop == wanted)
+    }
+
+    /// CR 511.2 + CR 603.7b: the "this turn's next end of combat" condition.
+    fn this_turns_next_end_of_combat() -> crate::types::ability::DelayedTriggerCondition {
+        crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(crate::types::phase::Phase::EndCombat),
+            ),
+            or_trigger: None,
+            lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+        }
+    }
+
+    /// Does the parse hold a delayed ability on `condition` whose payload carries no
+    /// duration of its own (the clause owns its window)?
+    fn parse_has_delayed_payload(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        condition: &crate::types::ability::DelayedTriggerCondition,
+    ) -> bool {
+        UnitEvidence::of(parsed).any_effect(|effect| {
+            matches!(
+                effect,
+                Effect::CreateDelayedTrigger {
+                    condition: found,
+                    effect: payload,
+                    ..
+                } if found == condition && payload.duration.is_none()
+            )
+        })
+    }
+
+    /// CR 509.1g + CR 608.2c + CR 603.7b: each printed card of the class parses
+    /// clean from its verbatim Oracle text — the exact relation, direction and
+    /// window, the earlier instruction's target as subject, the turn-bound
+    /// delayed condition where printed with no duration on its payload, Ride
+    /// Down's grant left on the broadcast path (`target: None`), no
+    /// `Unimplemented` and no warning. The relation's presence is the reach
+    /// guard for the silent detector.
+    #[test]
+    fn target_block_history_cards_parse_clean() {
+        for (name, text, direction, scope, delayed) in [
+            (
+                "Gaze of the Gorgon",
+                "({B/G} can be paid with either {B} or {G}.)\nRegenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+                BlockPairDirection::Either,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Venomous Breath",
+                "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+                BlockPairDirection::Either,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Glyph of Doom",
+                "Choose target Wall creature. At this turn's next end of combat, destroy all creatures that were blocked by that creature this turn.",
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Ride Down",
+                "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisCombat,
+                false,
+            ),
+        ] {
+            let parsed = parse_named(text, name, &["Instant"]);
+            assert!(
+                parse_has_history_relation(
+                    &parsed,
+                    direction,
+                    scope,
+                    CombatRelationSubject::AnaphoricTarget
+                ),
+                "{name}: the clause must bind the earlier target; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: {:?}",
+                parsed.abilities
+            );
+            assert!(
+                parsed.parse_warnings.is_empty(),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+            assert_eq!(
+                parse_has_delayed_payload(&parsed, &this_turns_next_end_of_combat()),
+                delayed,
+                "{name}: the turn-bound delayed ability with no payload duration"
+            );
+        }
+
+        let ride_down = parse_named(
+            "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+            "Ride Down",
+            &["Instant"],
+        );
+        let evidence = UnitEvidence::of(&ride_down);
+        assert!(
+            evidence
+                .any_effect(|effect| matches!(effect, Effect::GenericEffect { target: None, .. })),
+            "Ride Down: the grant stays on the broadcast path; {:?}",
+            ride_down.abilities
+        );
+        assert!(
+            !evidence.any_effect(|effect| matches!(
+                effect,
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::ParentTarget),
+                    ..
+                }
+            )),
+            "Ride Down: the grant must not bind the destroyed creature"
+        );
+    }
+
+    /// CR 603.7a: Triton Tactics' deferred body keeps both of its actions under
+    /// "at this turn's next end of combat" — the bare "and it doesn't untap …"
+    /// must not split out of the delayed trigger and run at resolution. The body
+    /// itself stays a reported gap.
+    #[test]
+    fn triton_tactics_delayed_body_keeps_its_second_action() {
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert_eq!(triton.abilities.len(), 1, "{:?}", triton.abilities);
+        let mut def = &triton.abilities[0];
+        let mut delayed = None;
+        loop {
+            if let Effect::CreateDelayedTrigger {
+                condition, effect, ..
+            } = &*def.effect
+            {
+                if *condition == this_turns_next_end_of_combat() {
+                    delayed = Some((def, effect));
+                }
+            }
+            match def.sub_ability.as_deref() {
+                Some(next) => def = next,
+                None => break,
+            }
+        }
+        let (delayed_def, payload) =
+            delayed.expect("reach guard: the delayed trigger must parse on the resolution chain");
+        assert!(
+            delayed_def.sub_ability.is_none(),
+            "no action may follow the delayed trigger at resolution: {:?}",
+            delayed_def.sub_ability
+        );
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the deferred body stays a reported gap: {payload:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2i + CR 115.1a: a history clause whose partner no
+    /// subject word covers fails its instruction closed as `Unimplemented {
+    /// block_history_partner }`, and the clause owns its window, so no spurious
+    /// duration appears. On a mass instruction no widened mass effect is left
+    /// behind (Triton Tactics, Glyph of Reincarnation); on a single target no
+    /// targeted effect is left behind with the restriction dropped — for a
+    /// partner that is an indefinite filter phrase (Time to Reflect, You Cannot
+    /// Pass!) and for any other unbound partner alike. A unary clause is no
+    /// history clause and raises no new warning (Heat Stroke, Sizzling Barrage).
+    #[test]
+    fn unbound_block_history_partner_fails_closed() {
+        // The failed instruction carries no duration: its window stays with the clause.
+        let unbound = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any::<AbilityDefinition>(|def| {
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                ) && def.duration.is_none()
+            })
+        };
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert!(unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
+        assert!(
+            !UnitEvidence::of(&triton).any_effect(|effect| matches!(
+                effect,
+                Effect::SetTapState {
+                    scope: crate::types::ability::EffectScope::All,
+                    ..
+                }
+            )),
+            "Triton Tactics: no widened tap may remain"
+        );
+        assert!(
+            UnitEvidence::of(&triton).any_effect(|effect| matches!(
+                effect,
+                Effect::CreateDelayedTrigger { condition, .. }
+                    if *condition == this_turns_next_end_of_combat()
+            )),
+            "Triton Tactics: reach guard — the delayed ability keeps its turn-bound condition"
+        );
+
+        let reincarnation = parse_named(
+            "Cast this spell only after combat.\nDestroy all creatures that were blocked by target Wall this turn. They can't be regenerated. For each creature that died this way, put a creature card from the graveyard of the player who controlled that creature the last time it became blocked by that Wall onto the battlefield under its owner's control.",
+            "Glyph of Reincarnation",
+            &["Instant"],
+        );
+        assert!(
+            unbound(&reincarnation),
+            "Glyph of Reincarnation: {:?}",
+            reincarnation.abilities
+        );
+        assert!(
+            !UnitEvidence::of(&reincarnation)
+                .any_effect(|effect| matches!(effect, Effect::DestroyAll { .. })),
+            "Glyph of Reincarnation: no widened destroy may remain"
+        );
+
+        // A single-target instruction: the filter-phrase partner of the printed cards and,
+        // as the control, an unbound partner. The recognizer tells them apart, and both
+        // fail closed: the filter form is not exempt.
+        for (name, text, partner) in [
+            (
+                "Time to Reflect",
+                "Exile target creature that blocked or was blocked by a Zombie this turn.",
+                crate::parser::oracle_target::HistoryPartner::Filter,
+            ),
+            (
+                "You Cannot Pass!",
+                "Destroy target creature that blocked or was blocked by a legendary creature this turn.",
+                crate::parser::oracle_target::HistoryPartner::Filter,
+            ),
+            (
+                "Test Card",
+                "Exile target creature that was blocked by target Wall this turn.",
+                crate::parser::oracle_target::HistoryPartner::Unbound,
+            ),
+        ] {
+            // Reach guard: the recognizer sees the clause and classifies its partner.
+            let cleaned = text.to_ascii_lowercase();
+            let (_, clause, _) = crate::parser::oracle_nom::primitives::scan_preceded(
+                &cleaned,
+                crate::parser::oracle_target::parse_block_history_clause,
+            )
+            .unwrap_or_else(|| panic!("{name}: reach guard — the recognizer must find the clause"));
+            assert_eq!(clause.partner, partner, "{name}");
+            // Detector Q has no exemption: with no evidence it reports either partner.
+            let mut diagnostics = Vec::new();
+            super::detect_combat_history_relation(
+                &cleaned,
+                text,
+                &[],
+                &mut diagnostics,
+            );
+            assert!(
+                !diagnostics.is_empty(),
+                "{name}: an unrepresented partner is reported"
+            );
+
+            let parsed = parse_named(text, name, &["Instant"]);
+            assert!(
+                unbound(&parsed),
+                "{name}: the instruction must fail closed; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                !UnitEvidence::of(&parsed).any_effect(|effect| effect.target_filter().is_some()),
+                "{name}: no targeted effect may remain with its restriction dropped; {:?}",
+                parsed.abilities
+            );
+        }
+
+        for (name, text, types) in [
+            (
+                "Heat Stroke",
+                "At end of combat, destroy each creature that blocked or was blocked this turn.",
+                &["Enchantment"][..],
+            ),
+            (
+                "Sizzling Barrage",
+                "Sizzling Barrage deals 4 damage to target creature that blocked this turn.",
+                &["Instant"][..],
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_block_history_clause,
+                )
+                .is_none(),
+                "{name}: a unary clause is no history clause"
+            );
+            let parsed = parse_named(text, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
+            assert!(!unbound(&parsed), "{name}: {:?}", parsed.abilities);
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 608.2c: a chain-pinned target is an earlier instruction's target, so
+    /// "it" in a later history clause binds it (`AnaphoricTarget`) and the
+    /// detector is silent. Hand-built: no printed card has a trigger that taps
+    /// a target and then reads its block history.
+    #[test]
+    fn combat_history_relation_binds_a_chain_pinned_target() {
+        let parsed = parse_named(
+            "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
+            "Test Card",
+            &["Creature"],
+        );
+        assert!(
+            parse_has_history_relation(
+                &parsed,
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                CombatRelationSubject::AnaphoricTarget,
+            ),
+            "{:?}",
+            parsed.triggers
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 509.1g + CR 608.2i: a one-way filter cannot vouch for a two-way clause
+    /// on the same line: the unbound two-way instruction fails the line closed
+    /// instead of leaving a widened destroy beside the represented one.
+    /// Hand-built: no printed card has this shape (nearest: Gaze of the Gorgon).
+    /// The one-way sentence parsed alone is the reach guard.
+    #[test]
+    fn combat_history_relation_one_way_filter_does_not_vouch_for_two_way_clause() {
+        let one_way = parse(
+            "Destroy all creatures that were blocked by Test Card this turn.",
+            &["Creature"],
+        );
+        assert!(
+            parse_has_blocked_history_filter(&one_way),
+            "reach guard: the one-way clause is represented alone; {:?}",
+            one_way.abilities
+        );
+        let parsed = parse(
+            "Destroy all creatures that were blocked by Test Card this turn. Destroy all creatures that blocked or were blocked by it this turn.",
+            &["Creature"],
+        );
+        assert!(
+            any_ability_has_unimplemented(&parsed),
+            "the two-way instruction must fail closed; {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !UnitEvidence::of(&parsed)
+                .any_effect(|effect| matches!(effect, Effect::DestroyAll { .. })),
+            "no destroy may survive beside the unbound clause; {:?}",
+            parsed.abilities
+        );
+    }
+
+    /// CR 608.2i: each history clause needs its own restricting filter. Two
+    /// clauses of one direction and window with one represented and the other's
+    /// filter dropped are reported, and so is a relation that sits under a
+    /// negation or in a disjunction, which doesn't restrict the affected set.
+    /// Hand-built evidence: no printed card repeats a clause this way.
+    #[test]
+    fn combat_history_relation_needs_one_restricting_filter_per_clause() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        let relation = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        let with = |props| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        let restricting = with(vec![relation.clone()]);
+        let text =
+            "destroy all creatures it blocked this turn. tap all creatures it blocked this turn.";
+        let flagged =
+            |filters: Vec<TargetFilter>| !history_filter_diagnostics(text, filters).is_empty();
+        assert!(
+            !flagged(vec![restricting.clone(), restricting.clone()]),
+            "one filter per clause"
+        );
+        assert!(
+            flagged(vec![restricting.clone(), with(vec![])]),
+            "the second clause's filter was dropped"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                with(vec![FilterProp::Not {
+                    prop: Box::new(relation.clone()),
+                }]),
+            ]),
+            "a negated relation doesn't restrict"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                with(vec![FilterProp::AnyOf {
+                    props: vec![FilterProp::Token, relation.clone()],
+                }]),
+            ]),
+            "a disjunctive relation doesn't restrict"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                TargetFilter::Or {
+                    filters: vec![with(vec![]), restricting.clone()],
+                },
+            ]),
+            "an unrestricted Or branch doesn't restrict"
+        );
+        // Unrelated serialized unions no longer supply instruction ownership.
+        let mut diagnostics = Vec::new();
+        detect_combat_history_relation(text, text, &[], &mut diagnostics);
+        assert!(!diagnostics.is_empty(), "missing provenance is reported");
+        assert!(
+            flagged(vec![
+                with(vec![relation.clone(), relation.clone()]),
+                with(vec![])
+            ]),
+            "one filter repeating a relation vouches for one clause"
+        );
+        assert!(
+            flagged(vec![
+                TargetFilter::And {
+                    filters: vec![restricting.clone(), restricting.clone()],
+                },
+                with(vec![]),
+            ]),
+            "one And repeating a leaf vouches for one clause"
+        );
+        assert!(
+            !flagged(vec![
+                TargetFilter::And {
+                    filters: vec![with(vec![]), restricting.clone()],
+                },
+                restricting.clone(),
+            ]),
+            "a relation under an outer And restricts"
+        );
+        let on_earlier_target = with(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::AnaphoricTarget,
+        }]);
+        let source_clause = "destroy all creatures ~ blocked this turn.";
+        let flags_source_clause = |filters: Vec<TargetFilter>| {
+            !history_filter_diagnostics(source_clause, filters).is_empty()
+        };
+        assert!(
+            flags_source_clause(vec![on_earlier_target]),
+            "a relation on the wrong subject"
+        );
+        assert!(!flags_source_clause(vec![restricting.clone()]));
+        // A filter a property names is a reference, not the affected set.
+        assert!(
+            flags_source_clause(vec![with(vec![FilterProp::DistinctFrom {
+                reference: Box::new(restricting.clone()),
+            }])]),
+            "a referenced filter doesn't restrict"
+        );
+    }
+
     // ── Detector R: CombatPairingRelation ──────────────────────────────
 
     /// Does the parse carry a current-block-pairing `CombatRelation` anywhere?
@@ -15261,8 +16383,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             matches!(
                 prop,
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy
-                        | CombatRelation::BlockedBySubject { scope: None },
+                    relation: CombatRelation::BlockPairing { scope: None, .. },
                     ..
                 }
             )
@@ -15427,7 +16548,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         use crate::types::ability::{CombatRelation, CombatRelationSubject};
         let pairing = |subject| {
             serde_json::to_string(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject,
             })
             .expect("a FilterProp serializes")
@@ -15453,6 +16577,284 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             reports(&[&source, &target]),
             "a parent-target filter does not represent a source clause"
         );
+    }
+
+    // ── Detector S: CastManaSourceQualifier ─────────────────────────────
+
+    const CAST_MANA_SOURCE_CARDS: [(&str, &[&str], &str); 3] = [
+        (
+            "Barracks of the Thousand",
+            &["Artifact", "Land"],
+            "(Transforms from Thousand Moons Smithy.)\n{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"",
+        ),
+        (
+            "Tecutlan, the Searing Rift",
+            &["Land"],
+            "(Transforms from Brass's Tunnel-Grinder.)\n{T}: Add {R}.\nWhenever you cast a permanent spell using mana produced by Tecutlan, discover X, where X is that spell's mana value.",
+        ),
+        (
+            "The Myriad Pools",
+            &["Artifact", "Land"],
+            "(Transforms from The Everflowing Well.)\n{T}: Add {U}.\nWhenever you cast a permanent spell using mana produced by The Myriad Pools, up to one other target permanent you control becomes a copy of that spell until end of turn.",
+        ),
+    ];
+
+    /// CR 106.3 + CR 601.2h: a parse that drops the qualifier leaves a trigger that
+    /// fires on every matching spell. The audit reads un-normalized text, so the
+    /// detector must fire on the card's name, never on `~`: this is the case a
+    /// self-reference tail in the detector grammar would miss.
+    #[test]
+    fn cast_mana_source_detector_flags_a_qualifier_with_no_carrier() {
+        for (_, _, text) in CAST_MANA_SOURCE_CARDS {
+            let line = text.lines().last().expect("the trigger is the last line");
+            let cleaned = line.to_lowercase();
+            let mut parsed = no_activation_limit_abilities();
+            parsed
+                .triggers
+                .push(crate::types::ability::TriggerDefinition::new(
+                    TriggerMode::SpellCast,
+                ));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [OracleDiagnostic::SwallowedClause { detector, .. }]
+                        if detector == "CastManaSourceQualifier"
+                ),
+                "{line}: {found:?}"
+            );
+        }
+    }
+
+    /// The represented qualifier silences the detector on the real parse of all three
+    /// cards. Its carrier sits under `TriggerCondition::EventTime`, so this also pins
+    /// the evidence probe's reach into that wrapper.
+    #[test]
+    fn cast_mana_source_detector_is_silent_on_the_represented_qualifier() {
+        for (name, types, text) in CAST_MANA_SOURCE_CARDS {
+            let parsed = parse_named(text, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard, an unimplemented unit is skipped before the detector runs"
+            );
+            let [trigger] = parsed.triggers.as_slice() else {
+                panic!("{name}: {:?}", parsed.triggers);
+            };
+            assert!(
+                matches!(
+                    &trigger.condition,
+                    Some(TriggerCondition::EventTime { condition })
+                        if matches!(
+                            &**condition,
+                            TriggerCondition::QuantityComparison { .. }
+                        )
+                ),
+                "{name}: reach guard, the qualifier must be represented: {:?}",
+                trigger.condition
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CastManaSourceQualifier"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 201.5: "mana produced by ~" names the card itself, so a `FromSource` read of
+    /// another source (Treasure mana here) is not a carrier for it. The positive row swaps
+    /// the same unit's filter back to `SelfRef`, the shape the real parse carries.
+    #[test]
+    fn cast_mana_source_detector_flags_a_carrier_for_another_source() {
+        let (name, types, text) = CAST_MANA_SOURCE_CARDS[0];
+        let real = parse_named(text, name, types);
+        let line = text.lines().last().expect("the trigger is the last line");
+        let cleaned = line.to_lowercase();
+        let carrier = |source_filter: TargetFilter| TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::FromSource { source_filter },
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+        };
+        let [trigger] = real.triggers.as_slice() else {
+            panic!("{name}: {:?}", real.triggers);
+        };
+        assert_eq!(
+            trigger.condition,
+            Some(carrier(TargetFilter::SelfRef)),
+            "reach guard: the built carrier is the real parse's"
+        );
+        let detect = |source_filter: TargetFilter| {
+            let mut parsed = real.clone();
+            parsed.triggers[0].condition = Some(carrier(source_filter));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            found
+        };
+
+        assert_eq!(detect(TargetFilter::SelfRef), []);
+        let treasure =
+            TargetFilter::Typed(TypedFilter::permanent().subtype("Treasure".to_string()));
+        assert!(
+            matches!(
+                detect(treasure).as_slice(),
+                [OracleDiagnostic::SwallowedClause { detector, .. }]
+                    if detector == "CastManaSourceQualifier"
+            ),
+            "a Treasure carrier does not represent mana produced by {name}"
+        );
+    }
+
+    /// CR 509.1g + CR 608.2i: Detectors Q and R carry the retired variants over
+    /// one for one. A clause is represented only by the exact relation it denoted
+    /// before the reshape: any other direction, a wrong window, or a current
+    /// pairing standing in for a recorded one (or the reverse) leaves it reported.
+    /// Each silent row is the positive for the reported rows beside it.
+    #[test]
+    fn combat_relation_detectors_carry_their_shapes_over_one_for_one() {
+        // The relation restricts a population, so it sits on a typed filter.
+        let evidence = |direction, scope| {
+            let filter = serde_json::to_string(&crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    },
+                ]),
+            ))
+            .expect("a TargetFilter serializes");
+            UnitEvidence::from_json_for_test(&format!("[{filter}]"))
+        };
+        let this_turn = Some(CombatHistoryScope::ThisTurn);
+        let this_combat = Some(CombatHistoryScope::ThisCombat);
+
+        let history = "destroy all creatures it blocked this turn.";
+        let history_reported = |direction, scope| {
+            !history_filter_diagnostics(
+                history,
+                vec![TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ))],
+            )
+            .is_empty()
+        };
+        assert!(
+            !history_reported(BlockPairDirection::SubjectIsBlocker, this_turn),
+            "the carried-over shape represents the clause"
+        );
+        for (direction, scope, why) in [
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_combat,
+                "a wrong window",
+            ),
+            (BlockPairDirection::Either, this_turn, "another direction"),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                this_turn,
+                "the inverse direction",
+            ),
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                None,
+                "a current pairing",
+            ),
+        ] {
+            assert!(
+                history_reported(direction, scope),
+                "{why} does not represent a recorded block"
+            );
+        }
+
+        // A two-way clause is represented only by a two-way filter in its own window.
+        let two_way = "destroy all creatures that blocked or were blocked by it this turn.";
+        let two_way_reported = |direction, scope| {
+            !history_filter_diagnostics(
+                two_way,
+                vec![TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ))],
+            )
+            .is_empty()
+        };
+        assert!(
+            !two_way_reported(BlockPairDirection::Either, this_turn),
+            "the clause's own direction and window represent it"
+        );
+        for (direction, scope, why) in [
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_turn,
+                "a one-way filter",
+            ),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                this_turn,
+                "the inverse one-way filter",
+            ),
+            (BlockPairDirection::Either, this_combat, "a wrong window"),
+        ] {
+            assert!(
+                two_way_reported(direction, scope),
+                "{why} does not represent a two-way clause"
+            );
+        }
+
+        let pairing = "exile all creatures blocked by this creature.";
+        let pairing_reported = |direction, scope| {
+            let mut diagnostics = Vec::new();
+            super::detect_combat_pairing_relation(
+                pairing,
+                pairing,
+                &evidence(direction, scope),
+                &mut diagnostics,
+            );
+            !diagnostics.is_empty()
+        };
+        assert!(
+            !pairing_reported(BlockPairDirection::SubjectIsBlocker, None),
+            "the carried-over shape represents the clause"
+        );
+        for (direction, scope, why) in [
+            (BlockPairDirection::Either, None, "another direction"),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                None,
+                "the inverse direction",
+            ),
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_turn,
+                "a recorded block",
+            ),
+        ] {
+            assert!(
+                pairing_reported(direction, scope),
+                "{why} does not represent a current pairing"
+            );
+        }
     }
 }
 
@@ -15613,6 +17015,7 @@ mod detect_condition_if_replacement_exemption_tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,

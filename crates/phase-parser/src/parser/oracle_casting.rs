@@ -2,9 +2,9 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::combinator::{all_consuming, map, opt, rest, value};
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{preceded, separated_pair, terminated};
 use nom::Parser;
 
 use super::oracle_classifier::lower_starts_with;
@@ -71,8 +71,9 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 ///
 /// Recognized patterns:
 /// - "you may blight N" → `Optional(Blight { count: N })`
-/// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
-/// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - "blight N or pay {M}" → `Choice([Blight { count: N }, Mana { cost: M }])`
+/// - General "X or Y or Z..." → `Choice([X, Y, Z])` using `parse_single_cost`
+///   for each leg
 /// - "X and Y" → `Required(Composite[X, Y])`
 /// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
 ///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
@@ -136,9 +137,18 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
-    // "X or pay {M}" → Choice between cost X and mana payment.
-    // Uses the raw text for mana symbols (case-sensitive).
-    if let Some((left_lower, right_lower)) = body_lower.split_once(" or pay ") {
+    // "X or pay {M}" → Choice between cost X and a mana payment. The right leg
+    // is read from the case-preserving body so mana symbols keep their case, and
+    // a trailing reminder sentence is tolerated exactly as before: the mana-leg
+    // authority (`parse_mana_symbols`) reads the symbols it is given. Nom owns
+    // the split; `parse_single_cost` stays the authority for the other leg.
+    if let Ok((_, (left_lower, right_lower))) = all_consuming(separated_pair(
+        take_until::<_, _, OracleError<'_>>(" or pay "),
+        tag(" or pay "),
+        rest,
+    ))
+    .parse(body_lower)
+    {
         let right_raw = &body_raw[body_raw.len() - right_lower.len()..];
         if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
             let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
@@ -151,43 +161,23 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
-    // General "X or Y or Z..." choice pattern using parse_single_cost for each fragment.
-    // Split on all " or " occurrences to support more than two options (e.g., Dusk Mangler:
-    // "sacrifice a creature, discard a card, or pay 4 life").
-    // Also handle Oxford-comma-separated lists: "A, B, or C" -> ["A", "B", "C"].
-    if body_lower.contains(" or ") {
-        // First split on " or " to get major fragments
-        let major_fragments: Vec<&str> = body_lower.split(" or ").map(str::trim).collect();
-        let mut all_fragments = Vec::new();
-        for (i, fragment) in major_fragments.iter().enumerate() {
-            // For the last fragment, " or " was the delimiter; for earlier ones,
-            // check if they contain comma-separated sub-options (Oxford comma case).
-            if i < major_fragments.len() - 1 && fragment.contains(", ") {
-                // Split on ", " for Oxford-comma-separated options
-                let sub_fragments: Vec<&str> = fragment.split(", ").map(str::trim).collect();
-                all_fragments.extend(sub_fragments);
-            } else {
-                all_fragments.push(*fragment);
+    // General "X or Y or Z..." choice: the alternative-list grammar (`, or ` /
+    // `, ` / ` or `) is parsed with nom, and `parse_single_cost` stays the
+    // authority for each leg's cost. Oxford-comma lists (Dusk Mangler:
+    // "sacrifice a creature, discard a card, or pay 4 life") and plain two-way
+    // alternates are one production with N legs, so no arm is needed per length.
+    if let Some(legs) = split_additional_cost_alternative_legs(body_raw) {
+        if legs.len() >= 2 {
+            let costs: Vec<AbilityCost> = legs
+                .iter()
+                .map(|leg| super::oracle_cost::parse_single_cost(leg.trim()))
+                .collect();
+            if costs
+                .iter()
+                .all(|cost| !matches!(cost, AbilityCost::Unimplemented { .. }))
+            {
+                return Some(AdditionalCost::Choice(costs));
             }
-        }
-        let mut costs = Vec::new();
-        let mut all_valid = true;
-        for (i, fragment) in all_fragments.iter().enumerate() {
-            // For the last fragment, use raw text to preserve mana symbol casing
-            let raw_fragment = if i == all_fragments.len() - 1 {
-                &body_raw[body_raw.len() - fragment.len()..]
-            } else {
-                fragment
-            };
-            let cost = super::oracle_cost::parse_single_cost(raw_fragment.trim());
-            if matches!(cost, AbilityCost::Unimplemented { .. }) {
-                all_valid = false;
-                break;
-            }
-            costs.push(cost);
-        }
-        if all_valid && costs.len() >= 2 {
-            return Some(AdditionalCost::Choice(costs));
         }
     }
 
@@ -239,6 +229,31 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     }
 
     None
+}
+
+/// CR 601.2b + CR 601.2h: Split an additional-cost body into its top-level
+/// alternatives on the printed separator grammar — `", or "` (Oxford comma),
+/// `", "` (middle legs) and `" or "` (two-way) — consuming the whole body.
+///
+/// This owns the list grammar only; each returned leg is still parsed by
+/// `parse_single_cost`, the cost authority. A body with no separator is not a
+/// list and declines, and an empty leg fails the parse instead of emitting a
+/// phantom cost.
+fn split_additional_cost_alternative_legs(body: &str) -> Option<Vec<&str>> {
+    fn separator(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(i)
+    }
+    fn leg(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        nom::combinator::recognize(nom::multi::many1(preceded(
+            nom::combinator::not(nom::combinator::peek(separator)),
+            nom::character::complete::anychar,
+        )))
+        .parse(i)
+    }
+    let (_, legs) = all_consuming(separated_list1(separator, leg))
+        .parse(body)
+        .ok()?;
+    Some(legs)
 }
 
 /// CR 701.4a: Detect the *opening* of a spelled-out choose-behold cost —

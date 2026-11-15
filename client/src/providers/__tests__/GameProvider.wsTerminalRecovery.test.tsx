@@ -1,20 +1,28 @@
 import "fake-indexeddb/auto";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameProvider } from "../GameProvider";
+import { useResumables } from "../../hooks/useResumables";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../../adapter/ws-adapter";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
 import { useGameStore } from "../../stores/gameStore";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { saveWsSession, loadWsSession, WS_SESSION_TTL_MS, type WsSessionData } from "../../services/multiplayerSession";
 import {
   commitFullTerminalDelivery, loadFullTerminalDelivery, type FullTerminalDelivery,
 } from "../../services/fullTerminalResult";
+import {
+  clearGame,
+  loadActiveGame,
+  saveActiveGame,
+} from "../../services/gamePersistence";
 
 // Real Provider, ordinary WebSocketAdapter, raw terminal helpers, localStorage
 // and IndexedDB. The fake server only controls wire replies/transport failures.
 vi.mock("idb-keyval", async (original) => {
   const actual = await original<typeof import("idb-keyval")>();
-  return { ...actual, get: vi.fn(actual.get) };
+  return { ...actual, get: vi.fn(actual.get), set: vi.fn(actual.set) };
 });
 const controller = vi.hoisted(() => vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), dispose: vi.fn() })));
 vi.mock("../../game/controllers/gameLoopController", () => ({ createGameLoopController: controller }));
@@ -22,7 +30,10 @@ vi.mock("../../game/dispatch", () => ({
   dispatchAction: vi.fn(), processRemoteUpdate: vi.fn(async () => {}),
   abandonPendingDispatches: vi.fn(),
 }));
-vi.mock("../../adapter/wasm-adapter", () => ({ WasmAdapter: class {}, getSharedAdapter: vi.fn() }));
+vi.mock("../../adapter/wasm-adapter", () => ({
+  WasmAdapter: class {},
+  getSharedAdapter: vi.fn(() => ({ openStateCodecSession: async () => null })),
+}));
 vi.mock("../../services/nativeEngine", () => ({
   canAttemptNativeEngine: () => false, nativeEngineKeyForCurrentOrigin: () => null,
 }));
@@ -86,14 +97,17 @@ class ServerSocket extends EventTarget {
           break;
         case "BootstrapTerminalDelivery":
           if (holdBootstrap) pendingBootstraps.push(this);
-          else this.receive({ type: "TerminalBootstrapResult", data: { delivery: bootstrap } });
+          else this.receive({ type: "TerminalBootstrapResult", data: bootstrap ? { delivery: bootstrap } : {} });
           break;
         case "AckTerminalDelivery":
           if (ackOutcome === "reject") this.onerror?.();
           else if (ackOutcome === "pending") pendingAcks.push(this);
           else {
             if (ackOutcome === "success") successfulAckResponses += 1;
-            this.receive({ type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected" });
+            this.receive({
+              type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected",
+              data: { delivery_id: delivery.deliveryId },
+            });
           }
           break;
         case "Reconnect":
@@ -114,9 +128,9 @@ beforeEach(async () => {
   localStorage.clear();
   useGameStore.getState().reset();
   vi.clearAllMocks();
-  vi.mocked((await import("idb-keyval")).get).mockImplementation(
-    (await vi.importActual<typeof import("idb-keyval")>("idb-keyval")).get,
-  );
+  const actualIdb = await vi.importActual<typeof import("idb-keyval")>("idb-keyval");
+  vi.mocked((await import("idb-keyval")).get).mockImplementation(actualIdb.get);
+  vi.mocked((await import("idb-keyval")).set).mockImplementation(actualIdb.set);
   sockets = [];
   requests = [];
   pendingAcks = [];
@@ -212,7 +226,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     };
     saveWsSession(replacement);
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     expect(loadWsSession()).toEqual(replacement);
   });
 
@@ -247,7 +263,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     saveWsSession({ ...retained, timestamp: Date.now() - WS_SESSION_TTL_MS - 1 });
     expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey, terminalOnly: true });
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     await waitFor(() => expect(loadWsSession()).toBeNull());
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
   });
@@ -274,12 +292,161 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
   });
 
   it.each(["saved", "bootstrap", "live"] as const)("control: %s ACK succeeds on the retained endpoint and tuple", async (path) => {
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
     await startTerminalPath(path);
     expect(requests).toContainEqual({ url: session.serverUrl, message: {
       type: "AckTerminalDelivery", data: { delivery_id: delivery.deliveryId, credential: delivery.credential },
     } });
     await waitFor(() => expect(loadWsSession()).toBeNull());
+    await waitFor(() => expect(loadActiveGame()).toBeNull());
     expect(successfulAckResponses).toBe(1);
+  });
+
+  it.each([
+    ["the completed game's pointer", null],
+    ["a replacement pointer for another game", { id: "rematch", mode: "online" as const, difficulty: "" }],
+  ])("releases %s on matching acknowledgement after navigation and keeps replacement", async (_desc, replacement) => {
+    ackOutcome = "pending";
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    const mounted = await startTerminalPath("live");
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Unmount before ACK arrives to model navigation away from the game page.
+    mounted.unmount();
+    expect(pendingAcks).toHaveLength(1);
+
+    if (replacement) {
+      saveActiveGame(replacement);
+    }
+
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
+
+    if (replacement) {
+      expect(loadActiveGame()).toEqual(replacement);
+    } else {
+      await waitFor(() => expect(loadActiveGame()).toBeNull());
+      expect(loadWsSession()).toBeNull();
+    }
+  });
+
+  it("keeps the online pointer across display cleanup and failed ACK, and reopening retries", async () => {
+    ackOutcome = "pending";
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    const mounted = await startTerminalPath("live");
+    // Display cleanup (clearGame) must not delete the online pointer.
+    await act(async () => { await clearGame("ws-terminal-recovery"); });
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Unmount before ACK lands to model navigation to Home.
+    mounted.unmount();
+
+    // Reject the pending ACK (failed ACK).
+    await act(async () => {
+      pendingAcks[0].onerror?.();
+    });
+
+    // Pointer is preserved on failed ACK.
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Reopen without gameplay connection retries ACK.
+    ackOutcome = "success";
+    const reopened = mountProvider();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({
+      type: "terminalDelivery", delivery: { ...delivery, finalView: undefined },
+    }));
+    await waitFor(() => expect(loadActiveGame()).toBeNull());
+    expect(loadWsSession()).toBeNull();
+  });
+
+  it.each([
+    ["the completed game's pointer", false],
+    ["a replacement session for another game", true],
+  ])("a mounted Home learns of a result retained after navigation, and a reopened matching ACK releases %s", async (_case, replace) => {
+    const finished = { id: "ws-terminal-recovery", mode: "online" as const, difficulty: "" };
+    saveActiveGame(finished);
+    saveWsSession(session);
+    // Hold the result's IndexedDB commit so retention finishes after Back to Home.
+    const idb = await import("idb-keyval");
+    const actualSet = (await vi.importActual<typeof import("idb-keyval")>("idb-keyval")).set;
+    let releaseRetention!: () => void;
+    const retentionHeld = new Promise<void>((resolve) => { releaseRetention = resolve; });
+    vi.mocked(idb.set).mockImplementation(async (key, value, store) => {
+      if ((value as Partial<FullTerminalDelivery> | undefined)?.deliveryId === delivery.deliveryId) {
+        await retentionHeld;
+      }
+      return actualSet(key, value, store);
+    });
+    ackOutcome = "reject";
+
+    // Home stays mounted for the whole sequence: it is never remounted.
+    const home = renderHook(
+      () => ({ resumables: useResumables(), location: useLocation() }),
+      { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+    );
+    await waitFor(() => expect(home.result.current.resumables.match?.id).toBe(finished.id));
+
+    const game = mountProvider();
+    await waitFor(() => expect(game.events).toHaveBeenCalledWith(expect.objectContaining({ type: "reconnected" })));
+    await act(async () => { sockets[sockets.length - 1]!.receive({ type: "TerminalResult", data: { delivery } }); });
+    expect(vi.mocked(idb.set)).toHaveBeenCalledWith(expect.anything(), delivery, expect.anything());
+
+    // Back to Home before retention lands: the session still looks playable.
+    game.unmount();
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, playerToken: session.playerToken });
+    expect(loadWsSession()?.terminalOnly).toBeUndefined();
+    expect(home.result.current.resumables.match?.id).toBe(finished.id);
+    expect(home.result.current.resumables.retainedResult).toBeNull();
+
+    // Retention lands and the ACK fails.
+    await act(async () => { releaseRetention(); });
+    await waitFor(() => expect(requests.some(({ message }) => message.type === "AckTerminalDelivery")).toBe(true));
+    expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+    expect(loadActiveGame()).toEqual(finished);
+    expect(successfulAckResponses).toBe(0);
+
+    // The mounted Home swaps Resume for View Result.
+    await waitFor(() => expect(home.result.current.resumables.retainedResult?.id).toBe(finished.id));
+    expect(home.result.current.resumables.match).toBeNull();
+    act(() => home.result.current.resumables.viewRetainedResult());
+    expect(home.result.current.location.pathname).toBe(`/game/${finished.id}`);
+    expect(home.result.current.location.search).toBe("?mode=host");
+
+    // Reopening re-displays the result without gameplay and retries the ACK.
+    ackOutcome = "pending";
+    const controllerCount = controller.mock.calls.length;
+    const reopened = mountProvider();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
+    await waitFor(() => expect(pendingAcks).toHaveLength(1));
+    expect(controller.mock.calls.length).toBe(controllerCount);
+
+    const rematch = { id: "rematch", mode: "online" as const, difficulty: "" };
+    const rematchSession: WsSessionData = {
+      ...session, gameCode: "NEXT", fullKey: { game_code: "NEXT", generation: 1 }, playerToken: "next-token",
+    };
+    if (replace) {
+      saveActiveGame(rematch);
+      saveWsSession(rematchSession);
+    }
+    await act(async () => {
+      pendingAcks[0]!.receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
+
+    if (replace) {
+      expect(loadActiveGame()).toEqual(rematch);
+      expect(loadWsSession()).toEqual(rematchSession);
+      await waitFor(() => expect(home.result.current.resumables.match?.id).toBe(rematch.id));
+    } else {
+      await waitFor(() => expect(loadActiveGame()).toBeNull());
+      expect(loadWsSession()).toBeNull();
+      await waitFor(() => expect(home.result.current.resumables.match).toBeNull());
+    }
+    expect(home.result.current.resumables.retainedResult).toBeNull();
   });
 
   it.each([
@@ -312,5 +479,109 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     });
     expect.soft(controller.mock.calls.length).toBe(controllerCount);
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+  });
+
+  describe("terminal response identity binding", () => {
+    const sentTypes = () => requests.map(({ message }) => message.type).filter((type) => type !== "ClientHello");
+
+    it("reports a foreign bootstrap key without committing, acknowledging, or reconnecting", async () => {
+      saveWsSession(session);
+      bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal bootstrap key",
+      }));
+      expect(sentTypes()).toEqual(["BootstrapTerminalDelivery"]);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
+      expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
+      expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
+      expect(loadWsSession()).toEqual(session);
+    });
+
+    it.each([
+      ["another credential", { credential: "foreign-credential" }],
+      ["another delivery", { deliveryId: "foreign-delivery" }],
+    ])("keeps the retained result and route when the read returns %s", async (_case, changed) => {
+      const retained = delivery;
+      await commitFullTerminalDelivery(retained);
+      saveWsSession({ ...session, terminalOnly: true });
+      delivery = { ...retained, ...changed, display: { winner: 1, reason: "Another game's result" } };
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal delivery read",
+      }));
+      // No acknowledgement was sent for the foreign reply.
+      expect(sentTypes()).toEqual(["ReadTerminalResult"]);
+      const published = events.mock.calls
+        .map(([event]) => event as { type: string })
+        .filter((event) => event.type === "terminalDelivery");
+      expect(published).toEqual([{ type: "terminalDelivery", delivery: { ...retained, finalView: undefined } }]);
+      expect(await loadFullTerminalDelivery(session.fullKey)).toEqual(retained);
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    });
+
+    it("keeps the recovery route when the server acknowledges a different delivery", async () => {
+      ackOutcome = "pending";
+      saveWsSession({ ...session, terminalOnly: true });
+      await commitFullTerminalDelivery(delivery);
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(pendingAcks).toHaveLength(1));
+      await act(async () => {
+        pendingAcks[0].receive({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: "other-delivery-id" },
+        });
+      });
+
+      expect(sentTypes()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
+      expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery });
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    });
+
+    it("restores authoritative guest seat 1 identity upon terminal recovery", async () => {
+      const guestSession: WsSessionData = {
+        ...session,
+        playerId: 1,
+        terminalOnly: true,
+      };
+      saveWsSession(guestSession);
+      const guestDelivery: FullTerminalDelivery = {
+        ...delivery,
+        display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+      };
+      await commitFullTerminalDelivery(guestDelivery);
+
+      useMultiplayerStore.getState().setActivePlayerId(null as never);
+      expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+
+      const { events } = mountProvider();
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalDelivery",
+        delivery: { ...guestDelivery, finalView: undefined },
+      }));
+
+      // The authoritative recipient seat 1 is restored before identity event
+      expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
+    });
+
+    it("leaves the seat unknown when a legacy save has no player id", async () => {
+      // Legacy online saves recorded no `playerId`; the terminal-only recovery
+      // never runs `playerIdentity`, so no seat may be assumed for the labels.
+      saveWsSession({ ...session, terminalOnly: true });
+      await commitFullTerminalDelivery(delivery);
+      useMultiplayerStore.getState().setActivePlayerId(1 as never);
+
+      const { events } = mountProvider();
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalDelivery",
+        delivery: { ...delivery, finalView: undefined },
+      }));
+
+      // A previous game's seat must not label this recovered result.
+      expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+    });
   });
 });

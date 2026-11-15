@@ -155,7 +155,7 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
                     .expect("t");
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                r.act(GameAction::DecideOptionalCost { pay: true })
+                r.act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kick");
             }
             WaitingFor::ManaPayment { .. } => {
@@ -349,6 +349,8 @@ fn illegal_declared_payer_is_not_prompted() {
 
 fn exile_head() -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::Typed(TypedFilter::creature()),

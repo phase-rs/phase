@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod ai_support;
 pub mod analysis;
 pub mod database;

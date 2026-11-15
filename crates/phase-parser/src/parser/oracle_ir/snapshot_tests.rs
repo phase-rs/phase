@@ -666,7 +666,7 @@ fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
     ));
 
     let (shoreline_ir, shoreline_lowered) = parse_two_layer(
-        "Delirium — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "Threshold — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
         "Shoreline Looter",
         &["Creature"],
         &["Rat", "Rogue"],
@@ -675,15 +675,26 @@ fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
     else {
         panic!("expected a native parsed Shoreline Looter trigger");
     };
+    // CR 608.2c: the "unless" binds to the discard only, so it is neither
+    // hoisted as an intervening-if nor replaced by the positive ability-word
+    // fallback; it gates the discard sub-ability and the draw stays
+    // unconditional.
     assert!(shoreline.partial_def.condition.is_none());
+    assert!(shoreline.modifiers.intervening_if.is_none());
+    let shoreline_trigger = &shoreline_lowered.triggers[0];
     assert!(
-        shoreline.modifiers.intervening_if.is_some(),
-        "parsed intervening-if must suppress the ability-word fallback"
+        shoreline_trigger.condition.is_none(),
+        "a later-instruction unless must not gate the whole trigger"
     );
-    assert!(matches!(
-        shoreline_lowered.triggers[0].condition,
-        Some(TriggerCondition::Not { .. })
-    ));
+    let execute = shoreline_trigger.execute.as_deref().expect("trigger body");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+    assert!(execute.condition.is_none());
+    let discard = execute.sub_ability.as_deref().expect("discard clause");
+    assert!(matches!(discard.effect.as_ref(), Effect::Discard { .. }));
+    assert!(
+        discard.condition.is_some(),
+        "the unless gate attaches to the discard"
+    );
 }
 
 /// The table scanner consumes only actual rows. A following ordinary line stays

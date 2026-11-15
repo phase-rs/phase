@@ -203,6 +203,8 @@ export function useDeckBuilder({
     commander: commanders.length > 0 ? commanders : undefined,
   }), [deck, commanders]);
   const formatConfig = formatMetadata(format)?.default_config;
+  // This editor offers only the commander family's dedicated companion slot.
+  const offersDedicatedCompanion = formatMetadata(format)?.companion_slot.type === "CommanderFamily";
 
   // Stable key for deck contents to debounce compatibility evaluation
   const deckKey = useMemo(
@@ -255,7 +257,7 @@ export function useDeckBuilder({
           signaturePolicy.type === "Required" ? signaturePolicy.data.candidates : null,
         );
         setCompanionCandidateNames(
-          formatConfig?.uses_commander ? companionCandidates : null,
+          offersDedicatedCompanion ? companionCandidates : null,
         );
       })
       .catch(() => {
@@ -267,7 +269,7 @@ export function useDeckBuilder({
     return () => {
       cancelled = true;
     };
-  }, [currentDeck, deckKey, format, formatConfig?.uses_commander]);
+  }, [currentDeck, deckKey, format, offersDedicatedCompanion]);
 
   const isCommander = formatConfig?.command_zone ?? false;
   const deckSizeRule: DeckSizeRule = formatConfig?.deck_size ?? { type: "Minimum", data: 60 };
@@ -548,9 +550,11 @@ export function useDeckBuilder({
 
   const applyDeckToEditor = useCallback((next: ParsedDeck, targetFormat: GameFormat = format) => {
     const projected = projectSignatureSpellForFormat(next, targetFormat);
-    const targetUsesCommander = formatMetadata(targetFormat)?.default_config.uses_commander ?? false;
-    const companionInDedicatedSlot = targetUsesCommander ? projected.companion : undefined;
-    const sideboard = !targetUsesCommander && projected.companion
+    // This editor's companion slot is the commander family's (CommanderPanel).
+    const targetHasDedicatedSlot =
+      formatMetadata(targetFormat)?.companion_slot.type === "CommanderFamily";
+    const companionInDedicatedSlot = targetHasDedicatedSlot ? projected.companion : undefined;
+    const sideboard = !targetHasDedicatedSlot && projected.companion
       && !projected.sideboard.some((entry) => entry.name === projected.companion)
       ? [...projected.sideboard, { count: 1, name: projected.companion }]
       : projected.sideboard;

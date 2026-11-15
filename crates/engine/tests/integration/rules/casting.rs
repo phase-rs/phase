@@ -91,7 +91,7 @@ fn optional_cost_paid_sets_flag() {
 
     // Pay the additional cost — this opens BlightChoice.
     let result_opt = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("decide optional cost should succeed");
     assert!(
         matches!(result_opt.waiting_for, WaitingFor::BlightChoice { .. }),
@@ -174,7 +174,7 @@ fn optional_cost_skipped_clears_flag() {
 
     // Skip the additional cost
     let result3 = runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("skip optional cost should succeed");
 
     assert!(
@@ -265,7 +265,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             runner.state().waiting_for,
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -288,7 +288,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             })
             .expect("cast should succeed at base cost");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("skipping the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -1282,6 +1282,7 @@ fn play_land_from_graveyard_with_permission() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1355,6 +1356,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1429,6 +1431,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1514,6 +1517,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1683,12 +1687,12 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             damage_source: None,
             excess: None,
         })
-        .with_additional_cost(AdditionalCost::Choice(
+        .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::Blight { count: 1 },
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 },
             },
-        ))
+        ]))
         .id();
 
     let mut runner = scenario.build();
@@ -2736,7 +2740,8 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(costs) if costs.len() == 2 => {
+                let (alt, printed) = (&costs[0], &costs[1]);
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2762,7 +2767,7 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     // Accept the alternative cost → Zombie reaches the stack with {0} paid.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&zombie_id].zone,
@@ -2855,7 +2860,8 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(costs) if costs.len() == 2 => {
+                let (alt, printed) = (&costs[0], &costs[1]);
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2882,7 +2888,7 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
     // Accept the {0} alternative → the spell reaches the stack and the source's
     // once-per-turn slot is consumed (CR 118.9 + CR 601.2b).
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,
@@ -2959,7 +2965,7 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
 
     // Decline → pay the printed {2} cost; the slot must remain unspent.
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,

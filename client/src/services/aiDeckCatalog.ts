@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { GameFormat, MatchType } from "../adapter/types";
+import type { ChallengeDeck, GameFormat, MatchType } from "../adapter/types";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
 import {
@@ -38,6 +38,13 @@ export interface AiDeckCatalogOptions {
   selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType | null;
   /**
+   * The Horde challenge deck AI survivors build against. Passed WITHOUT a
+   * format tag: the engine answers the picked challenge's survivor verdict
+   * per candidate (Commander shape for EDH hordes, unrestricted for
+   * constructed-block hordes).
+   */
+  selectedChallengeDeck?: ChallengeDeck | null;
+  /**
    * Set false when the caller receives the catalog from a hoisted call
    * instead (e.g. `AiOpponentConfig` under `GameSetupPage`, which shares one
    * analysis with the human pool): the hook stays idle and returns empty.
@@ -70,12 +77,17 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   requestKey: string | null;
 }
 
-/** Identity of one legal-catalog scan: the format/match request it answers. */
+/**
+ * Identity of one legal-catalog scan: the format/match/challenge request it
+ * answers. The challenge leg keeps Horde survivor scans (same match type,
+ * different picked deck) from sharing a key.
+ */
 export function catalogRequestKey(
   selectedFormat?: GameFormat | null,
   selectedMatchType?: MatchType | null,
+  selectedChallengeDeck?: ChallengeDeck | null,
 ): string {
-  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}`;
+  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}::${selectedChallengeDeck ?? ""}`;
 }
 
 /**
@@ -132,6 +144,9 @@ async function legalCandidate(
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
+    // Horde survivor scans pass the picked challenge WITHOUT a format tag;
+    // the engine answers the challenge's survivor verdict per candidate.
+    selectedChallengeDeck: options.selectedChallengeDeck,
     summaryOnly: true,
   });
   if (result.selected_format_compatible !== true) return null;
@@ -212,6 +227,7 @@ function isInventoryStorageKey(key: string | null): boolean {
 export function useAiDeckCatalog({
   selectedFormat,
   selectedMatchType,
+  selectedChallengeDeck,
   enabled = true,
 }: AiDeckCatalogOptions): UseAiDeckCatalogResult {
   const [result, setResult] = useState<UseAiDeckCatalogResult>({
@@ -256,10 +272,10 @@ export function useAiDeckCatalog({
 
   useEffect(() => {
     if (!enabled) return;
-    const key = catalogRequestKey(selectedFormat, selectedMatchType);
+    const key = catalogRequestKey(selectedFormat, selectedMatchType, selectedChallengeDeck);
     let cancelled = false;
     setResult((current) => ({ ...current, loading: true, error: null }));
-    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType })
+    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType, selectedChallengeDeck })
       .then((catalog) => {
         if (!cancelled) setResult({ ...catalog, loading: false, error: null, requestKey: key });
       })
@@ -277,7 +293,7 @@ export function useAiDeckCatalog({
     return () => {
       cancelled = true;
     };
-  }, [selectedFormat, selectedMatchType, enabled, libraryRevision]);
+  }, [selectedFormat, selectedMatchType, selectedChallengeDeck, enabled, libraryRevision]);
 
   return result;
 }

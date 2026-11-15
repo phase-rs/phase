@@ -542,6 +542,8 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // re-seed an exile object, so they would otherwise describe the permanent
     // instead of the prepare-face characteristics installed afterwards.
     copy.granted_abilities_from = None;
+    copy.protection_provenance.clear();
+    copy.protection_start_grants.clear();
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
@@ -561,6 +563,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.cast_cost_paid_object = None;
     copy.fused_split_spell = false;
     copy.cast_occurrence = None;
+    copy.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
 
     // CR 903.3 + CR 903.9a: the commander designation is an attribute of the
     // card itself, not of a copy, so the copy in exile is never a commander

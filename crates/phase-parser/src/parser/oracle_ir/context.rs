@@ -7,11 +7,90 @@ use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
     ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, ZoneChoiceCandidateSource,
+    OpponentMayScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
+
+/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
+/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
+/// resolution-time chooser prompts only the controller, so a bare choice owned by
+/// any of these keeps the timing it had before the bare-choice producer existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseChooser {
+    /// A subject other than the controller or the source: printed on the
+    /// predicate ("an opponent chooses ..."), carried by a conjugated
+    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
+    Subject,
+    /// A player scope peeled from an earlier chunk of the same sentence that this
+    /// subjectless chunk continues ("each opponent may draw a card, then choose
+    /// ...").
+    Scope,
+    /// An accepting-player scope peeled from an earlier chunk of the same sentence
+    /// ("any opponent may ..., then choose ...").
+    AcceptingPlayers,
+    /// An earlier chunk of the same sentence names a subject the parser does not
+    /// recognize ("your opponents each draw a card, then choose ..."; "an opponent
+    /// does the same, then chooses ..."). It is not proven to be the controller, so
+    /// the choice fails closed.
+    UnrecognizedSubject,
+    /// A chunk that opens with a conjugated verb and no subject of its own, whose
+    /// subject neither the chain nor the earlier chunks of its sentence name ("each
+    /// opponent who does chooses ...", "an opponent who controls an artifact
+    /// chooses ...", whose relative-clause subject is lifted into a condition
+    /// before the clause is parsed). "You"
+    /// refers to the controller (CR 109.5) and never takes the conjugated verb, so
+    /// the chooser is some other player.
+    ElidedThirdPerson,
+}
+
+/// CR 611.2a + CR 608.2c: the window a chunk's clause printed at its head, read by
+/// the clause parser itself rather than re-derived from the chunk's source text.
+///
+/// A duration that heads a sentence scopes every coordinated predicate of it
+/// ("Until your next turn, X and Y"), so assembly distributes it to the
+/// sentence's later clauses. Whether the clause heads with one is only knowable
+/// AFTER the chunk loop has lifted the clause's leading guards (a general
+/// conditional, a reflexive "If you do,", …) and the clause shell has peeled its
+/// slots; re-peeling the printed fragment downstream would have to re-implement
+/// that whole guard stack. So the chunk loop arms this probe immediately before
+/// the clause's main parse, the clause parser settles it on the text it actually
+/// lowers, and the chunk loop lifts the result onto `ClauseIr::head_window`.
+///
+/// `Unarmed` (the default, and every standalone parse) records nothing. An
+/// `Armed` probe the parse never settled — a recognizer that returned before
+/// reading its head — means "no head window": it states nothing to distribute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HeadWindowProbe {
+    #[default]
+    Unarmed,
+    Armed,
+    Read(Option<Duration>),
+}
+
+impl HeadWindowProbe {
+    pub(crate) fn is_armed(&self) -> bool {
+        matches!(self, Self::Armed)
+    }
+
+    /// Settle an armed probe with the window read at the clause head; a probe
+    /// that is unarmed or already settled is left untouched, so a nested clause
+    /// parse cannot overwrite the head reading.
+    pub(crate) fn settle(&mut self, window: Option<Duration>) {
+        if self.is_armed() {
+            *self = Self::Read(window);
+        }
+    }
+
+    /// Disarm the probe, yielding the head window it recorded (if any).
+    pub(crate) fn take_window(&mut self) -> Option<Duration> {
+        match std::mem::take(self) {
+            Self::Read(window) => window,
+            Self::Unarmed | Self::Armed => None,
+        }
+    }
+}
 
 /// The players an anaphoric controller phrase can bind to, read from the parse
 /// context (`ParseContext::player_antecedents`) or supplied by a named seed.
@@ -259,6 +338,23 @@ pub enum BareCardAggregateBinding {
     AbilityTargets,
 }
 
+/// CR 608.2c + CR 608.2k: what a bare "that spell" anaphor names in the body
+/// being parsed, for a body NOT itself flagged `in_trigger`. Read only through
+/// [`ParseContext::effective_spell_anaphor_binding`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpellAnaphorBinding {
+    /// CR 608.2c: a resolving spell/ability instruction — the spell its earlier
+    /// text announced (lowers to `TargetFilter::ParentTarget`).
+    #[default]
+    ParentTarget,
+    /// CR 608.2k: the spell the enclosing trigger condition referred to (lowers
+    /// to `TargetFilter::TriggeringSource`). Handed down to bodies parsed with a
+    /// fresh context that still belong to a triggered ability: delayed /
+    /// reflexive bodies (CR 603.7 / CR 603.12), a trigger-owned results table
+    /// (CR 706.3b), an "instead" sub-body of a triggered ability.
+    EventSource,
+}
+
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
 /// an effect chain, for resolving a demonstrative ("that creature") to the
 /// declared slot it names. Only the stable prefix is numbered: once a clause
@@ -291,6 +387,40 @@ pub struct DeclaredSlotEntry {
     pub filter: TargetFilter,
 }
 
+/// CR 608.2c: how the immediately preceding instruction produced the chain's
+/// pending tracked set, and the zone it left those cards in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTrackedSet {
+    pub zone: Zone,
+    pub producer: TrackedSetProducer,
+}
+
+/// CR 608.2c: the instruction kind that published a pending tracked set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedSetProducer {
+    /// "Choose card(s) in <zone>": the chosen cards are a referent that a later
+    /// bare "it" / "they" can name.
+    Chosen,
+    /// A bare reveal (CR 701.20b) chooses nothing, so its cards are named only
+    /// by "those cards" / "the cards revealed this way", never by a bare
+    /// pronoun.
+    Revealed,
+}
+
+impl ParseContext {
+    /// CR 608.2c: whether the preceding instruction chose cards that a bare
+    /// "it" / "they" can refer back to.
+    pub fn chosen_tracked_set_pending(&self) -> bool {
+        matches!(
+            self.pending_tracked_set,
+            Some(PendingTrackedSet {
+                producer: TrackedSetProducer::Chosen,
+                ..
+            })
+        )
+    }
+}
+
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -298,6 +428,32 @@ pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
+}
+
+/// CR 608.2c: whether the effect chain about to be parsed is proven to resolve
+/// as its ability's root node. The engine evaluates a root's gate on the root
+/// itself; a sub-ability's gate is evaluated first in its parent's hand-off,
+/// against the PARENT, and again on the sub itself, and both must hold. So a
+/// gate that reads the gated instruction's own target is only representable on
+/// a proven root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResolvedChainRoot {
+    /// Not proven: the chain may be attached under another node, or have
+    /// another instruction appended below it, at parse or cast time (a nested
+    /// remainder parse, a mode, a spell with a second paragraph, a fused half, a
+    /// spliced card or a splice host, a gift spell, an awaken spell), or lose
+    /// its targets at cast time (an overloaded spell).
+    #[default]
+    Unproven,
+    /// Set by a top-level entry point whose chain is its ability's resolved
+    /// root with its printed targets (a triggered ability's body, an activated
+    /// ability's effect on a card without a gift keyword, the spell line of a
+    /// card whose only non-keyword line it is and whose spell is not rewritten
+    /// at cast). A gift card is excluded for activated abilities too: the
+    /// engine wraps its first spell or activated ability under a `GiftDelivery`
+    /// root (`synthesize_gift`; Starforged Sword's synthesized Equip sits under
+    /// it).
+    Proven,
 }
 
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
@@ -340,6 +496,20 @@ pub struct ParseContext {
     /// A declared "target creature" subject inside a trigger body fails closed
     /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
+    /// What a bare "that spell" anaphor in this effect body names when the body
+    /// is not itself an `in_trigger` body (CR 608.2c + CR 608.2k).
+    ///
+    /// Set to [`SpellAnaphorBinding::EventSource`] for a delayed triggered
+    /// ability's body (CR 603.7), a reflexive body (CR 603.12), a trigger-owned
+    /// results table (CR 706.3b) and an "instead" sub-body parsed out of a
+    /// triggered ability: those bodies parse with a fresh context but have no
+    /// announced parent target, so their anaphor names the object the trigger
+    /// condition referred to. Distinct from `in_trigger`, which gates many other
+    /// parser branches. Consumers read this through
+    /// [`Self::effective_spell_anaphor_binding`], which lets `in_trigger`
+    /// dominate; only a context hand-off that also carries `in_trigger` (the
+    /// effect-chain chunk context) copies the raw field.
+    pub spell_anaphor_binding: SpellAnaphorBinding,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
@@ -383,6 +553,9 @@ pub struct ParseContext {
     /// paid, duration-scoped, capped-at-one `from among` batch grant to the
     /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
     pub stated_clause_duration: Option<Duration>,
+    /// CR 611.2a + CR 608.2c: whether the clause the chain chunk loop is about
+    /// to parse printed a window at its HEAD. See [`HeadWindowProbe`].
+    pub head_window: HeadWindowProbe,
     /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
     /// nearest preceding `Effect::Dig` in this chain whose kept and rest
     /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of
@@ -401,6 +574,24 @@ pub struct ParseContext {
     /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
     /// actually precedes it.
     pub nearest_dig_rest_zone: Option<crate::types::zones::Zone>,
+    /// CR 608.2c + CR 122.1: the counter KIND a bare counter anaphor ("remove
+    /// those counters" / "remove them" / "remove all of them") in this chunk
+    /// refers back to, when the gating condition introduced the counters as a
+    /// typed count on the ability source ("Then if there are three or more
+    /// promotion counters on her, remove those counters" — Beckett Mariner;
+    /// Prize Pig; Cursed Recording; Treasure Map; Hostile Hostel). `None` when
+    /// there is no such antecedent, or the antecedent is every kind ("three or
+    /// more counters on it"), in which case the anaphor keeps its all-kinds
+    /// reading.
+    ///
+    /// Set per effect-chain chunk from that chunk's resolved condition (a
+    /// struct-literal chunk context, so it never leaks into the next chunk),
+    /// falling back to the kind an enclosing gate bound for the chunk. A gate
+    /// whose body spans several instructions ("remove those counters, transform
+    /// this artifact, and create …") binds its kind on the parent context for
+    /// the recursive body parse only, then restores it.
+    /// Consumed by `oracle_effect::counter::try_parse_remove_counter`.
+    pub counter_anaphor_kind: Option<crate::types::counter::CounterType>,
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
@@ -467,6 +658,30 @@ pub struct ParseContext {
     /// parse; the coordinated writer declines to the unbound gap on a different
     /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
+    /// Player scope already peeled from this chunk's subject or optional prefix.
+    /// The chain loop supplies its composed scope before parsing the body so a
+    /// bare choose cannot mistake another player's choice for the controller's.
+    pub clause_player_scope: Option<PlayerFilter>,
+    /// First-accept-wins optional scope peeled from this chunk ("any ... may").
+    /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
+    pub clause_opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2d + CR 115.10a: The chooser, other than the ability's controller,
+    /// that owns the bare choices of the predicate being lowered (`ClauseChooser`).
+    /// `TargetOnly`'s resolution-time chooser prompts only the ability's
+    /// controller, so a bare choice owned by it cannot declare resolution timing.
+    /// Set by the subject-predicate lowering around a printed subject's
+    /// predicate, and seeded by the chain chunk loop for a chunk that names no
+    /// subject of its own: from the carried player subject that a conjugated
+    /// continuation inherits; else from the latest subject or peeled scope, other
+    /// than the controller or the source, that an earlier chunk of the same
+    /// sentence names, failing closed when that chunk's subject is not recognized;
+    /// else, for a chunk opening with a conjugated verb, as an elided third person
+    /// (CR 608.2c). Inherited by the compound continuations that predicate
+    /// splits into; a continuation with a controller subject of its own clears it
+    /// for that conjunct. `None` outside such a predicate. The chain loop assigns it
+    /// again before every chunk, so a value left by the last chunk is never read;
+    /// never serialized.
+    pub clause_subject_chooser: Option<ClauseChooser>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -607,6 +822,39 @@ pub struct ParseContext {
     /// the scan is trying to guess, so it states it here and the statement
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
+    ///
+    /// The legacy bare-choose producer declares `Resolution` for a singular
+    /// "a/an <object> you control" phrase fully consumed by the target parser,
+    /// with chosen selection and no peeled actor scope, printed target, context
+    /// reference, or player target. The chunk loop strips optional quantifiers;
+    /// those chunks and exact counts fail the a/an gate. The declaration applies
+    /// at any chain position (later chunks, compound continuations and modal
+    /// modes alike), since the choice is not a target at any of them; the
+    /// engine's `TargetOnly` exemption in `defers_conditional_target_selection`
+    /// keeps later announced targets.
+    /// Partial and quantified choices leave this unset.
+    /// A peeled opponent-may chunk's own bare choice declares nothing, so the
+    /// accepting-player timing fallback keeps the timing it always produced for
+    /// it; a compound continuation's sub-link in such a chunk is still re-timed by
+    /// `target_choice_timing_for_clause_sub`. A non-controller subject, printed or
+    /// inherited by a conjugated continuation (`clause_subject_chooser`), keeps
+    /// the bare-choice producer from declaring `Resolution` on its own clause and
+    /// on the compound continuations it owns, which is the timing those clauses had
+    /// before the producer existed. The object-and-player producer declares
+    /// `Resolution` for every subject, as it always did. The bare choice's
+    /// `Resolution` declaration is withdrawn after the chain is built, in four
+    /// passes that restore the timing the choice had before the producer existed:
+    /// when the choice is repeated per player or object
+    /// (`withhold_resolution_timing_from_repeated_choices`); when the chain holds
+    /// another cast-time bare choice, such as another player's
+    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); when a later
+    /// clause's printed "target" was bound to the choice or left unimplemented
+    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`, which
+    /// withdraws only that clause's antecedent choice); and when a later clause
+    /// reads the announced slots or pick (`withhold_resolution_timing_before_root_slot_readers`).
+    /// While later chunks are still being lowered, the in-loop readers see the
+    /// stamp as `Stack` (`bare_choice_resolution_is_pending`), so later clauses
+    /// lower as they did before the producer existed.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
@@ -783,6 +1031,18 @@ pub struct ParseContext {
     /// admitted inside a mode. Set to `ModalMode` on each mode's context by
     /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
     pub body_scope: BodyScope,
+    /// CR 608.2c: whether the next effect chain parsed on this context is its
+    /// ability's resolved root ([`ResolvedChainRoot`]). Set immediately before
+    /// the entry point's chain parse and taken by that parse on entry, so a
+    /// nested chain parsed inside it, or on a clone made afterwards, sees
+    /// `Unproven`. Never serialized.
+    pub resolved_chain_root: ResolvedChainRoot,
+    /// CR 608.2c: the card-level proof for the effects of this card's activated
+    /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
+    /// card's gift keyword (MTGJSON or printed line) and read by the
+    /// activated-ability entry point. `Unproven` by default, so a context
+    /// built elsewhere proves nothing. Never serialized.
+    pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
@@ -794,8 +1054,9 @@ pub struct ParseContext {
     /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
     /// no explicit origin; an impulse/cascade producer leaves this `None`, so
     /// the lowering keeps the exile default. Reset per effect chain in
-    /// `parse_effect_chain_ir`.
-    pub pending_tracked_set_origin: Option<Zone>,
+    /// `parse_effect_chain_ir`. The producer kind decides whether a bare
+    /// pronoun may name the set ([`Self::chosen_tracked_set_pending`]).
+    pub pending_tracked_set: Option<PendingTrackedSet>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed
@@ -1069,6 +1330,17 @@ impl ParseContext {
         }
     }
 
+    /// CR 608.2c + CR 608.2k: the binding a bare "that spell" anaphor takes here.
+    /// A printed trigger body (`in_trigger`) always names its event's spell;
+    /// otherwise the handed-down `spell_anaphor_binding` decides.
+    pub(crate) fn effective_spell_anaphor_binding(&self) -> SpellAnaphorBinding {
+        if self.in_trigger {
+            SpellAnaphorBinding::EventSource
+        } else {
+            self.spell_anaphor_binding
+        }
+    }
+
     /// Execute `f` with a temporary relative-player scope, restoring the prior
     /// value on return. Replaces thread-local ScopeGuard RAII pattern.
     pub fn with_player_scope<R>(
@@ -1139,6 +1411,45 @@ mod tests {
             context: "parse_target could not classify".into(),
             text: text.into(),
             line_index: 0,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: `in_trigger` dominates the handed-down binding; a
+    /// non-trigger body takes the handed-down binding unchanged.
+    #[test]
+    fn effective_spell_anaphor_binding_lets_in_trigger_dominate() {
+        for (in_trigger, binding, expected) in [
+            (
+                false,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::ParentTarget,
+            ),
+            (
+                false,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::ParentTarget,
+                SpellAnaphorBinding::EventSource,
+            ),
+            (
+                true,
+                SpellAnaphorBinding::EventSource,
+                SpellAnaphorBinding::EventSource,
+            ),
+        ] {
+            let ctx = ParseContext {
+                in_trigger,
+                spell_anaphor_binding: binding,
+                ..ParseContext::default()
+            };
+            assert_eq!(
+                ctx.effective_spell_anaphor_binding(),
+                expected,
+                "in_trigger={in_trigger}, binding={binding:?}"
+            );
         }
     }
 

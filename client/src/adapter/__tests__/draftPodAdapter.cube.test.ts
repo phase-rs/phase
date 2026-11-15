@@ -43,7 +43,7 @@ vi.mock("../../network/connection", () => ({
 }));
 
 vi.mock("../../services/draftPersistence", () => ({
-  loadDraftHostSession: vi.fn(async () => null),
+  loadDraftHostSession: vi.fn(async () => ({ type: "absent" })),
 }));
 
 vi.mock("../p2p-draft-host", () => ({
