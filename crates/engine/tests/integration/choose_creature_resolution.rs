@@ -1388,8 +1388,11 @@ fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool)
 /// land's name (CR 701.23a) and puts them onto the battlefield tapped.
 #[test]
 fn canoptek_wraith_declined_payment_gives_no_land_choice_and_paid_payment_offers_own_lands() {
-    // Declined. Two own lands with different names: a wrongly reached choice
-    // would prompt rather than bind silently to a lone candidate.
+    // Declined. Three own lands with different names: a wrongly reached choice
+    // would prompt rather than bind silently to a lone candidate. Three (not
+    // two) because the {3} offer must be genuinely payable for the prompt to
+    // surface at all (CR 118.3 + CR 608.2d feasibility gate); with two lands
+    // the offer is never made and there is no decline leg to exercise.
     let WraithBoard {
         mut runner,
         wraith,
@@ -1397,7 +1400,7 @@ fn canoptek_wraith_declined_payment_gives_no_land_choice_and_paid_payment_offers
         opposing_land,
         library_plains,
         library_island,
-    } = wraith_at_payment_prompt(&[ManaColor::White, ManaColor::Blue]);
+    } = wraith_at_payment_prompt(&[ManaColor::White, ManaColor::Blue, ManaColor::Black]);
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
         .unwrap();
