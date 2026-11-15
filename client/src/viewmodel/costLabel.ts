@@ -823,15 +823,14 @@ export function additionalCostChoices(
         ],
       };
     }
+    // A required cost has a single option (index 0); cancelling the cast is
+    // the modal's close affordance (`CancelCast`), not a `DecideOptionalCost`.
     case "Required":
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
-        options: [
-          { id: "0", label: `Pay ${formatAbilityCost(cost.data)}` },
-          { id: "1", label: "Cancel" },
-        ],
+        options: [{ id: "0", label: `Pay ${formatAbilityCost(cost.data)}` }],
       };
-    case "Choice":
+    case "Choice": {
       const choiceOptions = cost.data.map((c, i) => ({
         id: String(i),
         label: formatAbilityCost(c),
@@ -840,6 +839,7 @@ export function additionalCostChoices(
         title: "Choose additional cost",
         options: choiceOptions,
       };
+    }
   }
 }
 

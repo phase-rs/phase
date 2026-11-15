@@ -458,6 +458,34 @@ describe("additionalCostChoices — repeatable additional cost", () => {
   });
 });
 
+describe("additionalCostChoices — option ids are engine option indices", () => {
+  it("lists every Choice alternative in printed order (Dusk Mangler, #10442)", () => {
+    const threeWay: AdditionalCost = {
+      type: "Choice",
+      data: [
+        { type: "Sacrifice", target: { type: "Any" }, count: 1 },
+        { type: "Discard", count: 1 },
+        { type: "PayLife", amount: { type: "Fixed", value: 4 } },
+      ],
+    };
+
+    const { options } = additionalCostChoices(threeWay);
+
+    expect(options.map((o) => o.id)).toEqual(["0", "1", "2"]);
+  });
+
+  it("offers a Required cost as its single payment, leaving cancel to the close button", () => {
+    const required: AdditionalCost = {
+      type: "Required",
+      data: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+    };
+
+    const { options } = additionalCostChoices(required);
+
+    expect(options.map((o) => o.id)).toEqual(["0"]);
+  });
+});
+
 describe("formatAbilityCost", () => {
   // CR 101.4: `QuantityRef::PlayerChosenNumber` renders the cross-player fold the
   // engine supplies — "the highest number" for `Max`, "the lowest number" for
