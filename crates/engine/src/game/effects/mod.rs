@@ -24116,6 +24116,63 @@ impl Drop for HeadPaymentLatch<'_> {
     }
 }
 
+/// CR 608.2d + CR 101.4: offer an any-player "may" to each living seat in APNAP
+/// order, binding and judging each seat when it is offered; with no seat able to
+/// take it, the all-declined completion runs. `progress` is the chain's progress
+/// so far, returned unchanged when no seat is offerable and no all-declined
+/// branch exists. Kept out of line so the frame of `resolve_chain_body`, which
+/// the recursive chain walk stacks once per instruction, doesn't carry this
+/// branch's locals.
+#[inline(never)]
+fn offer_optional_in_apnap_order(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    excluded: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    progress: ResolutionProgress,
+) -> Result<ResolutionProgress, EffectError> {
+    let description = ability.description.clone();
+    // apnap_order returns ALL living players active-player-first
+    // (CR 101.4), so the controller lands in its correct slot.
+    let opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|p| Some(*p) != excluded)
+        .collect();
+    let hydrated_ability = ability_with_event_context_targets(state, ability);
+    // CR 608.2d + CR 701.68b + CR 101.4: each seat is bound and judged when it
+    // is offered, in APNAP order; an unable seat is never asked.
+    let Some((first, remaining)) = next_offerable_seat(state, &hydrated_ability, &opponent_order)
+    else {
+        // CR 608.2d + CR 101.4: no seat can take the option, so no one does —
+        // the existing all-declined completion.
+        return match declined_by_every_seat_branch(&hydrated_ability) {
+            Some(branch) => resolve_ability_chain_step(state, &branch, events, depth + 1),
+            None => Ok(progress),
+        };
+    };
+    let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
+    state
+        .install_direct_choice_frame(
+            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                ability: Box::new(hydrated_ability),
+                trigger_event: state.current_trigger_event.clone(),
+                trigger_events: state.current_trigger_events.clone(),
+                trigger_match_count: state.current_trigger_match_count,
+                return_result_occurrence: state.active_return_result_occurrence,
+            }),
+            WaitingFor::OpponentMayChoice {
+                player: first,
+                decision_subject_id,
+                source_id: ability.source_id,
+                description,
+                remaining,
+            },
+        )
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    Ok(ResolutionProgress::Waiting)
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -25402,48 +25459,9 @@ fn resolve_chain_body(
                     }
                 },
             };
-            let description = ability.description.clone();
-            // apnap_order returns ALL living players active-player-first
-            // (CR 101.4), so the controller lands in its correct slot.
-            let opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
-                .into_iter()
-                .filter(|p| Some(*p) != excluded)
-                .collect();
-            let hydrated_ability = ability_with_event_context_targets(state, ability);
-            // CR 608.2d + CR 701.68b + CR 101.4: each seat is bound and judged when it
-            // is offered, in APNAP order; an unable seat is never asked.
-            let Some((first, remaining)) =
-                next_offerable_seat(state, &hydrated_ability, &opponent_order)
-            else {
-                // CR 608.2d + CR 101.4: no seat can take the option, so no one does —
-                // the existing all-declined completion.
-                return match declined_by_every_seat_branch(&hydrated_ability) {
-                    Some(branch) => resolve_ability_chain_step(state, &branch, events, depth + 1),
-                    None => Ok(progress),
-                };
-            };
-            let decision_subject_id =
-                resolved_optional_decision_subject_id(state, &hydrated_ability);
-            state
-                .install_direct_choice_frame(
-                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                        ability: Box::new(hydrated_ability),
-                        trigger_event: state.current_trigger_event.clone(),
-                        trigger_events: state.current_trigger_events.clone(),
-                        trigger_match_count: state.current_trigger_match_count,
-                        return_result_occurrence: state.active_return_result_occurrence,
-                    }),
-                    WaitingFor::OpponentMayChoice {
-                        player: first,
-                        decision_subject_id,
-                        source_id: ability.source_id,
-                        description,
-                        remaining,
-                    },
-                )
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-            progress = ResolutionProgress::Waiting;
-            return Ok(progress);
+            return offer_optional_in_apnap_order(
+                state, ability, excluded, events, depth, progress,
+            );
         }
     }
 
