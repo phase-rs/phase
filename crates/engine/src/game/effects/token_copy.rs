@@ -1025,10 +1025,10 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 | GameEvent::CounterAdded { object_id, .. } => !created_ids.contains(object_id),
                 GameEvent::ZoneChanged {
                     object_id,
-                    from: None,
-                    to: Zone::Battlefield,
+                    from,
+                    to,
                     ..
-                } => !created_ids.contains(object_id),
+                } if from.is_none() && *to == Zone::Battlefield => !created_ids.contains(object_id),
                 _ => true,
             })
         {
