@@ -1186,12 +1186,21 @@ fn release_entering_block_history_is_repaired_for_raw_and_trusted_saves() {
 
 /// Keep Mirror Match's token past end of combat using the printed Stifle,
 /// then optionally declare it as a blocker in Full Throttle's second combat.
-/// Legacy saves preserve possibly genuine declarations once two declare-blockers
-/// steps have begun; current marked saves preserve precisely the recorded history.
+/// Current marked saves preserve precisely the recorded history. Legacy saves
+/// use the live second combat's window when it distinguishes a declaration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoredHistoryWindow {
+    SecondDeclaration,
+    AfterCombats,
+    ThirdCombat,
+}
+
+/// Exercise raw and trusted legacy envelopes through the restore pipeline.
 fn check_restored_entering_receipt(
     same_attacker: bool,
     check_returned_incarnation: bool,
     declare_later: bool,
+    window: RestoredHistoryWindow,
 ) {
     for trusted in [false, true] {
         let mut s = GameScenario::new();
@@ -1315,38 +1324,117 @@ fn check_restored_entering_receipt(
                 WaitingFor::Priority { .. }
             ));
         }
+        match window {
+            RestoredHistoryWindow::SecondDeclaration => {}
+            RestoredHistoryWindow::AfterCombats => {
+                pass_until(&mut runner, "third combat attack declaration", |state| {
+                    state.steps_started_this_turn.count(Phase::BeginCombat) == 3
+                        && matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. })
+                });
+                attack(&mut runner, &[]);
+                pass_until(&mut runner, "postcombat main", |state| {
+                    state.phase == Phase::PostCombatMain
+                        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                });
+                assert!(runner.state().combat.is_none());
+            }
+            RestoredHistoryWindow::ThirdCombat => {
+                pass_until(&mut runner, "third combat attack declaration", |state| {
+                    state.steps_started_this_turn.count(Phase::BeginCombat) == 3
+                        && matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. })
+                });
+                attack(&mut runner, &[]);
+                pass_until(&mut runner, "empty third combat end priority", |state| {
+                    state.phase == Phase::EndCombat
+                        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                });
+                assert_eq!(
+                    runner
+                        .state()
+                        .steps_started_this_turn
+                        .count(Phase::DeclareBlockers),
+                    2
+                );
+                assert_eq!(
+                    runner
+                        .state()
+                        .steps_started_this_turn
+                        .count(Phase::BeginCombat),
+                    3
+                );
+                assert!(!runner
+                    .state()
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .creature_blocked_attackers_this_combat
+                    .contains(&declared_pair));
+            }
+        }
         let mut saved = runner.state().clone();
         if !same_attacker || !declare_later {
             // Reconstruct the release writer's entering-only contribution.
-            // With two steps the migration cannot prove it was entering-only.
+            // The current writer correctly omits entering-only history.
             saved
                 .creature_blocked_attackers_this_turn
                 .insert(entered_pair);
             saved.creatures_blocked_this_turn.insert(token);
         }
+        assert!(
+            engine::game::casting::can_cast_object_now(&saved, P0, barrage),
+            "reach: the legacy contribution makes Barrage castable before repair"
+        );
         let restored = restore_block_history(&saved, trusted);
-        assert!(restored
-            .creature_blocked_attackers_this_turn
-            .contains(&entered_pair));
+        let keep_entry =
+            window != RestoredHistoryWindow::SecondDeclaration || (same_attacker && declare_later);
+        assert_eq!(
+            restored
+                .creature_blocked_attackers_this_turn
+                .contains(&entered_pair),
+            keep_entry
+        );
         assert_eq!(
             restored
                 .creature_blocked_attackers_this_turn
                 .contains(&declared_pair),
-            declare_later || same_attacker
+            declare_later || (same_attacker && keep_entry)
         );
+        assert_eq!(
+            restored.creatures_blocked_this_turn.contains(&token),
+            declare_later || keep_entry
+        );
+        if let Some(combat) = restored.combat.as_ref() {
+            assert_eq!(
+                combat
+                    .creature_blocked_attackers_this_combat
+                    .contains(&declared_pair),
+                declare_later && window == RestoredHistoryWindow::SecondDeclaration
+            );
+        }
+        if !declare_later && !keep_entry {
+            assert_eq!(restored.phase, Phase::DeclareBlockers);
+            assert_eq!(
+                restored.steps_started_this_turn.count(Phase::BeginCombat),
+                2
+            );
+            assert!(
+                matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0)
+            );
+            assert!(
+                !engine::game::casting::can_cast_object_now(&restored, P0, barrage),
+                "CR 509.4: Barrage has no creature that blocked to target"
+            );
+            continue;
+        }
         assert_eq!(
             restored
                 .combat
                 .as_ref()
-                .unwrap()
-                .creature_blocked_attackers_this_combat
-                .contains(&declared_pair),
-            declare_later
-        );
-        assert!(restored.creatures_blocked_this_turn.contains(&token));
-        assert_eq!(
-            restored.combat.as_ref().unwrap().blocker_to_attacker,
-            saved.combat.as_ref().unwrap().blocker_to_attacker,
+                .map(|combat| &combat.blocker_to_attacker),
+            saved
+                .combat
+                .as_ref()
+                .map(|combat| &combat.blocker_to_attacker),
             "live assignments survive even a collision"
         );
         let mut legacy_runner = GameRunner::from_state(restored);
@@ -1413,25 +1501,37 @@ fn check_restored_entering_receipt(
 
 #[test]
 fn restored_entering_receipts_preserve_independent_declarations() {
-    check_restored_entering_receipt(false, false, true);
+    check_restored_entering_receipt(false, false, true, RestoredHistoryWindow::SecondDeclaration);
 }
 
 #[test]
 fn restored_entering_receipts_preserve_later_blocker_incarnations() {
-    check_restored_entering_receipt(true, true, true);
+    check_restored_entering_receipt(true, true, true, RestoredHistoryWindow::SecondDeclaration);
 }
 
 #[test]
 fn current_and_legacy_saves_preserve_same_pair_declarations() {
-    check_restored_entering_receipt(true, false, true);
+    check_restored_entering_receipt(true, false, true, RestoredHistoryWindow::SecondDeclaration);
 }
 
-/// CR 509.4: entering blocking alone is not a block declaration. Legacy data
-/// cannot distinguish that erroneous contribution from a genuine later block
-/// once two declare-blockers steps have begun, so it conservatively survives.
+/// CR 509.4: entering blocking alone is not a block declaration. The live
+/// second combat distinguishes an empty declaration from a genuine one.
 #[test]
-fn legacy_two_step_history_preserves_an_ambiguous_entering_only_contribution() {
-    check_restored_entering_receipt(true, false, false);
+fn legacy_empty_second_declaration_removes_entering_only_history() {
+    check_restored_entering_receipt(true, false, false, RestoredHistoryWindow::SecondDeclaration);
+}
+
+/// CR 509.1g: a genuine second declaration survives an empty third combat.
+#[test]
+fn legacy_third_combat_preserves_genuine_second_declaration() {
+    check_restored_entering_receipt(true, false, true, RestoredHistoryWindow::ThirdCombat);
+}
+
+/// CR 509.4: once combat windows are gone, legacy entering-only history remains
+/// ambiguous and is conservatively kept. This documents the repair's limitation.
+#[test]
+fn legacy_finished_combats_preserve_ambiguous_entering_history() {
+    check_restored_entering_receipt(true, false, false, RestoredHistoryWindow::AfterCombats);
 }
 
 /// CR 702.12b: an indestructible target survives, and Ride Down's grant still

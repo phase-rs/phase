@@ -1078,15 +1078,29 @@ fn record_block_history(
 /// Receipts identify the blocker incarnation but only the attacker's storage id.
 /// With at most one declare-blockers step begun this turn, no later declaration
 /// (CR 509.1g) could have followed the entering block, so its history is removed.
-/// With two or more such steps, the receipt cannot exclude a genuine later block:
-/// preserve both windows and the unary entry, even if it only entered blocking.
+/// With exactly two declare-blockers steps and two combats begun, a live combat's
+/// window distinguishes the second declaration (CR 509.1g): the released writer
+/// cleared that window at each combat's beginning and wrote entries and declarations
+/// into both windows. Remove a receipt-matched turn pair only if absent there.
+/// Otherwise preserve ambiguous history: a finished second combat, additional
+/// combats (including ones skipping blockers), or more declarations cannot prove
+/// whether a later genuine block contributed. An entry in the live second combat
+/// also remains indistinguishable from a declaration and is conservatively kept.
 /// Current trusted saves bypass this repair and preserve genuine declarations.
 pub(crate) fn migrate_restored_entering_block_history(state: &mut GameState) {
     use crate::types::resolved_commands::ResolvedRulesCommand;
 
-    if state.steps_started_this_turn.count(Phase::DeclareBlockers) > 1 {
+    let declarations = state.steps_started_this_turn.count(Phase::DeclareBlockers);
+    let distinguishing_combat = if declarations <= 1 {
+        None
+    } else if declarations == 2 && state.steps_started_this_turn.count(Phase::BeginCombat) == 2 {
+        let Some(combat) = state.combat.as_ref() else {
+            return;
+        };
+        Some(combat.creature_blocked_attackers_this_combat.clone())
+    } else {
         return;
-    }
+    };
 
     let entering: HashSet<_> = state
         .resolved_rules_journal
@@ -1110,7 +1124,10 @@ pub(crate) fn migrate_restored_entering_block_history(state: &mut GameState) {
         .collect();
     let mut removed_blockers = HashSet::new();
     let mut keep = |pair: &BlockHistoryPair| {
-        let remove = entering.contains(&(pair.blocker, pair.attacker.object_id));
+        let remove = entering.contains(&(pair.blocker, pair.attacker.object_id))
+            && distinguishing_combat
+                .as_ref()
+                .is_none_or(|current| !current.contains(pair));
         if remove {
             removed_blockers.insert(pair.blocker);
         }
