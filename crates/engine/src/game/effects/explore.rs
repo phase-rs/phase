@@ -304,6 +304,7 @@ pub(crate) fn resolve_explore_effect(
         .unwrap_or_default();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&[top_card_id]),
         card_ids: vec![top_card_id],
         card_names: vec![revealed_name],
     });
