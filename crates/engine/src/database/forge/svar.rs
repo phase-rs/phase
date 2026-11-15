@@ -184,7 +184,7 @@ impl<'a> SvarResolver<'a> {
                 Ok(QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: crate::types::ability::ObjectScope::Source,
-                        counter_type: Some(counter_type),
+                        counter_type: Some(crate::types::CounterType::Generic(counter_type)),
                     },
                 })
             }

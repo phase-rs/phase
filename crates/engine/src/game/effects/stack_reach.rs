@@ -7,13 +7,15 @@ use crate::game::ability_utils::{
     apply_instead_swap, flatten_specified_targets_in_chain, validate_targets_in_chain,
 };
 use crate::game::functioning_abilities::{active_replacements, replacement_functions_in_zone};
+use crate::game::players::opponents;
 use crate::game::replacement::{
     find_applicable_replacements, live_floating_replacements, replacement_registry,
 };
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ReplacementDefinition,
-    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, ControllerRef, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ObjectScope, ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
@@ -759,12 +761,109 @@ fn hidden_library_move_may_be_replaced(
             && registry
                 .get(&definition.event)
                 .is_some_and(|handler| (handler.matcher)(&event, host, board))
+            && replacement_valid_card_admits_library_owner(definition, host, player, board)
     };
     active_replacements(board).any(|(_, host, definition)| {
         host.zone.is_public()
             && replacement_functions_in_zone(host, definition)
             && may_apply(host.id, definition)
     }) || live_floating_replacements(board).any(|(host, definition)| may_apply(host, definition))
+}
+
+/// Evaluates the ownership component of a replacement's `valid_card` filter
+/// against the known owner of a hidden library card (the library's owner).
+/// Evaluates the ownership component of a replacement's `valid_card` filter
+/// against the known owner of a hidden library card (the library's owner).
+/// CR 400.3 + CR 109.5: cards go to their owner's graveyard, so a replacement
+/// for "your graveyard" (Owned { You }) only applies to cards owned by the
+/// replacement's controller.
+fn replacement_valid_card_admits_library_owner(
+    definition: &ReplacementDefinition,
+    host: ObjectId,
+    library_owner: PlayerId,
+    board: &GameState,
+) -> bool {
+    let Some(valid_card) = &definition.valid_card else {
+        return true; // No filter = admits all
+    };
+
+    // Extract ownership filter from valid_card and evaluate it
+    evaluate_ownership_filter(valid_card, host, library_owner, board, definition)
+}
+
+fn evaluate_ownership_filter(
+    filter: &TargetFilter,
+    host: ObjectId,
+    card_owner: PlayerId,
+    board: &GameState,
+    definition: &ReplacementDefinition,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            // Check if any Owned property admits the card owner.
+            // If there are no Owned properties, there is no ownership constraint.
+            let mut has_owned = false;
+            for prop in properties {
+                match prop {
+                    FilterProp::Owned { controller } => {
+                        has_owned = true;
+                        // Resolve controller relative to the replacement's host
+                        if resolve_controller_ref(board, host, controller, definition)
+                            == Some(card_owner)
+                        {
+                            return true;
+                        }
+                    }
+                    _ => {} // Non-ownership properties don't constrain ownership
+                }
+            }
+            // If no Owned properties, no ownership constraint = admits all
+            !has_owned
+        }
+        TargetFilter::And { filters } => {
+            // All sub-filters must admit
+            filters
+                .iter()
+                .all(|f| evaluate_ownership_filter(f, host, card_owner, board, definition))
+        }
+        TargetFilter::Or { filters } => {
+            // At least one sub-filter must admit
+            filters
+                .iter()
+                .any(|f| evaluate_ownership_filter(f, host, card_owner, board, definition))
+        }
+        TargetFilter::Not { filter } => {
+            !evaluate_ownership_filter(filter, host, card_owner, board, definition)
+        }
+        TargetFilter::SelfRef => false, // Already excluded by caller
+        _ => true, // Other filters don't constrain ownership for hidden library cards
+    }
+}
+
+fn resolve_controller_ref(
+    board: &GameState,
+    host: ObjectId,
+    controller: &ControllerRef,
+    definition: &ReplacementDefinition,
+) -> Option<PlayerId> {
+    match controller {
+        ControllerRef::You => {
+            // First try to get controller from the host object
+            board
+                .objects
+                .get(&host)
+                .map(|obj| obj.controller)
+                // If host is not found (e.g., ObjectId(0) for floating replacements),
+                // fall back to the replacement's source_controller
+                .or(definition.source_controller)
+        }
+        ControllerRef::Opponent => board
+            .objects
+            .get(&host)
+            .map(|obj| obj.controller)
+            .and_then(|c| opponents(board, c).first().copied()),
+        _ => None, // Other controller refs not relevant for ownership on hidden library cards
+    }
 }
 
 /// The events `bound`'s resolver proposes to the replacement pipeline for what
