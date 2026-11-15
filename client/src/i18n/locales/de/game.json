@@ -1243,6 +1243,7 @@
       "draw": "UNENTSCHIEDEN",
       "victory": "SIEG",
       "defeat": "NIEDERLAGE",
+      "complete": "SPIEL VORBEI",
       "lifeSummary": "Du: <player>{{playerLife}}</player> <sep>/</sep> Gegner: <opponent>{{opponentLife}}</opponent>",
       "turns": "Züge: {{count}}",
       "duration": "Dauer: {{time}}",
@@ -2654,6 +2655,7 @@
   },
   "outsideGame": {
     "fromExile": "Aus dem Exil",
+    "fromCompanion": "Als Gefährte",
     "fromSideboard": "Aus dem Sideboard",
     "fromBoosterPack": "Aus einem {{setCode}}-Booster",
     "fromCubeBoosterPack": "Aus einem Cube-Booster"

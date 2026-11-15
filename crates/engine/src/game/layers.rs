@@ -2931,8 +2931,10 @@ fn evaluate_condition_inner(
         StaticCondition::WasCast { zone } => state
             .objects
             .get(&source_id)
-            .and_then(|obj| obj.cast_from_zone)
-            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
+            .filter(|obj| obj.cast_from_zone.is_some())
+            // CR 601.2a + CR 707.13: a cast from outside the game satisfies a bare
+            // "was cast" but no named origin zone.
+            .is_some_and(|obj| zone.is_none_or(|z| obj.cast_origin_zone() == Some(z))),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => {
             super::effects::ring::is_current_ring_bearer(state, controller, source_id)

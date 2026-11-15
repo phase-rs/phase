@@ -14612,9 +14612,9 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     `engine_resolution_choices.rs`, plus bottom selection in `mulligan.rs`,
 ///     the last of which answers the SAME
 ///     `GameAction::SelectCards` variant. A duplicate id therefore reaches
-///     `move_library_origin_cards_in_selection_order`
+///     the owner-ordered `PutAtLibraryPosition` delivery batch
 ///     (`engine_resolution_choices.rs`) and repositions one object twice
-///     inside one loop. That is a boundary-validation gap, not a filter defect.
+///     inside one batch. That is a boundary-validation gap, not a filter defect.
 ///
 /// CARVE-OUT: `game/stack.rs` builds a production `ZoneChanged` carrying
 /// index `0`, but it is a local probe passed only to
@@ -18312,16 +18312,16 @@ fn evaluate_trigger_condition_with_source(
             controller: caster_scope,
             owner: owner_scope,
         } => trigger_subject_read(state, trigger_event, source_context).is_some_and(|read| {
-            read.cast_from_zone()
-                .is_some_and(|cast_zone| zone.is_none_or(|expected| expected == cast_zone))
-                && caster_scope.as_ref().is_none_or(|scope| {
-                    read.cast_controller().is_some_and(|caster| {
-                        controller_ref_matches_player(caster, controller, scope)
-                    })
-                })
-                && owner_scope.as_ref().is_none_or(|scope| {
-                    controller_ref_matches_player(read.owner(), controller, scope)
-                })
+            // CR 601.2a + CR 707.13: a cast from outside the game satisfies a bare
+            // "was cast" but no named origin zone.
+            read.cast_from_zone().is_some_and(|cast_zone| {
+                zone.is_none_or(|expected| !read.cast_from_outside_game() && expected == cast_zone)
+            }) && caster_scope.as_ref().is_none_or(|scope| {
+                read.cast_controller()
+                    .is_some_and(|caster| controller_ref_matches_player(caster, controller, scope))
+            }) && owner_scope
+                .as_ref()
+                .is_none_or(|scope| controller_ref_matches_player(read.owner(), controller, scope))
         }),
         // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
         // the entering object was placed by THIS trigger's source ability.
@@ -26316,6 +26316,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let current_record = SpellCastRecord {
@@ -26332,6 +26333,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         state.spells_cast_this_turn_by_player.insert(
@@ -34720,6 +34722,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -34736,6 +34739,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -41385,6 +41389,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -41410,6 +41415,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -41436,6 +41442,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -41452,6 +41459,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -41481,6 +41489,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -41497,6 +41506,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -41524,6 +41534,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -41540,6 +41551,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -41556,6 +41568,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -41583,6 +41596,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         }
