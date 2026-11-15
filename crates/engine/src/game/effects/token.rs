@@ -1537,6 +1537,7 @@ fn apply_create_token_batch(
         copy,
         enter_tapped,
         count: final_count,
+        redirected_to,
         ..
     } = event
     else {
@@ -1606,7 +1607,9 @@ fn apply_create_token_batch(
             CardId(0),
             owner,
             ch.display_name.clone(),
-            Zone::Battlefield,
+            // CR 614.6: a token whose entry was replaced is created in the
+            // replacement's zone, never on the battlefield.
+            redirected_to.unwrap_or(Zone::Battlefield),
         );
 
         // CR 613.7d: a token enters the battlefield, so it receives a timestamp.
@@ -1646,7 +1649,7 @@ fn apply_create_token_batch(
         // publishes only the tokens that were actually created, so a later
         // `TargetFilter::LastCreated` cannot read a denied one — or, when the
         // whole batch is denied, an earlier unrelated batch.
-        if aura_token_entry_denied(state, obj_id, spec.attach_to) {
+        if redirected_to.is_none() && aura_token_entry_denied(state, obj_id, spec.attach_to) {
             uncreate_unentered_aura_token(state, obj_id, owner);
             continue;
         }
@@ -1670,12 +1673,30 @@ fn apply_create_token_batch(
                 // choices, so an ordinary Spec birth carries no entry answers.
                 entry_choices: Vec::new(),
                 resulting_next_object_id: state.next_object_id,
+                entry_zone: redirected_to,
                 cause,
             };
             state
                 .resolved_rules_journal
                 .record_token_creation(command)
                 .expect("resolved token creation must have a live journal cause");
+        }
+
+        // CR 614.6 + CR 111.1: the entry was replaced, so the token never
+        // reaches the battlefield — none of the battlefield-entry work below
+        // (attacking, entry counters, ETB abilities, attachment, delayed
+        // sacrifice) applies. The creation itself is still published.
+        if let Some(zone) = redirected_to {
+            created_ids.push(obj_id);
+            publish_redirected_token_creation(
+                state,
+                obj_id,
+                zone,
+                spec.characteristics.display_name.clone(),
+                spec.source_id,
+                events,
+            );
+            continue;
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
@@ -1848,6 +1869,36 @@ fn apply_create_token_batch(
     CreateTokenDelivery::Completed { primary_ids }
 }
 
+/// CR 614.6 + CR 111.1: publish the creation of a token whose battlefield entry
+/// a replacement sent to `zone` instead (Hallowed Moonlight: "exile it
+/// instead"). The creation observers see exactly what an ordinary creation
+/// shows them — the first-creation set, the turn's created-token ledger and
+/// `TokenCreated` (Mirkwood Bats) — and the token is placed in `zone` from no
+/// zone, not onto the battlefield, so no enters-the-battlefield event exists.
+/// The token then ceases to exist as a state-based action (CR 111.7, CR 704.5d).
+///
+/// The caller owns the `last_created_token_ids` row, exactly as for a
+/// battlefield entry.
+pub(crate) fn publish_redirected_token_creation(
+    state: &mut GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    name: String,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::restrictions::record_token_created_into(state, object_id, zone);
+    if crate::game::zones::record_and_emit_placement_from_no_zone(state, object_id, zone, events)
+        .is_some()
+    {
+        events.push(GameEvent::TokenCreated {
+            object_id,
+            name,
+            source_id,
+        });
+    }
+}
+
 /// Materializes one already-resolved CR 111.1 token creation verbatim.
 ///
 /// Unlike every other resolved-command applier, this one CREATES its subject
@@ -1909,7 +1960,10 @@ pub fn apply_resolved_token_creation(
         ResolvedTokenBody::Spec { spec, .. } => spec.characteristics.display_name.clone(),
         ResolvedTokenBody::Copy { copy, .. } => copy.values.name.clone(),
     };
-    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, Zone::Battlefield);
+    // CR 614.6: a birth whose entry a replacement redirected happened in that
+    // zone, not on the battlefield.
+    let birth_zone = command.entry_zone.unwrap_or(Zone::Battlefield);
+    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, birth_zone);
     match &command.body {
         ResolvedTokenBody::Spec {
             spec,
@@ -1937,7 +1991,7 @@ pub fn apply_resolved_token_creation(
 
     state.objects.insert(object_id, object);
     // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
-    zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    zones::add_to_zone(state, object_id, birth_zone, command.owner);
     // CR 614.12a + CR 400.7: install the recorded as-enters answers onto the
     // materialized object, mirroring the live fold. Placed before the
     // entry-record snapshot below: the live fold precedes the live snapshot,
@@ -1952,7 +2006,9 @@ pub fn apply_resolved_token_creation(
         .expect("the token was materialized above")
         .chosen_attributes
         .extend(command.entry_choices.iter().cloned());
-    crate::game::layers::mark_layers_entered(state, object_id);
+    if command.entry_zone.is_none() {
+        crate::game::layers::mark_layers_entered(state, object_id);
+    }
     // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
     // and the predefined/catalog tables, NOT from the body the command carries,
     // so the body alone materializes a Treasure with no "{T}, Sacrifice this
@@ -1966,12 +2022,16 @@ pub fn apply_resolved_token_creation(
     // `inject_resolved_token_abilities` would be wrong for the Copy body, whose
     // live authority uses the predefined-only injector after
     // `finalize_copied_token`'s CR 707.2 cast-only strip.
-    match &command.body {
-        ResolvedTokenBody::Copy { copy, .. } => {
-            super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
-            inject_predefined_token_abilities(state, object_id);
+    // CR 614.6: a token whose entry was redirected never reaches the battlefield,
+    // so the live path injects no abilities into it; replay mirrors that.
+    if command.entry_zone.is_none() {
+        match &command.body {
+            ResolvedTokenBody::Copy { copy, .. } => {
+                super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
+                inject_predefined_token_abilities(state, object_id);
+            }
+            ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
         }
-        ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
     }
     // CR 400.7 + CR 608.2i: the resolve path records the birth through
     // `restrictions::record_zone_change` (`push_committed_token_entry_events`),
@@ -2005,7 +2065,7 @@ pub fn apply_resolved_token_creation(
         .objects
         .get(&object_id)
         .expect("the token was materialized above")
-        .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+        .snapshot_for_zone_change(object_id, None, birth_zone);
     // CR 400.7: mirror the live birth authority
     // (`zones::record_and_emit_entry_from_no_zone`), which fills the entered
     // incarnation from the birth occurrence — replay's reconstructed record
@@ -2523,10 +2583,23 @@ pub(crate) fn place_liminal_token_on_battlefield(
     entry_ref: ObjectId,
     object: GameObject,
 ) {
+    place_liminal_token_in_zone(state, entry_ref, object, Zone::Battlefield);
+}
+
+/// CR 614.6: [`place_liminal_token_on_battlefield`] for a liminal token whose
+/// entry a replacement sent to `zone` instead; the token is born there, with no
+/// from-zone move.
+pub(crate) fn place_liminal_token_in_zone(
+    state: &mut GameState,
+    entry_ref: ObjectId,
+    mut object: GameObject,
+    zone: Zone,
+) {
     let owner = object.owner;
+    object.zone = zone;
     state.objects.insert(entry_ref, object);
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
-    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+    zones::add_to_zone(state, entry_ref, zone, owner);
 }
 
 /// The production entry: a token entry whose proposal already cleared the
@@ -2558,6 +2631,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
 ) -> bool {
     let ProposedEvent::TokenEntry {
         entry_ref,
+        redirected_to,
         enter_tapped,
         enter_with_counters,
         enter_with_choices,
@@ -2660,9 +2734,39 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
             // `reserve_liminal_token_object` advanced the allocator to exactly
             // one past this id when it drew it, however many were drawn since.
             resulting_next_object_id: entry_ref.0 + 1,
+            entry_zone: redirected_to,
             cause: state.current_or_begin_rules_execution_node(),
         }
     });
+
+    // CR 614.6 + CR 111.1: an applied replacement sent this entrant to another
+    // zone instead of the battlefield (Hallowed Moonlight: "exile it instead").
+    // The token is created there and its creation published; none of the
+    // battlefield-entry work below runs (as-enters host choice, entry counters,
+    // ETB abilities, attacking, attachment), and the token ceases to exist at the
+    // next state-based action check (CR 111.7, CR 704.5d). The tail mirrors the
+    // `last_created_token_ids` publication `finalize_committed_liminal_token_
+    // entry_from_action` ends with.
+    if let Some(zone) = redirected_to {
+        if let Some(command) = birth_command {
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved copy-token creation must have a live journal cause");
+        }
+        place_liminal_token_in_zone(state, entry_ref, entry.object.into_projected(), zone);
+        publish_redirected_token_creation(
+            state,
+            entry_ref,
+            zone,
+            entry.name.clone(),
+            entry.source_id,
+            events,
+        );
+        state.last_created_token_ids = entry.created_ids.clone();
+        record_last_created_token(state, entry_ref);
+        return true;
+    }
 
     place_liminal_token_on_battlefield(state, entry_ref, entry.object.into_projected());
 

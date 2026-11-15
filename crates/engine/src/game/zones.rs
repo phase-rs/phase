@@ -2230,10 +2230,25 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::ZoneChangeRecord> {
+    record_and_emit_placement_from_no_zone(state, object_id, Zone::Battlefield, events)
+}
+
+/// CR 614.6 + CR 111.1: the same record-and-emit pair for a token a replacement
+/// sent to `to` instead of the battlefield (Hallowed Moonlight: "exile it
+/// instead"). The token is created in `to`, so the zone change is from no zone
+/// into `to`; nothing here is a battlefield entry, so no CR 603.6a enter trigger
+/// can match it. The battlefield-entry bookkeeping inside `record_zone_change`
+/// is keyed on the record's destination and so is skipped.
+pub(crate) fn record_and_emit_placement_from_no_zone(
+    state: &mut GameState,
+    object_id: ObjectId,
+    to: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::ZoneChangeRecord> {
     let mut record = state
         .objects
         .get(&object_id)
-        .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
+        .map(|obj| obj.snapshot_for_zone_change(object_id, None, to))?;
     // CR 400.7: entries from no zone are created in place — no `move_to_zone`
     // call fills the entered incarnation — so the authority fills it here from
     // the birth incarnation, mirroring the battlefield arm there. Without it,
@@ -2244,7 +2259,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: None,
-        to: Zone::Battlefield,
+        to,
         record: Box::new(record.clone()),
     });
     Some(record)

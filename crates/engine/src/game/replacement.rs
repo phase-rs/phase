@@ -2432,13 +2432,27 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
     // more creatures … enter") is not used up by it and waits for a real entry.
     // Mirrors `draw_matcher`'s `count > 0`. A compound event is matched per batch
     // view, so an empty batch is skipped while its siblings still match.
+    //
+    // CR 614.6: a token entry already sent elsewhere by an applied replacement
+    // (`redirected_to`) is no longer an entry onto the battlefield, so no
+    // battlefield-entry replacement applies to it again.
     matches!(
         event,
         ProposedEvent::ZoneChange {
             to: Zone::Battlefield,
             ..
-        } | ProposedEvent::TokenEntry { .. }
-    ) || matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
+        } | ProposedEvent::TokenEntry {
+            redirected_to: None,
+            ..
+        }
+    ) || matches!(
+        event,
+        ProposedEvent::CreateToken {
+            count,
+            redirected_to: None,
+            ..
+        } if *count > 0
+    )
 }
 
 fn change_zone_applier(
@@ -11930,16 +11944,19 @@ fn apply_single_replacement(
                             // event's original (often unrelated or absent) cause.
                             *cause = Some(rid.source);
                         }
-                        // CR 614.6 + CR 701.7a + CR 111.7: creating a token is
-                        // putting it onto the battlefield. When that entry is
-                        // replaced "instead" by a move to another zone (Hallowed
-                        // Moonlight: "exile it instead"), the tokens never reach
-                        // the battlefield, and a token anywhere else ceases to
-                        // exist — so the batch creates nothing. Residual: no
-                        // transient token object is materialized in the
-                        // redirect zone, so nothing observes that brief move.
-                        ProposedEvent::CreateToken { count, .. } if zone != Zone::Battlefield => {
-                            *count = 0;
+                        // CR 614.6 + CR 111.1: the entry of a token (the whole
+                        // creation, or a liminal entrant) is replaced "instead" by
+                        // a move to another zone (Hallowed Moonlight: "exile it
+                        // instead"). The creation itself still happens (CR 701.7a);
+                        // only where the token ends up is replaced, so the batch
+                        // keeps its count and carries the destination to delivery.
+                        // A token anywhere but the battlefield then ceases to
+                        // exist (CR 111.7, CR 704.5d).
+                        ProposedEvent::CreateToken { redirected_to, .. }
+                        | ProposedEvent::TokenEntry { redirected_to, .. }
+                            if zone != Zone::Battlefield =>
+                        {
+                            *redirected_to = Some(zone);
                         }
                         _ => {}
                     }

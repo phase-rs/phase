@@ -26,13 +26,15 @@
 use std::ops::ControlFlow;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     AbilityCost, AbilityKind, ContinuousModification, Duration, Effect, FilterProp, TargetFilter,
 };
 use engine::types::ability_visit::visit_ability_def;
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugCardCreationKind, GameAction};
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -50,6 +52,10 @@ would enter and it wasn't cast, exile it instead.";
 
 const HALLOWED_MOONLIGHT: &str = "Until end of turn, if a creature would enter and it wasn't \
 cast, exile it instead.\nDraw a card.";
+
+/// Verbatim Oracle text of Mirkwood Bats (Scryfall): the token-creation observer.
+const MIRKWOOD_BATS: &str =
+    "Flying\nWhenever you create or sacrifice a token, each opponent loses 1 life.";
 
 const CONTAINMENT_PRIEST: &str =
     "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.";
@@ -681,10 +687,13 @@ fn three_hallowed_moonlights_prompt_once_for_a_token_batch() {
     assert_settled(runner.state(), "R5b");
 }
 
-/// R5j. CR 616.1f + CR 614.6 + CR 701.7a: once Hallowed Moonlight's redirect has zeroed
-/// the Soldier batch, Jinnie Fay's token-creation replacement no longer applies.
+/// R5j. CR 616.1g + CR 614.1a + CR 614.6: Jinnie Fay's token-creation replacement acts
+/// on the whole creation, Hallowed Moonlight's on the entry it contains, so central
+/// precedence offers Jinnie Fay first and Hallowed Moonlight only applies to the
+/// substituted Cat batch. The Cat is still created (Mirkwood Bats-style observers see
+/// it) but is exiled instead of entering; the resolution completes at priority.
 #[test]
-fn hallowed_moonlight_applied_first_leaves_nothing_for_jinnie_fay() {
+fn jinnie_fay_is_offered_before_hallowed_moonlight_and_the_cat_is_exiled() {
     let mut scenario = base_scenario();
     let mut jinnie =
         scenario.add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 3, JINNIE_FAY);
@@ -695,32 +704,53 @@ fn hallowed_moonlight_applied_first_leaves_nothing_for_jinnie_fay() {
 
     cast_hallowed(&mut runner, hallowed);
     let outcome = runner.cast(soldier).resolve();
-    let (_, candidates, kind) = replacement_candidates(outcome.state());
-    assert_eq!(kind, ReplacementChoiceKind::Order);
-    assert_eq!(candidates.len(), 2, "reach-guard: both replacements apply");
+    let (player, candidates, kind) = replacement_candidates(outcome.state());
+    assert_eq!(player, P0);
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "Jinnie Fay's creation substitution is the only candidate at the creation layer"
+    );
+    assert!(
+        candidates.iter().any(|d| d == JINNIE_FAY),
+        "Jinnie Fay is offered first, got {candidates:?}"
+    );
+    assert!(
+        !candidates.iter().any(|d| d.contains("exile it instead")),
+        "Hallowed Moonlight is not offered before the creation substitution, got {candidates:?}"
+    );
     let jinnie_index = candidates
         .iter()
         .position(|d| d == JINNIE_FAY)
-        .unwrap_or_else(|| panic!("one candidate is Jinnie Fay's, got {candidates:?}"));
-    let hallowed_index = 1 - jinnie_index;
+        .expect("Jinnie Fay's candidate");
 
     runner
         .act(GameAction::ChooseReplacement {
-            index: hallowed_index,
+            index: jinnie_index,
         })
-        .expect("choice accepted");
+        .expect("Jinnie Fay's substitution accepted");
     assert!(
-        !matches!(
+        matches!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. } | WaitingFor::ChooseOneOfBranch { .. }
+            WaitingFor::ChooseOneOfBranch { .. }
         ),
-        "Jinnie Fay must not apply to a zeroed batch, got {:?}",
+        "Jinnie Fay asks Cat or Dog, got {:?}",
         runner.state().waiting_for
+    );
+    let result = runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("the Cat branch is accepted");
+    let cats = created_tokens_named(&result.events, "Cat");
+    assert_eq!(cats.len(), 1, "the substituted Cat is created once");
+    assert_eq!(
+        zone_moves_of(&result.events, cats[0]),
+        vec![(None, Zone::Exile)],
+        "Hallowed Moonlight applies to the substituted batch: the Cat goes to exile"
     );
     for name in ["Soldier", "Cat", "Dog"] {
         assert!(
             battlefield_tokens_named(runner.state(), name).is_empty(),
-            "no {name} token"
+            "no {name} token enters the battlefield"
         );
     }
     assert_settled(runner.state(), "R5j");
@@ -1012,5 +1042,177 @@ fn hallowed_moonlight_keeps_copy_made_a_noncreature_by_its_exception() {
         outcome.zone_of(dead),
         Zone::Exile,
         "reach-guard: Hallowed Moonlight's effect is live"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F1 / F3 — the redirected entry delivers the token to exile (CR 614.6, CR 111.7).
+// ---------------------------------------------------------------------------
+
+/// Events of `events` that put `object` somewhere, as `(from, to)`.
+fn zone_moves_of(events: &[GameEvent], object: ObjectId) -> Vec<(Option<Zone>, Zone)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                ..
+            } if *object_id == object => Some((*from, *to)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `TokenCreated` object ids named `name` in `events`.
+fn created_tokens_named(events: &[GameEvent], name: &str) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated {
+                object_id,
+                name: token_name,
+                ..
+            } if token_name == name => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// F1. CR 111.1 + CR 614.6 + CR 111.7: under Hallowed Moonlight a created creature
+/// token is still CREATED — Mirkwood Bats sees it, the first-creation ledger records
+/// it — but it is put into exile instead of onto the battlefield, so no entry event
+/// exists, and it ceases to exist at the next state-based action check.
+#[test]
+fn hallowed_moonlight_token_creation_is_observed_then_exiled() {
+    let mut scenario = base_scenario();
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let soldier = add_instant(&mut scenario, P0, "Make Soldier", MAKE_SOLDIER);
+    let treasure = add_instant(&mut scenario, P0, "Make Treasure", MAKE_TREASURE);
+    scenario.add_creature_from_oracle(P0, "Mirkwood Bats", 2, 3, MIRKWOOD_BATS);
+    let mut runner = scenario.build();
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .is_empty(),
+        "reach-guard: no token was created yet this turn"
+    );
+    cast_hallowed(&mut runner, hallowed);
+    let life_before = runner.state().players[1].life;
+
+    let outcome = runner.cast(soldier).resolve();
+    assert_settled(outcome.state(), "F1 soldier");
+    let created = created_tokens_named(outcome.events(), "Soldier");
+    assert_eq!(created.len(), 1, "the creation is published once");
+    assert_eq!(
+        zone_moves_of(outcome.events(), created[0]),
+        vec![(None, Zone::Exile)],
+        "the token is created in exile: no battlefield entry event"
+    );
+    assert!(
+        !outcome.state().objects.contains_key(&created[0]),
+        "CR 111.7: the exiled token ceased to exist"
+    );
+    assert_eq!(
+        outcome.state().players[1].life,
+        life_before - 1,
+        "Mirkwood Bats observed the creation"
+    );
+    assert!(
+        outcome
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "the first-creation set records P0"
+    );
+    assert_eq!(
+        outcome.state().created_tokens_this_turn.len(),
+        1,
+        "the turn's created-token ledger records the redirected creation"
+    );
+
+    // Negative control: a noncreature token is not redirected, still observed.
+    let outcome = runner.cast(treasure).resolve();
+    assert_settled(outcome.state(), "F1 treasure");
+    let created = created_tokens_named(outcome.events(), "Treasure");
+    assert_eq!(
+        zone_moves_of(outcome.events(), created[0]),
+        vec![(None, Zone::Battlefield)],
+        "a noncreature token still enters the battlefield"
+    );
+    assert_eq!(outcome.state().players[1].life, life_before - 2);
+}
+
+/// Create one Elvish Visionary through the engine's debug Create Card entry as a
+/// token (`run_etb` selects the consulting or the forced entry) and return the events.
+fn debug_create_visionary_token(runner: &mut GameRunner, run_etb: bool) -> Vec<GameEvent> {
+    let db = crate::support::shared_card_db().expect("the committed integration fixture loads");
+    let face = db
+        .get_face_by_name("Elvish Visionary")
+        .expect("Elvish Visionary is in the committed fixture");
+    create_debug_cards(
+        runner.state_mut(),
+        DebugCardCreateRequest {
+            actor: P0,
+            source: debug_card_entry_source(db, face),
+            owner: P0,
+            zone: Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb,
+            nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Token,
+        },
+    )
+    .expect("the debug creation is accepted")
+    .events
+}
+
+/// F3. CR 614.6 + CR 614.12: the public debug Create Card token entry proposes a
+/// liminal `TokenEntry` directly (no `CreateToken` prepass). Under resolved Hallowed
+/// Moonlight the token is exiled instead — it does not enter, so its "when this enters,
+/// draw a card" never triggers — and the forced entry (`run_etb: false`) stays raw.
+#[test]
+fn hallowed_moonlight_redirects_a_debug_created_creature_token() {
+    let mut scenario = base_scenario();
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    cast_hallowed(&mut runner, hallowed);
+    let hand_before = runner.state().players[0].hand.len();
+
+    let events = debug_create_visionary_token(&mut runner, true);
+    let created = created_tokens_named(&events, "Elvish Visionary");
+    assert_eq!(created.len(), 1, "the debug creation is still a creation");
+    assert_eq!(
+        zone_moves_of(&events, created[0]),
+        vec![(None, Zone::Exile)],
+        "the token goes to exile, not the battlefield"
+    );
+    assert!(
+        battlefield_named(runner.state(), "Elvish Visionary").is_empty(),
+        "no Elvish Visionary entered"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&created[0]),
+        "CR 111.7: the exiled token ceased to exist"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before,
+        "it never entered, so its enter trigger did not draw"
+    );
+    assert_settled(runner.state(), "F3 consulting entry");
+
+    // CR 614.6 control: the forced entry (no replacement consult) is unchanged.
+    let events = debug_create_visionary_token(&mut runner, false);
+    let created = created_tokens_named(&events, "Elvish Visionary");
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        battlefield_named(runner.state(), "Elvish Visionary").len(),
+        1,
+        "the raw placement still puts the token on the battlefield"
     );
 }

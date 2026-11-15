@@ -1426,6 +1426,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 resulting_tapped,
                 entry_choices,
                 resulting_next_object_id: state.next_object_id,
+                entry_zone: None,
                 cause,
             };
             state
@@ -1892,6 +1893,7 @@ pub(crate) fn continue_copy_token_after_entry_payment(
                     resulting_tapped: tail.enter_tapped.resolve(tail.copy.tapped),
                     entry_choices: vec![ChosenAttribute::Number(answer)],
                     resulting_next_object_id: state.next_object_id,
+                    entry_zone: None,
                     cause,
                 };
                 state
