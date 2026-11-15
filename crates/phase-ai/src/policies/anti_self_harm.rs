@@ -186,20 +186,44 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     }
 }
 
+/// The beneficial effects whose recipient is a creature already on the battlefield.
+///
+/// A `ChangeZone` onto the battlefield draws its target from the library,
+/// graveyard, hand or exile — never from our own battlefield — so the
+/// "beneficial creature-targeting spell with no creature of ours to target"
+/// whiff checks cannot apply to it. Without this exclusion its permissive
+/// `TargetFilter::Any` reads as "targets a creature" via `targets_creatures`.
+/// That covers a whole class, not one card: every printed fetchland's
+/// search-and-put chain, and reanimation-shaped puts alike.
+///
+/// CR 608.2c + CR 111.1: a created-token placement (`PutCounter { LastCreated }`
+/// whose nearest preceding publisher in the same chain is a `Token`) is the second
+/// member of that category. Its recipient is the token this same resolution
+/// creates, so it does not need a creature of ours; this reads the walk without
+/// those placements.
+fn beneficial_battlefield_creature_effects<'a>(ctx: &PolicyContext<'a>) -> Vec<&'a Effect> {
+    ctx.effects_without_created_token_placements()
+        .into_iter()
+        .filter(|effect| {
+            !matches!(
+                effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+                && targets_creatures(effect)
+        })
+        .collect()
+}
+
 /// Reject a pure creature-benefit spell when the AI has no creature that can
 /// receive any of its upside. A soft no-target penalty still lets softmax spend
 /// a card to enhance an opponent's creature, which is never a useful line when
 /// the spell supplies no separate damage, removal, or AI-directed resource.
 fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) -> bool {
     let effects = ctx.effects();
-    let beneficial_creature_effects: Vec<&Effect> = effects
-        .iter()
-        .copied()
-        .filter(|effect| {
-            matches!(effect_polarity(effect), EffectPolarity::Beneficial)
-                && targets_creatures(effect)
-        })
-        .collect();
+    let beneficial_creature_effects = beneficial_battlefield_creature_effects(ctx);
     if beneficial_creature_effects.is_empty() {
         return false;
     }
@@ -381,35 +405,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     let effects = ctx.effects();
 
-    // A `ChangeZone` onto the battlefield draws its target from the library,
-    // graveyard, hand or exile — never from our own battlefield — so the
-    // "beneficial creature-targeting spell with no creature of ours to target"
-    // whiff check below cannot apply to it. Without this exclusion its
-    // permissive `TargetFilter::Any` reads as "targets a creature" via
-    // `targets_creatures`, and every such put is charged the full
-    // `wasted_cast_penalty` whenever the AI happens to control no creature.
-    // That covers a whole class, not one card: every printed fetchland's
-    // search-and-put chain, and reanimation-shaped puts alike.
-    //
-    // CR 608.2c + CR 111.1: a created-token placement (`PutCounter { LastCreated }`
-    // whose nearest preceding publisher in the same chain is a `Token`) is the second member of that category.
-    // Its recipient is the token this same resolution creates, so it does not
-    // need a creature of ours; this check reads the walk without those
-    // placements. Every other check below keeps the full `effects`.
-    let beneficial_creature_effects: Vec<&Effect> = ctx
-        .effects_without_created_token_placements()
-        .into_iter()
-        .filter(|effect| {
-            !matches!(
-                effect,
-                Effect::ChangeZone {
-                    destination: Zone::Battlefield,
-                    ..
-                }
-            ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
-                && targets_creatures(effect)
-        })
-        .collect();
+    let beneficial_creature_effects = beneficial_battlefield_creature_effects(ctx);
     let mut has_beneficial_creature_target = !beneficial_creature_effects.is_empty();
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
@@ -3501,17 +3497,15 @@ mod tests {
         ));
     }
 
-    /// AntiSelfHarm's verdict on P0 casting the real `spell` in Two-Headed Giant while its
-    /// teammate controls Grizzly Bears, and P0 controls Grizzly Bears too when `own_bears`.
-    fn two_headed_giant_cast_verdict(spell: &str, own_bears: bool) -> PolicyVerdict {
-        let db = crate::test_support::shared_integration_card_db();
-        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 7);
+    /// AntiSelfHarm's verdict on P0 casting the spell `setup` places, with mana for it floating.
+    fn cast_verdict(
+        format: FormatConfig,
+        players: u8,
+        setup: impl FnOnce(&mut GameScenario) -> ObjectId,
+    ) -> PolicyVerdict {
+        let mut scenario = GameScenario::new_with_format(format, players, 7);
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.add_real_card(PlayerId(1), "Grizzly Bears", Zone::Battlefield, db);
-        if own_bears {
-            scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
-        }
-        let spell_id = scenario.add_real_card(PlayerId(0), spell, Zone::Hand, db);
+        let spell_id = setup(&mut scenario);
         let mana = |color| ManaUnit::new(color, ObjectId(0), false, vec![]);
         scenario.with_mana_pool(
             PlayerId(0),
@@ -3521,6 +3515,7 @@ mod tests {
                 mana(ManaType::White),
                 mana(ManaType::White),
                 mana(ManaType::Green),
+                mana(ManaType::Black),
             ],
         );
         let mut runner = scenario.build();
@@ -3541,6 +3536,19 @@ mod tests {
             .into_iter()
             .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
             .expect("AntiSelfHarm judges the cast")
+    }
+
+    /// `cast_verdict` in Two-Headed Giant for the real `spell`, with the teammate controlling
+    /// Grizzly Bears and P0 controlling Grizzly Bears too when `own_bears`.
+    fn two_headed_giant_cast_verdict(spell: &str, own_bears: bool) -> PolicyVerdict {
+        cast_verdict(FormatConfig::two_headed_giant(), 4, |scenario| {
+            let db = crate::test_support::shared_integration_card_db();
+            scenario.add_real_card(PlayerId(1), "Grizzly Bears", Zone::Battlefield, db);
+            if own_bears {
+                scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+            }
+            scenario.add_real_card(PlayerId(0), spell, Zone::Hand, db)
+        })
     }
 
     /// CR 109.5: Silverflame Ritual's "each creature you control" never reaches the teammate's
@@ -3564,6 +3572,63 @@ mod tests {
             reason(two_headed_giant_cast_verdict("Giant Growth", false)),
             None
         );
+    }
+
+    /// Zombify's target is a creature card in the graveyard, not a creature on the
+    /// battlefield, so a board with no battlefield recipient does not refuse the cast.
+    #[test]
+    fn a_reanimation_spell_is_not_refused_for_want_of_a_battlefield_recipient() {
+        for (format, players) in [
+            (FormatConfig::standard(), 2),
+            (FormatConfig::two_headed_giant(), 4),
+        ] {
+            let verdict = cast_verdict(format, players, |scenario| {
+                let db = crate::test_support::shared_integration_card_db();
+                scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+                scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Graveyard, db);
+                scenario.add_real_card(PlayerId(0), "Zombify", Zone::Hand, db)
+            });
+            assert!(
+                matches!(verdict, PolicyVerdict::Score { .. }),
+                "{players} players: {verdict:?}"
+            );
+        }
+    }
+
+    const PLEDGE_OF_UNITY: &str = "Put a +1/+1 counter on each creature you control. You gain 1 life for each creature you control.";
+
+    /// CR 109.5: Pledge of Unity's "each creature you control" never reaches the teammate's Grizzly
+    /// Bears, so with none of its own the cast is charged as wasted; with its own it is not.
+    #[test]
+    fn a_you_control_pump_with_only_a_teammates_creature_is_a_wasted_cast() {
+        let delta = |own_bears: bool| {
+            let verdict = cast_verdict(FormatConfig::two_headed_giant(), 4, |scenario| {
+                let db = crate::test_support::shared_integration_card_db();
+                scenario.add_real_card(PlayerId(1), "Grizzly Bears", Zone::Battlefield, db);
+                if own_bears {
+                    scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+                }
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        PlayerId(0),
+                        "Pledge of Unity",
+                        true,
+                        PLEDGE_OF_UNITY,
+                    )
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![ManaCostShard::Green, ManaCostShard::White],
+                    })
+                    .id()
+            });
+            match verdict {
+                PolicyVerdict::Score { delta, .. } => delta,
+                PolicyVerdict::Reject { reason } => panic!("rejected: {}", reason.kind),
+            }
+        };
+        let (teammate_only, own) = (delta(false), delta(true));
+        assert!(teammate_only < 0.0, "{teammate_only}");
+        assert!(teammate_only < own, "{teammate_only} vs {own}");
     }
 
     #[test]
