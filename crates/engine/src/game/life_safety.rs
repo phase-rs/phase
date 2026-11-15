@@ -149,22 +149,42 @@ fn selected_optional_life_branch(
             match cost {
                 AdditionalCost::Optional { cost, .. } => cost.clone(),
                 AdditionalCost::Kicker { .. }
-                | AdditionalCost::Choice(_, _)
+                | AdditionalCost::Choice(_)
                 | AdditionalCost::Required(_) => unreachable!("matched Optional above"),
             },
         )),
-        (AdditionalCost::Choice(preferred @ AbilityCost::PayLife { .. }, _), true) => Some((
-            OptionalAdditionalCostBranch::ChoicePreferred,
-            preferred.clone(),
-        )),
-        (AdditionalCost::Choice(_, fallback @ AbilityCost::PayLife { .. }), false) => Some((
-            OptionalAdditionalCostBranch::ChoiceFallback,
-            fallback.clone(),
-        )),
+        (AdditionalCost::Choice(costs), true) => {
+            // Check if any option is PayLife (preferred branch)
+            if let Some(pay_life) = costs
+                .iter()
+                .find(|c| matches!(c, AbilityCost::PayLife { .. }))
+            {
+                Some((
+                    OptionalAdditionalCostBranch::ChoicePreferred,
+                    pay_life.clone(),
+                ))
+            } else {
+                None
+            }
+        }
+        (AdditionalCost::Choice(costs), false) => {
+            // Check if any option is PayLife (fallback branch)
+            if let Some(pay_life) = costs
+                .iter()
+                .find(|c| matches!(c, AbilityCost::PayLife { .. }))
+            {
+                Some((
+                    OptionalAdditionalCostBranch::ChoiceFallback,
+                    pay_life.clone(),
+                ))
+            } else {
+                None
+            }
+        }
         (AdditionalCost::Optional { .. }, false)
         | (AdditionalCost::Optional { .. }, true)
-        | (AdditionalCost::Choice(_, _), true)
-        | (AdditionalCost::Choice(_, _), false)
+        | (AdditionalCost::Choice(_), true)
+        | (AdditionalCost::Choice(_), false)
         | (AdditionalCost::Kicker { .. }, true | false)
         | (AdditionalCost::Required(_), true | false) => None,
     }
@@ -182,7 +202,7 @@ fn optional_additional_cost_path(pending: &PendingCast) -> OptionalAdditionalCos
             repeatability: *repeatability,
         },
         Some(AdditionalCost::Kicker { .. })
-        | Some(AdditionalCost::Choice(_, _))
+        | Some(AdditionalCost::Choice(_))
         | Some(AdditionalCost::Required(_))
         | None => OptionalAdditionalCostPath::Direct,
     }
@@ -224,7 +244,7 @@ fn extract_life_cost_root(
                 pending_cast,
                 ..
             },
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
         ) if *player == semantic_owner => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
             DefilerPaymentWitness {
                 player: *player,
@@ -243,9 +263,10 @@ fn extract_life_cost_root(
                 gift_kind,
                 pending_cast,
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) if *player == semantic_owner => {
-            let (branch, materialized_cost) = selected_optional_life_branch(cost, *pay)?;
+            let pay = *index == 0;
+            let (branch, materialized_cost) = selected_optional_life_branch(cost, pay)?;
             let path = optional_additional_cost_path(pending_cast);
             Some(ArmedLifeCostRoot::OptionalAdditionalCost(Box::new(
                 OptionalAdditionalCostWitness {
@@ -442,7 +463,7 @@ pub(crate) fn begin_defiler_payment_attempt(
             && *waiting_life_cost == life_cost
             && waiting_reduction == mana_reduction
             && waiting_pending.as_ref() == pending_cast
-            && witness.candidate.action == GameAction::DecideOptionalCost { pay: true }
+            && witness.candidate.action == GameAction::DecideOptionalCost { index: 0 }
             && witness.candidate.metadata.semantic_owner == Some(player)
             && witness.candidate.metadata.actor
                 == Some(authorized_submitter_for_player(state, player))
@@ -489,7 +510,10 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                     && &cost == materialized_cost
             });
             let matches_prompt = witness.player == player
-                && witness.candidate.action == GameAction::DecideOptionalCost { pay }
+                && witness.candidate.action
+                    == GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    }
                 && witness.candidate.metadata.semantic_owner == Some(player)
                 && witness.candidate.metadata.actor
                     == Some(authorized_submitter_for_player(state, player))
@@ -527,7 +551,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                                 repeatability: AdditionalCostRepeatability::Once,
                                 ..
                             }
-                            | AdditionalCost::Choice(_, _)
+                            | AdditionalCost::Choice(_)
                             | AdditionalCost::Kicker { .. }
                             | AdditionalCost::Required(_) => {
                                 pending_after.additional_cost_queue
@@ -632,7 +656,7 @@ mod tests {
                 ManaCost::zero(),
             ),
             candidate: CandidateAction {
-                action: GameAction::DecideOptionalCost { pay: true },
+                action: GameAction::DecideOptionalCost { index: 0 },
                 metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Selection),
             },
         }))
@@ -701,21 +725,24 @@ mod tests {
         )
         .is_none());
         assert!(matches!(
-            selected_optional_life_branch(&AdditionalCost::Choice(life, mana), true),
+            selected_optional_life_branch(
+                &AdditionalCost::Choice(vec![life.clone(), mana.clone()]),
+                true
+            ),
             Some((
                 OptionalAdditionalCostBranch::ChoicePreferred,
                 AbilityCost::PayLife { .. }
             ))
         ));
         assert!(selected_optional_life_branch(
-            &AdditionalCost::Choice(
+            &AdditionalCost::Choice(vec![
                 AbilityCost::Mana {
                     cost: ManaCost::zero(),
                 },
                 AbilityCost::Mana {
                     cost: ManaCost::zero(),
                 },
-            ),
+            ]),
             false,
         )
         .is_none());

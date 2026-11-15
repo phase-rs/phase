@@ -2786,14 +2786,18 @@ impl<'a> SpellCast<'a> {
                 // CR 601.2b: optional additional costs are chosen during
                 // announcement, before the spell is committed to the stack.
                 WaitingFor::OptionalCostChoice { .. } => {
-                    let pay = match optional {
-                        OptionalPolicy::Accept => true,
-                        OptionalPolicy::Decline => false,
+                    let index = match optional {
+                        OptionalPolicy::Accept => 0,
+                        OptionalPolicy::Decline => 1,
                         OptionalPolicy::Stop => {
                             panic!("OptionalPolicy::Stop is only valid after spell commitment")
                         }
                     };
-                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                    act_collect(
+                        runner,
+                        GameAction::DecideOptionalCost { index },
+                        &mut events,
+                    )?;
                 }
                 // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
                 // Sole-opponent games auto-latch and never raise this prompt.
@@ -3893,12 +3897,16 @@ fn drive_resolution(
             }
             // CR 608.2d: leave resolution-time choices to the declared policy.
             WaitingFor::OptionalCostChoice { .. } => {
-                let pay = match policy.optional {
-                    OptionalPolicy::Accept => true,
-                    OptionalPolicy::Decline => false,
+                let index = match policy.optional {
+                    OptionalPolicy::Accept => 0,
+                    OptionalPolicy::Decline => 1,
                     OptionalPolicy::Stop => break,
                 };
-                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalCost { index },
+                    &mut events,
+                )?;
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates

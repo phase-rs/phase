@@ -784,12 +784,13 @@ export function additionalCostChoices(
         ],
       };
     case "Choice":
+      const choiceOptions = cost.data.map((c, i) => ({
+        id: String(i),
+        label: formatAbilityCost(c),
+      }));
       return {
         title: "Choose additional cost",
-        options: [
-          { id: "pay", label: formatAbilityCost(cost.data[0]) },
-          { id: "decline", label: formatAbilityCost(cost.data[1]) },
-        ],
+        options: choiceOptions,
       };
   }
 }

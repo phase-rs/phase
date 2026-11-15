@@ -3629,7 +3629,7 @@ function DefilerPaymentModal() {
         { id: "skip", label: t("gamePage.defiler.decline") },
       ]}
       onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+        dispatch({ type: "DecideOptionalCost", data: { index: id === "pay" ? 0 : 1 } })
       }
       onClose={() => dispatch({ type: "CancelCast" })}
     />

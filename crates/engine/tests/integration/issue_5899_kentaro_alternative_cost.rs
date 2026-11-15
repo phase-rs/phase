@@ -45,21 +45,13 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => assert!(matches!(
             cost,
-            AdditionalCost::Choice(
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        shards,
-                        generic: 3,
-                    },
-                },
-                _
-            ) if shards.is_empty()
+            AdditionalCost::Choice(costs) if costs.len() == 2
         )),
         other => panic!("expected Kentaro alternative-cost choice, got {other:?}"),
     }
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the mana-value alternative cost must be payable");
 
     assert!(

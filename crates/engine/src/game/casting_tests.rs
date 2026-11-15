@@ -15987,12 +15987,12 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+            cost: AdditionalCost::Choice(ref costs),
             ..
-        }
+        } if costs.len() == 2
     ));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying alternative life cost should cast");
 
     assert_eq!(state.players[0].life, 16);
@@ -16023,7 +16023,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             shards: vec![ManaCostShard::Black],
             generic: 1,
         };
-        spell.additional_cost = Some(AdditionalCost::Choice(
+        spell.additional_cost = Some(AdditionalCost::Choice(vec![
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -16033,7 +16033,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 3 },
             },
-        ));
+        ]));
         let abilities = Arc::make_mut(&mut spell.abilities);
         abilities.clear();
         abilities.push(AbilityDefinition::new(

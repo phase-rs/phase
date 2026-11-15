@@ -143,24 +143,51 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
             let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
             if !matches!(cost_a, AbilityCost::Unimplemented { .. }) {
-                return Some(AdditionalCost::Choice(
+                return Some(AdditionalCost::Choice(vec![
                     cost_a,
                     AbilityCost::Mana { cost: mana_cost },
-                ));
+                ]));
             }
         }
     }
 
-    // General "X or Y" choice pattern using parse_single_cost for each fragment.
-    if let Some((left, right)) = body_lower.split_once(" or ") {
-        let cost_a = super::oracle_cost::parse_single_cost(left.trim());
-        let cost_b = super::oracle_cost::parse_single_cost(right.trim());
-        // Both fragments must parse to known costs — Unimplemented means the split was wrong
-        // (e.g. "sacrifice an artifact or creature" splits incorrectly on " or ").
-        if !matches!(cost_a, AbilityCost::Unimplemented { .. })
-            && !matches!(cost_b, AbilityCost::Unimplemented { .. })
-        {
-            return Some(AdditionalCost::Choice(cost_a, cost_b));
+    // General "X or Y or Z..." choice pattern using parse_single_cost for each fragment.
+    // Split on all " or " occurrences to support more than two options (e.g., Dusk Mangler:
+    // "sacrifice a creature, discard a card, or pay 4 life").
+    // Also handle Oxford-comma-separated lists: "A, B, or C" -> ["A", "B", "C"].
+    if body_lower.contains(" or ") {
+        // First split on " or " to get major fragments
+        let major_fragments: Vec<&str> = body_lower.split(" or ").map(str::trim).collect();
+        let mut all_fragments = Vec::new();
+        for (i, fragment) in major_fragments.iter().enumerate() {
+            // For the last fragment, " or " was the delimiter; for earlier ones,
+            // check if they contain comma-separated sub-options (Oxford comma case).
+            if i < major_fragments.len() - 1 && fragment.contains(", ") {
+                // Split on ", " for Oxford-comma-separated options
+                let sub_fragments: Vec<&str> = fragment.split(", ").map(str::trim).collect();
+                all_fragments.extend(sub_fragments);
+            } else {
+                all_fragments.push(*fragment);
+            }
+        }
+        let mut costs = Vec::new();
+        let mut all_valid = true;
+        for (i, fragment) in all_fragments.iter().enumerate() {
+            // For the last fragment, use raw text to preserve mana symbol casing
+            let raw_fragment = if i == all_fragments.len() - 1 {
+                &body_raw[body_raw.len() - fragment.len()..]
+            } else {
+                fragment
+            };
+            let cost = super::oracle_cost::parse_single_cost(raw_fragment.trim());
+            if matches!(cost, AbilityCost::Unimplemented { .. }) {
+                all_valid = false;
+                break;
+            }
+            costs.push(cost);
+        }
+        if all_valid && costs.len() >= 2 {
+            return Some(AdditionalCost::Choice(costs));
         }
     }
 
@@ -1538,20 +1565,28 @@ Trample";
             "As an additional cost to cast this spell, behold an Elf or pay {2}. (To behold an Elf, choose an Elf you control or reveal an Elf card from your hand.)";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Behold {
-                    count: 1,
-                    filter: TargetFilter::Typed(filter),
-                    action: BeholdCostAction::ChooseOrReveal,
-                    ..
-                },
-                AbilityCost::Mana { cost },
-            )) => {
-                assert!(filter
-                    .type_filters
-                    .iter()
-                    .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
-                assert_eq!(cost, ManaCost::generic(2));
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Behold {
+                        count: 1,
+                        filter: TargetFilter::Typed(filter),
+                        action: BeholdCostAction::ChooseOrReveal,
+                        ..
+                    } => {
+                        assert!(filter
+                            .type_filters
+                            .iter()
+                            .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
+                    }
+                    _ => panic!("Expected Behold as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { cost } => {
+                        assert_eq!(*cost, ManaCost::generic(2));
+                    }
+                    _ => panic!("Expected Mana as second choice"),
+                }
             }
             other => panic!("Expected Choice(Behold Elf, Mana {{2}}), got {other:?}"),
         }
@@ -1668,19 +1703,32 @@ Trample";
                 "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
             );
             let result = parse_additional_cost_line(&lower, &raw);
-            assert_eq!(
-                result,
-                Some(AdditionalCost::Choice(
-                    AbilityCost::Blight { count: blight },
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost {
-                            generic,
-                            shards: vec![]
+            match result {
+                Some(AdditionalCost::Choice(costs)) => {
+                    assert_eq!(costs.len(), 2);
+                    match &costs[0] {
+                        AbilityCost::Blight { count } => {
+                            assert_eq!(*count, blight);
                         }
+                        _ => panic!("Expected Blight as first choice"),
                     }
-                )),
-                "blight {blight} or pay {{{generic}}}"
-            );
+                    match &costs[1] {
+                        AbilityCost::Mana { cost } => {
+                            assert_eq!(
+                                *cost,
+                                ManaCost::Cost {
+                                    generic,
+                                    shards: vec![]
+                                }
+                            );
+                        }
+                        _ => panic!("Expected Mana as second choice"),
+                    }
+                }
+                other => {
+                    panic!("blight {blight} or pay {{{generic}}}: expected Choice, got {other:?}")
+                }
+            }
         }
     }
 
@@ -1701,16 +1749,23 @@ Trample";
         let raw = "As an additional cost to cast this spell, discard a card or pay 3 life.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    selection: CardSelectionMode::Chosen,
-                    ..
-                },
-                AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 3 },
-                },
-            )) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        selection: CardSelectionMode::Chosen,
+                        ..
+                    } => {}
+                    _ => panic!("Expected Discard as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    } => {}
+                    _ => panic!("Expected PayLife as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
         }
     }
@@ -1774,7 +1829,17 @@ Trample";
         let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Sacrifice(_) => {}
+                    _ => panic!("Expected Sacrifice as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { .. } => {}
+                    _ => panic!("Expected Mana as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
         }
     }
@@ -2132,14 +2197,21 @@ Trample";
             "As an additional cost to cast this spell, reveal a Dragon card from your hand or pay {1}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Reveal {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: Some(_),
-                    shared_quality: _,
-                },
-                AbilityCost::Mana { .. },
-            )) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Reveal {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: Some(_),
+                        shared_quality: _,
+                    } => {}
+                    _ => panic!("Expected Reveal as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { .. } => {}
+                    _ => panic!("Expected Mana as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
         }
     }
@@ -2170,6 +2242,55 @@ Trample";
             Some(AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)))
                 if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
+        }
+    }
+
+    /// Dusk Mangler — three-way additional cost choice: sacrifice a creature,
+    /// discard a card, or pay 4 life. This tests the multi-option Choice path
+    /// (issue #10442).
+    #[test]
+    fn parse_additional_cost_dusk_mangler_three_options() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 3, "Dusk Mangler has three options");
+                // Option 0: sacrifice a creature
+                match &costs[0] {
+                    AbilityCost::Sacrifice(ref sac) => {
+                        assert_eq!(sac.requirement.fixed_count(), Some(1));
+                        let TargetFilter::Typed(tf) = &sac.target else {
+                            panic!("expected Typed filter for sacrifice");
+                        };
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Creature)));
+                    }
+                    _ => panic!("Expected Sacrifice as first choice"),
+                }
+                // Option 1: discard a card
+                match &costs[1] {
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                        ..
+                    } => {}
+                    _ => panic!("Expected Discard as second choice"),
+                }
+                // Option 2: pay 4 life
+                match &costs[2] {
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                    } => {}
+                    _ => panic!("Expected PayLife as third choice"),
+                }
+            }
+            other => panic!("Expected Choice with 3 options, got {other:?}"),
         }
     }
 

@@ -5032,10 +5032,11 @@ pub(crate) fn deterministic_choice(
             }
             engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
-            engine::types::ability::AdditionalCost::Choice(_, _) => true,
+            engine::types::ability::AdditionalCost::Choice(_) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };
-        return Some(GameAction::DecideOptionalCost { pay });
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
@@ -5045,7 +5046,8 @@ pub(crate) fn deterministic_choice(
     {
         let life = state.players[player.0 as usize].life;
         let pay = life > (*life_cost as i32) * 3;
-        return Some(GameAction::DecideOptionalCost { pay });
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 514.1 + CR 701.9a: cleanup discard. The give-up order is

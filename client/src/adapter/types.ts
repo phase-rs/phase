@@ -3426,7 +3426,7 @@ export type GameAction =
   | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
-  | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  | { type: "DecideOptionalCost"; data: { index: number } }
   | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }

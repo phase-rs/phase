@@ -10,7 +10,7 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    AdditionalCost, ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -2243,18 +2243,23 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        WaitingFor::OptionalCostChoice { player, cost, .. } => {
+            let num_options = match cost {
+                AdditionalCost::Optional { .. } => 2, // pay (0) or skip (1)
+                AdditionalCost::Choice(costs) => costs.len(),
+                AdditionalCost::Kicker { .. } => 2, // kick (0) or decline (1)
+                AdditionalCost::Required(_) => 1,   // only pay (0)
+            };
+            (0..num_options)
+                .map(|index| {
+                    candidate(
+                        GameAction::DecideOptionalCost { index },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
@@ -2317,12 +2322,12 @@ pub fn candidate_actions_broad_with_probe(
         // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
         WaitingFor::DefilerPayment { player, .. } => vec![
             candidate(
-                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { index: 0 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
                 TacticalClass::Selection,
                 Some(*player),
             ),

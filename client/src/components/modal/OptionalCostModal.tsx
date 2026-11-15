@@ -75,9 +75,14 @@ export function OptionalCostModalContent({
     <ChoiceModal
       title={title}
       options={options}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
-      }
+      onChoose={(id) => {
+        const index = parseInt(id, 10);
+        if (Number.isNaN(index)) {
+          console.error("Invalid option ID for DecideOptionalCost:", id);
+          return;
+        }
+        dispatch({ type: "DecideOptionalCost", data: { index } });
+      }}
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
     />
   );

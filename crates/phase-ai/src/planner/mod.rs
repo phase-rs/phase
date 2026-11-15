@@ -1260,7 +1260,7 @@ impl<'a> PlannerServices<'a> {
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
+            engine::types::actions::GameAction::DecideOptionalCost { index: 1 }
                 if is_optional_cost =>
             {
                 true
