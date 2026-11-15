@@ -498,6 +498,14 @@ fn handle_opponent_may_choice_inner(
                     &costs::PaymentScope::Resolution {
                         ability: &ability,
                         cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+                        // CR 118.12 + CR 121.2b: this promptee is being offered the
+                        // choice for the first time, so the question is a fresh one
+                        // — the same origin `resolve_ability_cost_payment` will pay
+                        // under when they accept. `LatchedSuffix` would resume a
+                        // choice already made and would stop a prevented event from
+                        // refusing the payment, so asking under it could advertise
+                        // an offer the resolver then declines to honour.
+                        origin: crate::types::game_state::ResolutionPaymentOrigin::FreshChoice,
                     },
                 ),
                 _ => false,
@@ -673,6 +681,10 @@ fn handle_opponent_may_choice_inner(
                 // does not fire the "if no one does" rider for an action that
                 // was performed.
                 //
+                // Only when a later responder still HAS the option (CR 608.2d)
+                // — `acceptance_leaves_the_option_open` is the authority, and
+                // the Sin Prodder case is why the re-offer is not unconditional.
+                //
                 // Only from a settled priority: a chain that suspended on its
                 // own prompt owns the stack top, and burying it under another
                 // direct-choice frame is exactly what
@@ -681,7 +693,9 @@ fn handle_opponent_may_choice_inner(
                 // the invariant is the right thing to respect rather than work
                 // around — the remaining responders are dropped there, as they
                 // were on every path before this change.
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if acceptance_leaves_the_option_open(&ability.effect)
+                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                {
                     if let Some((&next, rest)) = remaining.split_first() {
                         let mut reoffered = frame.ability.clone();
                         reoffered.context.optional_effect_performed = true;
@@ -733,6 +747,43 @@ fn handle_opponent_may_choice_inner(
     resume_pending_continuation_if_priority(state, events)?;
     super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
     Ok(state.waiting_for.clone())
+}
+
+/// CR 101.4 + CR 608.2d: whether an acceptance leaves the offer standing for the
+/// responders after it, which is what decides if the poll outlives the first
+/// acceptance.
+///
+/// CR 101.4 polls every eligible player and nothing in it stops the poll when one
+/// player chooses, so continuation is never a per-card policy. What ends a later
+/// responder's option is CR 608.2d — "The player can't choose an option that's
+/// illegal or impossible." So the only question is whether the accepted action is
+/// still available to the next responder:
+///
+/// - **Self-funded actions stay available.** Each responder pays or suffers out of
+///   their own resources, so an earlier acceptance consumes nothing of theirs.
+///   Dash Hopes and Temporal Extortion both carry the printed ruling "As soon as
+///   any player performs the action, the spell is countered, but the remaining
+///   players still get the option." Browbeat and Book Burning ("any player may
+///   have ~ deal N damage to them") are the same shape; they have no rulings of
+///   their own, so they are classified from the mechanism, not from a quotation.
+/// - **One-shot actions on a single object do not.** Sin Prodder's "any opponent
+///   may have YOU put that card into your graveyard" moves one specific card
+///   once. After the first acceptance the option is impossible, which is exactly
+///   why its printed ruling says "Once a player does so ... Sin Prodder's trigger
+///   has no further action."
+///
+/// The distinction is already carried by the AST at the one site that needs it:
+/// the accept branch binds the action's subject to the responder for precisely
+/// the self-funded shapes (`PayCost`'s payer, `DealDamage`'s target) and leaves
+/// every other effect aimed wherever the card aimed it. Reading that rather than
+/// storing a policy field keeps one predicate covering the whole class.
+///
+/// Fail-closed: an effect shape not listed here stops the poll, which is the
+/// behaviour every path had before the poll was made to continue at all. A new
+/// self-funded shape must opt in here, and the Sin Prodder row is the control
+/// that proves the predicate is actually consulted.
+fn acceptance_leaves_the_option_open(effect: &Effect) -> bool {
+    matches!(effect, Effect::PayCost { .. } | Effect::DealDamage { .. })
 }
 
 /// CR 608.2d + CR 101.4: this promptee cannot legally take the offer, so their
@@ -5793,6 +5844,95 @@ mod tests {
             remaining,
         };
         state
+    }
+
+    fn pay_five_life() -> Effect {
+        Effect::PayCost {
+            cost: crate::types::ability::AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    }
+
+    /// CR 101.4 + CR 608.2d: a self-funded acceptance leaves the offer standing
+    /// for everyone after it, so the poll outlives it. This is Dash Hopes' and
+    /// Temporal Extortion's printed ruling ("As soon as any player performs the
+    /// action ... the remaining players still get the option") asserted at the
+    /// building-block level, so it covers every card whose accepted action is
+    /// paid out of the responder's own resources rather than one card's text.
+    #[test]
+    fn a_self_funded_acceptance_leaves_the_poll_open_for_the_next_responder() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+
+        // Positive reach-guard: the first responder really is on the clock, so a
+        // later assertion about P1 cannot pass on an engine that offered nobody
+        // anything.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "the acceptance answers one responder, not the poll: P1 must still be \
+             offered (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// The early-stop control, and the reason the re-offer is not unconditional.
+    ///
+    /// Sin Prodder's "any opponent may have YOU put that card into your
+    /// graveyard" is a one-shot action on a single object: once it is performed,
+    /// CR 608.2d makes the same choice impossible for every later responder,
+    /// which is why its printed ruling says "Once a player does so ... Sin
+    /// Prodder's trigger has no further action." Every effect whose subject is
+    /// not the responder takes this path, so the control is written at that
+    /// shape (a controller-scoped `GainLife`) rather than at one card.
+    ///
+    /// This row fails on an engine that re-offers after every acceptance.
+    #[test]
+    fn a_one_shot_acceptance_ends_the_poll_for_the_remaining_responders() {
+        let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "reach-guard: the poll must open on the active player, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the one-shot acceptance resolves");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }),
+            "the performed one-shot action leaves no legal choice for the \
+             remaining responders (CR 608.2d), so the poll must end, got {:?}",
+            state.waiting_for
+        );
     }
 
     #[test]
