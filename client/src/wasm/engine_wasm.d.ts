@@ -303,8 +303,10 @@ export function getBracketDifficultyTable(): any;
 
 /**
  * Return the authoritative list of selectable Horde challenge decks as a typed
- * array. The Horde deck picker renders this directly — the client never
- * maintains a mirrored deck list. Each entry bundles the deck's `HordeRuleset`.
+ * array. The Horde deck picker renders this directly, so adding a new challenge
+ * deck is a single engine-side change — the client never maintains a mirrored
+ * deck list. Each entry bundles the deck's `HordeRuleset`, so the client can
+ * build the complete `FormatConfig` for the picked deck without a second call.
  */
 export function getChallengeDeckRegistry(): any;
 
@@ -463,6 +465,23 @@ export function has_replay_recording(): boolean;
 export function init_panic_hook(): void;
 
 /**
+ * Initialize the match of an ACCEPTED draft (CR 100.2b): the only entry that
+ * confers a draft session's minimum deck size on a Limited game. The generic
+ * initializers take no minimum at all, so an ordinary launch cannot grant
+ * itself the session's deck-size authority; the declared format config must
+ * still validate as an ordinary game, and `FormatConfig::
+ * with_draft_session_minimum` admits Limited only.
+ */
+export function initialize_draft_match_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count: number | null | undefined, first_player: number | null | undefined, session_min_deck_size: number): any;
+
+/**
+ * The multiplayer-host sibling of [`initialize_draft_match_game`]: starts an
+ * accepted draft's P2P match and claims the engine for the host session in the
+ * same call.
+ */
+export function initialize_draft_match_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count: number | null | undefined, first_player: number | null | undefined, session_min_deck_size: number): any;
+
+/**
  * Initialize a new game for local (single-player / AI) play.
  * Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
  * format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
@@ -504,6 +523,11 @@ export function initialize_multiplayer_host_game(deck_data: any, seed: number | 
  * format-specific deck-validation predicates.
  */
 export function isCardCommanderEligibleForFormat(name: string, format: any): boolean;
+
+/**
+ * CR 702.139a: Whether the named card has the Companion keyword ability.
+ */
+export function isCardCompanion(name: string): boolean;
 
 /**
  * CR 903.3: Whether the named card can serve as a commander
@@ -909,9 +933,12 @@ export interface InitOutput {
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
+    readonly initialize_draft_match_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
+    readonly initialize_draft_match_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
+    readonly isCardCompanion: (a: number, b: number) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
@@ -945,6 +972,7 @@ export interface InitOutput {
     readonly statecodechandle_clone_handle: (a: number) => number;
     readonly statecodechandle_hash: (a: number) => [number, number];
     readonly statecodechandle_json: (a: number) => [number, number];
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly statecodechandle_revision: (a: number) => [number, bigint];
     readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
@@ -960,10 +988,10 @@ export interface InitOutput {
     readonly list_token_presets_js: () => any;
     readonly llmProviderCatalog: () => any;
     readonly create_initial_state: () => any;
+    readonly getChallengeDeckRegistry: () => any;
     readonly getFormatRegistry: () => any;
     readonly clear_replay_playback: () => void;
     readonly replay_length_js: () => number;
-    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -538,6 +538,13 @@ export type DeckSizeRule =
   | { type: "Minimum"; data: number }
   | { type: "Exactly"; data: number };
 
+/**
+ * Provenance of `FormatConfig.deck_size`'s magnitude, mirroring the engine's
+ * `DeckSizeOrigin`. `DraftSession` (CR 100.2b: a Cube session configures its
+ * own minimum deck size) is admitted by the engine for Limited only.
+ */
+export type DeckSizeOrigin = "Registry" | "DraftSession";
+
 export interface RangeOfInfluenceConfig {
   default_range: number;
   player_overrides: Record<string, number>;
@@ -563,6 +570,8 @@ export interface FormatConfig {
   min_players: number;
   max_players: number;
   deck_size: DeckSizeRule;
+  /** Absent means `Registry` (the engine skips serializing the default). */
+  deck_size_origin?: DeckSizeOrigin;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
@@ -644,8 +653,21 @@ export interface FormatMetadata {
   group: FormatGroup;
   /** Engine-published key of this format's legality table; null when the card data records none. */
   legality_key: string | null;
+  /** Engine-derived: where this format keeps a designated companion (CR 702.139a). */
+  companion_slot: CompanionSlot;
   default_config: FormatConfig;
 }
+
+/**
+ * CR 702.139a: where a format keeps a companion designated before the game,
+ * mirroring the engine's `CompanionSlot`. `LimitedPool` designates one pool
+ * card that stays a sideboard card (CR 100.4b); `CommanderFamily` is a slot
+ * outside the deck; `SideboardOnly` has no slot.
+ */
+export type CompanionSlot =
+  | { type: "SideboardOnly" }
+  | { type: "CommanderFamily" }
+  | { type: "LimitedPool" };
 
 // ── Lobby ────────────────────────────────────────────────────────────────
 
@@ -842,7 +864,9 @@ export type OutsideGameChoiceSource =
   | {
       type: "BoosterPack";
       data: { pack_slot: number; origin: PackOrigin; card: CardFacePartial };
-    };
+    }
+  /** CR 702.139a: the player's revealed companion, still outside the game. */
+  | { type: "Companion"; data: { card: CardFacePartial } };
 
 /**
  * Where an opened booster pack came from, for display. Mirrors Rust
@@ -863,7 +887,8 @@ export interface OutsideGameChoiceEntry {
 export type OutsideGameSelection =
   | { type: "Sideboard"; data: { sideboard_index: number } }
   | { type: "FaceUpExile"; data: { object_id: ObjectId } }
-  | { type: "BoosterPack"; data: { pack_slot: number } };
+  | { type: "BoosterPack"; data: { pack_slot: number } }
+  | { type: "Companion" };
 
 export interface OutsideGameCardUse {
   player: PlayerId;

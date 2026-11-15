@@ -2,6 +2,7 @@ import { PLAYER_ID } from "../constants/game";
 import { boundedDiagnosticProbe, recordDiagnostic, registerEngineDiagnostics } from "../services/troubleshooting";
 import type { EngineDiagnosticSnapshot } from "../services/troubleshooting";
 import { trackEvent } from "../services/telemetry";
+import { draftSessionAuthorityOf } from "../services/draftFormatConfig";
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -1621,6 +1622,7 @@ export class WasmAdapter
         matchConfig ?? null,
         playerCount,
         firstPlayer,
+        draftSessionAuthorityOf(formatConfig),
       );
       this.invalidateAiDecisionDiagnostics();
       return result;
@@ -1632,6 +1634,7 @@ export class WasmAdapter
       matchConfig ?? null,
       playerCount,
       firstPlayer,
+      draftSessionAuthorityOf(formatConfig),
     );
     this.invalidateAiDecisionDiagnostics();
     return result;
@@ -1666,6 +1669,7 @@ export class WasmAdapter
         matchConfig ?? null,
         playerCount,
         firstPlayer,
+        draftSessionAuthorityOf(formatConfig),
       );
       this.invalidateAiDecisionDiagnostics();
       return result;
@@ -1678,6 +1682,7 @@ export class WasmAdapter
       playerCount,
       firstPlayer,
       owner,
+      draftSessionAuthorityOf(formatConfig),
     );
     this.invalidateAiDecisionDiagnostics();
     return { events: result.events, log_entries: result.log_entries };
@@ -1782,6 +1787,7 @@ interface MainThreadFallback {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult>;
   initializeMultiplayerHostGame(
     deckData: unknown | null,
@@ -1791,6 +1797,7 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
     owner?: HostSessionOwner,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null>;
   deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null>;
@@ -2095,17 +2102,18 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
+      draftSessionMinDeckSize?: number,
     ) => {
       await mainThread.ensureComboTable();
       return enqueue(() => {
-        const r = wasm.initialize_game(
-          deckData,
-          seed,
-          formatConfig,
-          matchConfig,
-          playerCount ?? undefined,
-          firstPlayer ?? undefined,
-        );
+        const r = draftSessionMinDeckSize === undefined
+          ? wasm.initialize_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+          )
+          : wasm.initialize_draft_match_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+            draftSessionMinDeckSize,
+          );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       });
@@ -2119,17 +2127,18 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerCount?: number,
       firstPlayer?: number,
       owner?: HostSessionOwner,
+      draftSessionMinDeckSize?: number,
     ) => {
       await mainThread.ensureComboTable();
       return enqueue(() => {
-        const r = wasm.initialize_multiplayer_host_game(
-          deckData,
-          seed,
-          formatConfig,
-          matchConfig,
-          playerCount ?? undefined,
-          firstPlayer ?? undefined,
-        );
+        const r = draftSessionMinDeckSize === undefined
+          ? wasm.initialize_multiplayer_host_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+          )
+          : wasm.initialize_draft_match_host_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+            draftSessionMinDeckSize,
+          );
         throwInitFailure(r);
         if (owner) {
           runtime.hostGeneration = ++runtime.nextHostGeneration;

@@ -1272,6 +1272,17 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
         }
     }
 
+    /// CR 601.2a + CR 707.13: whether the source was cast from OUTSIDE the game,
+    /// so its `cast_from_zone` stamp is only a staging zone. A latched snapshot
+    /// answers `false`: an outside-the-game copy ceases to exist (CR 704.5e) when
+    /// it leaves the stack or battlefield, so no departed incarnation is read.
+    pub fn cast_from_outside_game(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.created_outside_game,
+            Self::Latched(_) => false,
+        }
+    }
+
     pub fn played_from_zone(self) -> Option<Zone> {
         match self {
             Self::ExactLive(object) => object.played_from_zone,
@@ -1492,6 +1503,11 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 601.2a + CR 707.13 + CR 400.11: the spell was cast from OUTSIDE the game
+    /// (the copy Garth One-Eye creates), so `from_zone` holds only its staging
+    /// zone and every "cast from [zone]" predicate over this record must be false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_outside_game: bool,
     /// CR 702.185c: The alternative-cast variant chosen when this spell was
     /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
     /// conditions ("a spell was warped this turn") can answer after the spell
@@ -1565,6 +1581,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             has_adventure: false,
             from_zone: Zone::Hand,
+            from_outside_game: false,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
@@ -5022,6 +5039,26 @@ impl PendingZoneChangeDelivery {
     }
 }
 
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+///
+/// CR 616.1: a delivery can pause on a replacement ordering choice between the
+/// captures and the settlement, so the operation rides on the delivery's resume
+/// carrier (`PendingChangeZoneIteration::library_reorder` or
+/// `PendingBatchDeliveries::library_reorder`) and is settled by the drain that
+/// completes the instruction — never by the call that started it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryReorderOperation {
+    pub(crate) members: Vec<ObjectId>,
+    pub(crate) libraries: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -5117,6 +5154,11 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this delivery performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
     /// position of a terminal-shuffle operation, carried across the pause.
     #[serde(
@@ -7106,6 +7148,11 @@ pub struct PendingBatchDeliveries {
     /// for newly parked actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this batch performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
     /// `enter_tapped` mod survives the pause boundary).
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -7654,8 +7701,16 @@ pub enum BatchCompletion {
         /// determines the printed placement order and remains the
         /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
-        /// Selection members that were already in a library at delivery time.
-        /// They are repositions, not replaceable zone-change requests.
+        /// CR 401.4: Selection members that were already in a library when the
+        /// owner's arrangement was answered, for a completion parked by a build
+        /// that queued only the non-library moves and left these members to be
+        /// repositioned by this tail. A current completion writes this empty
+        /// because every selected member — this set included — is delivered by
+        /// the replacement-consulting batch (CR 614.1 + CR 701.20d). A non-empty
+        /// restored set is therefore the migration marker for the legacy
+        /// arrange-then-reposition shape: the completion settles it through
+        /// [`super::game::engine_resolution_choices`]'s legacy reposition rather
+        /// than resuming the non-library moves and silently dropping the order.
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
@@ -10496,6 +10551,36 @@ impl GameState {
         }
     }
 
+    /// CR 400.7 + CR 701.20a: The exact occurrence of each live card a reveal
+    /// is disclosing right now, in `card_ids` order. Captured into
+    /// [`GameEvent::CardsRevealed`] where the event is built, so knowledge
+    /// finalized later in the action attaches to the disclosed object and not
+    /// to a new object that reuses its storage id (CR 701.20d reorders).
+    ///
+    /// [`GameEvent::CardsRevealed`]: crate::types::events::GameEvent::CardsRevealed
+    pub fn disclosed_occurrences(&self, card_ids: &[ObjectId]) -> Vec<ObjectIncarnationRef> {
+        card_ids
+            .iter()
+            .filter_map(|id| self.objects.get(id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect()
+    }
+
+    /// CR 400.7 + CR 701.20a/d: The storage id through which a disclosure of
+    /// `occurrence` still identifies a card, or `None` once that object is gone.
+    ///
+    /// The disclosed object itself qualifies while it is still current. Once it
+    /// has become a new object, only a move into a hand carries the disclosure
+    /// along: the table saw which card was put there (CR 701.20a), the same
+    /// destination rule `clear_revealed_information_on_zone_exit` applies to a
+    /// publication made before the move. A card reordered within its library
+    /// (CR 701.20d) or moved anywhere else is a new object nobody was shown.
+    pub(crate) fn disclosure_survivor(&self, occurrence: ObjectIncarnationRef) -> Option<ObjectId> {
+        let object = self.objects.get(&occurrence.object_id)?;
+        (ObjectIncarnationRef::from_object(object) == occurrence || object.zone == Zone::Hand)
+            .then_some(occurrence.object_id)
+    }
+
     /// Returns whether `viewer` learned this exact still-current card
     /// occurrence. A library fact is valid only for the library generation in
     /// which it was disclosed; other-zone facts are unaffected by library churn.
@@ -12271,6 +12356,16 @@ pub enum OutsideGameChoiceSource {
         /// and the `game_state_stack_budget` regression). `Sideboard` already
         /// sets that ceiling; adding a pack origin beside a second inline face
         /// would raise it.
+        card: Box<crate::types::card::CardFace>,
+    },
+    /// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+    /// outside the game (`Player::companion` with `used == false`). Revealing it
+    /// does not bring it into the game, so an effect that finds cards "from
+    /// outside the game" can find it until the companion special action (or a
+    /// prior such effect) puts it into hand (CR 702.139c). It leaves the
+    /// sideboard pool at the reveal, so it is not a `Sideboard` entry. Boxed for
+    /// the same `WaitingFor` size budget as `BoosterPack`.
+    Companion {
         card: Box<crate::types::card::CardFace>,
     },
 }
@@ -26941,6 +27036,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_label_this_resolution: Option<String>,
 
+    /// CR 201.4 + CR 608.2c: the card name the current resolution's most recent
+    /// card-name choice named ("the card with the chosen name", Garth One-Eye).
+    /// Unlike the source's `ChosenAttribute::CardName` history, this answers
+    /// what THIS resolution chose: an impossible choice (an exhausted closed
+    /// domain, CR 609.3) leaves it `None`, and it is written even when the
+    /// source has left its zone (CR 113.7a: the ability still resolves).
+    /// Cleared at every top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_card_name_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -31964,6 +32069,30 @@ impl GameState {
         self.resolution_stack.take_active_batch_delivery()
     }
 
+    /// CR 701.20d + CR 701.20a: Whether `card_id` is tracked by an active
+    /// in-flight whole-library reorder operation whose terminal finish settles
+    /// reveal retirement at the batch completion boundary, so per-card reorder
+    /// moves do not prematurely retire it during intermediate deliveries.
+    pub fn is_active_library_reorder_member(&self, card_id: ObjectId) -> bool {
+        if let Some(pending) = self.active_batch_delivery() {
+            if let Some(reorder) = &pending.library_reorder {
+                if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                    return true;
+                }
+            }
+        }
+        if let Some(frame) = self.active_change_zone_frame() {
+            if let Some(pending) = &frame.pending {
+                if let Some(reorder) = &pending.library_reorder {
+                    if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Returns the CounterMoves queue only when its typed frame owns the stack
     /// top.
     pub fn active_counter_moves(&self) -> Option<&PendingCounterMoveQueue> {
@@ -35481,6 +35610,7 @@ impl GameState {
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
             named_label_this_resolution: None,
+            named_card_name_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -36679,6 +36809,7 @@ impl GameState {
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
         self.named_label_this_resolution.hash(&mut h);
+        self.named_card_name_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -37452,6 +37583,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -37818,6 +37950,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -37994,6 +38127,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -39160,6 +39294,7 @@ impl GameState {
             chosen_color_this_resolution: _,
             named_color_this_resolution: _,
             named_label_this_resolution: _,
+            named_card_name_this_resolution: _,
             placed_sticker_this_resolution: _,
             noted_numbers_this_resolution: _,
             last_chosen_damage_source: _,
@@ -41031,6 +41166,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
         named_label_this_resolution: _,
+        named_card_name_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -41739,6 +41875,7 @@ impl PartialEq for GameState {
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
             && self.named_label_this_resolution == other.named_label_this_resolution
+            && self.named_card_name_this_resolution == other.named_card_name_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
@@ -41907,7 +42044,7 @@ mod resolved_information_tests {
     }
 
     #[test]
-    fn reveal_until_reveal_only_records_exact_retained_information() {
+    fn reveal_until_reveal_only_records_controller_until_action_boundary() {
         let mut state = GameState::new_two_player(42);
         let revealed = create_object(
             &mut state,
@@ -41940,8 +42077,11 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
+        // CR 701.20a: the reveal lasts while the effect still needs it. The
+        // resolver records only the controller reveal; the resolution's completion
+        // boundary ends it, and a reveal-only pile is never published durably.
         assert!(state.revealed_cards.contains(&revealed));
-        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
             .entries()
@@ -41951,7 +42091,8 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(information.len(), 2);
+        assert_eq!(information.len(), 1);
+        assert_eq!(information[0].edit, ResolvedInformationEdit::Reveal);
 
         let mut replay = pre_state;
         for command in &information {
@@ -45834,6 +45975,7 @@ mod tests {
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -61391,6 +61533,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -63306,6 +63449,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            from_outside_game: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -66114,6 +66258,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        library_reorder: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

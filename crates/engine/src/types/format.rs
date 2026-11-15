@@ -43,7 +43,32 @@ pub struct FormatMetadata {
     /// maps record this format's legality table under, or `None` when the card
     /// data records no table for it.
     pub legality_key: Option<&'static str>,
+    /// Where `default_config` keeps a designated companion
+    /// ([`FormatConfig::companion_slot`]), published so the frontend reads the
+    /// engine's answer instead of re-listing formats.
+    pub companion_slot: CompanionSlot,
     pub default_config: FormatConfig,
+}
+
+/// CR 702.139a: where a format keeps a companion a player designates before
+/// the game. Derived from a resolved [`FormatConfig`] by
+/// [`FormatConfig::companion_slot`], the single authority every loader,
+/// reveal, between-games and deck-validation site reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CompanionSlot {
+    /// No designated slot. A companion is revealed from the sideboard
+    /// (CR 702.139a + CR 400.11a), when the format has one.
+    SideboardOnly,
+    /// Commander family: a dedicated slot outside the deck. Commander games
+    /// use no sideboard (CR 903.5e), and the card enters only through the
+    /// companion special action (CR 702.139d).
+    CommanderFamily,
+    /// Limited: the designation names one card of the player's pool. Whenever
+    /// that card is not the revealed companion it is a sideboard card
+    /// (CR 100.4b), so it rejoins the sideboard when the reveal window closes
+    /// without it and between games.
+    LimitedPool,
 }
 
 /// Supported game formats.
@@ -1537,6 +1562,35 @@ fn default_deck_copy_limit_fallback() -> DeckCopyLimit {
     DeckCopyLimit::UpTo(1)
 }
 
+/// Provenance of a [`FormatConfig`]'s `deck_size` magnitude.
+///
+/// CR 100.2b: a Limited deck has a minimum size, and a Cube draft session
+/// configures that minimum when the draft is set up (it may be 20 or 50 rather
+/// than 40). That is a session decision, not a registry rule, so it is carried
+/// as typed provenance rather than by loosening Limited's registry check. The
+/// field exists so an engine-produced state round-trips (save/restore, host
+/// resume); it is NEVER an ingress claim: only
+/// [`FormatConfig::with_draft_session_minimum`] (a draft-match initializer)
+/// sets it, and [`FormatConfig::validate_for_player_count`] refuses a config
+/// that arrives already carrying it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeckSizeOrigin {
+    /// The format registry's own deck-size rule (or a closed option list it
+    /// declares, `GameFormat::deck_size_authority`).
+    #[default]
+    Registry,
+    /// The draft session's configured minimum deck size. Admitted only for
+    /// a format with a [`GameFormat::draft_session_minimum_floor`] (Limited,
+    /// Commander Draft) on a `Minimum(n)` rule, `n` at or above that floor.
+    DraftSession,
+}
+
+impl DeckSizeOrigin {
+    fn is_registry(&self) -> bool {
+        matches!(self, DeckSizeOrigin::Registry)
+    }
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -1552,6 +1606,13 @@ pub struct FormatConfig {
     /// format with a minimum; CR 903.13f(1) makes Commander Draft another).
     /// Compare through `DeckSizeRule::accepts`, never by hand.
     pub deck_size: DeckSizeRule,
+    /// Where `deck_size`'s magnitude was decided. `Registry` (the default, and
+    /// every payload that predates this field) means the format registry's own
+    /// rule, so the built-in gate holds it to the registry's value or option
+    /// list. `DraftSession` means a draft session resolved it at configuration
+    /// time; only Limited and Commander Draft admit that (see [`DeckSizeOrigin`]).
+    #[serde(default, skip_serializing_if = "DeckSizeOrigin::is_registry")]
+    pub deck_size_origin: DeckSizeOrigin,
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
@@ -1916,6 +1977,14 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // closed because this field is live in `DeckSizeRule::accepts`
     // (`game::deck_validation`) and `DeckSizeRule::min_cards`
     // (`game::match_flow`).
+    //
+    // SESSION-AUTHORIZED MAGNITUDE — CR 100.2b: a Cube draft session
+    // configures its own minimum deck size, recorded as
+    // `DeckSizeOrigin::DraftSession` by `with_draft_session_minimum`. The
+    // decoder admits it for engine-produced state (restore round-trip) on
+    // Limited only, on the `Minimum` shape (the discriminant stays locked),
+    // with at least one card; ingress refuses it in `validate_for_player_count`.
+    // Without the origin, Limited is held to the registry's 40.
     let deck_size_ok = match (config.deck_size, rules.deck_size) {
         // Same discriminant: fall through to the magnitude rule.
         (DeckSizeRule::Minimum(declared), DeckSizeRule::Minimum(registry))
@@ -1926,6 +1995,11 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
                     .deck_size_authority()
                     .options()
                     .contains(&declared)
+                || (config.deck_size_origin == DeckSizeOrigin::DraftSession
+                    && config
+                        .format
+                        .draft_session_minimum_floor()
+                        .is_some_and(|floor| declared >= floor))
         }
         // Different discriminant: refused outright, never consulted against
         // the option list. This is the arm that makes the magnitude set safe.
@@ -1945,6 +2019,17 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
                 [] => String::new(),
                 options => format!(" (count may also be one of {options:?})"),
             },
+        ));
+    }
+
+    // deck_size_origin: only Limited may claim a draft session's authority.
+    if config.deck_size_origin == DeckSizeOrigin::DraftSession
+        && config.format.draft_session_minimum_floor().is_none()
+    {
+        return Err(format!(
+            "FormatConfig.deck_size_origin is DraftSession, but {} is not a draft format — only \
+             Limited and Commander Draft deck sizes are configured by a draft session",
+            config.format,
         ));
     }
 
@@ -2765,6 +2850,20 @@ impl GameFormat {
         }
     }
 
+    /// CR 100.2b: the smallest minimum deck size a draft session may configure
+    /// for this format, or `None` when the format's deck size is never a draft
+    /// session's decision. Limited's minimum is the session's to set (a Cube
+    /// may configure 20 or 50). CR 903.13f(1): Commander Draft decks "must
+    /// contain at least 60 cards", so a Commander Cube may raise its minimum
+    /// but never lower it below the registry's.
+    pub fn draft_session_minimum_floor(self) -> Option<u16> {
+        match self {
+            GameFormat::Limited => Some(1),
+            GameFormat::CommanderDraft => Some(60),
+            _ => None,
+        }
+    }
+
     /// Whether this format's deck-size MAGNITUDE is rules-fixed or agreed at
     /// the table, and if agreed, the closed set a host may choose from. The
     /// `Minimum`/`Exactly` discriminant is always rules-fixed — see
@@ -3572,6 +3671,7 @@ impl GameFormat {
                 description: "Rotating card pool",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Standard.legality_key(),
+                companion_slot: FormatConfig::standard().companion_slot(),
                 default_config: FormatConfig::standard(),
             },
             FormatMetadata {
@@ -3581,6 +3681,7 @@ impl GameFormat {
                 description: "Non-rotating from 2012",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Pioneer.legality_key(),
+                companion_slot: FormatConfig::pioneer().companion_slot(),
                 default_config: FormatConfig::pioneer(),
             },
             FormatMetadata {
@@ -3590,6 +3691,7 @@ impl GameFormat {
                 description: "Non-rotating from Mirrodin onward",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Modern.legality_key(),
+                companion_slot: FormatConfig::modern().companion_slot(),
                 default_config: FormatConfig::modern(),
             },
             FormatMetadata {
@@ -3599,6 +3701,7 @@ impl GameFormat {
                 description: "Old-frame constructed through Scourge",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Premodern.legality_key(),
+                companion_slot: FormatConfig::premodern().companion_slot(),
                 default_config: FormatConfig::premodern(),
             },
             FormatMetadata {
@@ -3608,6 +3711,7 @@ impl GameFormat {
                 description: "Eternal format, all sets legal",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Legacy.legality_key(),
+                companion_slot: FormatConfig::legacy().companion_slot(),
                 default_config: FormatConfig::legacy(),
             },
             FormatMetadata {
@@ -3617,6 +3721,7 @@ impl GameFormat {
                 description: "Broadest pool, Power Nine restricted",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Vintage.legality_key(),
+                companion_slot: FormatConfig::vintage().companion_slot(),
                 default_config: FormatConfig::vintage(),
             },
             FormatMetadata {
@@ -3626,6 +3731,7 @@ impl GameFormat {
                 description: "Arena's eternal format",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Historic.legality_key(),
+                companion_slot: FormatConfig::historic().companion_slot(),
                 default_config: FormatConfig::historic(),
             },
             FormatMetadata {
@@ -3635,6 +3741,7 @@ impl GameFormat {
                 description: "Arena's eternal non-rotating format",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Timeless.legality_key(),
+                companion_slot: FormatConfig::timeless().companion_slot(),
                 default_config: FormatConfig::timeless(),
             },
             FormatMetadata {
@@ -3644,6 +3751,7 @@ impl GameFormat {
                 description: "Commons only",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Pauper.legality_key(),
+                companion_slot: FormatConfig::pauper().companion_slot(),
                 default_config: FormatConfig::pauper(),
             },
             FormatMetadata {
@@ -3653,6 +3761,7 @@ impl GameFormat {
                 description: "Every set, no bans, no copy limit, no deck minimum",
                 group: FormatGroup::Constructed,
                 legality_key: GameFormat::Freeform.legality_key(),
+                companion_slot: FormatConfig::freeform().companion_slot(),
                 default_config: FormatConfig::freeform(),
             },
             FormatMetadata {
@@ -3662,6 +3771,7 @@ impl GameFormat {
                 description: "100-card singleton, 2\u{2013}4 players",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::Commander.legality_key(),
+                companion_slot: FormatConfig::commander().companion_slot(),
                 default_config: FormatConfig::commander(),
             },
             FormatMetadata {
@@ -3671,6 +3781,7 @@ impl GameFormat {
                 description: "2v2 Commander, 60 shared life per team",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::TwoHeadedGiantCommander.legality_key(),
+                companion_slot: FormatConfig::two_headed_giant_commander().companion_slot(),
                 default_config: FormatConfig::two_headed_giant_commander(),
             },
             FormatMetadata {
@@ -3680,6 +3791,7 @@ impl GameFormat {
                 description: "1-vs-many Commander, 60 life each side",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::ArchenemyCommander.legality_key(),
+                companion_slot: FormatConfig::archenemy_commander().companion_slot(),
                 default_config: FormatConfig::archenemy_commander(),
             },
             FormatMetadata {
@@ -3689,6 +3801,7 @@ impl GameFormat {
                 description: "Commander multiplayer with a communal planar deck",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::PlanechaseCommander.legality_key(),
+                companion_slot: FormatConfig::planechase_commander().companion_slot(),
                 default_config: FormatConfig::planechase_commander(),
             },
             FormatMetadata {
@@ -3698,6 +3811,7 @@ impl GameFormat {
                 description: "Tournament 1v1 Commander, 30 life",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::DuelCommander.legality_key(),
+                companion_slot: FormatConfig::duel_commander().companion_slot(),
                 default_config: FormatConfig::duel_commander(),
             },
             FormatMetadata {
@@ -3707,6 +3821,7 @@ impl GameFormat {
                 description: "Commons-only singleton Commander",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::PauperCommander.legality_key(),
+                companion_slot: FormatConfig::pauper_commander().companion_slot(),
                 default_config: FormatConfig::pauper_commander(),
             },
             FormatMetadata {
@@ -3716,6 +3831,7 @@ impl GameFormat {
                 description: "50-card Tiny singleton",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::TinyLeaders.legality_key(),
+                companion_slot: FormatConfig::tiny_leaders().companion_slot(),
                 default_config: FormatConfig::tiny_leaders(),
             },
             FormatMetadata {
@@ -3725,6 +3841,7 @@ impl GameFormat {
                 description: "60-card singleton, Planeswalker + signature spell",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::Oathbreaker.legality_key(),
+                companion_slot: FormatConfig::oathbreaker().companion_slot(),
                 default_config: FormatConfig::oathbreaker(),
             },
             FormatMetadata {
@@ -3734,6 +3851,7 @@ impl GameFormat {
                 description: "60-card Standard singleton",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::Brawl.legality_key(),
+                companion_slot: FormatConfig::brawl().companion_slot(),
                 default_config: FormatConfig::brawl(),
             },
             FormatMetadata {
@@ -3743,6 +3861,7 @@ impl GameFormat {
                 description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::HistoricBrawl.legality_key(),
+                companion_slot: FormatConfig::historic_brawl().companion_slot(),
                 default_config: FormatConfig::historic_brawl(),
             },
             FormatMetadata {
@@ -3752,6 +3871,7 @@ impl GameFormat {
                 description: "Drafted 60-card minimum Commander, 3\u{2013}8 players",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::CommanderDraft.legality_key(),
+                companion_slot: FormatConfig::commander_draft().companion_slot(),
                 default_config: FormatConfig::commander_draft(),
             },
             FormatMetadata {
@@ -3761,6 +3881,7 @@ impl GameFormat {
                 description: "Any castable card as your commander, every set, no deck minimum",
                 group: FormatGroup::Commander,
                 legality_key: GameFormat::FreeformCommander.legality_key(),
+                companion_slot: FormatConfig::freeform_commander().companion_slot(),
                 default_config: FormatConfig::freeform_commander(),
             },
             FormatMetadata {
@@ -3770,6 +3891,7 @@ impl GameFormat {
                 description: "3\u{2013}6 player battle royale",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::FreeForAll.legality_key(),
+                companion_slot: FormatConfig::free_for_all().companion_slot(),
                 default_config: FormatConfig::free_for_all(),
             },
             FormatMetadata {
@@ -3779,6 +3901,7 @@ impl GameFormat {
                 description: "4 players, two teams of two",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::TwoHeadedGiant.legality_key(),
+                companion_slot: FormatConfig::two_headed_giant().companion_slot(),
                 default_config: FormatConfig::two_headed_giant(),
             },
             FormatMetadata {
@@ -3788,6 +3911,7 @@ impl GameFormat {
                 description: "One archenemy against a team of heroes",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::Archenemy.legality_key(),
+                companion_slot: FormatConfig::archenemy().companion_slot(),
                 default_config: FormatConfig::archenemy(),
             },
             FormatMetadata {
@@ -3797,6 +3921,7 @@ impl GameFormat {
                 description: "60-card multiplayer with a communal planar deck",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::Planechase.legality_key(),
+                companion_slot: FormatConfig::planechase().companion_slot(),
                 default_config: FormatConfig::planechase(),
             },
             FormatMetadata {
@@ -3806,6 +3931,7 @@ impl GameFormat {
                 description: "Draft or sealed, 40-card deck",
                 group: FormatGroup::Limited,
                 legality_key: GameFormat::Limited.legality_key(),
+                companion_slot: FormatConfig::limited().companion_slot(),
                 default_config: FormatConfig::limited(),
             },
             FormatMetadata {
@@ -3815,6 +3941,7 @@ impl GameFormat {
                 description: "60 snow basic lands, random creature tokens",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::Momir.legality_key(),
+                companion_slot: FormatConfig::momir().companion_slot(),
                 default_config: FormatConfig::momir(),
             },
             FormatMetadata {
@@ -3824,6 +3951,8 @@ impl GameFormat {
                 description: "Co-op team vs a self-piloting Horde deck",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::Horde.legality_key(),
+                companion_slot: FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset())
+                    .companion_slot(),
                 default_config: FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
             },
             FormatMetadata {
@@ -3833,6 +3962,7 @@ impl GameFormat {
                 description: "Shared library and graveyard, fixed 80-card deck",
                 group: FormatGroup::Multiplayer,
                 legality_key: GameFormat::Dandan.legality_key(),
+                companion_slot: FormatConfig::dandan().companion_slot(),
                 default_config: FormatConfig::dandan(),
             },
         ]
@@ -3869,6 +3999,21 @@ struct LegacyFormatFields {
 }
 
 impl FormatConfig {
+    /// CR 702.139a: where this format keeps a designated companion. Derived
+    /// from the resolved fields, so a `Custom` format answers from its own
+    /// declared rules: a commander-damage command zone (`uses_commander`)
+    /// gives the commander family's dedicated slot whatever its sideboard
+    /// policy, and only the built-in Limited format draws the slot from a pool.
+    pub fn companion_slot(&self) -> CompanionSlot {
+        if self.uses_commander {
+            CompanionSlot::CommanderFamily
+        } else if self.format == GameFormat::Limited {
+            CompanionSlot::LimitedPool
+        } else {
+            CompanionSlot::SideboardOnly
+        }
+    }
+
     /// Persistence and local game-init ingress: a config an earlier engine wrote
     /// decodes under today's rules. Network payloads keep the strict validator.
     pub fn migrate_persisted(config: &mut serde_json::Value) {
@@ -4193,6 +4338,28 @@ impl FormatConfig {
     /// `from_persisted` is deliberate and accepted as-is; this paragraph is
     /// disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
+        // CR 100.2b: a draft session's deck-size authority is conferred by a
+        // draft-match initializer through `with_draft_session_minimum`, never
+        // claimed by the payload being validated. Every ingress (WASM
+        // initializers, lobby broker, server Full settings, session creation)
+        // validates the config it was SENT through this function, so a
+        // `DraftSession` claim here is a payload granting itself the exception.
+        if self.deck_size_origin == DeckSizeOrigin::DraftSession {
+            return Err(
+                "FormatConfig.deck_size_origin DraftSession is conferred by a draft match,                  never declared by a format payload"
+                    .to_string(),
+            );
+        }
+        self.validate_restored_for_player_count(player_count)
+    }
+
+    /// The seat-count and topology half of [`Self::validate_for_player_count`],
+    /// for an ENGINE-ISSUED snapshot being restored (a hosted game's saved
+    /// state). It keeps a valid `DraftSession` origin that a draft-match
+    /// initializer stamped, which new-game ingress refuses: restoring is not a
+    /// payload granting itself the draft session's deck-size authority, and the
+    /// decoder still holds the origin to Limited's `Minimum` shape.
+    pub fn validate_restored_for_player_count(&self, player_count: u8) -> Result<(), String> {
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat
         // count a format admits is the engine registry's, not the
@@ -4389,6 +4556,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4413,6 +4581,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4454,6 +4623,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4550,6 +4720,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4578,6 +4749,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4642,6 +4814,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4669,6 +4842,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4704,6 +4878,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4730,7 +4905,33 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
+    }
+
+    /// This Limited config under a draft session's configured minimum deck
+    /// size (CR 100.2b). The single constructor of [`DeckSizeOrigin::DraftSession`]:
+    /// the session, not the registry, decided `minimum`, and only a draft-match
+    /// initializer (which holds the accepted session's value) calls this. A
+    /// generic format payload cannot reach it, because
+    /// [`FormatConfig::validate_for_player_count`] refuses any config that
+    /// already claims the session's authority.
+    pub fn with_draft_session_minimum(mut self, minimum: u16) -> Result<Self, String> {
+        let Some(floor) = self.format.draft_session_minimum_floor() else {
+            return Err(format!(
+                "a draft session configures only Limited and Commander Draft deck sizes, not {}",
+                self.format
+            ));
+        };
+        if !matches!(self.deck_size, DeckSizeRule::Minimum(_)) || minimum < floor {
+            return Err(format!(
+                "a draft session's minimum deck size must be at least {floor} on {}'s Minimum                  rule, got {minimum} on {:?}",
+                self.format, self.deck_size
+            ));
+        }
+        self.deck_size = DeckSizeRule::Minimum(minimum);
+        self.deck_size_origin = DeckSizeOrigin::DraftSession;
+        Ok(self)
     }
 
     /// Limited format with an enabled command zone (CR 905: Conspiracy Draft).
@@ -4767,6 +4968,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4794,6 +4996,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4818,6 +5021,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4854,6 +5058,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4881,6 +5086,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4911,6 +5117,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4945,6 +5152,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -4971,6 +5179,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -5035,6 +5244,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: Some(ruleset),
             custom_rules: None,
+            deck_size_origin: Default::default(),
         }
     }
 
@@ -5224,6 +5434,7 @@ impl FormatConfig {
             allow_debug_actions: false,
             horde_ruleset: None,
             custom_rules: Some(Box::new(rules.clone())),
+            deck_size_origin: Default::default(),
         }
     }
 }
@@ -5299,6 +5510,63 @@ mod tests {
     /// == 17`) that a future field sharing `archenemy_player`/`custom_rules`'s
     /// `skip_serializing_if`-when-`None` shape could silently defeat without
     /// moving the count.
+    /// CR 702.139a: the companion slot is derived from the resolved config,
+    /// published unchanged in the registry, and answers a custom format from
+    /// its own declared command zone rather than its sideboard policy.
+    #[test]
+    fn companion_slot_is_derived_from_the_resolved_config() {
+        for metadata in GameFormat::registry() {
+            let config = &metadata.default_config;
+            assert_eq!(
+                metadata.companion_slot,
+                config.companion_slot(),
+                "{}",
+                metadata.format
+            );
+            let expected = if config.uses_commander {
+                CompanionSlot::CommanderFamily
+            } else if metadata.format == GameFormat::Limited {
+                CompanionSlot::LimitedPool
+            } else {
+                CompanionSlot::SideboardOnly
+            };
+            assert_eq!(config.companion_slot(), expected, "{}", metadata.format);
+        }
+        assert_eq!(
+            FormatConfig::limited().companion_slot(),
+            CompanionSlot::LimitedPool
+        );
+
+        let custom_from = |base: FormatConfig| {
+            crate::types::custom_format::CustomFormatDef::from_lobby_config(
+                "companion slot fixture".to_string(),
+                &base,
+            )
+            .expect("a built-in lobby save is a valid custom format")
+            .rules
+        };
+        // A commander-damage command zone keeps the dedicated slot even when the
+        // custom format also declares a sideboard.
+        let mut commander_with_sideboard = custom_from(FormatConfig::commander());
+        commander_with_sideboard.structural.sideboard_policy = SideboardPolicy::Unlimited;
+        assert_eq!(
+            FormatConfig::for_custom_rules(&commander_with_sideboard).companion_slot(),
+            CompanionSlot::CommanderFamily
+        );
+        // A command zone without commander damage (Tiny Leaders-shaped) has no
+        // dedicated slot; companions come from its sideboard.
+        assert_eq!(
+            FormatConfig::for_custom_rules(&custom_from(FormatConfig::tiny_leaders()))
+                .companion_slot(),
+            CompanionSlot::SideboardOnly
+        );
+        // Only the built-in Limited format draws a slot from a pool.
+        assert_eq!(
+            FormatConfig::for_custom_rules(&custom_from(FormatConfig::limited())).companion_slot(),
+            CompanionSlot::SideboardOnly
+        );
+    }
+
     #[test]
     fn format_config_field_destructure_is_exhaustive() {
         let config = FormatConfig::standard();
@@ -5308,6 +5576,7 @@ mod tests {
             min_players: _,
             max_players: _,
             deck_size: _,
+            deck_size_origin: _,
             singleton: _,
             command_zone: _,
             commander_damage_threshold: _,
@@ -8000,5 +8269,45 @@ mod tests {
             WaveCount::Snaking { min: 3, max: 1 }.nontokens_for_turn(7),
             3
         );
+    }
+
+    /// CR 100.2b: the draft session's deck-size authority is conferred only by
+    /// `with_draft_session_minimum`; a payload that arrives already claiming it
+    /// is refused by the ingress authority, and the constructor admits the draft
+    /// formats alone.
+    #[test]
+    fn draft_session_authority_is_conferred_never_declared() {
+        let conferred = FormatConfig::limited()
+            .with_draft_session_minimum(20)
+            .unwrap();
+        assert_eq!(conferred.deck_size, DeckSizeRule::Minimum(20));
+        assert_eq!(conferred.deck_size_origin, DeckSizeOrigin::DraftSession);
+        // Engine-produced state still round-trips through the decoder.
+        let round_tripped: FormatConfig =
+            serde_json::from_value(serde_json::to_value(&conferred).unwrap()).unwrap();
+        assert_eq!(round_tripped, conferred);
+        // Ingress validation refuses the claim.
+        assert!(conferred.validate_for_player_count(2).is_err());
+        assert!(FormatConfig::limited().validate_for_player_count(2).is_ok());
+        // Only Limited's Minimum rule, with at least one card.
+        assert!(FormatConfig::standard()
+            .with_draft_session_minimum(20)
+            .is_err());
+        assert!(FormatConfig::limited()
+            .with_draft_session_minimum(0)
+            .is_err());
+        // CR 903.13f(1): Commander Draft's session minimum may rise, never
+        // fall below the 60-card floor.
+        let cube = FormatConfig::commander_draft()
+            .with_draft_session_minimum(65)
+            .unwrap();
+        assert_eq!(cube.deck_size, DeckSizeRule::Minimum(65));
+        let round_tripped: FormatConfig =
+            serde_json::from_value(serde_json::to_value(&cube).unwrap()).unwrap();
+        assert_eq!(round_tripped, cube);
+        assert!(cube.validate_for_player_count(4).is_err());
+        assert!(FormatConfig::commander_draft()
+            .with_draft_session_minimum(59)
+            .is_err());
     }
 }

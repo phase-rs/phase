@@ -118,6 +118,7 @@ fn validate_custom_rules_consistency_accepts_matching_id() {
     let rules = sample_rules(5);
     let config = FormatConfig {
         custom_rules: Some(Box::new(rules.clone())),
+        deck_size_origin: Default::default(),
         ..FormatConfig {
             format: GameFormat::Custom(rules.id),
             ..FormatConfig::standard()
@@ -131,6 +132,7 @@ fn validate_custom_rules_consistency_rejects_mismatched_id() {
     let config = FormatConfig {
         format: GameFormat::Custom(CustomFormatId(5)),
         custom_rules: Some(Box::new(sample_rules(7))),
+        deck_size_origin: Default::default(),
         ..FormatConfig::standard()
     };
     assert!(validate_custom_rules_consistency(&config).is_err());
@@ -141,6 +143,7 @@ fn validate_custom_rules_consistency_rejects_custom_without_rules() {
     let config = FormatConfig {
         format: GameFormat::Custom(CustomFormatId(5)),
         custom_rules: None,
+        deck_size_origin: Default::default(),
         ..FormatConfig::standard()
     };
     assert!(validate_custom_rules_consistency(&config).is_err());
@@ -151,6 +154,7 @@ fn validate_custom_rules_consistency_rejects_builtin_with_custom_rules() {
     let config = FormatConfig {
         format: GameFormat::Standard,
         custom_rules: Some(Box::new(sample_rules(5))),
+        deck_size_origin: Default::default(),
         ..FormatConfig::standard()
     };
     assert!(validate_custom_rules_consistency(&config).is_err());
@@ -1399,6 +1403,7 @@ fn format_config_deserialization_rejects_custom_without_matching_rules() {
     let invalid = FormatConfig {
         format: GameFormat::Custom(CustomFormatId(1)),
         custom_rules: None,
+        deck_size_origin: Default::default(),
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&invalid).unwrap();
@@ -1415,6 +1420,7 @@ fn format_config_deserialization_rejects_custom_with_mismatched_rules_id() {
     let invalid = FormatConfig {
         format: GameFormat::Custom(CustomFormatId(5)),
         custom_rules: Some(Box::new(sample_rules(7))),
+        deck_size_origin: Default::default(),
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&invalid).unwrap();
@@ -2440,6 +2446,7 @@ fn companion_reveal_check_does_not_panic_for_an_in_memory_custom_format_config()
     state.format_config = FormatConfig {
         format: GameFormat::Custom(rules.id),
         custom_rules: Some(Box::new(rules)),
+        deck_size_origin: Default::default(),
         uses_commander: true,
         ..FormatConfig::standard()
     };
@@ -2488,6 +2495,7 @@ fn custom_format_unlimited_sideboard_survives_deck_loading() {
     state.format_config = FormatConfig {
         format: GameFormat::Custom(rules.id),
         custom_rules: Some(Box::new(rules)),
+        deck_size_origin: Default::default(),
         sideboard_policy: SideboardPolicy::Unlimited,
         ..FormatConfig::standard()
     };
