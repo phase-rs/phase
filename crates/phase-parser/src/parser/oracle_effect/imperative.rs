@@ -1286,6 +1286,7 @@ fn parse_loyalty_symbol_effect(lower: &str) -> Option<ImperativeFamilyAst> {
                 counter_type: Some(crate::types::counter::CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: delta.abs() },
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
                 exact_selection: None,
                 multi_target: None,
             },
@@ -17490,9 +17491,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             counter_type,
             count,
             target,
+            scope,
             exact_selection: Some(selection_count),
             multi_target: None,
         }) => {
+            // "each of N" is a `Chosen` lead in `try_parse_remove_counter`, so a
+            // fixed exact selection is never a mass removal.
+            debug_assert_eq!(scope, EffectScope::Single);
             let removal = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::RemoveCounter {
@@ -17501,6 +17506,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     target: TargetFilter::TrackedSet {
                         id: crate::types::identifiers::TrackedSetId(0),
                     },
+                    scope: EffectScope::Single,
                 },
             );
             let mut clause = parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
@@ -17672,7 +17678,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             },
         ) => {
             let multi_target = match &ast {
-                ZoneCounterImperativeAst::RemoveCounter { multi_target, .. } => {
+                ZoneCounterImperativeAst::RemoveCounter {
+                    multi_target,
+                    scope,
+                    ..
+                } => {
+                    // "each of N target" is a `Chosen` lead, never a mass removal.
+                    debug_assert_eq!(*scope, EffectScope::Single);
                     multi_target.clone()
                 }
                 _ => None,
@@ -19048,10 +19060,12 @@ pub(super) fn parse_zone_counter_ast<'a>(
                     counter_type,
                     count,
                     target,
+                    scope,
                 }) => Some(Ok(ZoneCounterImperativeAst::RemoveCounter {
                     counter_type,
                     count,
                     target,
+                    scope,
                     exact_selection: remove_counter_exact_selection_count(lower),
                     multi_target: remove_counter_exact_target_multi_target(lower),
                 })),
@@ -19249,12 +19263,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             target,
+            scope,
             exact_selection: _,
             multi_target: _,
         } => Effect::RemoveCounter {
             counter_type,
             count,
             target,
+            scope,
         },
         // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
         // target arrives via the parent `TargetOnly` chain, so this effect carries
@@ -32836,6 +32852,7 @@ mod loyalty_symbol_effect_tests {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             } if *value == count
         )
     }
