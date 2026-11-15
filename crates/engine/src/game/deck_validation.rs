@@ -4670,8 +4670,8 @@ pub fn is_commander_eligible(face: &CardFace) -> bool {
 /// Every core type on the face must be castable, and the type list must be
 /// NONEMPTY: `Iterator::all` is vacuously `true` on an empty list, which
 /// would re-admit a face with no recognized `CoreType` at all (the fixture
-/// carries such faces — Vanguard/Avatar cards, whose CR 313 card type has no
-/// `CoreType` variant) as though it were castable.
+/// carries such faces, e.g. un-set cards whose type line names no CR 205.2a
+/// card type) as though it were castable.
 pub fn is_freeform_commander_eligible(face: &CardFace) -> bool {
     let core_types = &face.card_type.core_types;
     !core_types.is_empty()
@@ -4709,12 +4709,13 @@ fn core_type_can_be_cast(core_type: CoreType) -> bool {
         // CR 108.2a: nontraditional card types, each of which its own CR
         // section says explicitly "can't be cast": CR 309.2c (Dungeon),
         // CR 311.2 (Plane), CR 312.2 (Phenomenon), CR 314.2 (Scheme),
-        // CR 315.3 (Conspiracy). Turtle Team-Up Bosses and Events likewise
-        // can't be cast (the product booklet is the authority — they have no
-        // CR section of their own).
+        // CR 315.3 (Conspiracy), CR 313.2 (Vanguard). Turtle Team-Up Bosses
+        // and Events likewise can't be cast (the product booklet is the
+        // authority — they have no CR section of their own).
         CoreType::Dungeon
         | CoreType::Plane
         | CoreType::Phenomenon
+        | CoreType::Vanguard
         | CoreType::Scheme
         | CoreType::Conspiracy
         | CoreType::Boss

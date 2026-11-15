@@ -5,6 +5,7 @@ use super::anthem::rewrite_self_pronoun_subject;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::BlockPairDirection;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
@@ -3012,6 +3013,48 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
     Some(vec![cast_def, activate_def])
 }
 
+/// Split "<subject> costs <…> to cast and can be cast as though it had flash"
+/// into the cast-cost clause (through "to cast") and the lowercase subject.
+fn parse_cost_and_flash_clauses(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (rest, (cast_clause, (subject, _, _, _))) = nom::combinator::consumed((
+        take_until(" costs "),
+        tag(" costs "),
+        take_until(" to cast and can be cast as though it had flash"),
+        tag(" to cast"),
+    ))
+    .parse(input)?;
+    let (rest, _) = (
+        tag(" and can be cast as though it had flash"),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(rest)?;
+    Ok((rest, (cast_clause, subject)))
+}
+
+/// CR 601.2f + CR 601.3b + CR 611.3a: Radagast of Rhosgobel — "The first
+/// creature spell you cast each turn costs {2} less to cast and can be cast as
+/// though it had flash." One shared nth-qualified subject yields a `ModifyCost`
+/// static and a gated `CastWithFlash` static.
+fn parse_nth_spell_cost_and_flash(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (_, (cast_clause, subject)) = parse_cost_and_flash_clauses(tp.lower).ok()?;
+    let (cast_tp, _) = tp.split_at(cast_clause.len());
+    let mut cost = parse_static_line(cast_tp.original)?;
+    if !matches!(cost.mode, StaticMode::ModifyCost { .. }) {
+        return None;
+    }
+    let flash = super::keyword_grant::nth_qualified_spell_grant(
+        subject,
+        StaticMode::CastWithFlash,
+        None,
+        text,
+    )?;
+    cost.description = Some(text.to_string());
+    Some(vec![cost, flash])
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -3131,6 +3174,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // timing condition. Must precede the single-return fallback, which keeps the
     // cast half and silently drops the "and abilities …" activate half.
     if let Some(defs) = parse_compound_spell_and_ability_cost_tax(&stripped) {
+        return defs;
+    }
+
+    // Must precede the single-return fallback, which keeps the cost half and
+    // drops the "and can be cast as though it had flash" grant (Radagast).
+    if let Some(defs) = parse_nth_spell_cost_and_flash(&stripped) {
         return defs;
     }
 
@@ -5339,7 +5388,10 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
                     add_property(
                         f,
                         FilterProp::CombatRelation {
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::BlockPairing {
+                                direction: BlockPairDirection::Either,
+                                scope: None,
+                            },
                             subject: CombatRelationSubject::Source,
                         },
                     )
