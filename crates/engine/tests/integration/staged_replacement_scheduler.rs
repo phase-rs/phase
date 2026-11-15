@@ -3038,3 +3038,53 @@ fn a_prevented_aura_that_armor_later_destroys_still_saves_restores_and_completes
     assert_eq!(zone(&runner, hyena_a), Zone::Graveyard);
     assert_eq!(zone(&runner, hyena_b), Zone::Graveyard);
 }
+
+/// CR 603.10a + CR 701.8a: Wrath of God's staged batch holds a logical
+/// zone-change slot for each creature, and settlement records each pending slot
+/// from the staged member carrying that incarnation. A save whose group names an
+/// incarnation no staged member carries would present a prompt that can never
+/// complete (the batch's completion requires every slot terminal), so checked
+/// restore refuses it. The unmodified save, whose slots all have members and
+/// which plays on to completion, is the control.
+#[test]
+fn checked_restore_rejects_a_pending_logical_slot_no_staged_member_can_settle() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plain = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let armored = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, hyena, armored);
+    attach(&mut runner, felidar, armored);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(asked_choice(&runner), (P1, armored));
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the staged save serializes");
+
+    let mut control = restore_wire(saved.clone()).expect("the unmodified save restores");
+    choose_source(&mut control, hyena);
+    finish(&mut control);
+    assert_eq!(zone(&control, plain), Zone::Graveyard);
+
+    let mut orphaned = saved;
+    let owner = staged_owner_json(&mut orphaned).expect("a staged owner is saved");
+    let slot = owner["logical_zone_change_group"]["prospective_battlefield_members"]
+        .as_array()
+        .expect("the group lists its members")
+        .iter()
+        .position(|candidate| candidate["identity"]["object_id"] == serde_json::json!(plain.0))
+        .expect("the group announced the plain Bear");
+    assert_eq!(
+        owner["logical_zone_change_group"]["terminal_outcomes"][slot]["type"], "pending",
+        "reach guard: the plain Bear's slot is pending in the saved batch"
+    );
+    owner["logical_zone_change_group"]["prospective_battlefield_members"][slot]["identity"]
+        ["incarnation"] = serde_json::json!(99);
+    let error = restore_wire(orphaned)
+        .err()
+        .expect("a pending slot no staged member carries is refused at import");
+    assert!(error.contains("no staged member to settle it"), "{error}");
+}

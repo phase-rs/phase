@@ -7411,6 +7411,28 @@ impl PendingBatchDeliveries {
                 ));
             }
         }
+        // CR 603.10a: settlement records each slot from the staged member that
+        // carries its incarnation (a member's own terminal, or `Preempted` for
+        // an abandoned one), and completion requires every slot terminal. A
+        // slot still `Pending` therefore needs such a member; a member with no
+        // battlefield slot (an off-battlefield origin) owes nothing the other
+        // way, and a slot another replacement already moved is `Moved`.
+        for (slot, outcome) in group.terminal_outcomes.iter().enumerate() {
+            if !matches!(outcome, LogicalZoneChangeTerminalOutcome::Pending) {
+                continue;
+            }
+            let identity = group.prospective_battlefield_members[slot].identity;
+            if !staged
+                .members
+                .iter()
+                .any(|member| member.identity == identity)
+            {
+                return Err(format!(
+                    "a pending logical zone-change slot for object {} has no staged member to settle it",
+                    identity.object_id.0
+                ));
+            }
+        }
         Ok(())
     }
 
