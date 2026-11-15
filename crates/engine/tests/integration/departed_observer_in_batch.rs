@@ -1406,10 +1406,11 @@ fn decimate_blood_artist_sees_a_later_slot_death_in_the_same_sentence() {
 fn settle_with_sacrifice_picks(
     runner: &mut GameRunner,
     spell: ObjectId,
+    targets: &[ObjectId],
     picks: &[(PlayerId, Vec<ObjectId>)],
 ) -> perf_counters::DepartureWindowCounters {
     perf_counters::reset();
-    let _ = runner.cast(spell).commit();
+    let _ = runner.cast(spell).target_objects(targets).commit();
     for _ in 0..128 {
         if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
             drain_order_triggers_with_identity(runner.state_mut());
@@ -1443,6 +1444,7 @@ fn settle_with_sacrifice_picks(
                     }),
                 }
             }
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 0 },
             WaitingFor::Priority { .. } => GameAction::PassPriority,
             other => panic!("driver stopped at an unexpected prompt: {other:?}"),
         };
@@ -1479,6 +1481,7 @@ fn barter_in_blood_choice_completion_is_one_instruction_for_kalitas_zombies() {
     let counters = settle_with_sacrifice_picks(
         &mut runner,
         barter,
+        &[],
         &[(P0, vec![fodder_a, fodder_b]), (P1, vec![bears, warden])],
     );
 
@@ -1518,5 +1521,57 @@ fn barter_in_blood_choice_completion_is_one_instruction_for_kalitas_zombies() {
         runner.life(P1),
         20,
         "Soul Warden left in the event that created the Zombies"
+    );
+}
+
+/// CR 608.2c + CR 603.10: Decimate's slots are one instruction even when a slot
+/// pauses for a replacement choice (CR 616.1). Rest in Peace and Kalitas both
+/// replace the Bears' death; P1 answers, Kalitas exiles it and a Zombie enters,
+/// and Carnival of Souls ("Whenever a creature enters, you lose 1 life and add
+/// {B}.") is destroyed by the same sentence, so it does not see the Zombie.
+/// Preservation row: a list slot that cannot prove its sibling after a pause
+/// fails closed (`InstructionWatch::Unwatched`) instead of opening a later
+/// instruction start. MEASURED: this board passes with and without that
+/// fallback (the resumed slots still find their siblings), so it guards the
+/// end result and does not isolate the fallback; the reviewer's derivation of a
+/// board that does was not reproduced.
+#[test]
+fn decimate_slot_after_a_replacement_choice_does_not_see_the_earlier_slots_zombie() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = main_phase();
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let carnival = scenario.add_real_card(P1, "Carnival of Souls", Zone::Battlefield, db);
+    let forest = scenario.add_real_card(P1, "Forest", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let decimate = scenario.add_real_card(P0, "Decimate", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, &[ManaType::Red, ManaType::Green], 2);
+
+    settle_with_sacrifice_picks(
+        &mut runner,
+        decimate,
+        &[sol_ring, bears, carnival, forest],
+        &[],
+    );
+
+    assert_eq!(
+        runner.state().objects[&carnival].zone,
+        Zone::Exile,
+        "reach: Rest in Peace exiled the destroyed enchantment"
+    );
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Exile);
+    assert_eq!(
+        tokens_named(&runner, P0, "Zombie").len(),
+        1,
+        "reach: Kalitas replaced the Bears' death (P1 chose it at the prompt)"
+    );
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Carnival of Souls left in the event that created the Zombie"
     );
 }

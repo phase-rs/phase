@@ -2068,6 +2068,18 @@ impl InstructionLead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenInstruction {
     pub start: usize,
+    pub watch: InstructionWatch,
+}
+
+/// CR 608.2c + CR 603.10: whether departures inside an open instruction carry
+/// an instruction lead, and so are watched by the departure window.
+/// `Unwatched` is the fail-closed answer for a `ListSlot` node that cannot
+/// prove which instruction it continues (a pause separated it from its
+/// sibling): its departures stay unstamped, which is upstream-main behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionWatch {
+    Watched,
+    Unwatched,
 }
 
 /// CR 608.2c: the effect node whose instruction scope closed last, so a

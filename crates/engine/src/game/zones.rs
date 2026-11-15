@@ -3,9 +3,9 @@ use crate::types::ability::{EffectKind, InstructionJoin, StaticDefinition};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ClosedInstruction, GameState, InstructionLead, LinkedExileLki, LinkedExileSnapshot,
-    OpenInstruction, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
-    ZoneChangeRecord,
+    ClosedInstruction, GameState, InstructionLead, InstructionWatch, LinkedExileLki,
+    LinkedExileSnapshot, OpenInstruction, ResolutionSourceRelatch, StackEntry, StackEntryKind,
+    ZoneChangeCombatStatus, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -2311,10 +2311,22 @@ pub(crate) fn within_instruction<R>(
     body: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> R,
 ) -> R {
     let depth = state.instruction_scopes.len();
-    let start = node
-        .and_then(|node| list_slot_start(state, depth, node, events.len()))
-        .unwrap_or(events.len());
-    state.instruction_scopes.push(OpenInstruction { start });
+    // CR 608.2c: a `ListSlot` that cannot find the slot just before it opens an
+    // `Unwatched` scope (fail closed) rather than a fresh instruction: a fresh
+    // start would be later than the list's, so its observer would see the
+    // earlier slots' events.
+    let (start, watch) = match node {
+        Some(node) if node.join == InstructionJoin::ListSlot => {
+            match list_slot_start(state, depth, node, events.len()) {
+                Some(start) => (start, InstructionWatch::Watched),
+                None => (events.len(), InstructionWatch::Unwatched),
+            }
+        }
+        _ => (events.len(), InstructionWatch::Watched),
+    };
+    state
+        .instruction_scopes
+        .push(OpenInstruction { start, watch });
     let result = body(state, events);
     state.instruction_scopes.truncate(depth);
     // A scope opened for anything but an effect node breaks the sibling run.
@@ -2345,9 +2357,11 @@ impl InstructionNode {
 
 /// CR 608.2c: where a `ListSlot` node's instruction began — the start of the
 /// sibling that closed immediately before it, at the same scope depth, for the
-/// same verb, in the same buffer at the same length. Anything else (an `Own`
-/// node, a pause between the slots, an intervening node) opens a new
-/// instruction, whose window is never narrower than the list's.
+/// same verb, in the same buffer at the same length. `None` for an `Own` node
+/// (it opens an instruction of its own) and for a `ListSlot` that cannot prove
+/// its sibling (a pause between the slots, an intervening node): that slot's
+/// scope is `Unwatched`, because a fresh start would be LATER than the list's
+/// and widen the window it is allowed to see.
 fn list_slot_start(
     state: &GameState,
     depth: usize,
@@ -2387,6 +2401,7 @@ fn open_instruction_lead(state: &GameState, events_len: usize) -> Option<Instruc
     state
         .instruction_scopes
         .last()
+        .filter(|scope| scope.watch == InstructionWatch::Watched)
         .and_then(|scope| events_len.checked_sub(scope.start))
         .map(InstructionLead)
 }
@@ -8207,7 +8222,10 @@ mod instruction_scope_tests {
     #[test]
     fn a_buffer_shorter_than_the_open_scope_yields_no_lead() {
         let mut state = GameState::new_two_player(42);
-        state.instruction_scopes.push(OpenInstruction { start: 5 });
+        state.instruction_scopes.push(OpenInstruction {
+            start: 5,
+            watch: InstructionWatch::Watched,
+        });
         assert_eq!(open_instruction_lead(&state, 0), None);
         let id = battlefield_creature(&mut state, "Probe");
         let mut local = Vec::new();
@@ -8220,13 +8238,22 @@ mod instruction_scope_tests {
     #[test]
     fn a_state_restore_inside_the_scope_restores_the_depth() {
         let mut state = GameState::new_two_player(42);
-        state.instruction_scopes.push(OpenInstruction { start: 0 });
+        state.instruction_scopes.push(OpenInstruction {
+            start: 0,
+            watch: InstructionWatch::Watched,
+        });
         let base = state.clone();
         let mut events = Vec::new();
         within_instruction(&mut state, &mut events, None, |state, _| {
             *state = base;
         });
-        assert_eq!(state.instruction_scopes, vec![OpenInstruction { start: 0 }]);
+        assert_eq!(
+            state.instruction_scopes,
+            vec![OpenInstruction {
+                start: 0,
+                watch: InstructionWatch::Watched
+            }]
+        );
     }
 
     /// The instruction start never underflows below the list's first index.
@@ -8298,9 +8325,10 @@ mod instruction_scope_tests {
 
     /// A `ListSlot` whose preceding sibling used another verb, ran at another
     /// depth, or closed at another buffer length (an intervening event, a
-    /// pause into a later action's buffer) falls back to a new instruction.
+    /// pause into a later action's buffer) fails closed: its scope is
+    /// `Unwatched`, so its departures carry no lead.
     #[test]
-    fn a_list_slot_without_its_direct_sibling_opens_a_new_instruction() {
+    fn a_list_slot_without_its_direct_sibling_fails_closed() {
         let mut state = GameState::new_two_player(42);
         let mut events = vec![GameEvent::PriorityPassed {
             player_id: PlayerId(0),
@@ -8339,8 +8367,8 @@ mod instruction_scope_tests {
         });
         assert_eq!(
             departure_record(&events, id).instruction_lead,
-            Some(InstructionLead(0)),
-            "the fallback is a fresh instruction"
+            None,
+            "the fallback fails closed: an unwatched scope stamps no lead"
         );
         // The direct sibling is reused.
         state.last_closed_instruction = Some(ClosedInstruction {
