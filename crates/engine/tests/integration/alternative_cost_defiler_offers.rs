@@ -544,51 +544,94 @@ struct Answers {
     sacrifice: Option<ObjectId>,
 }
 
+/// How a cast driven by [`drive_cast`] ended.
+#[derive(Debug)]
+enum CastOutcome {
+    /// The completion boundary: the spell is on the stack and P0 holds
+    /// priority (CR 601.2i). Carries the prompts answered on the way.
+    Completed(Vec<&'static str>),
+    /// The reducer refused an action, which changes nothing: `CastSpell` itself
+    /// (`prompt: None`) or the answer to `prompt`.
+    Refused {
+        prompt: Option<&'static str>,
+        error: String,
+        prompts: Vec<&'static str>,
+    },
+    /// The cast is still live at a prompt the answers don't cover.
+    Stopped {
+        waiting: String,
+        prompts: Vec<&'static str>,
+    },
+}
+
 /// Cast `spell`, accept the Defiler, and answer the rest from `answers`.
-/// Returns the prompts seen until the spell reached the stack (the completion
-/// boundary: P0 holds priority with the spell on the stack), or where the cast
-/// stopped.
+fn drive_cast(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> CastOutcome {
+    let card_id = runner.state().objects[&spell].card_id;
+    if let Err(e) = runner.act(GameAction::CastSpell {
+        object_id: spell,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }) {
+        return CastOutcome::Refused {
+            prompt: None,
+            error: format!("{e:?}"),
+            prompts: Vec::new(),
+        };
+    }
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        let stopped = |runner: &GameRunner, prompts: &Vec<&'static str>| CastOutcome::Stopped {
+            waiting: format!("{:?}", runner.state().waiting_for),
+            prompts: prompts.clone(),
+        };
+        let next = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().objects[&spell].zone == Zone::Stack => {
+                return CastOutcome::Completed(prompts);
+            }
+            WaitingFor::AlternativeCastChoice { .. } => match answers.alternative {
+                Some(choice) => GameAction::ChooseAlternativeCast { choice },
+                None => return stopped(runner, &prompts),
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::PayCost { .. } => match answers.sacrifice {
+                Some(id) => GameAction::SelectCards { cards: vec![id] },
+                None => return stopped(runner, &prompts),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            _ => return stopped(runner, &prompts),
+        };
+        let prompt = match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+            _ => runner.waiting_for_kind(),
+        };
+        if let Err(e) = runner.act(next) {
+            return CastOutcome::Refused {
+                prompt: Some(prompt),
+                error: format!("{e:?}"),
+                prompts,
+            };
+        }
+        prompts.push(prompt);
+    }
+    let waiting = format!("{:?}", runner.state().waiting_for);
+    CastOutcome::Stopped { waiting, prompts }
+}
+
+/// [`drive_cast`] for a cast expected to complete: the prompts answered, or
+/// how it ended otherwise.
 fn cast_with_defiler(
     runner: &mut GameRunner,
     spell: ObjectId,
     answers: &Answers,
 ) -> Result<Vec<&'static str>, String> {
-    let card_id = runner.state().objects[&spell].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .map_err(|e| format!("CastSpell rejected: {e:?}"))?;
-    let mut prompts = Vec::new();
-    for _ in 0..8 {
-        let next = match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().objects[&spell].zone == Zone::Stack => {
-                return Ok(prompts);
-            }
-            WaitingFor::AlternativeCastChoice { .. } => match answers.alternative {
-                Some(choice) => GameAction::ChooseAlternativeCast { choice },
-                None => return Err(format!("unexpected choice after {prompts:?}")),
-            },
-            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
-            WaitingFor::PayCost { .. } => match answers.sacrifice {
-                Some(id) => GameAction::SelectCards { cards: vec![id] },
-                None => return Err(format!("unexpected PayCost after {prompts:?}")),
-            },
-            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
-            other => return Err(format!("cast stopped at {other:?} after {prompts:?}")),
-        };
-        prompts.push(match &runner.state().waiting_for {
-            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
-            _ => runner.waiting_for_kind(),
-        });
-        runner
-            .act(next.clone())
-            .map_err(|e| format!("{next:?} rejected after {prompts:?}: {e:?}"))?;
+    match drive_cast(runner, spell, answers) {
+        CastOutcome::Completed(prompts) => Ok(prompts),
+        CastOutcome::Stopped { waiting, prompts } => {
+            Err(format!("stopped at {waiting} after {prompts:?}"))
+        }
+        refused => Err(format!("{refused:?}")),
     }
-    Err(format!("cast did not complete: {prompts:?}"))
 }
 
 fn offered(runner: &GameRunner, spell: ObjectId) -> bool {
@@ -597,8 +640,11 @@ fn offered(runner: &GameRunner, spell: ObjectId) -> bool {
         .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell))
 }
 
-/// The cast is not a legal action, and the handler can't complete it: it is
-/// refused at once or once the Defiler is accepted, with nothing paid.
+/// CR 601.2h: the cast is not a legal action, and the reducer refuses it:
+/// `CastSpell` itself, or, once the matching Defiler is offered, both of its
+/// answers (no total either way can be paid). Each refused action changes
+/// nothing: the spell stays in hand and no life or mana is paid. A cast left
+/// waiting at any other prompt fails.
 fn assert_refused(runner: &mut GameRunner, spell: ObjectId) {
     assert!(
         !offered(runner, spell),
@@ -606,8 +652,30 @@ fn assert_refused(runner: &mut GameRunner, spell: ObjectId) {
     );
     let life = runner.state().players[0].life;
     let pool = runner.state().players[0].mana_pool.total();
-    let result = cast_with_defiler(runner, spell, &Answers::default());
-    assert!(result.is_err(), "the cast must not complete: {result:?}");
+    match drive_cast(runner, spell, &Answers::default()) {
+        CastOutcome::Refused { prompt: None, .. } => assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "a refused cast leaves P0 with priority, got {:?}",
+            runner.state().waiting_for
+        ),
+        CastOutcome::Refused {
+            prompt: Some("DefilerPayment"),
+            error,
+            prompts,
+        } => {
+            assert!(prompts.is_empty(), "{prompts:?}");
+            assert!(
+                error.contains("Cannot pay mana cost"),
+                "accepting is refused as unpayable: {error}"
+            );
+            assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
+            let declined = runner.act(GameAction::DecideOptionalCost { pay: false });
+            assert!(declined.is_err(), "declining is refused too: {declined:?}");
+            assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
+        }
+        other => panic!("the reducer must refuse the cast, got {other:?}"),
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
     assert_eq!(runner.state().players[0].life, life, "no life paid");
     assert_eq!(
         runner.state().players[0].mana_pool.total(),
@@ -1220,4 +1288,279 @@ fn converted_spell_is_not_offered_when_neither_cost_is_payable() {
         pool
     });
     assert_refused(&mut runner, optimus);
+}
+
+// ---------------------------------------------------------------------------
+// Fixed payments are reserved before life is budgeted for mana (CR 119.4 +
+// CR 601.2h): a Defiler's 2 life can't also pay a {B} through K'rrik.
+// ---------------------------------------------------------------------------
+
+const KRRIK_LIFE_FOR_BLACK: &str =
+    "For each {B} in a cost, you may pay 2 life rather than pay that mana.";
+
+/// K'rrik, Son of Yawgmoth's "For each {B} in a cost, you may pay 2 life rather
+/// than pay that mana." on P0's battlefield.
+fn add_krrik(scenario: &mut GameScenario) {
+    let parsed = parse_oracle_text(
+        KRRIK_LIFE_FOR_BLACK,
+        "K'rrik, Son of Yawgmoth",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|s| format!("{s:?}").contains("PayLifeAsColoredMana")),
+        "reach: K'rrik's grant parses, got {:?}",
+        parsed.statics
+    );
+    let mut krrik = scenario.add_creature(P0, "K'rrik, Son of Yawgmoth", 2, 2);
+    krrik.with_color(vec![ManaColor::Black]);
+    for s in parsed.statics {
+        krrik.with_static_definition(s);
+    }
+}
+
+/// Earwig Squad ({3}{B}{B}, prowl {2}{B}) in hand with Defiler of Flesh and
+/// K'rrik, three colourless mana and P0 at `life`. With `prowl`, Changeling
+/// Outcast ("can't be blocked"; every creature type) first deals combat damage
+/// to P1, enabling prowl (CR 702.76a), and the cast is in the postcombat main.
+fn earwig_with_krrik(life: i32, prowl: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, life);
+    add_defiler_of_flesh(&mut scenario);
+    add_krrik(&mut scenario);
+    let outcast = scenario
+        .add_creature(P0, "Changeling Outcast", 1, 1)
+        .from_oracle_text_with_keywords(
+            &["Changeling"],
+            "Changeling\nThis creature can't block and can't be blocked.",
+        )
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let squad = scenario
+        .add_creature_to_hand_from_oracle(P0, "Earwig Squad", 5, 3, EARWIG_SQUAD)
+        .with_subtypes(vec!["Goblin", "Rogue"])
+        .with_mana_cost(cost(3, &[ManaCostShard::Black, ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let mut runner = scenario.build();
+    if prowl {
+        // CR 702.73a: Changeling is every creature type; the scenario's type
+        // list stands in for the card database's.
+        runner.state_mut().all_creature_types = vec!["Goblin".into(), "Rogue".into()];
+        runner.state_mut().layers_dirty.mark_full();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(
+                outcast,
+                engine::game::combat::AttackTarget::Player(engine::game::scenario::P1),
+            )])
+            .expect("the Outcast attacks");
+        while runner.state().phase != Phase::PostCombatMain {
+            let next = match runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                _ => GameAction::PassPriority,
+            };
+            runner.act(next).expect("combat proceeds");
+        }
+        assert_eq!(
+            runner.state().players[1].life,
+            19,
+            "reach: combat damage dealt"
+        );
+    }
+    add_colorless_mana(&mut runner, 3);
+    (runner, squad)
+}
+
+/// Cast `spell` with automatic payment and return the first prompt.
+fn start_cast(runner: &mut GameRunner, spell: ObjectId) -> &'static str {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the cast is legal");
+    match runner.state().waiting_for {
+        WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+        _ => runner.waiting_for_kind(),
+    }
+}
+
+/// The completion boundary for a cast that leaves P0 at 0 life: the spell was
+/// cast (CR 601.2i) before state-based actions removed P0 from the game.
+fn assert_spell_cast(events: &[engine::types::events::GameEvent], spell: ObjectId) {
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            engine::types::events::GameEvent::SpellCast { object_id, .. } if *object_id == spell
+        )),
+        "the spell is cast, got {events:?}"
+    );
+}
+
+/// CR 119.4 + CR 601.2h: at 2 life the printed {3}{B}{B} needs 4 life (the
+/// Defiler's 2 and K'rrik's 2 for the remaining {B}, or 4 for both {B}), so
+/// only prowl {2}{B} is offered: the Defiler makes it {2}, taken for the 2
+/// life.
+#[test]
+fn printed_cost_needing_the_defilers_life_twice_is_not_offered() {
+    let (mut runner, squad) = earwig_with_krrik(2, true);
+    assert!(offered(&runner, squad), "the prowl cast is a legal action");
+
+    assert_eq!(
+        start_cast(&mut runner, squad),
+        "DefilerPayment",
+        "only prowl is offered, so there is no choice"
+    );
+    let paid = runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accept the Defiler");
+
+    assert_spell_cast(&paid.events, squad);
+    assert_eq!(runner.state().players[0].life, 0, "the Defiler's 2 life");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1, "{{2}} paid");
+}
+
+/// Control: at 4 life both methods are offered, and the printed cast with the
+/// Defiler pays {3}, 2 life for the Defiler and 2 for K'rrik's {B}.
+#[test]
+fn printed_cost_payable_with_the_defiler_and_krrik_keeps_the_prowl_choice() {
+    let (mut runner, squad) = earwig_with_krrik(4, true);
+
+    assert_eq!(
+        start_cast(&mut runner, squad),
+        "AlternativeCastChoice",
+        "both methods are payable, so the player chooses"
+    );
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Normal,
+        })
+        .expect("choose the printed cost");
+    assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accept the Defiler");
+    // CR 107.4f + CR 601.2g: K'rrik lets the remaining {B} be paid with 2 life.
+    let WaitingFor::PhyrexianPayment { shards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the {{B}} is offered as life, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(shards.len(), 1);
+    let paid = runner
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![engine::types::game_state::ShardChoice::PayLife],
+        })
+        .expect("pay the {B} with 2 life");
+
+    assert_spell_cast(&paid.events, squad);
+    assert_eq!(runner.state().players[0].life, 0, "2 + 2 life paid");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{3}} paid");
+}
+
+/// CR 119.4 + CR 601.2h: without prowl, the printed cast at 2 life can't be
+/// paid either way, so it isn't a legal action.
+#[test]
+fn printed_cost_needing_the_defilers_life_twice_is_not_castable() {
+    let (runner, squad) = earwig_with_krrik(2, false);
+    assert!(!offered(&runner, squad), "the printed cast is not legal");
+}
+
+const OMNATH: &str = "If you would lose unspent mana, that mana becomes black instead.";
+
+/// CR 107.4f + CR 119.4: Omnath, Locus of All ({W}{U}{B/P}{R}{G}) with Defiler
+/// of Dreams and {W}{R}{G}: the Defiler pays the {U} with 2 life and the {B/P}
+/// takes 2 more, 4 in all. Refused at 3 life; at 5 it is cast, ending at 1.
+#[test]
+fn native_phyrexian_shard_and_defiler_life_are_paid_together() {
+    for life in [3, 5] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain).with_life(P0, life);
+        add_defiler_of_dreams(&mut scenario);
+        let omnath = scenario
+            .add_creature_to_hand_from_oracle(P0, "Omnath, Locus of All", 4, 4, OMNATH)
+            .with_mana_cost(cost(
+                0,
+                &[
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                    ManaCostShard::PhyrexianBlack,
+                    ManaCostShard::Red,
+                    ManaCostShard::Green,
+                ],
+            ))
+            .with_color(ManaColor::ALL.to_vec())
+            .id();
+        let mut pool = pool_of(ManaType::White, 1);
+        pool.extend(pool_of(ManaType::Red, 1));
+        pool.extend(pool_of(ManaType::Green, 1));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        if life == 3 {
+            assert_refused(&mut runner, omnath);
+            continue;
+        }
+        assert_eq!(start_cast(&mut runner, omnath), "DefilerPayment");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("accept the Defiler");
+        let paid = runner
+            .act(GameAction::SubmitPhyrexianChoices {
+                choices: vec![engine::types::game_state::ShardChoice::PayLife],
+            })
+            .expect("pay the {B/P} with 2 life");
+        assert_spell_cast(&paid.events, omnath);
+        assert_eq!(runner.state().players[0].life, 1);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    }
+}
+
+const SOLITUDE: &str = "Flash\nLifelink\nWhen this creature enters, exile up to one other target creature. That creature's controller gains life equal to its power.\nEvoke\u{2014}Exile a white card from your hand.";
+
+/// CR 601.2f + CR 702.74a: Solitude's evoke has no mana part; Trinisphere
+/// makes it {3}, which three mana pay with a white card exiled.
+#[test]
+fn non_mana_evoke_pays_the_floor() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_trinisphere(&mut scenario);
+    let solitude = scenario
+        .add_creature_to_hand_from_oracle(P0, "Solitude", 3, 2, SOLITUDE)
+        .with_mana_cost(cost(3, &[ManaCostShard::White, ManaCostShard::White]))
+        .with_color(vec![ManaColor::White])
+        .id();
+    let pitched = scenario
+        .add_creature_to_hand(P0, "White Card", 1, 1)
+        .with_color(vec![ManaColor::White])
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Colorless, 3));
+    let mut runner = scenario.build();
+    assert!(
+        offered(&runner, solitude),
+        "the evoke cast is a legal action"
+    );
+
+    let result = cast_with_defiler(
+        &mut runner,
+        solitude,
+        &Answers {
+            alternative: Some(AlternativeCastDecision::Alternative),
+            sacrifice: Some(pitched),
+        },
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(runner.state().objects[&pitched].zone, Zone::Exile);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{3}} paid");
 }

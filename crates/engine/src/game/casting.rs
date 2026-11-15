@@ -12834,34 +12834,162 @@ fn apply_cost_modifiers_to_base_with(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DefilerCredit {
     /// The Defiler decision is still ahead: also price the total with its
-    /// reduction, when its life is payable alongside the `committed_life` the
-    /// cast's other costs already pay.
-    Offerable { committed_life: u32 },
+    /// reduction, when its life is payable alongside the life the cast's other
+    /// unpaid costs reserve (`CastPricing::reserved`).
+    Offerable,
     /// The decision is made: price only the reductions the cast carries.
     Settled,
+}
+
+/// CR 118.3 + CR 601.2g-h: how another unpaid leg of the cast uses a reserved
+/// object alongside the mana payment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReservedUse {
+    /// A tap leg: a tapped permanent can't be tapped again to pay a cost
+    /// (CR 118.3), so the object can't be tapped for mana or consumed.
+    Untapped,
+    /// A sacrifice, exile or return leg: mana abilities are activated before
+    /// costs are paid (CR 601.2g), so the object may be tapped for mana first,
+    /// but not consumed.
+    Present,
+}
+
+/// CR 118.3 + CR 119.4 + CR 601.2h: what a cast's other unpaid costs pay
+/// alongside its mana. Partial payments aren't allowed, so the mana is judged
+/// with these resources already spoken for: the life is the payer's less this,
+/// and each reserved object is held for its leg.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PaymentReservation<'a> {
+    pub(super) life: u32,
+    pub(super) objects: &'a [(ObjectId, ReservedUse)],
+}
+
+impl PaymentReservation<'_> {
+    pub(super) const NONE: PaymentReservation<'static> = PaymentReservation {
+        life: 0,
+        objects: &[],
+    };
+
+    pub(super) fn life(life: u32) -> PaymentReservation<'static> {
+        PaymentReservation { life, objects: &[] }
+    }
+}
+
+/// CR 118.3 + CR 119.4 + CR 601.2h: the settled scratch state a reserved
+/// payment's mana is probed on: the payer's life less the reserved life (the
+/// Phyrexian budget reads only free life), and each reserved object barred from
+/// being sacrificed as a cost (a Yasharn-class prohibition, read by every
+/// sacrifice gate) and, for a tap leg, tapped. `None` when nothing is reserved.
+/// The scratch never reaches a real payment.
+pub(super) fn reserved_payment_state(
+    state: &GameState,
+    player: PlayerId,
+    reserved: &PaymentReservation<'_>,
+) -> Option<GameState> {
+    if reserved.life == 0 && reserved.objects.is_empty() {
+        return None;
+    }
+    let mut scratch = state.clone();
+    if let Some(payer) = scratch.players.iter_mut().find(|p| p.id == player) {
+        payer.life -= i32::try_from(reserved.life).unwrap_or(i32::MAX);
+    }
+    for &(id, reserved_use) in reserved.objects {
+        let Some(obj) = scratch.objects.get_mut(&id) else {
+            continue;
+        };
+        let bar = StaticDefinition::new(StaticMode::CantPayCost {
+            who: crate::types::statics::ProhibitionScope::AllPlayers,
+            cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
+                filter: TargetFilter::SelfRef,
+            },
+        });
+        obj.static_definitions.push(bar.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(bar);
+        if reserved_use == ReservedUse::Untapped {
+            obj.tapped = true;
+        }
+    }
+    if !reserved.objects.is_empty() {
+        scratch.layers_dirty.mark_full();
+    }
+    super::layers::flush_layers(&mut scratch);
+    Some(scratch)
+}
+
+/// CR 601.2g-h: whether the Auto payer can pay `cost` with `reserved` spoken for.
+pub(super) fn reserved_mana_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    reserved: &PaymentReservation<'_>,
+) -> bool {
+    let scratch = reserved_payment_state(state, player, reserved);
+    can_pay_cost_after_auto_tap(scratch.as_ref().unwrap_or(state), player, object_id, cost)
+}
+
+/// CR 601.2g-h: one assignment of the reservation search: whether `cost` can be
+/// paid by the castability authority (Auto, else the manual route) with
+/// `reserved` held. With objects held, a paused Auto preview isn't counted.
+///
+/// Found, not fixed (fenced): an ability-removal effect can remove a held
+/// object's injected prohibition while a later-timestamped grant leaves it a
+/// self-sacrifice mana ability (Humility, then Rain of Filth). The scratch then
+/// can't hold that object apart, so the assignment isn't counted.
+pub(super) fn reserved_assignment_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    reserved: &PaymentReservation<'_>,
+) -> bool {
+    let scratch = reserved_payment_state(state, player, reserved);
+    let probe_state = scratch.as_ref().unwrap_or(state);
+    let unheld = reserved.objects.iter().any(|&(id, _)| {
+        !super::static_abilities::player_cant_sacrifice_as_cost(probe_state, player, id)
+            && super::mana_sources::object_has_activatable_self_sacrifice_mana(
+                probe_state,
+                player,
+                id,
+            )
+    });
+    !unheld
+        && can_feasibly_pay_mana_cost_with_options(
+            probe_state,
+            player,
+            Some(object_id),
+            cost,
+            if reserved.objects.is_empty() {
+                PausedManaPayment::Resumable
+            } else {
+                PausedManaPayment::Unresumable
+            },
+        )
 }
 
 /// CR 601.2f + CR 118.9d: how a mana base is priced. `variant` and
 /// `permission` select variant-conditional modifiers and the permission's own
 /// rider; `accepted` holds reductions the board can't show (an accepted
 /// Defiler payment, an Emerge sacrifice); `defiler` says whether an undecided
-/// Defiler counts.
+/// Defiler counts; `reserved` is what the cast's other unpaid costs pay.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CastPricing<'a> {
     pub(super) variant: Option<CastingVariant>,
     pub(super) permission: Option<CastingPermissionIndex>,
     pub(super) accepted: &'a [CostReductionEntry],
     pub(super) defiler: DefilerCredit,
+    pub(super) reserved: PaymentReservation<'a>,
 }
 
 impl CastPricing<'static> {
     /// An offer projection: no committed casting method, no accepted
-    /// reductions, and an undecided Defiler judged on its own life.
+    /// reductions, nothing else reserved, and an undecided Defiler.
     pub(super) const OFFER: Self = Self {
         variant: None,
         permission: None,
         accepted: &[],
-        defiler: DefilerCredit::Offerable { committed_life: 0 },
+        defiler: DefilerCredit::Offerable,
+        reserved: PaymentReservation::NONE,
     };
 }
 
@@ -12879,12 +13007,33 @@ pub(super) enum CastBase<'a> {
 #[derive(Clone, Debug)]
 pub(super) struct CastTotals {
     pub(super) plain: ManaCost,
-    pub(super) with_defiler: Option<ManaCost>,
+    pub(super) with_defiler: Option<DefilerTotal>,
+}
+
+/// A total priced with an undecided Defiler's reduction, and the life that
+/// Defiler payment costs (paid before the mana, so reserved for its probe).
+#[derive(Clone, Debug)]
+pub(super) struct DefilerTotal {
+    pub(super) cost: ManaCost,
+    pub(super) life: u32,
 }
 
 impl CastTotals {
-    pub(super) fn iter(&self) -> impl Iterator<Item = &ManaCost> {
-        std::iter::once(&self.plain).chain(self.with_defiler.as_ref())
+    /// Each priced total with the life reserved beside `reserved`: the plain
+    /// total's own, and the Defiler total's plus the Defiler's life.
+    pub(super) fn with_reservations<'r>(
+        &self,
+        reserved: PaymentReservation<'r>,
+    ) -> impl Iterator<Item = (&ManaCost, PaymentReservation<'r>)> {
+        std::iter::once((&self.plain, reserved)).chain(self.with_defiler.as_ref().map(|total| {
+            (
+                &total.cost,
+                PaymentReservation {
+                    life: reserved.life + total.life,
+                    ..reserved
+                },
+            )
+        }))
     }
 }
 
@@ -12930,7 +13079,7 @@ pub(super) fn cast_mana_totals(
         }
     };
     let with_defiler = match pricing.defiler {
-        DefilerCredit::Offerable { committed_life } => {
+        DefilerCredit::Offerable => {
             // CR 601.2b: the optional cost is announced once per cast.
             let already_accepted = pricing
                 .accepted
@@ -12942,14 +13091,17 @@ pub(super) fn cast_mana_totals(
                         state,
                         player,
                         object_id,
-                        committed_life,
+                        pricing.reserved.life,
                     )
                 })
                 .flatten()
-                .map(|entry| {
+                .map(|(entry, life)| {
                     let mut extra = pricing.accepted.to_vec();
                     extra.push(entry);
-                    price(extra)
+                    DefilerTotal {
+                        cost: price(extra),
+                        life,
+                    }
                 })
         }
         DefilerCredit::Settled => None,
@@ -12960,8 +13112,10 @@ pub(super) fn cast_mana_totals(
     }
 }
 
-/// CR 601.2f + CR 601.2h: whether some total [`cast_mana_totals`] prices for a
-/// printed or alternative `base` can be paid now.
+/// CR 601.2f + CR 601.2h + CR 119.4: whether some total [`cast_mana_totals`]
+/// prices for a printed or alternative `base` can be paid now, by the Auto
+/// payer, with the cast's other unpaid costs (`pricing.reserved`) and, for the
+/// Defiler total, the Defiler's life spoken for.
 pub(super) fn cast_mana_affordable(
     state: &GameState,
     player: PlayerId,
@@ -12970,8 +13124,8 @@ pub(super) fn cast_mana_affordable(
     pricing: &CastPricing<'_>,
 ) -> bool {
     cast_mana_totals(state, player, object_id, CastBase::Printed(base), pricing)
-        .iter()
-        .any(|total| can_pay_cost_after_auto_tap(state, player, object_id, total))
+        .with_reservations(pricing.reserved)
+        .any(|(total, reserved)| reserved_mana_payable(state, player, object_id, total, &reserved))
 }
 
 /// CR 601.2f + CR 601.2g: Re-derive a pending cast's total mana cost after an
@@ -22180,12 +22334,16 @@ fn can_cast_prepared_now_with_probe(
     )
     .with_defiler
     .is_some_and(|reduced| {
+        // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
+        // a life-for-mana budget can't count it again.
+        let scratch =
+            reserved_payment_state(state, player, &PaymentReservation::life(reduced.life));
         can_feasibly_pay_harmonize_mana_cost_with_probe(
-            state,
+            scratch.as_ref().unwrap_or(state),
             player,
             prepared.object_id,
             prepared.casting_variant,
-            &reduced,
+            &reduced.cost,
             probe,
         )
     });
@@ -22334,7 +22492,9 @@ fn target_dependent_reduction_makes_payable(
             pending.base_cost = Some(prepared.base_mana_cost.clone());
             pending.casting_variant = prepared.casting_variant;
             if accept_defiler {
-                pending.accepted_cost_reductions.extend(defiler.clone());
+                pending
+                    .accepted_cost_reductions
+                    .extend(defiler.as_ref().map(|(entry, _)| entry.clone()));
             }
             let ctx = CostFinalizeContext::from_pending(&pending);
             let modifiers = CollectedCostModifiers::collect_for(
@@ -22367,9 +22527,9 @@ fn target_dependent_reduction_makes_payable(
             );
             recompute_pending_mana_total_using(flushed, player, &pending, Some(0), ctx, &collected)
         };
-        let payable = |cost: &ManaCost| {
+        let payable_on = |state: &GameState, cost: &ManaCost| {
             can_feasibly_pay_harmonize_mana_cost_with_probe(
-                flushed,
+                state,
                 player,
                 prepared.object_id,
                 prepared.casting_variant,
@@ -22377,6 +22537,14 @@ fn target_dependent_reduction_makes_payable(
                 None,
             )
         };
+        let payable = |cost: &ManaCost| payable_on(flushed, cost);
+        // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
+        // the Defiler totals are probed with it spoken for.
+        let defiler_scratch = defiler.as_ref().and_then(|(_, life)| {
+            reserved_payment_state(flushed, player, &PaymentReservation::life(*life))
+        });
+        let defiler_payable =
+            |cost: &ManaCost| payable_on(defiler_scratch.as_ref().unwrap_or(flushed), cost);
         // CR 601.2f + CR 601.2h: the best case any assignment can reach takes
         // every target-gated reduction and no target-gated raise or floor (a
         // reduction never raises a total, a raise or floor never lowers one).
@@ -22396,7 +22564,7 @@ fn target_dependent_reduction_makes_payable(
         if !payable(&price(&plain_cast, &resolved, &best_case))
             && !defiler_cast
                 .as_ref()
-                .is_some_and(|cast| payable(&price(cast, &resolved, &best_case)))
+                .is_some_and(|cast| defiler_payable(&price(cast, &resolved, &best_case)))
         {
             return false;
         }
@@ -22458,7 +22626,7 @@ fn target_dependent_reduction_makes_payable(
             {
                 continue;
             }
-            if payable(&priced) || with_defiler.as_ref().is_some_and(&payable) {
+            if payable(&priced) || with_defiler.as_ref().is_some_and(&defiler_payable) {
                 return true;
             }
             checked.push((priced, with_defiler));
@@ -23460,6 +23628,25 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
     cost: &crate::types::mana::ManaCost,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
+    auto_tap_probe(
+        state,
+        player,
+        source_id,
+        cost,
+        probe,
+        // Casts suspend through `pending_cast`; the live payment resumes.
+        PausedManaPayment::Resumable,
+    )
+}
+
+fn auto_tap_probe(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    probe: Option<&PriorityCastProbe>,
+    paused: PausedManaPayment,
+) -> bool {
     crate::game::perf_counters::record_auto_payment_borrowed_wrapper();
     let mut simulated = state.clone();
     let probe_matches =
@@ -23482,8 +23669,7 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
         AutoTapProbeOptions {
             source_cache,
             explicit_tap_payment_mode: None,
-            // Casts suspend through `pending_cast`; the live payment resumes.
-            paused: PausedManaPayment::Resumable,
+            paused,
             phyrexian_life_budget: ProbeLifeBudget::AfterAutoTap,
         },
     )
@@ -24163,11 +24349,48 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
     cost: &crate::types::mana::ManaCost,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
+    feasibly_payable_without_x(
+        state,
+        player,
+        source_id,
+        cost,
+        probe,
+        PausedManaPayment::Resumable,
+    )
+}
+
+/// CR 601.2f + CR 601.2g-h: [`can_feasibly_pay_mana_cost`] with the paused-Auto
+/// capability explicit: `Unresumable` doesn't count a paused Auto preview as a
+/// payment.
+pub(super) fn can_feasibly_pay_mana_cost_with_options(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+    paused: PausedManaPayment,
+) -> bool {
+    // CR 107.1b: X = 0 is the cheapest concrete probe, as in the default entry.
+    if source_id.is_some() && super::casting_costs::cost_has_x(cost) {
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        return feasibly_payable_without_x(state, player, source_id, &concrete, None, paused);
+    }
+    feasibly_payable_without_x(state, player, source_id, cost, None, paused)
+}
+
+fn feasibly_payable_without_x(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+    probe: Option<&PriorityCastProbe>,
+    paused: PausedManaPayment,
+) -> bool {
     // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
     // paid with only `{T}` activations was castable before this predicate
     // existed and must continue to be castable now.
     if let Some(sid) = source_id {
-        if can_pay_cost_after_auto_tap_with_probe(state, player, sid, cost, probe) {
+        if auto_tap_probe(state, player, sid, cost, probe, paused) {
             return true;
         }
     }
@@ -27897,7 +28120,7 @@ fn alternative_cost_offer_payable(
                     object_id,
                     base,
                     &CastPricing {
-                        defiler: DefilerCredit::Offerable { committed_life },
+                        reserved: PaymentReservation::life(committed_life),
                         ..CastPricing::OFFER
                     },
                 )

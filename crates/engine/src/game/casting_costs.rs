@@ -510,6 +510,20 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     pending: &PendingCast,
     cost: AbilityCost,
 ) -> Result<bool, EngineError> {
+    declaration_offerable_reserving(state, player, pending, cost, 0)
+}
+
+/// [`additional_cost_declaration_is_offerable`] with `reserved_life` more life
+/// the cast's other unpaid costs pay beside the declaration (CR 119.4 +
+/// CR 601.2h): the mana is probed with it, and the declared residual's own
+/// life, spoken for.
+fn declaration_offerable_reserving(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: AbilityCost,
+    reserved_life: u32,
+) -> Result<bool, EngineError> {
     // CR 601.2h: "Unpayable costs can't be paid." A cost the parser could not
     // read has no payment procedure at all, so it can never be declared — a
     // required one makes the cast illegal (CR 601.2 + CR 733.1), and an optional
@@ -567,6 +581,14 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     if total.is_without_paying_mana() {
         return Ok(true);
     }
+    let reserved = super::casting::PaymentReservation::life(
+        reserved_life
+            + split.residual.as_ref().map_or(0, |residual| {
+                cost_life_payment(state, player, pending.object_id, residual)
+            }),
+    );
+    let scratch = super::casting::reserved_payment_state(state, player, &reserved);
+    let state = scratch.as_ref().unwrap_or(state);
     let can_pay_normally =
         super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
     if can_pay_normally {
@@ -697,19 +719,49 @@ fn raise_offered_alternative_cost_choice(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let offered = select_offered_alternative_cost(
+    let Some(alt_cost) = next_offered_alternative_cost(state, player, &pending, None) else {
+        pending.alternative_cost_election =
+            crate::types::game_state::SpellAlternativeCostElection::Declined;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    };
+    raise_alternative_cost_choice(state, player, pending, alt_cost)
+}
+
+/// CR 118.9a + CR 601.4: the alternative offered after `declined` (the first
+/// when `None`) among those the cast can still pay, under settled terms. An
+/// election is keyed by its cost and the grant slot it spends, the only facts
+/// an accepted Choice carries; the candidate list holds no two equal keys, so
+/// each decline strictly advances.
+fn next_offered_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    declined: Option<(&AbilityCost, Option<ObjectId>)>,
+) -> Option<PayableSpellAlternativeCost> {
+    let mut offered = offered_alternative_costs(
         state,
         player,
         pending.object_id,
         pending.cast_timing_permission,
         pending.casting_permission_index,
         AltCostTerms::settled(&pending.accepted_cost_reductions),
-    );
-    let Some(alt_cost) = offered else {
-        pending.alternative_cost_election =
-            crate::types::game_state::SpellAlternativeCostElection::Declined;
-        return finish_pending_cost_or_cast(state, player, pending, events);
-    };
+    )
+    .into_iter();
+    match declined {
+        None => offered.next(),
+        Some((cost, source)) => offered
+            .by_ref()
+            .find(|alt| alt.cost == *cost && alt.once_per_turn_source == source)
+            .and_then(|_| offered.next()),
+    }
+}
+
+fn raise_alternative_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    alt_cost: PayableSpellAlternativeCost,
+) -> Result<WaitingFor, EngineError> {
     pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
     // CR 601.2f: the declined branch's printed total includes the reductions
     // the cast carries (an accepted Defiler's).
@@ -822,6 +874,18 @@ pub(crate) fn handle_decide_additional_cost(
     // queued or in flow is answered here, not by their handlers.
     let answers_alternative_cost = pending.alternative_cost_election
         == crate::types::game_state::SpellAlternativeCostElection::Offered;
+    // CR 118.9a + CR 601.4: declining an offered alternative offers the next
+    // one the cast can still pay, before the printed cost.
+    if let (true, false, AdditionalCost::Choice(declined, _)) =
+        (answers_alternative_cost, pay, additional_cost)
+    {
+        let declined_key = (declined, pending.alt_cost_grant_source);
+        if let Some(next) =
+            next_offered_alternative_cost(state, player, &pending, Some(declined_key))
+        {
+            return raise_alternative_cost_choice(state, player, pending, next);
+        }
+    }
     if !answers_alternative_cost
         && pending
             .additional_cost_queue
@@ -1194,7 +1258,7 @@ pub(super) struct AltCostTerms<'a> {
 
 impl AltCostTerms<'static> {
     pub(super) const ANNOUNCED: Self = Self {
-        defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+        defiler: super::casting::DefilerCredit::Offerable,
         accepted: &[],
     };
 }
@@ -1204,7 +1268,7 @@ impl<'a> AltCostTerms<'a> {
     /// be announced); `accepted` holds the reductions it already carries.
     pub(super) fn announced(accepted: &'a [CostReductionEntry]) -> Self {
         Self {
-            defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+            defiler: super::casting::DefilerCredit::Offerable,
             accepted,
         }
     }
@@ -1230,14 +1294,38 @@ fn select_offered_alternative_cost(
     casting_permission_index: Option<CastingPermissionIndex>,
     terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
+    offered_alternative_costs(
+        state,
+        player,
+        object_id,
+        cast_timing_permission,
+        casting_permission_index,
+        terms,
+    )
+    .into_iter()
+    .next()
+}
+
+/// The alternatives [`select_offered_alternative_cost`] chooses from, in offer
+/// order: the timing grant alone when it opens the cast, else the payable
+/// alternatives under the elected permission.
+fn offered_alternative_costs(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cast_timing_permission: Option<CastTimingPermission>,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    terms: AltCostTerms<'_>,
+) -> Vec<PayableSpellAlternativeCost> {
     cast_timing_permission
         .and_then(|permission| {
             payable_spell_alternative_cost_for_timing_with(
                 state, player, object_id, permission, terms,
             )
         })
-        .or_else(|| {
-            payable_spell_alternative_cost_details_at_index_with(
+        .map(|timing| vec![timing])
+        .unwrap_or_else(|| {
+            payable_spell_alternative_costs_at_index_with(
                 state,
                 player,
                 object_id,
@@ -1301,6 +1389,28 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
     casting_permission_index: Option<CastingPermissionIndex>,
     terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_costs_at_index_with(
+        state,
+        player,
+        object_id,
+        casting_permission_index,
+        terms,
+    )
+    .into_iter()
+    .next()
+}
+
+/// CR 118.9 + CR 118.9a: the payable alternative costs of a cast, in offer
+/// order: the spell's own printed option, then its own grant, then a
+/// permanent's grant. Alternatives whose election is the same (equal cost and
+/// grant slot) are listed once.
+fn payable_spell_alternative_costs_at_index_with(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    terms: AltCostTerms<'_>,
+) -> Vec<PayableSpellAlternativeCost> {
     let payable = |cost: &AbilityCost| {
         spell_alternative_cost_is_payable(
             state,
@@ -1311,7 +1421,9 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
             terms,
         )
     };
-    let obj = state.objects.get(&object_id)?;
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
@@ -1342,16 +1454,13 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
     // `player` still gets `player`'s alternative costs (Warped Space). Casting
     // from another player's hand is outside this offer's scope.
     if !own_card && origin_zone == Zone::Hand {
-        return None;
+        return Vec::new();
     }
     // CR 118.9a: only one alternative cost is applied to a spell and the
-    // controller chooses which. The pipeline currently exposes a single
-    // alternative-vs-printed choice, so when a spell carries BOTH a
-    // self-referential casting option and a permanent grant it cannot offer
-    // both — it deterministically prefers the spell's own printed option. This
-    // is not a CR-mandated precedence; honoring full controller choice across a
-    // self-option and one or more grants needs a multi-alternative choice
-    // surface and is a known limitation tracked for follow-up.
+    // controller chooses which. The pipeline offers them one Choice at a time
+    // in this order (`next_offered_alternative_cost`): declining one offers the
+    // next. Within a tier only the first payable option is listed, so a choice
+    // among several grants of one tier is a known limitation.
     let self_option_reaches_cast = (own_card && origin_zone == Zone::Hand) || impulse_exile_cast;
     let self_option = self_option_reaches_cast
         .then(|| obj.casting_options.iter())
@@ -1385,9 +1494,7 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
                 None
             }
         });
-    if self_option.is_some() {
-        return self_option;
-    }
+    let mut offered: Vec<PayableSpellAlternativeCost> = self_option.into_iter().collect();
 
     // CR 118.9 + CR 113.6e + CR 601.2f: a SELF-granted alternative cost -- a
     // `CastWithAlternativeCost` static the spell object carries on its OWN
@@ -1424,7 +1531,7 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
         })
         .find(|(cost, _)| payable(cost));
     if let Some((cost, timing_permission)) = granted_self {
-        return Some(PayableSpellAlternativeCost {
+        offered.push(PayableSpellAlternativeCost {
             cost,
             timing_permission,
             // CR 118.9: a self grant carries no per-turn grant slot to
@@ -1434,16 +1541,31 @@ pub(super) fn payable_spell_alternative_cost_details_at_index_with(
     }
 
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
-    // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
+    // Storm, Fist of Suns, Jodah), offered after the spell's own options.
     // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
     // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
     // origin only through an origin-scoped filter branch.
-    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    payable(&granted.cost).then_some(PayableSpellAlternativeCost {
-        cost: granted.cost,
-        timing_permission: granted.timing_permission,
-        once_per_turn_source: granted.once_per_turn_source,
-    })
+    offered.extend(
+        super::casting::granted_spell_alternative_cost(state, player, object_id)
+            .filter(|granted| payable(&granted.cost))
+            .map(|granted| PayableSpellAlternativeCost {
+                cost: granted.cost,
+                timing_permission: granted.timing_permission,
+                once_per_turn_source: granted.once_per_turn_source,
+            }),
+    );
+    // CR 118.9a: an accepted Choice carries only the cost and the grant slot it
+    // spends, so alternatives equal in both are one election (Bringer's own
+    // {W}{U}{B}{R}{G} and Fist of Suns').
+    let mut distinct: Vec<PayableSpellAlternativeCost> = Vec::with_capacity(offered.len());
+    for alt in offered {
+        if !distinct.iter().any(|kept| {
+            kept.cost == alt.cost && kept.once_per_turn_source == alt.once_per_turn_source
+        }) {
+            distinct.push(alt);
+        }
+    }
+    distinct
 }
 
 pub(crate) fn payable_spell_alternative_cost_for_timing(
@@ -1486,9 +1608,11 @@ pub(super) fn payable_spell_alternative_cost_for_timing_with(
 }
 
 /// CR 118.9 + CR 601.2f + CR 601.2h: whether an Oracle alternative cost can be
-/// paid. Its mana is priced by `cast_mana_totals` (the board's modifiers, the
-/// reductions `terms` carries and, while announceable, a matching Defiler's;
-/// floors last), as the payment's total will be.
+/// paid. The alternative replaces the mana cost, so its mana part ({0} when it
+/// has none) is the base its total is priced from by `cast_mana_totals` (the
+/// board's modifiers, the reductions `terms` carries and, while announceable,
+/// a matching Defiler's; floors last), and its other legs are paid with that
+/// total, their life and objects spoken for beside the mana.
 fn spell_alternative_cost_is_payable(
     state: &GameState,
     player: PlayerId,
@@ -1497,59 +1621,256 @@ fn spell_alternative_cost_is_payable(
     permission: Option<CastingPermissionIndex>,
     terms: AltCostTerms<'_>,
 ) -> bool {
-    match cost {
-        AbilityCost::Mana { cost } => super::casting::cast_mana_affordable(
+    let (mana, residual) = super::casting::split_alt_cost_components(cost);
+    let legs = match &residual {
+        Some(AbilityCost::Composite { costs }) => costs.as_slice(),
+        Some(leaf) => std::slice::from_ref(leaf),
+        None => &[],
+    };
+    // CR 118.3 + CR 119.4 + CR 601.2h: every leg must be payable, the object
+    // legs with distinct objects (spell costs prompt them without look-ahead),
+    // and their life together.
+    let committed_life = committed_life_of(state, player, object_id, legs.iter().map(Some));
+    if !legs
+        .iter()
+        .all(|leg| leg.is_payable_for_spell(state, player, object_id))
+        || !super::cost_payability::object_cost_legs_jointly_payable(
             state,
             player,
             object_id,
-            cost,
-            &super::casting::CastPricing {
-                variant: Some(CastingVariant::Normal),
-                permission,
-                accepted: terms.accepted,
-                defiler: terms.defiler,
-            },
-        ),
-        // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
-        // hand-discard legs must be payable together (one card cannot serve two).
-        // Spell costs prompt their object legs without look-ahead.
-        // CR 119.4: a Defiler is credited to the mana leg only when its life is
-        // payable alongside the life the other legs pay.
-        AbilityCost::Composite { costs } => {
-            let defiler = match terms.defiler {
-                super::casting::DefilerCredit::Offerable { committed_life } => {
-                    super::casting::DefilerCredit::Offerable {
-                        committed_life: committed_life
-                            + committed_life_of(
-                                state,
-                                player,
-                                object_id,
-                                costs
-                                    .iter()
-                                    .filter(|leg| !matches!(leg, AbilityCost::Mana { .. }))
-                                    .map(Some),
-                            ),
-                    }
-                }
-                super::casting::DefilerCredit::Settled => super::casting::DefilerCredit::Settled,
-            };
-            let leg_terms = AltCostTerms { defiler, ..terms };
-            costs.iter().all(|sub_cost| {
-                spell_alternative_cost_is_payable(
-                    state, player, object_id, sub_cost, permission, leg_terms,
-                )
-            }) && super::cost_payability::object_cost_legs_jointly_payable(
+            None,
+            legs,
+            super::cost_payability::ObjectLegPayment::Unguided,
+            super::cost_payability::CostSourceRole::SpellBeingCast,
+        )
+        || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
+    {
+        return false;
+    }
+    let pricing = super::casting::CastPricing {
+        variant: Some(CastingVariant::Normal),
+        permission,
+        accepted: terms.accepted,
+        defiler: terms.defiler,
+        reserved: super::casting::PaymentReservation::life(committed_life),
+    };
+    let object_legs =
+        super::cost_payability::reservable_battlefield_legs(state, player, object_id, legs);
+    match mana {
+        Some(mana) if object_legs.is_empty() => {
+            super::casting::cast_mana_affordable(state, player, object_id, &mana, &pricing)
+        }
+        mana => {
+            reserved_alternative_verdict(
                 state,
                 player,
                 object_id,
-                None,
-                costs,
-                super::cost_payability::ObjectLegPayment::Unguided,
-                super::cost_payability::CostSourceRole::SpellBeingCast,
-            )
+                &mana.unwrap_or_else(ManaCost::zero),
+                &pricing,
+                &object_legs,
+            ) != ReservationVerdict::Rejected
         }
-        other => other.is_payable_for_spell(state, player, object_id),
     }
+}
+
+/// CR 601.2g-h: how the reservation search judged an alternative's mana beside
+/// the objects its other legs hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReservationVerdict {
+    /// Some assignment of the legs' objects leaves the mana payable.
+    Witness,
+    /// No assignment does, or the mana is unpayable with nothing held.
+    Rejected,
+    /// The probe budget ran out first. Offered, as base offered it; the real
+    /// payment decides (Found, not fixed).
+    Exhausted,
+    /// A mana ability the payer controls consumes another object, which the
+    /// capacity estimate can't hold apart. Offered; the real payment decides
+    /// (Found, not fixed).
+    ConsumerFuelled,
+}
+
+/// The most assignments the reservation search explores before
+/// [`ReservationVerdict::Exhausted`].
+pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
+
+/// CR 118.3 + CR 601.2g-h: search the assignments of `legs`' objects for one
+/// that leaves `base`'s priced total payable by the castability authority with
+/// those objects and `pricing.reserved`'s life held.
+///
+/// Holding objects only removes resources, so a total unpayable with nothing
+/// held is rejected at once. A candidate is inert when it makes no mana now (no
+/// mana-source selection), no other mana ability or tap-payment mode can use
+/// it, and no production reads the board: holding any of them changes no probe,
+/// so a leg takes inert candidates first and enumerates only the rest.
+fn reserved_alternative_verdict(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    base: &ManaCost,
+    pricing: &super::casting::CastPricing<'_>,
+    legs: &[super::cost_payability::ReservableLeg],
+) -> ReservationVerdict {
+    let reach = super::mana_sources::player_mana_ability_reach(state, player);
+    if reach.consumes_other {
+        return ReservationVerdict::ConsumerFuelled;
+    }
+    let totals = super::casting::cast_mana_totals(
+        state,
+        player,
+        object_id,
+        super::casting::CastBase::Printed(base),
+        pricing,
+    );
+    let payable = |objects: &[(ObjectId, super::casting::ReservedUse)]| {
+        totals
+            .with_reservations(super::casting::PaymentReservation {
+                objects,
+                ..pricing.reserved
+            })
+            .any(|(total, reserved)| {
+                super::casting::reserved_assignment_payable(
+                    state, player, object_id, total, &reserved,
+                )
+            })
+    };
+    if !payable(&[]) {
+        return ReservationVerdict::Rejected;
+    }
+    if legs.is_empty() {
+        return ReservationVerdict::Witness;
+    }
+    let mana_sources: HashSet<ObjectId> = if reach.uses_other
+        || reach.board_dependent
+        || state.layers_dirty.is_dirty()
+        || super::casting::spell_tap_payment_mode(state, player, object_id).is_some()
+    {
+        state.battlefield.iter().copied().collect()
+    } else {
+        super::mana_sources::activatable_mana_source_selections(state, player)
+            .iter()
+            .map(|selection| selection.source.object_id)
+            .collect()
+    };
+    let mut held = Vec::new();
+    let mut explored = 0;
+    match assign_reserved_legs(
+        legs,
+        &|id| !mana_sources.contains(&id),
+        &mut held,
+        &mut explored,
+        &payable,
+    ) {
+        Some(true) => ReservationVerdict::Witness,
+        Some(false) => ReservationVerdict::Rejected,
+        None => ReservationVerdict::Exhausted,
+    }
+}
+
+/// One leg at a time: its inert candidates first, then each combination of the
+/// rest, streamed. `None` when the budget runs out.
+fn assign_reserved_legs(
+    legs: &[super::cost_payability::ReservableLeg],
+    inert: &impl Fn(ObjectId) -> bool,
+    held: &mut Vec<(ObjectId, super::casting::ReservedUse)>,
+    explored: &mut usize,
+    payable: &impl Fn(&[(ObjectId, super::casting::ReservedUse)]) -> bool,
+) -> Option<bool> {
+    let Some((leg, rest)) = legs.split_first() else {
+        return Some(payable(held));
+    };
+    let (inert_free, active): (Vec<ObjectId>, Vec<ObjectId>) = leg
+        .candidates
+        .iter()
+        .copied()
+        .filter(|id| !held.iter().any(|(held_id, _)| held_id == id))
+        .partition(|&id| inert(id));
+    let from_inert = leg.count.min(inert_free.len());
+    let remainder = leg.count - from_inert;
+    if active.len() < remainder {
+        return Some(false);
+    }
+    let start = held.len();
+    held.extend(
+        inert_free[..from_inert]
+            .iter()
+            .map(|&id| (id, leg.reserved_use)),
+    );
+    let mut cursor: Vec<usize> = (0..remainder).collect();
+    let verdict = loop {
+        *explored += 1;
+        if *explored > RESERVATION_PROBE_BUDGET {
+            break None;
+        }
+        held.truncate(start + from_inert);
+        held.extend(cursor.iter().map(|&i| (active[i], leg.reserved_use)));
+        match assign_reserved_legs(rest, inert, held, explored, payable) {
+            Some(false) => {}
+            settled => break settled,
+        }
+        if !next_combination(&mut cursor, active.len()) {
+            break Some(false);
+        }
+    };
+    held.truncate(start);
+    verdict
+}
+
+/// Advance `cursor`, a strictly increasing k-combination of `0..n`, to the next
+/// in lexicographic order; `false` after the last.
+fn next_combination(cursor: &mut [usize], n: usize) -> bool {
+    let k = cursor.len();
+    let Some(i) = (0..k).rev().find(|&i| cursor[i] < n - k + i) else {
+        return false;
+    };
+    cursor[i] += 1;
+    let first = cursor[i];
+    for (offset, slot) in cursor[i + 1..].iter_mut().enumerate() {
+        *slot = first + offset + 1;
+    }
+    true
+}
+
+/// The reservation search's verdict on `object_id`'s Oracle alternative, for
+/// tests that assert an offer the search left to the payment.
+#[cfg(feature = "test-support")]
+pub fn oracle_alternative_reservation_verdict(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<ReservationVerdict> {
+    let obj = state.objects.get(&object_id)?;
+    let cost = obj.casting_options.iter().find_map(|option| {
+        (option.kind == SpellCastingOptionKind::AlternativeCost)
+            .then(|| option.cost.clone())
+            .flatten()
+    })?;
+    let (mana, residual) = super::casting::split_alt_cost_components(&cost);
+    let legs = match &residual {
+        Some(AbilityCost::Composite { costs }) => costs.clone(),
+        Some(leaf) => vec![leaf.clone()],
+        None => Vec::new(),
+    };
+    let pricing = super::casting::CastPricing {
+        variant: Some(CastingVariant::Normal),
+        reserved: super::casting::PaymentReservation::life(committed_life_of(
+            state,
+            player,
+            object_id,
+            legs.iter().map(Some),
+        )),
+        ..super::casting::CastPricing::OFFER
+    };
+    let object_legs =
+        super::cost_payability::reservable_battlefield_legs(state, player, object_id, &legs);
+    Some(reserved_alternative_verdict(
+        state,
+        player,
+        object_id,
+        &mana.unwrap_or_else(ManaCost::zero),
+        &pricing,
+        &object_legs,
+    ))
 }
 
 pub(crate) fn eligible_behold_choices(
@@ -10843,7 +11164,11 @@ fn required_declaration_offerable(
     required: &AbilityCost,
     residual: Option<&AbilityCost>,
 ) -> Result<bool, EngineError> {
-    if additional_cost_declaration_is_offerable(state, player, pending, required.clone())? {
+    // CR 119.4 + CR 601.2h: the cast's other unpaid life is paid beside it.
+    let residual_life = residual.map_or(0, |residual| {
+        cost_life_payment(state, player, pending.object_id, residual)
+    });
+    if declaration_offerable_reserving(state, player, pending, required.clone(), residual_life)? {
         return Ok(true);
     }
     let Some(defiler) = defiler_offer_alongside(
@@ -10865,7 +11190,14 @@ fn required_declaration_offerable(
             &defiler.mana_reduction,
             defiler.reach,
         ));
-    additional_cost_declaration_is_offerable(state, player, &credited, required.clone())
+    // CR 119.4: the prospective Defiler's life is paid before the mana too.
+    declaration_offerable_reserving(
+        state,
+        player,
+        &credited,
+        required.clone(),
+        residual_life + defiler.life_cost,
+    )
 }
 
 /// CR 119.4: the life a cost pays, summed across a composite ("{2}{B}{B}, Pay
@@ -11053,13 +11385,13 @@ fn sacrifice_reduction_entry(
 }
 
 /// CR 601.2b + CR 601.2f: the reduction entry an affordable Defiler life
-/// payment would add to the cast, for pricing the cast through the ordered
-/// reduction set (floors last) without paying life.
+/// payment would add to the cast, and the life it costs, for pricing the cast
+/// through the ordered reduction set (floors last) without paying life.
 pub(crate) fn defiler_reduction_entry_if_affordable(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-) -> Option<CostReductionEntry> {
+) -> Option<(CostReductionEntry, u32)> {
     defiler_reduction_entry_alongside(state, caster, spell_id, 0)
 }
 
@@ -11071,14 +11403,17 @@ pub(crate) fn defiler_reduction_entry_alongside(
     caster: PlayerId,
     spell_id: ObjectId,
     committed_life: u32,
-) -> Option<CostReductionEntry> {
+) -> Option<(CostReductionEntry, u32)> {
     let reduction = defiler_reduction_alongside(state, caster, spell_id, committed_life)?;
-    Some(accepted_defiler_reduction_entry(
-        state,
-        caster,
-        spell_id,
-        &reduction.mana_reduction,
-        reduction.reach,
+    Some((
+        accepted_defiler_reduction_entry(
+            state,
+            caster,
+            spell_id,
+            &reduction.mana_reduction,
+            reduction.reach,
+        ),
+        reduction.life_cost,
     ))
 }
 
@@ -12470,7 +12805,8 @@ pub(super) fn can_pay_emerge_cost(
                 variant,
                 permission,
                 accepted: &accepted,
-                defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+                defiler: super::casting::DefilerCredit::Offerable,
+                reserved: super::casting::PaymentReservation::NONE,
             },
         )
     })

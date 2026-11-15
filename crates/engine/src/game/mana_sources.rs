@@ -1410,6 +1410,70 @@ fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Sacrifice(_)))
 }
 
+/// CR 605.1a + CR 118.3: how the mana abilities a player controls reach objects
+/// other than their own source, for holding objects for another leg of a cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ManaAbilityReach {
+    /// Some cost sacrifices, exiles or returns another object (Ashnod's Altar,
+    /// Krark-Clan Ironworks, Priest of Yawgmoth).
+    pub(crate) consumes_other: bool,
+    /// Some cost taps or consumes another object (adds Springleaf Drum).
+    pub(crate) uses_other: bool,
+    /// Some production amount reads the game state (Gaea's Cradle class).
+    pub(crate) board_dependent: bool,
+}
+
+pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> ManaAbilityReach {
+    let mut reach = ManaAbilityReach::default();
+    let abilities = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| obj.abilities.iter())
+        .filter(|ability| {
+            ability.kind == AbilityKind::Activated && mana_abilities::is_mana_ability(ability)
+        });
+    for ability in abilities {
+        let consumes = cost_has_component(&ability.cost, |c| match c {
+            AbilityCost::Sacrifice(cost) => cost.target != TargetFilter::SelfRef,
+            AbilityCost::Exile { filter, .. } | AbilityCost::ReturnToHand { filter, .. } => {
+                !matches!(filter, Some(TargetFilter::SelfRef))
+            }
+            _ => false,
+        });
+        reach.consumes_other |= consumes;
+        reach.uses_other |= consumes
+            || cost_has_component(&ability.cost, |c| {
+                matches!(c, AbilityCost::TapCreatures { .. })
+            });
+        if let Effect::Mana { produced, .. } = &*ability.effect {
+            produced.for_each_quantity_expr(&mut |quantity| {
+                reach.board_dependent |= !matches!(quantity, QuantityExpr::Fixed { .. });
+            });
+        }
+    }
+    reach
+}
+
+/// CR 605.3a + CR 701.21a: whether `object_id` has a mana ability `player` can
+/// activate now that pays by sacrificing that object itself (Gold; a granted
+/// "Sacrifice this land: Add {B}.").
+pub(crate) fn object_has_activatable_self_sacrifice_mana(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    activatable_mana_source_selections(state, player)
+        .iter()
+        .filter(|selection| selection.source.object_id == object_id)
+        .filter_map(|selection| object.abilities.get(selection.ability_index?))
+        .any(|ability| has_unambiguous_self_sacrifice_component(&ability.cost))
+}
+
 /// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.
 /// Threading this as a small private helper keeps the recursive walker and
 /// the composite-cost loop in sync: any `None` contribution collapses the

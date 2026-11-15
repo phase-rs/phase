@@ -275,6 +275,10 @@ fn drive(runner: &mut GameRunner, first: GameAction, answers: &Answers) -> Trail
                     index: answers.branch_index.unwrap(),
                 }
             }
+            // CR 107.4f: a Phyrexian or life-for-mana shard is paid with life.
+            WaitingFor::PhyrexianPayment { shards, .. } => GameAction::SubmitPhyrexianChoices {
+                choices: vec![engine::types::game_state::ShardChoice::PayLife; shards.len()],
+            },
             _ => break,
         };
         trail.prompts.push(runner.waiting_for_kind());
@@ -2074,6 +2078,229 @@ fn composite_alternative_affordable_only_with_a_defiler_completes() {
     assert_eq!(pool(&runner), 0);
 }
 
+/// Zahid with Defiler of Dreams, Sol Ring ("{T}: Add {C}{C}.") and a Plains,
+/// an empty pool and, when `spare` is set, an untapped Ornithopter.
+fn zahid_with_sol_ring(spare: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    add_defiler_of_dreams(&mut scenario);
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    let ornithopter = spare.then(|| {
+        scenario
+            .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+            .as_artifact_creature()
+            .id()
+    });
+    let zahid = scenario
+        .add_creature_to_hand_from_oracle(P0, "Zahid, Djinn of the Lamp", 5, 6, ZAHID)
+        .with_mana_cost(cost(4, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    (scenario.build(), zahid, ring, ornithopter)
+}
+
+/// CR 118.3 + CR 601.2h: Zahid's {3} (with the Defiler) needs Sol Ring's mana,
+/// and its tap leg needs an untapped artifact; the Ring can't pay both.
+#[test]
+fn composite_alternative_cant_tap_its_mana_artifact_twice() {
+    let (mut runner, zahid, ring, _) = zahid_with_sol_ring(false);
+    assert!(!offered(&runner, zahid), "the cast is not a legal action");
+
+    let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+
+    assert!(trail.refused, "the cast is refused: {:?}", trail.prompts);
+    assert_eq!(zone(&runner, zahid), Zone::Hand);
+    assert!(!runner.state().objects[&ring].tapped);
+    assert_eq!(life(&runner), 20);
+}
+
+/// Control: with a spare Ornithopter for the tap leg, the Ring and the Plains
+/// pay the {3}.
+#[test]
+fn composite_alternative_taps_a_spare_artifact() {
+    let (mut runner, zahid, ring, ornithopter) = zahid_with_sol_ring(true);
+    let ornithopter = ornithopter.unwrap();
+    assert!(offered(&runner, zahid), "the cast is a legal action");
+
+    let trail = cast(
+        &mut runner,
+        zahid,
+        &Answers {
+            picks: vec![ornithopter],
+            ..ACCEPT_BOTH
+        },
+    );
+
+    assert_cast_completes(&runner, zahid, &trail);
+    assert_eq!(
+        trail.prompts,
+        ["DefilerPayment", "OptionalCostChoice", "PayCost"]
+    );
+    assert!(runner.state().objects[&ornithopter].tapped);
+    assert!(runner.state().objects[&ring].tapped);
+    assert_eq!(life(&runner), 18);
+}
+
+const TRINISPHERE: &str = "As long as this artifact is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)";
+
+const ORIMS_CURE: &str = "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.\nPrevent the next 4 damage that would be dealt to any target this turn.";
+
+/// An untapped Trinisphere under P1's control.
+fn add_trinisphere(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_artifact_from_oracle(P1, "Trinisphere", TRINISPHERE)
+        .id()
+}
+
+/// Reach: Trinisphere's Oracle text parsed to a cost floor.
+fn assert_floor_parsed(runner: &GameRunner, trinisphere: ObjectId) {
+    assert!(
+        runner.state().objects[&trinisphere]
+            .static_definitions
+            .iter_all()
+            .any(|s| format!("{:?}", s.mode).contains("Minimum")),
+        "reach: Trinisphere parses to a cost floor"
+    );
+}
+
+/// Demon of Death's Gate in hand, three black creatures, P0 at 20 life, an
+/// opposing Trinisphere and `colorless` colourless mana; no Defiler.
+fn demon_under_trinisphere(colorless: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let trinisphere = add_trinisphere(&mut scenario);
+    let fodder = (0..3)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Black Fodder {i}"), 1, 1)
+                .with_color(vec![ManaColor::Black])
+                .id()
+        })
+        .collect();
+    let demon = scenario
+        .add_creature_to_hand_from_oracle(P0, "Demon of Death's Gate", 9, 9, DEMON_OF_DEATHS_GATE)
+        .with_mana_cost(cost(
+            6,
+            &[
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+        ))
+        .with_color(vec![ManaColor::Black])
+        .id();
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, colorless)]));
+    let runner = scenario.build();
+    assert_floor_parsed(&runner, trinisphere);
+    (runner, demon, fodder)
+}
+
+/// CR 601.2f + CR 118.9d: Trinisphere floors the alternative's {0} mana part to
+/// {3}, so with no mana the alternative can't be paid.
+#[test]
+fn non_mana_alternative_under_a_floor_is_not_offered_without_mana() {
+    let (mut runner, demon, fodder) = demon_under_trinisphere(0);
+    assert!(!offered(&runner, demon), "the cast is not a legal action");
+
+    let trail = cast(&mut runner, demon, &ACCEPT_BOTH);
+
+    assert!(trail.refused, "the cast is refused: {:?}", trail.prompts);
+    assert_eq!(zone(&runner, demon), Zone::Hand);
+    assert_eq!(life(&runner), 20);
+    for id in fodder {
+        assert_eq!(zone(&runner, id), Zone::Battlefield);
+    }
+}
+
+/// Control: with {3}, the alternative completes for the floor, 6 life and the
+/// three creatures.
+#[test]
+fn non_mana_alternative_under_a_floor_pays_the_floor() {
+    let (mut runner, demon, fodder) = demon_under_trinisphere(3);
+    assert!(offered(&runner, demon), "the cast is a legal action");
+
+    let trail = cast(
+        &mut runner,
+        demon,
+        &Answers {
+            picks: fodder.clone(),
+            ..ACCEPT_BOTH
+        },
+    );
+
+    assert_cast_completes(&runner, demon, &trail);
+    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
+    assert_eq!(life(&runner), 14);
+    assert_eq!(pool(&runner), 0, "the floored {{3}} is paid");
+    for id in fodder {
+        assert_eq!(zone(&runner, id), Zone::Graveyard);
+    }
+}
+
+/// Orim's Cure in hand with `plains` Plains, Llanowar Elves ("{T}: Add {G}."),
+/// an empty pool and an opposing Trinisphere.
+fn orims_cure_under_trinisphere(plains: usize) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let trinisphere = add_trinisphere(&mut scenario);
+    for _ in 0..plains {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let elves = scenario
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+        .id();
+    let cure = scenario
+        .add_spell_to_hand_from_oracle(P0, "Orim's Cure", true, ORIMS_CURE)
+        .with_mana_cost(cost(1, &[ManaCostShard::White]))
+        .with_color(vec![ManaColor::White])
+        .id();
+    let runner = scenario.build();
+    assert_floor_parsed(&runner, trinisphere);
+    assert!(
+        !runner.state().objects[&cure].casting_options.is_empty(),
+        "reach: Orim's Cure carries its alternative cost"
+    );
+    (runner, cure, elves)
+}
+
+/// CR 118.3 + CR 601.2f: with two Plains the floored {3} needs the Elf's mana,
+/// and the tap leg needs the Elf; it can't pay both, so the alternative isn't
+/// offered and the printed {1}{W} (floored to {2}{W}) is cast.
+#[test]
+fn tap_alternative_under_a_floor_cant_tap_its_mana_creature_twice() {
+    let (mut runner, cure, elves) = orims_cure_under_trinisphere(2);
+
+    let trail = cast(&mut runner, cure, &ACCEPT_BOTH);
+
+    assert_cast_completes(&runner, cure, &trail);
+    assert_eq!(trail.count("OptionalCostChoice"), 0, "{:?}", trail.prompts);
+    assert!(runner.state().objects[&elves].tapped, "tapped for {{G}}");
+}
+
+/// Control: with a third Plains the alternative is offered; the Elf is tapped
+/// for it and the Plains pay the floored {3}.
+#[test]
+fn tap_alternative_under_a_floor_taps_its_creature_with_spare_mana() {
+    let (mut runner, cure, elves) = orims_cure_under_trinisphere(3);
+
+    let trail = cast(
+        &mut runner,
+        cure,
+        &Answers {
+            picks: vec![elves],
+            ..ACCEPT_BOTH
+        },
+    );
+
+    assert_cast_completes(&runner, cure, &trail);
+    assert_eq!(trail.count("OptionalCostChoice"), 1, "{:?}", trail.prompts);
+    assert!(runner.state().objects[&elves].tapped);
+    assert_eq!(pool(&runner), 0);
+}
+
 /// Bringer with Defiler of Flesh, {W}{U}{R}{G} and As Foretold with nine time
 /// counters ({0} once each turn for a spell with mana value 9 or less).
 fn bringer_with_as_foretold() -> (GameRunner, ObjectId, ObjectId) {
@@ -2089,11 +2316,53 @@ fn bringer_with_as_foretold() -> (GameRunner, ObjectId, ObjectId) {
     (scenario.build(), bringer, foretold)
 }
 
-/// CR 118.9a + CR 601.2b: the Choice re-selects the alternative under the
-/// Defiler decision. Accepted, Bringer's own {W}{U}{B}{R}{G} less {B} is
-/// payable and offered: As Foretold's slot stays unspent.
+/// CR 118.9a + CR 601.4: only one alternative cost applies, and the player
+/// chooses which. With the Defiler accepted, Bringer's own {W}{U}{B}{R}{G}
+/// less {B} and As Foretold's {0} are both payable: the spell's own is offered
+/// first, and declining it offers As Foretold's, whose slot is then spent.
 #[test]
-fn accepted_defiler_keeps_the_spells_own_alternative_over_a_grant() {
+fn accepted_defiler_offers_each_payable_alternative_in_turn() {
+    let (mut runner, bringer, foretold) = bringer_with_as_foretold();
+
+    let first = cast_action(&runner, bringer);
+    runner.act(first).expect("the cast starts");
+    assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accept the Defiler");
+    assert_eq!(offered_alternative(&runner), Some(wubrg_cost()));
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("decline the spell's own alternative");
+    assert_eq!(
+        offered_alternative(&runner),
+        Some(ManaCost::zero()),
+        "As Foretold's alternative is offered next"
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("choose As Foretold's alternative");
+
+    assert_cast_completes(
+        &runner,
+        bringer,
+        &Trail {
+            prompts: Vec::new(),
+            events: Vec::new(),
+            refused: false,
+        },
+    );
+    assert_eq!(life(&runner), 18);
+    assert_eq!(pool(&runner), 4, "{{0}} is paid");
+    assert!(runner
+        .state()
+        .alt_cost_grant_permissions_used
+        .contains(&foretold));
+}
+
+/// Choosing the spell's own alternative spends no grant slot.
+#[test]
+fn accepted_defiler_then_the_spells_own_alternative_spends_no_grant() {
     let (mut runner, bringer, foretold) = bringer_with_as_foretold();
 
     let trail = cast(&mut runner, bringer, &ACCEPT_BOTH);
@@ -2105,6 +2374,72 @@ fn accepted_defiler_keeps_the_spells_own_alternative_over_a_grant() {
         .state()
         .alt_cost_grant_permissions_used
         .contains(&foretold));
+}
+
+/// CR 118.9a: with no Defiler, Bringer's own {W}{U}{B}{R}{G} is payable outright,
+/// and declining it still offers As Foretold's {0}.
+#[test]
+fn declined_own_alternative_offers_the_payable_grant() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let foretold = scenario
+        .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+        .id();
+    scenario.with_counter(foretold, engine::types::counter::CounterType::Time, 9);
+    let bringer = add_bringer(&mut scenario);
+    scenario.with_mana_pool(P0, mana(&wubrg()));
+    let mut runner = scenario.build();
+
+    let first = cast_action(&runner, bringer);
+    runner.act(first).expect("the cast starts");
+    assert_eq!(offered_alternative(&runner), Some(wubrg_cost()));
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("decline the spell's own alternative");
+    assert_eq!(offered_alternative(&runner), Some(ManaCost::zero()));
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("choose As Foretold's alternative");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bringer), Zone::Stack);
+    assert_eq!(pool(&runner), 5, "{{0}} is paid");
+    assert!(runner
+        .state()
+        .alt_cost_grant_permissions_used
+        .contains(&foretold));
+}
+
+fn wubrg_cost() -> ManaCost {
+    ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    }
+}
+
+/// The mana alternative an alternative-cost Choice offers, if one is pending.
+fn offered_alternative(runner: &GameRunner) -> Option<ManaCost> {
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice {
+            cost:
+                engine::types::ability::AdditionalCost::Choice(
+                    engine::types::ability::AbilityCost::Mana { cost },
+                    _,
+                ),
+            ..
+        } => Some(cost.clone()),
+        _ => None,
+    }
 }
 
 /// Declined, Bringer's own alternative is no longer payable, so As Foretold's
@@ -2501,4 +2836,746 @@ fn granted_alternative_for_a_printed_cost_offers_the_defiler_then_the_choice() {
         .state()
         .alt_cost_grant_permissions_used
         .contains(&room));
+}
+
+// ---------------------------------------------------------------------------
+// Resources another leg holds (#10918 review): an object or life paying one
+// leg of the cast can't also pay its mana (CR 118.3 + CR 119.4 + CR 601.2g-h).
+// ---------------------------------------------------------------------------
+
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const SEPHARA: &str = "You may pay {W} and tap four untapped creatures you control with flying rather than pay this spell's mana cost.\nFlying, lifelink\nOther creatures you control with flying have indestructible.";
+const HUMILITY: &str = "All creatures lose all abilities and have base power and toughness 1/1.";
+const DEFILER_OF_FAITH: &str = "Vigilance\nAs an additional cost to cast white permanent spells, you may pay 2 life. Those spells cost {W} less to cast if you paid life this way. This effect reduces only the amount of white mana you pay.\nWhenever you cast a white permanent spell, create a 1/1 white Soldier creature token.";
+const EVERFLOWING_CHALICE: &str = "Multikicker {2} (You may pay an additional {2} any number of times as you cast this spell.)\nThis artifact enters with a charge counter on it for each time it was kicked.\n{T}: Add {C} for each charge counter on this artifact.";
+const FIST_OF_SUNS: &str =
+    "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.";
+const KRRIK_GRANT: &str = "For each {B} in a cost, you may pay 2 life rather than pay that mana.";
+const ENSLAVE: &str = "Enchant creature\nYou control enchanted creature.\nAt the beginning of your upkeep, enchanted creature deals 1 damage to its owner.";
+
+fn board() -> GameScenario {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    scenario
+}
+
+/// `n` creatures named `name` under P0's control, from `oracle`, coloured `color`.
+fn creatures(
+    scenario: &mut GameScenario,
+    name: &str,
+    n: usize,
+    oracle: &str,
+    color: ManaColor,
+) -> Vec<ObjectId> {
+    (0..n)
+        .map(|_| {
+            scenario
+                .add_creature_from_oracle(P0, name, 1, 1, oracle)
+                .with_color(vec![color])
+                .id()
+        })
+        .collect()
+}
+
+fn ornithopters(scenario: &mut GameScenario, n: usize) -> Vec<ObjectId> {
+    (0..n)
+        .map(|_| {
+            scenario
+                .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+                .as_artifact_creature()
+                .id()
+        })
+        .collect()
+}
+
+/// A Defiler from its Oracle text, its statics only.
+fn add_parsed_defiler(scenario: &mut GameScenario, name: &str, oracle: &str) {
+    let parsed = parse_oracle_text(oracle, name, &[], &["Creature".into()], &[]);
+    let mut defiler = scenario.add_creature(P0, name, 5, 5);
+    for s in parsed.statics {
+        defiler.with_static_definition(s);
+    }
+}
+
+fn add_zahid(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Zahid, Djinn of the Lamp", 5, 6, ZAHID)
+        .with_mana_cost(cost(4, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .with_color(vec![ManaColor::Blue])
+        .id()
+}
+
+fn add_sephara(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Sephara, Sky's Blade", 7, 7, SEPHARA)
+        .with_mana_cost(cost(
+            4,
+            &[
+                ManaCostShard::White,
+                ManaCostShard::White,
+                ManaCostShard::White,
+            ],
+        ))
+        .with_color(vec![ManaColor::White])
+        .id()
+}
+
+fn add_demon(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Demon of Death's Gate", 9, 9, DEMON_OF_DEATHS_GATE)
+        .with_mana_cost(cost(
+            6,
+            &[
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+        ))
+        .with_color(vec![ManaColor::Black])
+        .id()
+}
+
+/// Cast `spell` with manual mana payment, answering until the mana payment.
+fn manual_cast(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Trail {
+    let first = GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Manual,
+    };
+    drive(runner, first, answers)
+}
+
+/// CR 605.3a: activate Ashnod's Altar, sacrificing `victim`.
+fn sacrifice_to_altar(runner: &mut GameRunner, altar: ObjectId, victim: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the Altar");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![victim],
+        })
+        .expect("sacrifice to the Altar");
+}
+
+/// Ends a manual mana payment, returning whether the spell was cast.
+fn finish_payment(runner: &mut GameRunner, spell: ObjectId) -> bool {
+    assert_eq!(runner.waiting_for_kind(), "ManaPayment");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pay from the pool")
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::SpellCast { object_id, .. } if *object_id == spell))
+}
+
+fn verdict(runner: &GameRunner, spell: ObjectId) -> engine::game::ReservationVerdict {
+    engine::game::oracle_alternative_reservation_verdict(runner.state(), P0, spell)
+        .expect("reach: the spell has an Oracle alternative")
+}
+
+/// Demon of Death's Gate in hand, `corpses` Walking Corpses, Ashnod's Altar,
+/// `floating` {C} and an opposing Trinisphere.
+fn demon_with_altar(
+    corpses: usize,
+    floating: usize,
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut scenario = board();
+    let trinisphere = add_trinisphere(&mut scenario);
+    let corpses = creatures(
+        &mut scenario,
+        "Walking Corpse",
+        corpses,
+        "",
+        ManaColor::Black,
+    );
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let demon = add_demon(&mut scenario);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, floating)]));
+    let runner = scenario.build();
+    assert_floor_parsed(&runner, trinisphere);
+    (runner, demon, altar, corpses)
+}
+
+/// CR 601.2g + Main ruling (b): Ashnod's Altar can fuel the floored {3}, which
+/// the estimate can't hold apart, so the alternative is offered. Three Corpses
+/// pay the leg and the fourth goes to the Altar during payment.
+#[test]
+fn altar_fuelled_floor_is_offered_and_paid_during_payment() {
+    let (mut runner, demon, altar, corpses) = demon_with_altar(4, 1);
+    assert_eq!(
+        verdict(&runner, demon),
+        engine::game::ReservationVerdict::ConsumerFuelled
+    );
+    let trail = manual_cast(
+        &mut runner,
+        demon,
+        &Answers {
+            picks: corpses[..3].to_vec(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
+    sacrifice_to_altar(&mut runner, altar, corpses[3]);
+
+    assert!(finish_payment(&mut runner, demon));
+    assert_eq!(life(&runner), 14);
+    assert_eq!(pool(&runner), 0);
+    assert!(corpses.iter().all(|&c| zone(&runner, c) == Zone::Graveyard));
+}
+
+/// Control: the Altar activated at priority first; the cast pays from the pool.
+#[test]
+fn altar_mana_made_before_the_cast_pays_the_floor() {
+    let (mut runner, demon, altar, corpses) = demon_with_altar(4, 1);
+    sacrifice_to_altar(&mut runner, altar, corpses[3]);
+
+    let trail = cast(
+        &mut runner,
+        demon,
+        &Answers {
+            picks: corpses[..3].to_vec(),
+            ..ACCEPT_BOTH
+        },
+    );
+
+    assert_cast_completes(&runner, demon, &trail);
+    assert_eq!((life(&runner), pool(&runner)), (14, 0));
+}
+
+/// Two Altar activations during payment pay {3} with {C} left over.
+#[test]
+fn altar_activated_twice_pays_the_floor() {
+    let (mut runner, demon, altar, corpses) = demon_with_altar(5, 0);
+    let trail = manual_cast(
+        &mut runner,
+        demon,
+        &Answers {
+            picks: corpses[..3].to_vec(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
+    sacrifice_to_altar(&mut runner, altar, corpses[3]);
+    sacrifice_to_altar(&mut runner, altar, corpses[4]);
+
+    assert!(finish_payment(&mut runner, demon));
+    assert_eq!((life(&runner), pool(&runner)), (14, 1));
+}
+
+/// CR 118.3 + CR 601.2h: Blood Pets ("Sacrifice this creature: Add {B}.") the
+/// alternative sacrifices can't also make its floored {3}: with exactly three
+/// it isn't offered; with six, three pay the leg and three the mana.
+#[test]
+fn self_sacrificing_fuel_held_for_the_leg_cant_pay_the_floor() {
+    for (pets, offered_now) in [(3, false), (6, true)] {
+        let mut scenario = board();
+        add_trinisphere(&mut scenario);
+        let pets = creatures(
+            &mut scenario,
+            "Blood Pet",
+            pets,
+            "Sacrifice this creature: Add {B}.",
+            ManaColor::Black,
+        );
+        let demon = add_demon(&mut scenario);
+        let mut runner = scenario.build();
+        assert_eq!(offered(&runner, demon), offered_now, "{} Pets", pets.len());
+
+        let trail = cast(
+            &mut runner,
+            demon,
+            &Answers {
+                picks: pets[..3].to_vec(),
+                ..ACCEPT_BOTH
+            },
+        );
+
+        if offered_now {
+            // CR 605.3a: sacrificial mana is the player's to activate.
+            for &pet in &pets[3..] {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: pet,
+                        ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .expect("sacrifice a Pet for {B}");
+            }
+            assert!(finish_payment(&mut runner, demon), "{:?}", trail.prompts);
+            assert_eq!(life(&runner), 14);
+            assert!(pets.iter().all(|&p| zone(&runner, p) == Zone::Graveyard));
+        } else {
+            assert!(trail.refused, "{:?}", trail.prompts);
+            assert_eq!((zone(&runner, demon), life(&runner)), (Zone::Hand, 20));
+            assert!(pets.iter().all(|&p| zone(&runner, p) == Zone::Battlefield));
+        }
+    }
+}
+
+/// Main ruling (b) applies whatever the mana leg: Sephara's {W}, less Defiler
+/// of Faith's {W}, is floored to {3}, which two Altar activations pay.
+#[test]
+fn altar_fuels_a_floored_printed_mana_leg() {
+    let mut scenario = board();
+    add_trinisphere(&mut scenario);
+    add_parsed_defiler(&mut scenario, "Defiler of Faith", DEFILER_OF_FAITH);
+    let flyers = ornithopters(&mut scenario, 4);
+    let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let sephara = add_sephara(&mut scenario);
+    let mut runner = scenario.build();
+
+    let trail = manual_cast(
+        &mut runner,
+        sephara,
+        &Answers {
+            picks: flyers.clone(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_eq!(
+        trail.prompts,
+        ["DefilerPayment", "OptionalCostChoice", "PayCost"]
+    );
+    sacrifice_to_altar(&mut runner, altar, corpses[0]);
+    sacrifice_to_altar(&mut runner, altar, corpses[1]);
+
+    assert!(finish_payment(&mut runner, sephara));
+    assert_eq!((life(&runner), pool(&runner)), (18, 1));
+    assert!(flyers.iter().all(|&f| runner.state().objects[&f].tapped));
+}
+
+/// Zahid with Defiler of Dreams, a Gold token, two Plains and, when `spare`,
+/// an Ornithopter: the Gold can't be both the tapped artifact and the third
+/// mana.
+#[test]
+fn self_sacrificing_artifact_held_for_the_tap_cant_pay_the_mana() {
+    for spare in [false, true] {
+        let mut scenario = board();
+        add_defiler_of_dreams(&mut scenario);
+        let gold = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Gold",
+                "Sacrifice this artifact: Add one mana of any color.",
+            )
+            .id();
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_basic_land(P0, ManaColor::White);
+        let spare = spare.then(|| ornithopters(&mut scenario, 1)[0]);
+        let zahid = add_zahid(&mut scenario);
+        let mut runner = scenario.build();
+        assert_eq!(offered(&runner, zahid), spare.is_some());
+
+        let trail = cast(
+            &mut runner,
+            zahid,
+            &Answers {
+                picks: spare.into_iter().collect(),
+                ..ACCEPT_BOTH
+            },
+        );
+
+        if spare.is_some() {
+            assert_cast_completes(&runner, zahid, &trail);
+            assert_eq!(life(&runner), 18);
+            assert_eq!(zone(&runner, gold), Zone::Graveyard, "the Gold paid {{1}}");
+        } else {
+            assert!(trail.refused, "{:?}", trail.prompts);
+            assert_eq!(zone(&runner, gold), Zone::Battlefield);
+        }
+    }
+}
+
+/// Zahid, `{3}{U}` floating, P1's Humility, and the artifacts `build` adds.
+fn zahid_under_humility(
+    build: impl FnOnce(&mut GameScenario) -> Vec<ObjectId>,
+) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = board();
+    let artifacts = build(&mut scenario);
+    scenario.add_enchantment_from_oracle(P1, "Humility", HUMILITY);
+    let zahid = add_zahid(&mut scenario);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 3), (ManaType::Blue, 1)]));
+    (scenario.build(), zahid, artifacts)
+}
+
+/// Humility removes the Ornithopter's abilities, the injected prohibition
+/// included, but leaves it no mana ability to misuse: the cast is legal, in
+/// either insertion order, tapping the artifact chosen.
+#[test]
+fn humility_on_the_tapped_artifact_keeps_the_alternative() {
+    let relic = |scenario: &mut GameScenario| {
+        scenario
+            .add_artifact_from_oracle(P0, "Darksteel Relic", "Indestructible")
+            .id()
+    };
+    for relic_first in [false, true] {
+        let (mut runner, zahid, artifacts) = zahid_under_humility(|scenario| {
+            if relic_first {
+                vec![relic(scenario), ornithopters(scenario, 1)[0]]
+            } else {
+                vec![ornithopters(scenario, 1)[0], relic(scenario)]
+            }
+        });
+        let relic = artifacts[usize::from(!relic_first)];
+
+        let trail = cast(
+            &mut runner,
+            zahid,
+            &Answers {
+                picks: vec![relic],
+                ..ACCEPT_BOTH
+            },
+        );
+
+        assert_cast_completes(&runner, zahid, &trail);
+        assert!(runner.state().objects[&relic].tapped);
+        assert_eq!(pool(&runner), 0);
+    }
+    let (mut runner, zahid, artifacts) = zahid_under_humility(|scenario| ornithopters(scenario, 1));
+    let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+    assert_cast_completes(&runner, zahid, &trail);
+    assert!(runner.state().objects[&artifacts[0]].tapped);
+}
+
+/// Darksteel Citadel enchanted by Ensoul Artifact under Humility, then given
+/// Rain of Filth's "Sacrifice this land: Add {B}." (a later timestamp): the
+/// prohibition is gone and the self-sacrifice survives, so the Citadel can't
+/// be held; Zahid with {2}{U} can't be cast. Control: no Rain, {3}{U}.
+#[test]
+fn granted_self_sacrifice_surviving_humility_is_fenced() {
+    for rain in [true, false] {
+        let mut scenario = board();
+        let citadel = scenario
+            .add_land_from_oracle(P0, "Darksteel Citadel", "Indestructible\n{T}: Add {C}.")
+            .as_artifact()
+            .id();
+        let ensoul = scenario
+            .add_enchantment_from_oracle(P0, "Ensoul Artifact", "Enchant artifact\nEnchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.")
+            .with_subtypes(vec!["Aura"])
+            .id();
+        scenario.add_enchantment_from_oracle(P1, "Humility", HUMILITY);
+        let rain_spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Rain of Filth",
+                true,
+                "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
+            )
+            .with_mana_cost(cost(0, &[ManaCostShard::Black]))
+            .id();
+        let zahid = add_zahid(&mut scenario);
+        let colorless = if rain { 2 } else { 3 };
+        scenario.with_mana_pool(
+            P0,
+            mana(&[
+                (ManaType::Black, 1),
+                (ManaType::Colorless, colorless),
+                (ManaType::Blue, 1),
+            ]),
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&ensoul)
+            .unwrap()
+            .attached_to = Some(engine::game::game_object::AttachTarget::Object(citadel));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&citadel)
+            .unwrap()
+            .attachments
+            .push(ensoul);
+        runner.state_mut().layers_dirty.mark_full();
+        if rain {
+            let trail = cast(&mut runner, rain_spell, &ACCEPT_BOTH);
+            assert_cast_completes(&runner, rain_spell, &trail);
+            runner.pass_both_players();
+        }
+        engine::game::layers::flush_layers(runner.state_mut());
+        let citadel_mana: Vec<_> =
+            engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+                .into_iter()
+                .filter(|s| s.source.object_id == citadel)
+                .collect();
+        assert!(
+            runner.state().objects[&citadel]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "reach: the Citadel is a creature"
+        );
+        assert_eq!(
+            citadel_mana.len(),
+            usize::from(rain),
+            "reach: only Rain's grant makes mana"
+        );
+
+        if rain {
+            assert_eq!(
+                verdict(&runner, zahid),
+                engine::game::ReservationVerdict::Rejected
+            );
+            assert!(!offered(&runner, zahid));
+            let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+            assert!(trail.refused, "{:?}", trail.prompts);
+            assert_eq!((zone(&runner, zahid), pool(&runner)), (Zone::Hand, 3));
+        } else {
+            let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+            assert_cast_completes(&runner, zahid, &trail);
+            assert!(runner.state().objects[&citadel].tapped);
+            assert_eq!(pool(&runner), 1, "Rain's {{B}} is left");
+        }
+    }
+}
+
+/// Everflowing Chalices cast for real with multikicker `kicks`, then Zahid
+/// with Defiler of Dreams: one Chalice is tapped for the leg, the other pays
+/// the {3}.
+fn chalices_then_zahid(kicks: [u32; 2]) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = board();
+    add_defiler_of_dreams(&mut scenario);
+    let chalices: Vec<ObjectId> = kicks
+        .iter()
+        .map(|_| {
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Everflowing Chalice", EVERFLOWING_CHALICE)
+                .with_mana_cost(cost(0, &[]))
+                .id()
+        })
+        .collect();
+    let zahid = add_zahid(&mut scenario);
+    let mut runner = scenario.build();
+    for (&chalice, &kick) in chalices.iter().zip(&kicks) {
+        add_pool(&mut runner, &[(ManaType::Colorless, 2 * kick as usize)]);
+        let first = cast_action(&runner, chalice);
+        runner.act(first).expect("cast the Chalice");
+        // CR 702.33c: multikicker is offered again after each payment.
+        while let WaitingFor::OptionalCostChoice { times_kicked, .. } = runner.state().waiting_for {
+            runner
+                .act(GameAction::DecideOptionalCost {
+                    pay: times_kicked < kick,
+                })
+                .expect("answer multikicker");
+        }
+        assert_eq!(runner.state().objects[&chalice].zone, Zone::Stack);
+        runner.pass_both_players();
+        assert_eq!(
+            runner.state().objects[&chalice]
+                .counters
+                .get(&engine::types::counter::CounterType::Generic(
+                    "charge".into()
+                ))
+                .copied(),
+            Some(kick),
+            "reach: the Chalice entered with its counters"
+        );
+    }
+    (runner, zahid, chalices)
+}
+
+/// Charge counters differ, so the Chalices aren't interchangeable: the
+/// one-counter Chalice is tapped for the leg, in either cast order.
+#[test]
+fn chalices_with_different_counters_are_assigned_by_their_output() {
+    for kicks in [[1, 3], [3, 1]] {
+        let (mut runner, zahid, chalices) = chalices_then_zahid(kicks);
+        let small = chalices[usize::from(kicks[0] == 3)];
+        assert!(offered(&runner, zahid), "{kicks:?}");
+
+        let trail = cast(
+            &mut runner,
+            zahid,
+            &Answers {
+                picks: vec![small],
+                ..ACCEPT_BOTH
+            },
+        );
+
+        assert_cast_completes(&runner, zahid, &trail);
+        assert_eq!(life(&runner), 18);
+        assert!(chalices.iter().all(|&c| runner.state().objects[&c].tapped));
+    }
+    let (runner, zahid, _) = chalices_then_zahid([1, 1]);
+    assert!(!offered(&runner, zahid), "two one-counter Chalices can't");
+}
+
+/// Sephara with `birds` Birds of Paradise (summoning sick when `sick`), `spheres`
+/// Spheres of Resistance and `pool` floating.
+fn sephara_with_birds(
+    birds: usize,
+    sick: bool,
+    spheres: usize,
+    pool: &[(ManaType, usize)],
+) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = board();
+    let birds = (0..birds)
+        .map(|_| {
+            let mut bird = scenario.add_creature_from_oracle(
+                P0,
+                "Birds of Paradise",
+                0,
+                1,
+                "Flying\n{T}: Add one mana of any color.",
+            );
+            if sick {
+                bird.with_summoning_sickness();
+            }
+            bird.id()
+        })
+        .collect();
+    for _ in 0..spheres {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Sphere of Resistance",
+            "Spells cost {1} more to cast.",
+        );
+    }
+    let sephara = add_sephara(&mut scenario);
+    scenario.with_mana_pool(P0, mana(pool));
+    (scenario.build(), sephara, birds)
+}
+
+/// One probe refuses Sephara with no white source; with {W}, the summoning-sick
+/// Birds make no mana, so any four are held at once (CR 302.6 limits a
+/// creature's own {T} abilities, not tapping it for a cost).
+#[test]
+fn summoning_sick_flyers_are_held_without_a_search() {
+    let (runner, sephara, _) = sephara_with_birds(100, true, 0, &[]);
+    assert!(!offered(&runner, sephara));
+
+    let (mut runner, sephara, birds) = sephara_with_birds(100, true, 0, &[(ManaType::White, 1)]);
+    let trail = cast(
+        &mut runner,
+        sephara,
+        &Answers {
+            picks: birds[..4].to_vec(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_cast_completes(&runner, sephara, &trail);
+    assert_eq!(pool(&runner), 0);
+}
+
+/// Twenty active Birds and nineteen Spheres: {19}{W} is payable with nothing
+/// held, but every hold of four leaves sixteen mana. C(20, 4) = 4,845
+/// assignments exceed the budget, so the alternative stays offered.
+#[test]
+fn reservation_search_past_its_budget_keeps_the_offer() {
+    let (mut runner, sephara, _) = sephara_with_birds(20, false, 19, &[]);
+    const { assert!(engine::game::RESERVATION_PROBE_BUDGET < 4_845) };
+    assert_eq!(
+        verdict(&runner, sephara),
+        engine::game::ReservationVerdict::Exhausted
+    );
+    let first = cast_action(&runner, sephara);
+    runner.act(first).expect("the cast starts");
+    assert_eq!(runner.waiting_for_kind(), "OptionalCostChoice");
+}
+
+/// CR 118.9a: Fist of Suns' grant and Bringer's own {W}{U}{B}{R}{G} are one
+/// election, offered once; As Foretold's {0} follows. Declining both reaches the
+/// printed cost, which can't be paid. Each Choice survives a save and reload.
+#[test]
+fn declining_every_alternative_reaches_the_printed_cost_once_each() {
+    let mut scenario = board();
+    add_defiler_of_flesh(&mut scenario);
+    let foretold = scenario
+        .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+        .id();
+    scenario.with_counter(foretold, engine::types::counter::CounterType::Time, 9);
+    scenario.add_artifact_from_oracle(P0, "Fist of Suns", FIST_OF_SUNS);
+    let bringer = add_bringer(&mut scenario);
+    scenario.with_mana_pool(P0, mana(&WURG));
+    let mut runner = scenario.build();
+    let first = cast_action(&runner, bringer);
+    runner.act(first).expect("the cast starts");
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accept the Defiler");
+
+    let mut offers = Vec::new();
+    while let Some(offer) = offered_alternative(&runner) {
+        offers.push(offer);
+        runner = round_trip(&runner);
+        assert_eq!(offered_alternative(&runner), offers.last().cloned());
+        if runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    assert_eq!(offers, [wubrg_cost(), ManaCost::zero()]);
+    assert_eq!(
+        zone(&runner, bringer),
+        Zone::Hand,
+        "the printed cost is unpayable"
+    );
+    assert_eq!(pool(&runner), 4);
+}
+
+/// CR 119.4 + CR 601.2h: Enslave targeting Terror of the Peaks costs 3 more
+/// life, the Defiler 2 and K'rrik's {B} 2: 7 life. At 5 it can't be cast; at 8
+/// it is, for exactly 7.
+#[test]
+fn imposed_life_and_defiler_life_are_held_from_life_for_mana() {
+    for (start, cast_now) in [(5, false), (8, true)] {
+        let mut scenario = board();
+        scenario.with_life(P0, start);
+        add_defiler_of_flesh(&mut scenario);
+        let krrik = parse_oracle_text(KRRIK_GRANT, "K'rrik", &[], &["Creature".into()], &[]);
+        let mut grant = scenario.add_creature(P0, "K'rrik, Son of Yawgmoth", 2, 2);
+        for s in krrik.statics {
+            grant.with_static_definition(s);
+        }
+        let terror = scenario
+            .add_creature(P1, "Terror of the Peaks", 5, 4)
+            .from_oracle_text_with_keywords(&["Flying"], TERROR_OF_THE_PEAKS)
+            .id();
+        let enslave = scenario
+            .add_spell_to_hand(P0, "Enslave", false)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(cost(4, &[ManaCostShard::Black, ManaCostShard::Black]))
+            .with_color(vec![ManaColor::Black])
+            .from_oracle_text_with_keywords(&["Enchant"], ENSLAVE)
+            .id();
+        scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 4)]));
+        let mut runner = scenario.build();
+
+        let trail = cast(
+            &mut runner,
+            enslave,
+            &Answers {
+                targets: vec![terror],
+                ..ACCEPT_BOTH
+            },
+        );
+
+        if cast_now {
+            assert_cast_completes(&runner, enslave, &trail);
+            assert_eq!((life(&runner), pool(&runner)), (1, 0));
+        } else {
+            // Both Defiler answers are refused as unpayable; nothing is paid.
+            assert!(trail.refused, "{:?}", trail.prompts);
+            assert_eq!(trail.prompts, ["TargetSelection", "DefilerPayment"]);
+            assert!(runner
+                .act(GameAction::DecideOptionalCost { pay: false })
+                .is_err());
+            assert_eq!((zone(&runner, enslave), life(&runner)), (Zone::Hand, 5));
+        }
+    }
 }
