@@ -574,7 +574,7 @@ describe("additionalCostChoices — Choice with a malformed (short) engine paylo
     const decline = additionalCostChoices(cost).options.find(
       (o) => o.id === "decline",
     )!;
-    expect(decline.label).toBe("Decline");
+    expect(decline.label).toBe("Pay second cost");
   });
 });
 

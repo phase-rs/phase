@@ -839,8 +839,8 @@ export function additionalCostChoices(
       return {
         title: "Choose additional cost",
         options: [
-          { id: "pay", label: pay ? formatAbilityCost(pay) : "Pay" },
-          { id: "decline", label: decline ? formatAbilityCost(decline) : "Decline" },
+          { id: "pay", label: pay ? formatAbilityCost(pay) : "Pay first cost" },
+          { id: "decline", label: decline ? formatAbilityCost(decline) : "Pay second cost" },
         ],
       };
     }
