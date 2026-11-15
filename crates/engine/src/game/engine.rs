@@ -10316,9 +10316,16 @@ pub(super) fn resume_pending_continuation_if_priority(
         // creation the substitute replaced is still resolving), so no player may
         // receive priority: pass again. The repeat follows the whole pass, so that
         // pass's entry commits land first (CR 614.12a).
+        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
+        // owner above the spell's parked tail. Finish that move before returning
+        // priority, so its later instructions resume in this same action.
         let exposes_resolving_owner = matches!(
             state.resolution_stack.last(),
-            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+            Some(
+                ResolutionFrame::CopyToken(_)
+                    | ResolutionFrame::PostReplacement(_)
+                    | ResolutionFrame::ChangeZone(_)
+            )
         );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
