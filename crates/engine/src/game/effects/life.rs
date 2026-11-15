@@ -764,7 +764,21 @@ pub fn try_apply_life_loss(
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, LifeChangeError> {
-    let Some(proposed) = proposed_life_loss(state, player_id, amount) else {
+    try_apply_life_loss_with_prohibition_board(state, player_id, amount, None, events)
+}
+
+/// CR 614.12a + CR 119.4: entry payments judge life-loss prohibitions before
+/// entry, while replacements and settlement still operate on the live state.
+/// `None` uses the live board, as ordinary life loss does.
+pub(crate) fn try_apply_life_loss_with_prohibition_board(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    prohibition_board: Option<&GameState>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    let Some(proposed) = proposed_life_loss(prohibition_board.unwrap_or(state), player_id, amount)
+    else {
         return Ok(0);
     };
     run_ingress_life_change(state, proposed, settle_life_loss, events)

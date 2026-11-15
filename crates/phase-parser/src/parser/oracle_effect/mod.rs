@@ -7307,12 +7307,6 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     })
 }
 
-/// CR 402.2 + CR 114.1: Parse "you have no maximum hand size [for the rest of the game]"
-/// as an effect that creates an emblem with `NoMaximumHandSize` static.
-///
-/// When this text appears on a permanent as a static ability, the static parser handles it.
-/// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
-/// it needs to create an emblem to produce a persistent game-state effect.
 /// CR 118.12a: "[effect] unless a player has [~] deal N damage to them" — any
 /// player may have the source deal damage instead of the primary effect
 /// (Barbarian Bully).
@@ -9097,6 +9091,14 @@ fn parse_event_context_ref_with_ctx<'a>(
     Some((target, rest))
 }
 
+/// CR 611.2 + CR 402.2: Parse "you have no maximum hand size [for the rest of the game]"
+/// as an effect: a continuous effect from a resolving spell or ability that changes a
+/// rule of the game. The engine carries it on an emblem object with a
+/// `NoMaximumHandSize` static, which functions from the command zone (CR 114.4).
+///
+/// When this text appears on a permanent as a static ability, the static parser handles it.
+/// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
+/// the emblem carrier produces the persistent game-state effect.
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
     // Strip optional "you " prefix, then match "have no maximum hand size"
     let after_you = nom_on_lower(tp.original, tp.lower, |i| value((), tag("you ")).parse(i));
@@ -9117,9 +9119,13 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
         return None;
     }
 
+    let mut statics = vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
+        .description("You have no maximum hand size.".to_string())];
+    // CR 611.2 + CR 402.2: the engine carries this effect on an emblem object; like every
+    // emblem static it functions from the command zone (CR 114.4).
+    declare_emblem_static_zones(&mut statics);
     Some(Effect::CreateEmblem {
-        statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
-            .description("You have no maximum hand size.".to_string())],
+        statics,
         triggers: Vec::new(),
     })
 }
@@ -12323,8 +12329,9 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
-    // CR 402.2 + CR 114.1: "you have no maximum hand size [for the rest of the game]" —
-    // as an effect, this creates an emblem with NoMaximumHandSize static.
+    // CR 611.2 + CR 402.2: "you have no maximum hand size [for the rest of the game]" is a
+    // continuous effect from a resolving spell or ability that changes a rule of the game;
+    // the engine carries it on an emblem object with a NoMaximumHandSize static.
     if let Some(effect) = try_parse_no_max_hand_size_effect(tp) {
         return parsed_clause(effect);
     }
@@ -28435,7 +28442,16 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        // CR 701.3d: in "unattach it" the anaphor IS the attachment and no host
+        // is named, so the host stays `Any`; "unattach all Equipment from it"
+        // names the host by anaphor.
+        Effect::UnattachAll { attachment, target }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !matches!(
+                    attachment,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                ) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         // CR 122.1 + CR 701.10e + CR 608.2c: the counter-target anaphor family.
@@ -35534,6 +35550,19 @@ fn strip_balanced_outer_quotes(s: &str) -> &str {
     s
 }
 
+/// CR 114.4 + CR 113.6b: abilities of emblems function in the command zone.
+/// Single parser authority for the zone of function of an emblem's static
+/// abilities, and the static-side twin of the trigger branch's
+/// `trigger_zones = [Zone::Command]`. Replaces (never extends) the zones the
+/// static-line parser declared for the same text on a permanent (for example
+/// `keyword_grant`'s CR 113.6 `[Battlefield]` on `CastWithKeyword`): an emblem
+/// is put into the command zone (CR 114.2) and is never a permanent (CR 114.5).
+fn declare_emblem_static_zones(statics: &mut [StaticDefinition]) {
+    for static_def in statics {
+        static_def.active_zones = vec![Zone::Command];
+    }
+}
+
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
@@ -35598,9 +35627,11 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     // several statics at once; `parse_static_line_multi` emits them all and
     // internally falls back to the single-def parser for simple bodies. An
     // empty result routes to an explicit `emblem_creation` failure below,
-    // so an unparseable body stays a visible coverage gap.
+    // so an unparseable body stays a visible coverage gap. Every emblem static
+    // then declares the command zone as its zone of function (CR 114.4).
     let mut static_defs = super::oracle_static::parse_static_line_multi(inner);
     if !static_defs.is_empty() {
+        declare_emblem_static_zones(&mut static_defs);
         // CR 114: retain the emblem's granted rules text for the display
         // tooltip on the first def only, mirroring the trigger branch.
         if let Some(first) = static_defs.first_mut() {
