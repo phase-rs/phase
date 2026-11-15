@@ -1743,6 +1743,17 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+        /// CR 400.7 + CR 701.20a/d: the exact occurrence of each card at the
+        /// instant it was disclosed ([`GameState::disclosed_occurrences`]). The
+        /// action-boundary knowledge finalizer binds viewer knowledge to these,
+        /// never to whatever later occurrence reuses the storage id, so a card
+        /// reordered after its reveal in the same action stays hidden. Engine
+        /// bookkeeping: `filter_events_for_viewer` strips it. Empty on legacy
+        /// events, which then disclose nothing durable.
+        ///
+        /// [`GameState::disclosed_occurrences`]: crate::types::game_state::GameState::disclosed_occurrences
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        occurrences: Vec<ObjectIncarnationRef>,
     },
     /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
     /// instruction ("then all players reveal those numbers simultaneously" —

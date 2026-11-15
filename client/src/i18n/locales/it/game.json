@@ -1243,6 +1243,7 @@
       "draw": "PAREGGIO",
       "victory": "VITTORIA",
       "defeat": "SCONFITTA",
+      "complete": "PARTITA FINITA",
       "lifeSummary": "Tu: <player>{{playerLife}}</player> <sep>/</sep> Avversario: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turni: {{count}}",
       "duration": "Durata: {{time}}",
@@ -2654,6 +2655,7 @@
   },
   "outsideGame": {
     "fromExile": "Dall'esilio",
+    "fromCompanion": "Dal compagno",
     "fromSideboard": "Dalla sideboard",
     "fromBoosterPack": "Da una busta {{setCode}}",
     "fromCubeBoosterPack": "Da una busta del cube"
