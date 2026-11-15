@@ -2701,6 +2701,25 @@ fn with_full_reveal_population<R>(
     Some(read(produced, &scratch, mana_node))
 }
 
+/// CR 106.12a: a triggered mana ability that triggers "whenever you tap a
+/// permanent for mana" (Kinnan, Bonder Prodigy) triggers only when the mana
+/// ability resolves and produces mana, so its `bonus` is credited only to a
+/// projected `gross` production above zero.
+fn repeated_type_bonus_credit(gross: u32, bonus: u32) -> u32 {
+    if gross > 0 {
+        bonus
+    } else {
+        0
+    }
+}
+
+/// CR 106.12a + CR 605.3b: net capacity of one activation: its gross production
+/// plus the repeated-type bonus it earns (none when it produces nothing), less
+/// the mana paid to activate it.
+fn net_with_repeated_type_bonus(gross: u32, bonus: u32, activation_cost: u32) -> u32 {
+    (gross + repeated_type_bonus_credit(gross, bonus)).saturating_sub(activation_cost)
+}
+
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
 fn usable_mana_ability_net(
     state: &GameState,
@@ -2718,7 +2737,12 @@ fn usable_mana_ability_net(
         // (CR 616.1 replacement orderings) is sized as the plain production it
         // leaves, and the best one bounds the capacity.
         if crate::types::ability::inline_mana_preamble(ability).is_some() {
-            let production = mana_abilities::ability_from_mana_production(ability);
+            // The activation cost is netted only after the repeated-type bonus is
+            // credited, so the per-outcome production is sized without it.
+            let mut production = mana_abilities::ability_from_mana_production(ability);
+            production.cost = None;
+            let activation_cost =
+                mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
             let repeated_type_bonus =
                 taps_for_mana_repeated_type_bonus(state, object_id, controller);
             return mana_abilities::inline_preamble_outcomes(state, object_id, controller, ability)
@@ -2734,7 +2758,9 @@ fn usable_mana_ability_net(
                     )
                 })
                 .max()
-                .map(|net| net + repeated_type_bonus);
+                .map(|gross| {
+                    net_with_repeated_type_bonus(gross, repeated_type_bonus, activation_cost)
+                });
         }
         let shape = reveal_then_mana_shape(ability)?;
         let gross =
@@ -2742,7 +2768,11 @@ fn usable_mana_ability_net(
         let activation_cost =
             mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
         let repeated_type_bonus = taps_for_mana_repeated_type_bonus(state, object_id, controller);
-        return Some((gross + repeated_type_bonus).saturating_sub(activation_cost));
+        return Some(net_with_repeated_type_bonus(
+            gross,
+            repeated_type_bonus,
+            activation_cost,
+        ));
     };
     let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
     if capacity_use == CapacityUse::XCeiling
@@ -2894,12 +2924,14 @@ impl ActivatableManaProfileKind {
                     Self::AnyOneColor { options } => vec![Self::AnyOneColor {
                         options: options
                             .into_iter()
-                            .map(|(mana_type, count)| (mana_type, count + 1))
+                            .map(|(mana_type, count)| {
+                                (mana_type, count + repeated_type_bonus_credit(count, 1))
+                            })
                             .collect(),
                     }],
                     Self::AnyCombination { count, options } => {
                         vec![Self::AnyCombination {
-                            count: count + 1,
+                            count: count + repeated_type_bonus_credit(count, 1),
                             options,
                         }]
                     }

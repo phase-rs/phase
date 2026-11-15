@@ -1679,3 +1679,93 @@ fn kinnan_lets_a_one_artifact_metalworker_pay_matter_reshaper() {
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
     assert!(runner.state().pending_cast.is_none(), "payment finalized");
 }
+
+const SOLEMNITY_ORACLE: &str = "Players can't get counters.\nCounters can't be put on artifacts, creatures, enchantments, or lands.";
+const ENDLESS_ONE_ORACLE: &str = "This creature enters with X +1/+1 counters on it.";
+
+/// Casts Endless One ({X}) from P0's hand and returns the announcement's maximum X.
+fn endless_one_max_x(mut scenario: GameScenario) -> u32 {
+    let endless_one = scenario
+        .add_creature_to_hand_from_oracle(P0, "Endless One", 0, 0, ENDLESS_ONE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::X],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&endless_one].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: endless_one,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting reaches the X announcement");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => *max,
+        other => panic!("expected the X announcement, got {other:?}"),
+    }
+}
+
+/// CR 106.12a: Kinnan's trigger fires only when the mana ability "resolves and
+/// produces mana". Metalworker with no artifact card in hand produces nothing,
+/// so Kinnan adds nothing and the announcement offers a maximum X of 0.
+#[test]
+fn kinnan_bonus_is_not_credited_when_metalworker_has_nothing_to_reveal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact();
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    assert_eq!(endless_one_max_x(scenario), 0);
+}
+
+/// Positive control: one artifact card to reveal keeps Kinnan-assisted sizing:
+/// {C}{C} plus Kinnan's {C} is three mana, so X can be 3.
+#[test]
+fn kinnan_bonus_is_credited_when_metalworker_can_reveal_an_artifact() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact();
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact();
+    assert_eq!(endless_one_max_x(scenario), 3);
+}
+
+/// CR 106.12a + CR 122.6: Empowered Autogenerator reaches the inline-preamble
+/// branch. Under Solemnity its counter is never placed, so X is 0, it produces
+/// nothing, and Kinnan's trigger does not fire: the maximum X stays 0.
+#[test]
+fn kinnan_bonus_is_not_credited_when_inline_preamble_produces_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Empowered Autogenerator",
+        EMPOWERED_AUTOGENERATOR_ORACLE,
+    );
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Solemnity", SOLEMNITY_ORACLE);
+    assert_eq!(endless_one_max_x(scenario), 0);
+}
+
+/// Control for the inline-preamble case: without Solemnity the counter lands,
+/// X is 1, and Kinnan adds one more mana, so the maximum X is 2.
+#[test]
+fn kinnan_bonus_is_credited_when_inline_preamble_produces_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Empowered Autogenerator",
+        EMPOWERED_AUTOGENERATOR_ORACLE,
+    );
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    assert_eq!(endless_one_max_x(scenario), 2);
+}
