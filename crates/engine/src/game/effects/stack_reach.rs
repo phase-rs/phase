@@ -817,9 +817,10 @@ fn controller_ref_admits_owner(
     match controller {
         // CR 109.5: "you" means the source controller.
         ControllerRef::You => source_controller == Some(card_owner),
-        // CR 109.5: "an opponent" means any player other than the source
-        // controller who is still in the game. This is a relation, not a single
-        // player — in multiplayer there are multiple opponents.
+        // CR 102.3: an opponent is a player not on the source controller's
+        // team. This arm admits any living player other than the source
+        // controller, matching `filter::owned_axis_admits`. This is a relation,
+        // not a single player — in multiplayer there are multiple opponents.
         ControllerRef::Opponent => {
             source_controller.is_some()
                 && source_controller != Some(card_owner)
