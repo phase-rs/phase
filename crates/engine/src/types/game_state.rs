@@ -6385,6 +6385,31 @@ pub struct PendingPlayerScopeSacrificeChoice {
     pub resolving_entry: Option<ObjectId>,
 }
 
+/// CR 101.4: If players make choices for one instruction, they choose in
+/// APNAP order before the simultaneous action happens. Per-player untargeted
+/// choices for one simultaneous instruction: "each player returns a permanent
+/// they control to its owner's hand" (`Effect::Bounce`, CR 400.3) or "each
+/// opponent discards a card" (`Effect::Discard`, CR 701.9a). Nothing chosen
+/// moves until every player has chosen; the whole selection is then delivered
+/// as one batch. The instruction is the carrier's `ability`'s effect, and the
+/// matching collector (`effects::bounce` or `effects::scoped_discard`) owns
+/// the walk.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPlayerScopeChoice {
+    /// The scoped `Effect::Bounce` or `Effect::Discard` template. The current chooser is rebound
+    /// onto a clone before each pool is built.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Objects already chosen (or forced by a one-card pool), in APNAP order,
+    /// each with the player who chose it and the incarnation it had when chosen.
+    /// They stay where they were (the battlefield, or a hand: CR 101.4a lets
+    /// it stay unrevealed) until the batch is delivered; a pick that has since
+    /// left that zone is a new object (CR 400.7) and is not moved. Never
+    /// projected to a viewer.
+    pub selections: Vec<(PlayerId, ObjectIncarnationRef)>,
+}
+
 /// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
 /// token instruction whose declining players receive one aggregate token
 /// creation after every payer has answered. Kept independently of the current
@@ -27764,6 +27789,11 @@ declare_game_state! {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4: per-player untargeted return or discard choices paused by the
+    /// current player's prompt (`EffectZoneChoice` or `DiscardChoice`); nothing
+    /// has moved yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_choice: Option<PendingPlayerScopeChoice>,
     /// CR 101.4 + CR 118.12a: player-scoped unless-payment poll retained
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36541,6 +36571,7 @@ impl GameState {
             resolution_coin_flip: None,
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_player_scope_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_hero_event: None,
@@ -40360,6 +40391,7 @@ impl GameState {
             entering_aura_authority: _,
             last_discover_value: _,
             pending_player_scope_sacrifice_choice: _,
+            pending_player_scope_choice: _,
             pending_player_scope_unless_payment: _,
             pending_discard_batch: _,
             pending_exile_from_top_until: _,
@@ -42318,6 +42350,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     every Priority sample beat — the drain consumes it before priority is restored), so
         //     COMPARING it can never suppress a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_player_scope_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
@@ -42840,6 +42873,7 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_player_scope_choice == other.pending_player_scope_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
