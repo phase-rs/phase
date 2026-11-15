@@ -47058,9 +47058,9 @@ fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
     assert!(checked > 0, "reach guard: the search parsed");
 }
 
-/// CR 608.2c + CR 121.1: a source-owner anchor is not a resolvable Draw actor
-/// in this PR. The shared anchor applier must leave a subjectless Draw on its
-/// controller; only RevealUntil resolves Owner (through the live-or-LKI seam).
+/// CR 608.2c + CR 121.1: the shared anchor applier binds a subjectless Draw
+/// to the source owner. The chained parser carries that owner as the scoped
+/// actor for the subsequent Draw.
 #[test]
 fn owner_anchor_binds_draw_through_the_shared_resolver() {
     let mut draw = Effect::Draw {
