@@ -41895,7 +41895,8 @@ fn nearest_dig_rest_zone_in_ability(def: &AbilityDefinition) -> Option<Zone> {
 /// card exiled with this artifact into its owner's graveyard, then create ...
 /// for each card put into a graveyard this way" — every exiled card lands in
 /// the SAME graveyard pile via `ChangeZoneAll`, not a Dig, so this returns
-/// `None` and the bare `TrackedSetSize` default stays correct there).
+/// `None` and the clause keeps the destination-count parse: the tracked cards
+/// delivered to Graveyard, CR 614.6).
 fn nearest_dig_rest_zone_in_clause(clause: &ParsedEffectClause) -> Option<Zone> {
     dig_rest_zone(&clause.effect).or_else(|| {
         clause

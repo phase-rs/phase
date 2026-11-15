@@ -15498,25 +15498,42 @@ fn park_resolution_object_choice(
 }
 
 /// CR 701.17c + CR 608.2c: a settled mill batch publishes its public results
-/// into the tracked set of the `player_scope` clause whose detached tail reads
-/// it. The live clause is the resolving sidecar (a leg draining under it) or the
-/// active continuation's (the paused seat's batch settling before its drain);
-/// with neither, or a tail that does not read the set, the ordinary postlude
-/// publication owns the result.
-pub(super) fn publish_settled_mill_to_scope_tail(state: &mut GameState, settled: Vec<ObjectId>) {
+/// into the tracked set its owning instruction's later clauses read ("for each
+/// creature card put into a graveyard this way"). The reader is whichever
+/// clause the resolution parked behind the mill: the `player_scope` sidecar's
+/// detached tail (a leg draining under it, or the active continuation's tail
+/// when the paused seat's batch settles before its drain), or the active
+/// continuation's own chain (a CR 616.1 replacement-order answer resumes the
+/// delivery after the effect handler returned, so the handler's ordinary
+/// postlude publication never sees the cards delivered after the pause). With
+/// no such reader the ordinary postlude publication owns the result.
+///
+/// This is the single seam both continuation shapes publish through; the
+/// publication is a union, so the unpaused path publishing again is a no-op.
+pub(super) fn publish_settled_mill_to_continuation_reader(
+    state: &mut GameState,
+    settled: Vec<ObjectId>,
+) {
     if settled.is_empty() {
         return;
     }
-    let tail_reads_set = state
+    let continuation = state.active_ability_continuation();
+    let scope_tail_reads_set = state
         .resolving_player_scope_tail
         .as_ref()
-        .or_else(|| {
-            state
-                .active_ability_continuation()
-                .and_then(|pending| pending.player_scope_tail.as_ref())
-        })
+        .or_else(|| continuation.and_then(|pending| pending.player_scope_tail.as_ref()))
         .is_some_and(|scope| chain_references_tracked_set(&scope.after_scope));
-    if tail_reads_set {
+    // CR 608.2c: the parked chain belongs to the resolving instruction only when
+    // it shares its source (the same guard `resolution_next_needs_tracked_set`
+    // applies to a producer).
+    let chain_reads_set = continuation.is_some_and(|pending| {
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|entry| entry.source_id == pending.chain.source_id)
+            && chain_references_tracked_set(&pending.chain)
+    });
+    if scope_tail_reads_set || chain_reads_set {
         publish_tracked_set_with_causes(
             state,
             settled
@@ -68634,6 +68651,7 @@ mod entry_observation_settlement_tests {
             after_scope: Box::new(node(put_counter())),
             linked_exile_batch: Vec::new(),
             created_tokens: None,
+            zone_changed_this_way: None,
         });
         settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
         assert!(

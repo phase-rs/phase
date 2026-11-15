@@ -300,9 +300,10 @@ pub(crate) fn complete_mill_delivery(
     state.last_zone_changed_ids = moved;
     // CR 701.17c + CR 608.2c: the settling batch publishes its own results - the
     // `Milled` it just emitted, never the rest of the action's buffer - into the
-    // tracked set a `player_scope` clause's detached tail reads. This is the one
-    // seam a seat's mill reaches on the paused (CR 616.1) and unpaused path alike.
-    super::publish_settled_mill_to_scope_tail(
+    // tracked set a later clause of the instruction reads (a `player_scope`
+    // clause's detached tail, or the parked continuation's own chain). This is the
+    // one seam a mill reaches on the paused (CR 616.1) and unpaused path alike.
+    super::publish_settled_mill_to_continuation_reader(
         state,
         public_milled_results(&events[settled_from..]),
     );

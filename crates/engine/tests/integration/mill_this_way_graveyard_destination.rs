@@ -12,6 +12,8 @@
 //! Oracle text below is verbatim from Scryfall `cards/named`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -175,4 +177,115 @@ fn coerced_confession_under_rest_in_peace_draws_nothing() {
         "reach guard: Rest in Peace exiled both milled creatures"
     );
     assert_eq!(drawn, 0);
+}
+
+const BRUVAC: &str = "If an opponent would mill one or more cards, they mill twice that many cards instead. (To mill a card, a player puts the top card of their library into their graveyard.)";
+const WATER_CRYSTAL: &str = "If an opponent would mill one or more cards, they mill that many cards plus four instead.\nBlue spells you cast cost {1} less to cast.\n{4}{U}{U}, {T}: Each opponent mills cards equal to the number of cards in your hand.";
+
+/// CR 616.1 + CR 701.17a: P1 controls Bruvac and The Water Crystal, so P0's mill
+/// is modified by two replacements of the same event and P0 chooses the order
+/// (either order mills at least X + 4 cards). P0's library holds one creature
+/// card on top of otherwise noncreature cards deep enough for either order.
+/// Returns the staged creature card's id.
+fn stage_order_prompt_board(scenario: &mut GameScenario, below_mill_range: usize) -> ObjectId {
+    scenario.add_creature_from_oracle(P1, "Bruvac the Grandiloquent", 1, 4, BRUVAC);
+    scenario.add_artifact_from_oracle(P1, "The Water Crystal", WATER_CRYSTAL);
+    // Cards below the mill range, for a spell that draws afterwards.
+    for _ in 0..below_mill_range {
+        scenario.add_card_to_library_top(P0, "Draw Fodder");
+    }
+    for _ in 0..24 {
+        stage_spell(scenario, P0);
+    }
+    let creature = stage_creature(scenario, P0);
+    stage_spell(scenario, P1);
+    creature
+}
+
+/// Answer the CR 616.1 order prompt, then settle to an empty stack.
+fn answer_order_prompt_and_settle(runner: &mut GameRunner) {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P0,
+                kind: ReplacementChoiceKind::Order,
+                ..
+            }
+        ),
+        "reach guard: P0 is asked to order Bruvac and The Water Crystal, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the order choice is accepted");
+    for _ in 0..50 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            ref other => panic!("unexpected decision after the order choice: {other:?}"),
+        }
+    }
+    panic!("the spell never finished resolving");
+}
+
+/// CR 616.1 + CR 701.17a + CR 608.2c: Dread Summons X=1 with P0's mill paused on
+/// the replacement order. The creature card delivered after the answer was put
+/// into a graveyard this way, so exactly one Zombie is created.
+#[test]
+fn dread_summons_counts_a_creature_delivered_after_the_replacement_order_answer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dread Summons", false, DREAD_SUMMONS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let creature = stage_order_prompt_board(&mut scenario, 0);
+    scenario.with_mana_pool(P0, pool(ManaType::Black, 3));
+    let mut runner = scenario.build();
+    runner.cast(spell).x(1).resolve();
+    answer_order_prompt_and_settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Graveyard,
+        "reach guard: the creature card reached P0's graveyard"
+    );
+    assert_eq!(zombie_tokens(&runner), 1);
+}
+
+/// CR 616.1 + CR 701.17a + CR 608.2c: Coerced Confession targeting P0 with the
+/// mill paused on the replacement order. The creature card put into P0's
+/// graveyard after the answer yields exactly one draw.
+#[test]
+fn coerced_confession_counts_a_creature_delivered_after_the_replacement_order_answer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Coerced Confession", false, COERCED_CONFESSION)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::BlueBlack],
+            generic: 4,
+        })
+        .id();
+    let creature = stage_order_prompt_board(&mut scenario, 4);
+    scenario.with_mana_pool(P0, pool(ManaType::Black, 5));
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    runner.cast(spell).target_player(P0).resolve();
+    answer_order_prompt_and_settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Graveyard,
+        "reach guard: the creature card reached P0's graveyard"
+    );
+    // The spell left the hand when cast; everything else in hand was drawn.
+    let drawn = runner.state().players[P0.0 as usize].hand.len() + 1 - hand_before;
+    assert_eq!(drawn, 1);
 }
