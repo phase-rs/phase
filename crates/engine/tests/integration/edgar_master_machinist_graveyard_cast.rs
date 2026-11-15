@@ -10,7 +10,6 @@
 //!
 //! Every test drives production `GameAction`s after `build()`.
 
-use engine::game::casting::can_cast_object_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CardPlayMode, StaticCondition};
 use engine::types::actions::GameAction;
@@ -153,6 +152,18 @@ fn cast_under(runner: &mut GameRunner, id: ObjectId, source: ObjectId) -> Object
                         slot: CoreType::Artifact,
                     })
                     .expect("choosing the artifact slot")
+                    .waiting_for;
+            }
+            // CR 601.2f: pay each Phyrexian shard with mana.
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                waiting = runner
+                    .act(GameAction::SubmitPhyrexianChoices {
+                        choices: vec![
+                            engine::types::game_state::ShardChoice::PayMana;
+                            shards.len()
+                        ],
+                    })
+                    .expect("paying the Phyrexian shard with mana")
                     .waiting_for;
             }
             _ => break,
@@ -625,22 +636,113 @@ fn edgar_hand_cast_enters_untapped() {
     assert!(!edgar_slot_used(&r, edgar));
 }
 
-/// C14b: "during each of your turns" — no graveyard cast on an opponent's
-/// turn (Edgar 2025-06-06 ruling: timing permissions are the card's own).
+/// Shimmer Myr: an artifact with flash that lets artifact spells be cast as
+/// though they had flash, so an opponent-turn refusal can't come from sorcery
+/// timing.
+const SHIMMER_MYR: &str = "Flash\nYou may cast artifact spells as though they had flash.";
+
+/// Drive P0's turn to P1's upkeep through public actions (no attackers, no
+/// blockers), then hand P0 priority there.
+fn to_opponents_upkeep_with_priority(r: &mut GameRunner) {
+    let turn = r.state().turn_number;
+    for _ in 0..200 {
+        if r.state().turn_number == turn + 1 && r.state().phase == Phase::Upkeep {
+            break;
+        }
+        let action = match &r.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: Vec::new(),
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: Vec::new(),
+            },
+            other => panic!("unexpected prompt while driving to P1's turn: {other:?}"),
+        };
+        r.act(action).expect("driver action accepted");
+    }
+    assert_eq!(r.state().active_player, P1, "reach guard: P1's turn");
+    assert_eq!(r.state().phase, Phase::Upkeep);
+    give_priority_to(r, P0);
+}
+
+/// C14b (Q3): "Once during each of your turns" (CR 102.1 + the parsed
+/// `DuringYourTurn`). Shimmer Myr has flash, so on P1's turn only Edgar's turn
+/// restriction can refuse the graveyard cast. Controls: (a) the same graveyard
+/// cast on P0's own turn succeeds; (b) the same card from hand at the same
+/// opponent-turn window succeeds (flash); (c) with only Edgar's
+/// `DuringYourTurn` removed, the opponent-turn graveyard cast succeeds.
 #[test]
 fn edgar_permission_blocked_on_opponents_turn() {
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
-    let edgar = add_edgar(&mut s);
-    let orni = graveyard_artifact(&mut s, "Ornithopter", 0, 2);
-    let mut r = s.build();
-    assert_edgar_permission(&r, edgar);
+    let board = |zone: Zone| {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let edgar = add_edgar(&mut s);
+        let myr = match zone {
+            Zone::Graveyard => s.add_creature_to_graveyard(P0, "Shimmer Myr", 2, 2),
+            _ => s.add_creature_to_hand(P0, "Shimmer Myr", 2, 2),
+        }
+        .as_artifact_creature()
+        .from_oracle_text(SHIMMER_MYR)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+        let r = s.build();
+        assert_edgar_permission(&r, edgar);
+        (r, edgar, myr)
+    };
+
+    // (a) own turn: Edgar authorizes the graveyard cast.
+    let (mut r, edgar, myr) = board(Zone::Graveyard);
+    add_colorless(&mut r, 0, 3);
+    start_cast(&mut r, myr, CastPaymentMode::Auto).expect("own-turn graveyard cast");
+    assert_eq!(selected_authority(&r, myr), edgar);
+
+    // The negative: P1's turn, P0 holds priority, Edgar's slot unused.
+    let (mut r, edgar, myr) = board(Zone::Graveyard);
+    to_opponents_upkeep_with_priority(&mut r);
     assert!(
-        can_cast_object_now(r.state(), P0, orni),
-        "reach guard: castable on P0's turn"
+        !edgar_slot_used(&r, edgar),
+        "reach guard: the slot is unused"
     );
-    r.state_mut().active_player = P1;
-    assert!(!can_cast_object_now(r.state(), P0, orni));
+    add_colorless(&mut r, 0, 3);
+    assert!(
+        start_cast(&mut r, myr, CastPaymentMode::Auto).is_err(),
+        "Edgar's permission works only during its controller's turns"
+    );
+    assert_eq!(r.state().objects[&myr].zone, Zone::Graveyard);
+
+    // (b) the same window admits the card from hand (it has flash).
+    let (mut r, _edgar, myr) = board(Zone::Hand);
+    to_opponents_upkeep_with_priority(&mut r);
+    add_colorless(&mut r, 0, 3);
+    start_cast(&mut r, myr, CastPaymentMode::Auto).expect("flash cast from hand");
+    assert_eq!(r.state().objects[&myr].zone, Zone::Stack);
+
+    // (c) mutation: only Edgar's DuringYourTurn removed → the graveyard cast
+    // is admitted in the same window, so the refusal above is the condition.
+    let (mut r, edgar, myr) = board(Zone::Graveyard);
+    to_opponents_upkeep_with_priority(&mut r);
+    {
+        let obj = r.state_mut().objects.get_mut(&edgar).unwrap();
+        let without_turn_gate = |def: &mut engine::types::ability::StaticDefinition| {
+            if matches!(def.mode, StaticMode::GraveyardCastPermission { .. }) {
+                def.condition = None;
+            }
+        };
+        for index in 0..obj.static_definitions.len() {
+            if let Some(def) = obj.static_definitions.get_mut(index) {
+                without_turn_gate(def);
+            }
+        }
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions)
+            .iter_mut()
+            .for_each(without_turn_gate);
+    }
+    add_colorless(&mut r, 0, 3);
+    start_cast(&mut r, myr, CastPaymentMode::Auto)
+        .expect("without DuringYourTurn the opponent-turn graveyard cast is admitted");
+    assert_eq!(selected_authority(&r, myr), edgar);
 }
 
 // --- C15 / C22: the carrier ends when the spell leaves the stack ------------
@@ -708,67 +810,240 @@ fn remanded_edgar_cast_recast_from_hand_enters_untapped() {
     assert!(!tapped(&r, orni));
 }
 
-// --- C19: an original that enters as a copy --------------------------------
+// --- C19 (Q2): an original that enters as a copy -------------------------------
 
-/// C19: Phyrexian Metamorph cast through Edgar (Biotransference not needed: it
-/// is an artifact) enters as a copy of Ornithopter. CR 616.1c applies the copy
-/// first; Edgar's rider still applies, so it enters tapped, and it is still a
-/// nontoken card.
-#[test]
-fn edgar_metamorph_enters_as_copy_tapped() {
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
-    let edgar = add_edgar(&mut s);
-    let model = s
-        .add_creature(P0, "Ornithopter", 0, 2)
-        .as_artifact_creature()
-        .id();
-    let metamorph = s
-        .add_creature_to_graveyard(P0, "Phyrexian Metamorph", 0, 0)
-        .as_artifact_creature()
-        .from_oracle_text(PHYREXIAN_METAMORPH)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    let mut r = s.build();
-    assert_edgar_permission(&r, edgar);
-    assert_eq!(cast_under(&mut r, metamorph, edgar), edgar);
-    let mut saw_copy_choice = false;
-    for _ in 0..16 {
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+
+/// Resolve the stack, answering Phyrexian Metamorph's entry explicitly: the
+/// "you may have it enter as a copy" choice is accepted with `copy` (or
+/// declined with `None`). Returns the prompts seen, in order.
+fn resolve_metamorph_entry(r: &mut GameRunner, copy: Option<ObjectId>) -> Vec<String> {
+    let mut seen = Vec::new();
+    for _ in 0..24 {
         match r.state().waiting_for.clone() {
-            WaitingFor::Priority { .. }
-                if r.state().stack.is_empty()
-                    && r.state().objects[&metamorph].zone == Zone::Battlefield =>
-            {
-                break
-            }
+            WaitingFor::Priority { .. } if r.state().stack.is_empty() => return seen,
             WaitingFor::Priority { .. } => {
-                r.act(GameAction::PassPriority).expect("pass");
+                r.act(GameAction::PassPriority).expect("pass priority");
             }
-            WaitingFor::ReplacementChoice { candidates, .. } => {
-                saw_copy_choice = true;
-                let index = candidates
-                    .iter()
-                    .position(|c| c.source_name == "Phyrexian Metamorph")
-                    .unwrap_or(0);
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                seen.push(format!("CopyTargetChoice({valid_targets:?})"));
+                if let Some(model) = copy {
+                    assert!(valid_targets.contains(&model), "the model is offered");
+                }
+                r.act(GameAction::ChooseTarget {
+                    target: copy.map(engine::types::ability::TargetRef::Object),
+                })
+                .expect("answer the copy choice");
+            }
+            WaitingFor::ReplacementChoice {
+                candidates, kind, ..
+            } => {
+                seen.push(format!(
+                    "ReplacementChoice({kind:?}: {:?})",
+                    candidates
+                        .iter()
+                        .map(|c| format!("{}: {}", c.source_name, c.description))
+                        .collect::<Vec<_>>()
+                ));
+                let index = if copy.is_some() { 0 } else { 1 };
                 r.act(GameAction::ChooseReplacement { index })
-                    .expect("accept the copy");
+                    .expect("answer the optional copy");
             }
-            other => {
-                saw_copy_choice = true;
-                let choice = engine::ai_support::legal_actions(r.state())
-                    .into_iter()
-                    .find(|action| format!("{action:?}").contains(&format!("{:?}", model)))
-                    .unwrap_or_else(|| panic!("a choice naming the model, at {other:?}"));
-                r.act(choice).expect("choose Ornithopter to copy");
-            }
+            other => panic!("unexpected prompt {other:?} after {seen:?}"),
         }
     }
-    assert!(saw_copy_choice, "reach guard: the copy choice was offered");
-    let entered = &r.state().objects[&metamorph];
-    assert_eq!(entered.zone, Zone::Battlefield);
-    assert_eq!(entered.name, "Ornithopter", "entered as a copy");
-    assert!(!entered.is_token, "still a nontoken card");
-    assert!(entered.tapped, "Edgar's rider applies to the copy's entry");
+    panic!("the stack never emptied after {seen:?}");
+}
+
+/// C19 (Q2): Phyrexian Metamorph cast through Edgar for its printed
+/// {3}{U/P}, on a board with Glorious Anthem (so a declined 0/0 Metamorph
+/// survives). Accepting the copy of Ornithopter (CR 616.1c applies the copy
+/// first) or declining it, it enters tapped, is still a nontoken card, its
+/// carrier is cleared, and the game is back at Priority with an empty stack.
+#[test]
+fn edgar_metamorph_enters_tapped_whether_or_not_it_copies() {
+    for accept in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let edgar = add_edgar(&mut s);
+        s.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+        let model = s
+            .add_creature(P0, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .id();
+        let metamorph = s
+            .add_creature_to_graveyard(P0, "Phyrexian Metamorph", 0, 0)
+            .as_artifact_creature()
+            .from_oracle_text(PHYREXIAN_METAMORPH)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![engine::types::mana::ManaCostShard::PhyrexianBlue],
+            })
+            .id();
+        let mut r = s.build();
+        assert_edgar_permission(&r, edgar);
+        add_colorless(&mut r, 0, 3);
+        r.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+        assert_eq!(cast_under(&mut r, metamorph, edgar), edgar);
+        assert_eq!(
+            r.state().players[0].mana_pool.total(),
+            0,
+            "the printed {{3}}{{U/P}} was paid"
+        );
+        let seen = resolve_metamorph_entry(&mut r, accept.then_some(model));
+        let optional = seen
+            .first()
+            .unwrap_or_else(|| panic!("the optional copy prompt (accept {accept})"));
+        assert!(
+            optional.starts_with("ReplacementChoice(OptionalBranch")
+                && optional.contains("Phyrexian Metamorph: You may have ~ enter as a copy")
+                && optional.contains("Phyrexian Metamorph: Decline"),
+            "reach guard: the copy is offered as an accept/decline choice: {seen:?}"
+        );
+        if accept {
+            assert_eq!(seen.len(), 2, "{seen:?}");
+            assert!(seen[1].starts_with("CopyTargetChoice"), "{seen:?}");
+        } else {
+            assert_eq!(seen.len(), 1, "declining asks nothing more: {seen:?}");
+        }
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        assert!(r.state().stack.is_empty());
+        let entered = &r.state().objects[&metamorph];
+        assert_eq!(entered.zone, Zone::Battlefield, "accept {accept}: {seen:?}");
+        assert_eq!(
+            entered.name,
+            if accept {
+                "Ornithopter"
+            } else {
+                "Phyrexian Metamorph"
+            },
+            "accept {accept}"
+        );
+        assert!(!entered.is_token, "still a nontoken card (accept {accept})");
+        assert!(
+            entered.tapped,
+            "Edgar's rider applies (accept {accept}): {seen:?}"
+        );
+        assert_eq!(
+            entered.cast_permission_enter_tapped,
+            EtbTapState::Unspecified
+        );
+    }
+}
+
+// --- EM5-1 (Q1): the latch outlives a copied source -----------------------------
+
+/// Q1: CR 601.2a + Edgar's 2025-06-06 ruling. P0's Phyrexian Metamorph copies
+/// P1's Edgar, so P0 has Edgar's permission. P0 announces Myr Retriever under
+/// it, then sacrifices the copy to Ashnod's Altar while paying. In the
+/// graveyard the Metamorph has its own characteristics again (CR 707.2 copy
+/// effects end), so only the rider latched at announcement can make Retriever
+/// enter tapped. Control: the copy stays and the cast is paid from the pool.
+#[test]
+fn copied_edgar_sacrificed_mid_payment_still_enters_tapped() {
+    for sacrifice in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let edgar = s.add_creature_from_oracle(P1, EDGAR_NAME, 2, 4, EDGAR).id();
+        let altar = s
+            .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+            .id();
+        let metamorph = s
+            .add_creature_to_hand(P0, "Phyrexian Metamorph", 0, 0)
+            .as_artifact_creature()
+            .from_oracle_text(PHYREXIAN_METAMORPH)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![engine::types::mana::ManaCostShard::PhyrexianBlue],
+            })
+            .id();
+        let retriever = s
+            .add_creature_to_graveyard(P0, "Myr Retriever", 1, 1)
+            .as_artifact_creature()
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let mut r = s.build();
+        assert_edgar_permission(&r, edgar);
+
+        add_colorless(&mut r, 0, 3);
+        r.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+        let waiting = start_cast(&mut r, metamorph, CastPaymentMode::Auto).expect("cast Metamorph");
+        if let WaitingFor::PhyrexianPayment { shards, .. } = waiting {
+            r.act(GameAction::SubmitPhyrexianChoices {
+                choices: vec![engine::types::game_state::ShardChoice::PayMana; shards.len()],
+            })
+            .expect("pay the Phyrexian shard with mana");
+        }
+        assert_eq!(r.state().objects[&metamorph].zone, Zone::Stack);
+        let seen = resolve_metamorph_entry(&mut r, Some(edgar));
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(
+            seen[0].starts_with("ReplacementChoice(OptionalBranch")
+                && seen[1].starts_with("CopyTargetChoice"),
+            "reach guard: the copy prompt, accepted with P1's Edgar: {seen:?}"
+        );
+        assert_eq!(r.state().objects[&metamorph].zone, Zone::Battlefield);
+        assert_edgar_permission(&r, metamorph);
+
+        if !sacrifice {
+            add_colorless(&mut r, 0, 2);
+        }
+        let waiting =
+            start_cast(&mut r, retriever, CastPaymentMode::Manual).expect("the cast starts");
+        if sacrifice {
+            assert!(
+                matches!(waiting, WaitingFor::ManaPayment { .. }),
+                "manual payment, got {waiting:?}"
+            );
+            r.act(GameAction::ActivateAbility {
+                source_id: altar,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Ashnod's Altar during payment");
+            r.act(GameAction::SelectCards {
+                cards: vec![metamorph],
+            })
+            .expect("sacrifice the copied source");
+            let departed = &r.state().objects[&metamorph];
+            assert_eq!(departed.zone, Zone::Graveyard, "the source departed first");
+            assert!(
+                departed
+                    .static_definitions
+                    .iter_all()
+                    .all(|def| !matches!(def.mode, StaticMode::GraveyardCastPermission { .. })),
+                "reach guard: the departed Metamorph no longer carries Edgar's permission"
+            );
+        }
+        for _ in 0..4 {
+            if matches!(r.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                r.act(GameAction::PassPriority).expect("commit the payment");
+            }
+        }
+        assert_eq!(r.state().objects[&retriever].zone, Zone::Stack);
+        assert_eq!(selected_authority(&r, retriever), metamorph);
+        assert_eq!(
+            carrier(&r, retriever),
+            EtbTapState::Tapped,
+            "the latched rider reached the spell (sacrifice {sacrifice})"
+        );
+        resolve_all(&mut r);
+        assert_eq!(r.state().objects[&retriever].zone, Zone::Battlefield);
+        assert!(
+            tapped(&r, retriever),
+            "enters tapped (sacrifice {sacrifice})"
+        );
+    }
 }
 
 // --- C25a: repo-owned saved games still load ---------------------------------
