@@ -185,7 +185,7 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     }
 }
 
-/// The beneficial effects whose recipient is a creature already on the battlefield.
+/// Whether a beneficial effect's target can be a creature on the battlefield.
 ///
 /// A `ChangeZone` onto the battlefield draws its target from the library,
 /// graveyard, hand or exile — never from our own battlefield — so the
@@ -200,10 +200,10 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
 /// member of that category. Its recipient is the token this same resolution
 /// creates, so it does not need a creature of ours; this reads the walk without
 /// those placements.
-fn beneficial_battlefield_creature_effects<'a>(ctx: &PolicyContext<'a>) -> Vec<&'a Effect> {
+fn has_beneficial_battlefield_creature_effect(ctx: &PolicyContext<'_>) -> bool {
     ctx.effects_without_created_token_placements()
         .into_iter()
-        .filter(|effect| {
+        .any(|effect| {
             !matches!(
                 effect,
                 Effect::ChangeZone {
@@ -213,7 +213,6 @@ fn beneficial_battlefield_creature_effects<'a>(ctx: &PolicyContext<'a>) -> Vec<&
             ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
                 && targets_creatures(effect)
         })
-        .collect()
 }
 
 /// Reject a pure creature-benefit spell when the AI has no creature that can
@@ -222,8 +221,7 @@ fn beneficial_battlefield_creature_effects<'a>(ctx: &PolicyContext<'a>) -> Vec<&
 /// the spell supplies no separate damage, removal, or AI-directed resource.
 fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) -> bool {
     let effects = ctx.effects();
-    let beneficial_creature_effects = beneficial_battlefield_creature_effects(ctx);
-    if beneficial_creature_effects.is_empty() {
+    if !has_beneficial_battlefield_creature_effect(ctx) {
         return false;
     }
 
@@ -401,8 +399,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     let effects = ctx.effects();
 
-    let beneficial_creature_effects = beneficial_battlefield_creature_effects(ctx);
-    let mut has_beneficial_creature_target = !beneficial_creature_effects.is_empty();
+    let mut has_beneficial_creature_target = has_beneficial_battlefield_creature_effect(ctx);
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
