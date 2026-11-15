@@ -3002,6 +3002,7 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -5563,29 +5564,51 @@ fn start_game_counts_the_starting_players_first_turn() {
     assert_eq!(state.players[0].turns_taken, 1);
 }
 
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),
@@ -8081,8 +8104,8 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 ///
 /// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
 /// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
-/// builds its eligible pool via `FilterContext::from_ability` (source excluded
-/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+/// builds its eligible pool via `FilterContext::from_ability` (no recipient
+/// bound, so `FilterProp::Another` excludes the source).
 ///
 /// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
 /// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
@@ -9307,6 +9330,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -9757,6 +9781,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -11749,6 +11774,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -13440,4 +13466,162 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
         !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
         "CR 101.2: a \"can't play lands\" static refuses the land face"
     );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
+    );
+}
+
+/// Park a copy owner for `source` that already lists `created` and has no
+/// batch left to create.
+fn park_completed_copy_owner(state: &mut GameState, source: ObjectId, created: ObjectId) {
+    state
+        .resolution_stack
+        .push_copy_token(crate::types::game_state::PendingCopyTokenResolution {
+            created_ids: vec![created],
+            remaining: std::collections::VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: source,
+            referent_set: None,
+            offered_batch: crate::types::game_state::OfferedBatchCustody::Settled,
+        });
+}
+
+fn resolution_frame_kinds(state: &GameState) -> Vec<crate::types::resolution::FrameKind> {
+    state
+        .resolution_stack
+        .iter()
+        .map(ResolutionFrame::kind)
+        .collect()
+}
+
+/// The sources of every `EffectResolved{CopyTokenOf}`, in event order.
+fn copy_token_terminals(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::CopyTokenOf,
+                source_id,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn battlefield_object(state: &mut GameState, name: &str) -> ObjectId {
+    create_object(
+        state,
+        CardId(1),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    )
+}
+
+/// U-R1 (CR 117.2e + CR 614.6): a retired post-replacement drain exposes the
+/// copy owner whose creation it replaced. That ability is still resolving, so
+/// the common priority boundary completes the owner in the same call.
+#[test]
+fn priority_boundary_completes_a_copy_owner_a_retired_drain_exposes() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src = battlefield_object(&mut state, "Producer");
+    let a = battlefield_object(&mut state, "Token A");
+    park_completed_copy_owner(&mut state, src, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![FrameKind::CopyToken, FrameKind::PostReplacement],
+        "REACH-GUARD: an exhausted drain over the parked copy owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the exposed owner completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
+    assert_eq!(copy_token_terminals(&events), vec![src]);
+}
+
+/// U-R2 (CR 117.2e + CR 614.6): a copy owner over an exhausted drain over the
+/// outer copy owner unwinds in one boundary call, inner owner first.
+#[test]
+fn priority_boundary_unwinds_a_nested_copy_owner_chain() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src_a = battlefield_object(&mut state, "Outer producer");
+    let a = battlefield_object(&mut state, "Token A");
+    let src_b = battlefield_object(&mut state, "Inner producer");
+    let b = battlefield_object(&mut state, "Token B");
+    park_completed_copy_owner(&mut state, src_a, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    park_completed_copy_owner(&mut state, src_b, b);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![
+            FrameKind::CopyToken,
+            FrameKind::PostReplacement,
+            FrameKind::CopyToken
+        ],
+        "REACH-GUARD: inner owner, exhausted drain, outer owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the whole chain completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(
+        copy_token_terminals(&events),
+        vec![src_b, src_a],
+        "the inner owner completes before the outer one"
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
 }

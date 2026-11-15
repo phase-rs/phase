@@ -5,6 +5,7 @@ use super::anthem::rewrite_self_pronoun_subject;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::BlockPairDirection;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
@@ -5339,7 +5340,10 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
                     add_property(
                         f,
                         FilterProp::CombatRelation {
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::BlockPairing {
+                                direction: BlockPairDirection::Either,
+                                scope: None,
+                            },
                             subject: CombatRelationSubject::Source,
                         },
                     )

@@ -144,16 +144,15 @@ fn counters_persist_on_move(state: &GameState, object_id: ObjectId, to: Zone) ->
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
 /// "for each Aura you controlled that was attached to it" (Hateful Eidolon)
 /// can resolve their quantity after the departure has already unattached the
-/// Auras (CR 701.3d).
+/// Auras (CR 701.3d). A phased-out attachment did not exist, so it is omitted
+/// (CR 702.26b).
 pub(crate) fn capture_attachment_snapshot(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<crate::types::game_state::AttachmentSnapshot> {
     use crate::types::ability::AttachmentKind;
-    obj.attachments
-        .iter()
-        .filter_map(|id| {
-            let att = state.objects.get(id)?;
+    crate::game::filter::phased_in_attachments(state, obj)
+        .filter_map(|att| {
             let kind = if att.card_types.subtypes.iter().any(|s| s == "Aura") {
                 AttachmentKind::Aura
             } else if att.card_types.subtypes.iter().any(|s| s == "Equipment") {
@@ -164,7 +163,7 @@ pub(crate) fn capture_attachment_snapshot(
                 return None;
             };
             Some(crate::types::game_state::AttachmentSnapshot {
-                object_id: *id,
+                object_id: att.id,
                 identity: Some(ObjectIncarnationRef::from_object(att)),
                 controller: att.controller,
                 kind,
@@ -243,6 +242,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         // represented on the stack, never to the new object after it leaves.
         if from == Zone::Stack && to != Zone::Stack {
             obj.cast_occurrence = None;
+            obj.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
             obj.prepared_copy_source = None;
             // CR 400.7: the spell's identity ends with the spell.
             obj.spell_announcement = None;
@@ -1428,6 +1428,7 @@ pub fn apply_resolved_zone_change(
     // must reproduce the live Stack-exit carrier clear from the recorded move.
     if command.from == Zone::Stack && command.to != Zone::Stack {
         object.cast_occurrence = None;
+        object.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
         object.prepared_copy_source = None;
         object.spell_announcement = None;
     }
@@ -6548,6 +6549,74 @@ mod tests {
             hostile.objects[&id].cast_occurrence,
             Some(occurrence),
             "only a Stack exit owns cast-occurrence cleanup"
+        );
+    }
+
+    #[test]
+    fn cast_permission_enter_tapped_is_cleared_on_every_stack_exit_live_and_replayed() {
+        // CR 400.7 + CR 614.1d: the cast-this-way enters-tapped rider belongs to
+        // the spell; any Stack exit ends it, and replay must match the live clear.
+        for destination in [Zone::Battlefield, Zone::Graveyard] {
+            let mut live = setup();
+            let id = create_object(
+                &mut live,
+                CardId(9770),
+                PlayerId(0),
+                "Edgar-Cast Spell".to_string(),
+                Zone::Stack,
+            );
+            live.objects
+                .get_mut(&id)
+                .unwrap()
+                .cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+            let mut replayed = live.clone();
+            let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+                id,
+                Some(Zone::Stack),
+                destination,
+            );
+            let command = resolve_and_apply_zone_change(
+                &mut live,
+                id,
+                Zone::Stack,
+                destination,
+                PlayerId(0),
+                None,
+                record,
+            )
+            .expect("live Stack exit resolves");
+            assert_eq!(
+                live.objects[&id].cast_permission_enter_tapped,
+                crate::types::zones::EtbTapState::Unspecified,
+                "live Stack exit to {destination:?} clears the rider"
+            );
+            apply_resolved_zone_change(&mut replayed, &command)
+                .expect("recorded Stack exit replays");
+            assert_eq!(
+                replayed.objects[&id].cast_permission_enter_tapped,
+                crate::types::zones::EtbTapState::Unspecified,
+                "replayed Stack exit to {destination:?} clears the rider"
+            );
+        }
+
+        let mut hostile = setup();
+        let id = create_object(
+            &mut hostile,
+            CardId(9771),
+            PlayerId(0),
+            "Not a Stack Exit".to_string(),
+            Zone::Hand,
+        );
+        hostile
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+        move_to_zone(&mut hostile, id, Zone::Exile, &mut Vec::new());
+        assert_eq!(
+            hostile.objects[&id].cast_permission_enter_tapped,
+            crate::types::zones::EtbTapState::Tapped,
+            "only a Stack exit owns the rider's cleanup"
         );
     }
 

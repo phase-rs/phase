@@ -303,16 +303,13 @@
     "skip": "Toca para omitir",
     "continue": "Toca para continuar",
     "you": "Tú",
-    "youPlayFirst": "Juegas primero",
-    "playerPlaysFirst": "{{name}} juega primero",
+    "youWonRoll": "Ganaste la tirada",
+    "playerWonRoll": "{{name}} ganó la tirada",
     "heads": "Cara",
     "tails": "Cruz",
     "coinFlip": "Lanzamiento de moneda",
     "wonCoinFlip": "{{name}} ganó el lanzamiento",
     "lostCoinFlip": "{{name}} perdió el lanzamiento",
-    "turnOrder": "Orden de turnos",
-    "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Juegas el turno {{turn}}",
     "ignoredDie": "Ignorado"
   },
   "chrome": {
@@ -333,6 +330,11 @@
     "heading": "Algo salió mal",
     "body": "La aplicación encontró un error inesperado y no puede continuar en esta pantalla. Recargar suele solucionarlo.",
     "reload": "Recargar"
+  },
+  "stateCodec": {
+    "actionInterrupted": "La transmisión del estado se interrumpió durante la acción",
+    "submissionNotSent": "Se está restableciendo la transmisión del estado; esta acción no se ha enviado.",
+    "reconnectSubmissionNotSent": "Se está restableciendo la conexión; esta acción no se ha enviado."
   },
   "actionError": {
     "title": "{{action}} falló",

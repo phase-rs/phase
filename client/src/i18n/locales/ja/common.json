@@ -304,16 +304,13 @@
     "ignoredDie": "無視",
     "continue": "タップして続行",
     "you": "あなた",
-    "youPlayFirst": "あなたが先攻",
-    "playerPlaysFirst": "{{name}}が先攻",
+    "youWonRoll": "あなたがダイスロールに勝利",
+    "playerWonRoll": "{{name}}がダイスロールに勝利",
     "heads": "表",
     "tails": "裏",
     "coinFlip": "コインフリップ",
     "wonCoinFlip": "{{name}}がコインフリップに勝利",
-    "lostCoinFlip": "{{name}}がコインフリップに敗北",
-    "turnOrder": "ターン順",
-    "turnOrderItem": "{{turn}}ターン目: {{name}}",
-    "youTakeTurn": "あなたの{{turn}}ターン目"
+    "lostCoinFlip": "{{name}}がコインフリップに敗北"
   },
   "chrome": {
     "back": "戻る",
@@ -333,6 +330,11 @@
     "heading": "問題が発生しました",
     "body": "予期しないエラーが発生し、この画面を続行できません。通常は再読み込みで解決します。",
     "reload": "再読み込み"
+  },
+  "stateCodec": {
+    "actionInterrupted": "操作中に状態の配信が中断されました",
+    "submissionNotSent": "状態の配信を復旧中です。この操作は送信されませんでした。",
+    "reconnectSubmissionNotSent": "接続を再確立しています。この操作は送信されませんでした。"
   },
   "actionError": {
     "title": "{{action}}に失敗しました",

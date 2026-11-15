@@ -304,27 +304,17 @@ report_verbatim_eq=""
 report_unimpl=""
 
 # Filter a per-file candidate list against the allow-noncombinator escape
-# hatch. Reads candidate lines (each prefixed by '+') on stdin, prints the
-# unfiltered text to stdout. Args: $1 = file path.
+# hatch, on the candidate's own line or the line above it. Args: $1 = file path,
+# $2 = `<line>\t<content>` records. Prints the unannotated content.
 filter_allow_noncombinator() {
-    local file="$1"
-    local candidates="$2"
-    local added=""
-    while IFS= read -r diff_line; do
-        [ -z "$diff_line" ] && continue
-        local text="${diff_line#*+}"
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-noncombinator'; then
-                continue
-            fi
-        fi
-        # Same-line annotation also exempts.
-        if echo "$text" | grep -q 'allow-noncombinator'; then
-            continue
+    local file="$1" candidates="$2" added="" rec ln text prev
+    while IFS= read -r rec; do
+        [ -z "$rec" ] && continue
+        ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
+        case "$text" in *allow-noncombinator*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
+            case "$prev" in *allow-noncombinator*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -437,16 +427,15 @@ added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
 while IFS= read -r file; do
     [ -f "$file" ] || continue
 
-    # This file's genuinely-added records, then the old `+<content>` stream
-    # rebuilt from them (once, for reuse), keeping the old filter.
+    # This file's genuinely-added records; `kept` drops blank and `+`-leading content.
     file_added=$(added_lines_for "$file")
-    diff_added=$(printf '%s\n' "$file_added" | cut -f2- | sed 's/^/+/' | grep -E '^\+[^+]' || true)
-    if [ -z "$diff_added" ]; then
+    kept=$(printf '%s\n' "$file_added" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
         continue
     fi
 
     # (A) String-method dispatch.
-    methods_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_METHODS" || true)
+    methods_hits=$(added_lines_grep "$kept" "$FORBIDDEN_METHODS") || exit 2
     methods_clean=$(filter_allow_noncombinator "$file" "$methods_hits")
     if [ -n "$methods_clean" ]; then
         report_methods="${report_methods}
@@ -459,7 +448,7 @@ while IFS= read -r file; do
     fi
 
     # (B) Match-arm string-literal patterns.
-    match_arm_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_MATCH_ARM" || true)
+    match_arm_hits=$(added_lines_grep "$kept" "$FORBIDDEN_MATCH_ARM") || exit 2
     match_arm_clean=$(filter_allow_noncombinator "$file" "$match_arm_hits")
     if [ -n "$match_arm_clean" ]; then
         report_match_arm="${report_match_arm}
@@ -473,7 +462,7 @@ while IFS= read -r file; do
 
     # (C) Chained if-let-tag. Count occurrences in this file's added lines;
     # 2+ is the anti-pattern. Single occurrences are fine (and common).
-    iflet_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$IFLET_TAG_PATTERN" || true)
+    iflet_hits=$(added_lines_grep "$kept" "$IFLET_TAG_PATTERN") || exit 2
     iflet_clean=$(filter_allow_noncombinator "$file" "$iflet_hits")
     iflet_count=0
     if [ -n "$iflet_clean" ]; then
@@ -490,7 +479,7 @@ while IFS= read -r file; do
     fi
 
     # (E) Verbatim-sentence equality comparisons.
-    verbatim_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_VERBATIM_EQ" || true)
+    verbatim_hits=$(added_lines_grep "$kept" "$FORBIDDEN_VERBATIM_EQ") || exit 2
     verbatim_clean=$(filter_allow_noncombinator "$file" "$verbatim_hits")
     if [ -n "$verbatim_clean" ]; then
         report_verbatim_eq="${report_verbatim_eq}
@@ -503,7 +492,7 @@ while IFS= read -r file; do
     fi
 
     # (F) Hand-constructed Effect::Unimplemented literals.
-    unimpl_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_UNIMPL_LITERAL" || true)
+    unimpl_hits=$(added_lines_grep "$kept" "$FORBIDDEN_UNIMPL_LITERAL") || exit 2
     unimpl_clean=$(filter_allow_noncombinator "$file" "$unimpl_hits")
     if [ -n "$unimpl_clean" ]; then
         report_unimpl="${report_unimpl}

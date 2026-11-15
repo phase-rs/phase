@@ -168,6 +168,9 @@ function PodSetup() {
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const allowedSetLayouts = useDraftPodStore((s) => s.allowedSetLayouts);
+  const postDraftPlay = useDraftPodStore((s) => s.postDraftPlay);
+  // Only an engine-published TournamentPairings procedure plays rounds; unpublished is not offered.
+  const playsRounds = postDraftPlay === "TournamentPairings";
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
   const cubeMinDeckSize = useDraftPodStore((s) =>
     s.procedureCacheKey?.kind === s.config.kind
@@ -216,8 +219,8 @@ function PodSetup() {
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
   const policyDescription = config.podPolicy === "Competitive"
-    ? t("podSetup.policyCompetitiveDesc")
-    : t("podSetup.policyCasualDesc");
+    ? (playsRounds ? t("podSetup.policyCompetitiveDesc") : t("podSetup.policyCompetitiveNoRoundsDesc"))
+    : (playsRounds ? t("podSetup.policyCasualDesc") : t("podSetup.policyCasualNoRoundsDesc"));
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
   const podSizeItems = useMemo(
     () => (allowedPodSizes ?? []).map((podSize) => ({
@@ -395,36 +398,38 @@ function PodSetup() {
         </div>
 
         {/* Tournament Format (D-04) */}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-white/60">
-            {t("podSetup.tournamentFormat")}
-          </label>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "Swiss"}
-                onChange={() => setConfig({ tournamentFormat: "Swiss" })}
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentSwiss")}
+        {playsRounds && (
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-white/60">
+              {t("podSetup.tournamentFormat")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "SingleElimination"}
-                onChange={() =>
-                  setConfig({ tournamentFormat: "SingleElimination" })
-                }
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentElimination")}
-            </label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "Swiss"}
+                  onChange={() => setConfig({ tournamentFormat: "Swiss" })}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentSwiss")}
+              </label>
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "SingleElimination"}
+                  onChange={() =>
+                    setConfig({ tournamentFormat: "SingleElimination" })
+                  }
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentElimination")}
+              </label>
+            </div>
+            <p className="text-xs text-white/40">{tournamentDescription}</p>
           </div>
-          <p className="text-xs text-white/40">{tournamentDescription}</p>
-        </div>
+        )}
 
         {/* Pod Policy (D-07) */}
         <div className="flex flex-col gap-1">

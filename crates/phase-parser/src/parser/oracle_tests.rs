@@ -8,9 +8,10 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun,
-    CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter,
-    DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
+    CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
@@ -1981,7 +1982,10 @@ fn named_step_activation_cards_parse_without_gaps() {
         target,
         &TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }
         ])),
@@ -35024,6 +35028,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {
@@ -35071,14 +35076,24 @@ fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
     assert!(
         defs.iter().any(|d| matches!(
             &*d.effect,
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                owner_library: true,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         )),
-        "expected an owner-library move, got {defs:?}"
+        "expected an owner-library population move, got {defs:?}"
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        )),
+        "expected the terminal owner-scoped shuffle, got {defs:?}"
     );
     assert!(
         !defs
@@ -35910,4 +35925,47 @@ fn corpus_oracle_text(name: &str) -> String {
         other => panic!("no corpus oracle text recorded for {other}"),
     }
     .to_string()
+}
+
+/// CR 607.2a + CR 608.2c: promoting a linked LTB return to the return of every
+/// card this object exiled keeps the move's performer. Synthetic actor: no
+/// printed linked return names a subject today.
+#[test]
+fn ltb_return_promotion_keeps_the_actor() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::identifiers::TrackedSetId;
+    let actor = LibraryInstructionActor::Player {
+        player: TargetFilter::ParentTargetController,
+    };
+    let unpromoted = Effect::ChangeZone {
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+        library_shuffle: Default::default(),
+    };
+    let promoted = ltb_return_of_exiled_by_source(&unpromoted).expect("promoted");
+    let Effect::ChangeZoneAll {
+        actor: promoted_actor,
+        target,
+        ..
+    } = &promoted
+    else {
+        panic!("expected ChangeZoneAll, got {promoted:?}");
+    };
+    assert_eq!(promoted_actor, &actor);
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }

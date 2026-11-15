@@ -7,14 +7,15 @@ use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
-    CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
+    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
+    Parity, ParitySource, PlayerFilter, PlayerRelation, PlayerScope, ProtectionDoesNotRemove,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
+    SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::keywords::{Keyword, WardCost};
+use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
@@ -87,6 +88,33 @@ fn color_conditional_keyword_grant_single_pair() {
         defs[0].modifications,
         vec![ContinuousModification::AddKeyword {
             keyword: Keyword::Vigilance
+        }]
+    );
+}
+
+/// CR 611.3a + CR 608.2c: Predator's Gambit's printed "as long as its controller
+/// controls no other creatures" stays an explicit `Unrecognized` coverage gap.
+/// A static ability has no resolving target to bind the referent against, so the
+/// shared target-controller recognizer must not be reachable from
+/// `parse_inner_condition` and read an unbound parent-target controller.
+#[test]
+fn predators_gambit_controller_clause_stays_an_explicit_gap() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has intimidate as long as its controller controls no other creatures.",
+    );
+    assert_eq!(defs.len(), 1);
+    assert!(
+        matches!(
+            defs[0].condition,
+            Some(StaticCondition::Unrecognized { .. })
+        ),
+        "the controller clause must stay an explicit gap, got {:?}",
+        defs[0].condition
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Intimidate
         }]
     );
 }
@@ -16513,6 +16541,7 @@ fn own_unlimited_cast_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -35336,6 +35365,68 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
     );
 }
 
+/// CR 613.1f: "has/have no abilities" (Xu-Ifit, Osteoharmonist's rider) is the
+/// "has" form of ability removal and yields `LossMember::Abilities`; the
+/// existing "loses all ..." arm and the empty scan are unchanged.
+#[test]
+fn loss_enumeration_reads_has_no_abilities() {
+    assert_eq!(
+        parse_loss_enumeration("has no abilities").expect("has form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        parse_loss_enumeration("have no abilities").expect("have form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        scan_loss_enumeration("is a skeleton in addition to its other types and has no abilities"),
+        vec![LossMember::Abilities]
+    );
+    assert!(parse_continuous_modifications("and has no abilities")
+        .contains(&ContinuousModification::RemoveAllAbilities));
+    // Positive: the "loses all" arm still reads.
+    assert_eq!(
+        scan_loss_enumeration("loses all land types and abilities"),
+        vec![LossMember::LandTypes, LossMember::Abilities]
+    );
+    // Hostile: empty input and the filter phrase yield nothing.
+    assert!(scan_loss_enumeration("").is_empty());
+    assert!(scan_loss_enumeration("creatures with no abilities get +2/+2").is_empty());
+}
+
+/// CR 613.1f: the filter phrase "with no abilities" (Muraganda Petroglyphs,
+/// Ruxa) selects objects; it is not ability removal.
+#[test]
+fn no_abilities_filter_is_not_ability_removal() {
+    for (text, power) in [
+        ("Creatures with no abilities get +2/+2.", 2),
+        ("Creatures you control with no abilities get +1/+1.", 1),
+    ] {
+        let def = parse_static_line(text).expect("static def");
+        // Reach guard: the filter and the pump parsed.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "{text}: {:?}",
+                tf.properties
+            ),
+            other => panic!("{text}: expected Typed filter, got {other:?}"),
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddPower { value: power }),
+            "{text}: {:?}",
+            def.modifications
+        );
+        assert!(
+            !def.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities),
+            "{text}: {:?}",
+            def.modifications
+        );
+    }
+}
+
 /// CR 205.3i: "land types" is a fourth loss-enumeration member alongside
 /// abilities/card types/creature types — Alpine Moon, Lithoform Blight, and
 /// Ultima, Origin of Oblivion all use "loses all land types and abilities".
@@ -36622,10 +36713,13 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
         };
         assert!(
             props.contains(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }),
-            "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"
+            "{line:?}: expected a source-anchored Either pairing prop, got {props:?}"
         );
     }
 }
@@ -42175,6 +42269,55 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
     );
 }
 
+// SHAPE: full-document routing must retain the live set and the Aura's own-source rider.
+#[test]
+fn kannushi_pledge_full_oracle_live_color_set() {
+    for (name, text, types, subtypes, aura) in [
+        (
+            "Empty-Shrine Kannushi",
+            "This creature has protection from each color among permanents you control.",
+            vec!["Creature".to_string()],
+            vec!["Human".to_string(), "Cleric".to_string()],
+            false,
+        ),
+        (
+            "Pledge of Loyalty",
+            "Enchant creature\nEnchanted creature has protection from each color among permanents you control. This effect doesn't remove this Aura.",
+            vec!["Enchantment".to_string()],
+            vec!["Aura".to_string()],
+            true,
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text, name, &[], &types, &subtypes,
+        );
+        let grant = ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl,
+            )),
+        };
+        let def = parsed.statics.iter().find(|def| def.modifications.contains(&grant))
+            .unwrap_or_else(|| panic!("{name}: missing live grant: {parsed:?}"));
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if aura {
+            assert!(matches!(&def.affected, Some(TargetFilter::Typed(filter))
+                if filter.properties.contains(&FilterProp::EnchantedBy)));
+            assert_eq!(def.protection_does_not_remove, Some(ProtectionDoesNotRemove::Source));
+        } else {
+            assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(def.protection_does_not_remove, None);
+        }
+        assert!(!parsed.extracted_keywords.iter().any(|keyword|
+            matches!(keyword, Keyword::Protection(ProtectionTarget::EachColor(_)))));
+        assert_eq!(def.modifications, vec![grant]);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty(), "{name}: unexpected residual ability");
+        assert!(parsed.triggers.is_empty());
+        assert!(parsed.replacements.is_empty());
+        assert!(!parsed.extracted_keywords.iter().any(|keyword| matches!(keyword, Keyword::Unknown(_))));
+    }
+}
+
 // SHAPE: the full Oracle line and its canonical trailing forms must preserve
 // both the live Forest census and the complementary combat gates.
 // CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
@@ -42549,4 +42692,156 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
             "{name} must stay an explicit gap: {json}"
         );
     }
+}
+
+// --- Edgar, Master Machinist (#9770): the cast-this-way enters-tapped rider ---
+
+fn edgar_parse(text: &str, name: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
+    crate::parser::oracle::parse_oracle_text(
+        text,
+        name,
+        &[],
+        &types.iter().map(|t| (*t).to_string()).collect::<Vec<_>>(),
+        &[],
+    )
+}
+
+fn graveyard_permission(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> Option<&StaticDefinition> {
+    parsed
+        .statics
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::GraveyardCastPermission { .. }))
+}
+
+const EDGAR_PERMISSION: &str = "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped.";
+
+/// CR 601.3 + CR 607.1c + CR 614.1d (C1): Edgar's line is one permission with
+/// its linked rider: once per turn, cast-only, artifact spells, during its
+/// controller's turns, and the spell cast this way enters tapped.
+#[test]
+fn edgar_graveyard_permission_enters_tapped_rider() {
+    use crate::types::zones::EtbTapState;
+    let parsed = edgar_parse(
+        EDGAR_PERMISSION,
+        "Edgar, Master Machinist",
+        &["Legendary", "Creature"],
+    );
+    let def = graveyard_permission(&parsed).expect("Edgar parses to a graveyard cast permission");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                enter_tapped: EtbTapState::Tapped,
+                enters_with_counter: None,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                ..
+            }
+        ),
+        "got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.condition,
+        Some(crate::types::ability::StaticCondition::DuringYourTurn)
+    );
+    let Some(TargetFilter::Typed(filter)) = &def.affected else {
+        panic!("a typed affected filter, got {:?}", def.affected);
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Artifact]);
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(*ability.effect, Effect::Unimplemented { .. })),
+        "no residual Unimplemented: {:?}",
+        parsed.abilities
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the rider is carried, not swallowed: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 614.1d (C2): the "enters the battlefield tapped" template is the same rider.
+#[test]
+fn edgar_graveyard_permission_enters_tapped_rider_battlefield_template() {
+    use crate::types::zones::EtbTapState;
+    let parsed = edgar_parse(
+        "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters the battlefield tapped.",
+        "Test Machinist",
+        &["Creature"],
+    );
+    let def = graveyard_permission(&parsed).expect("the template parses");
+    assert!(matches!(
+        def.mode,
+        StaticMode::GraveyardCastPermission {
+            enter_tapped: EtbTapState::Tapped,
+            ..
+        }
+    ));
+}
+
+/// CR 607.1 (C3): a rider with more after "enters tapped" is not modelled, so
+/// the whole permission declines rather than dropping the rest. Positive
+/// control: the rider alone parses (C1).
+#[test]
+fn edgar_graveyard_permission_rider_trailing_text_declines() {
+    let control = edgar_parse(EDGAR_PERMISSION, "Test Machinist", &["Creature"]);
+    assert!(graveyard_permission(&control).is_some(), "reach guard");
+    let parsed = edgar_parse(
+        "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped and attacking.",
+        "Test Machinist",
+        &["Creature"],
+    );
+    assert!(
+        graveyard_permission(&parsed).is_none(),
+        "the trailing \"and attacking\" must decline, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 614.1d (C4): `ExileCastPermission` has no enters-tapped carrier, so an
+/// exile permission with that rider declines. Positive control: the same
+/// line with the finality rider parses (Intrepid Paleontologist).
+#[test]
+fn edgar_exile_permission_tapped_rider_declines() {
+    let exile_permission = |parsed: &crate::parser::oracle::ParsedAbilities| {
+        parsed
+            .statics
+            .iter()
+            .find(|def| matches!(def.mode, StaticMode::ExileCastPermission { .. }))
+            .cloned()
+    };
+    let control = edgar_parse(
+        "You may cast Dinosaur creature spells from among cards you own exiled with this creature. If you cast a spell this way, that creature enters with a finality counter on it.",
+        "Intrepid Paleontologist",
+        &["Creature"],
+    );
+    assert!(
+        matches!(
+            exile_permission(&control).map(|def| def.mode),
+            Some(StaticMode::ExileCastPermission {
+                enters_with_counter: Some(CounterType::Finality),
+                ..
+            })
+        ),
+        "reach guard: the finality line parses, got {:?}",
+        control.statics
+    );
+    let parsed = edgar_parse(
+        "You may cast Dinosaur creature spells from among cards you own exiled with this creature. If you cast a spell this way, that creature enters tapped.",
+        "Intrepid Paleontologist",
+        &["Creature"],
+    );
+    assert!(
+        exile_permission(&parsed).is_none(),
+        "no exile permission may drop the tapped rider, got {:?}",
+        parsed.statics
+    );
 }

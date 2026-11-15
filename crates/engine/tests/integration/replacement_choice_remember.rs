@@ -999,6 +999,7 @@ fn interactive_leading_damage_continuation_is_ineligible_and_keeps_ordinary_sele
     let continuation = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Hand,
@@ -1078,6 +1079,7 @@ fn interactive_modifier_prefix_in_mixed_decline_is_ineligible_and_resolves_norma
     let decline = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Hand,

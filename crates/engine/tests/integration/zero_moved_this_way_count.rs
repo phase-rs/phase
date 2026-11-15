@@ -51,6 +51,7 @@ fn move_then_gain_previous_count(
 ) -> ResolvedAbility {
     let mut ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(origin),
             destination,

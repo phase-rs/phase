@@ -72,6 +72,22 @@ export interface DungeonPreview {
   room_count: number;
 }
 
+// Mirrors `engine::game::players::PoisonLossScope` — whose poison counters a
+// poison loss is measured on.
+export type PoisonLossScope = "Player" | "Team";
+
+// Mirrors `engine::game::derived_views::PoisonLossProximity` — the display
+// classification of how close a poison-loss count is to its threshold.
+export type PoisonLossProximity = "Normal" | "NearLethal";
+
+// Mirrors `engine::game::derived_views::PoisonLossView`, delivered on
+// `GameState.derived.poison_loss`.
+export interface PoisonLossView {
+  scope: PoisonLossScope;
+  threshold: number;
+  proximity: PoisonLossProximity;
+}
+
 // Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
 // venture marker currently sits, named. Delivered on
 // `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
@@ -290,6 +306,9 @@ export interface StructuralRules {
   team_based: boolean;
   sideboard_policy: SideboardPolicy;
   default_deck_copy_limit: DeckCopyLimit;
+  /** CR 704.5c individual poison threshold. Optional because it postdates the
+   *  Axis-A save path; absent means ten (the engine's serde default). */
+  poison_counter_threshold?: number;
 }
 
 /** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
@@ -534,6 +553,11 @@ export type DeckCopyLimit =
   | { type: "Unlimited" }
   | { type: "UpTo"; data: number };
 
+/** The largest value an engine `u8` field holds — the bound on
+ *  `FormatConfig`'s `u8` thresholds (`poison_counter_threshold`,
+ *  `commander_damage_threshold`). */
+export const U8_MAX = 255;
+
 export interface FormatConfig {
   format: GameFormat;
   starting_life: number;
@@ -543,6 +567,10 @@ export interface FormatConfig {
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
+  /** CR 704.5c: the poison-counter count at which an individual player loses
+   *  (a host-adjustable house-rule dial). `null` for the Two-Headed Giant
+   *  family, which ignores CR 704.5c and loses to team poison instead. */
+  poison_counter_threshold: number | null;
   range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
   /** Engine-authoritative sideboard policy. This must be sent with every
@@ -550,8 +578,8 @@ export interface FormatConfig {
    * `Forbidden` for legacy payloads. */
   sideboard_policy: SideboardPolicy;
   /**
-   * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
+   * Engine-derived predicate: true when the format is a Commander variant
+   * (CR 903), independent of `commander_damage_threshold`.
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */
@@ -1406,7 +1434,8 @@ export type UnTellKind =
 export type UnAction =
   | { type: "SetEnabled"; data: { enabled: boolean } }
   | { type: "PerformTell"; data: { tell: UnTell } }
-  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
+  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } }
+  | { type: "TouchObject"; data: { target: ObjectIncarnationRef } };
 
 export interface GotchaOffer {
   id: number;
@@ -1430,6 +1459,10 @@ export interface UnActionState {
   enabled_players?: PlayerId[];
   gotcha_offers?: GotchaOffer[];
   menu?: UnTellKind[];
+  /** Objects with a functioning touch ability ("Whenever a player's skin or
+   *  fingernail touches this creature", Vile Bile). The client reports a touch
+   *  (`TouchObject`) when an opted-in player's pointer enters one of them. */
+  touchable?: ObjectIncarnationRef[];
 }
 
 export type UnlessCost =
@@ -2003,6 +2036,13 @@ export interface GameObject {
    */
   phase_status?: PhaseStatus;
   is_commander?: boolean;
+  /**
+   * A Horde challenge-deck token (Boss pile, event library, or deployed Boss).
+   * Mirrors `engine::game::game_object::GameObject::is_horde_deck_token`
+   * and is omitted on the wire when false. The Horde HUD uses the deployed Boss
+   * identities in `derived.horde`.
+   */
+  is_horde_deck_token?: boolean;
   /** Oathbreaker RC: this command-zone card is the player's signature spell. */
   signature_spell?: Record<string, never> | null;
   commander_tax?: number;
@@ -3073,6 +3113,7 @@ export type WaitingFor =
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "ChooseStartingPlayer"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
@@ -3147,7 +3188,7 @@ export type WaitingFor =
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
-  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
+  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[]; repeat?: number } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
@@ -3204,6 +3245,9 @@ export type WaitingFor =
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
       library_position?: LibraryPosition;
+      // CR 608.2c: the player who performs the chosen move (not the chooser).
+      // Omitted for other effect kinds; display-only on the client.
+      performed_by?: PlayerId | null;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; slots: RetargetSlotAddress[]; slot_pools: TargetRef[][]; legal_new_targets: TargetRef[]; keep_is_distinct?: boolean[] } }
@@ -3676,6 +3720,7 @@ export type GameAction =
   | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
+  | { type: "ChooseStartingPlayer"; data: { player: PlayerId } }
   | { type: "ChooseOption"; data: { choice: string } }
   // CR 701.38b: Cast a vote for one object candidate in an object-pool vote.
   // `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`.
@@ -4020,10 +4065,12 @@ export type GameEvent =
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
   | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
-  // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
+  // Un-card gestures / speech / touch (no CR entry); mirror engine
+  // GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid, ObjectTouched}.
   | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
   | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
   | { type: "GotchaSaid"; data: { player: PlayerId; source: ObjectIdentityBinding; returns: ObjectIdentityBinding } }
+  | { type: "ObjectTouched"; data: { player: PlayerId; object_id: ObjectId } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.
@@ -4071,6 +4118,16 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+/**
+ * CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+ * window. Mirrors `engine::game::derived_views::ManaAbilityPaymentView`.
+ */
+export interface ManaAbilityPaymentView {
+  source_id: ObjectId;
+  cost: ManaCost;
+  pinned_pool_units: number[];
+}
+
 export interface PlanechaseView {
   active_plane?: ObjectId | null;
   planar_controller?: PlayerId | null;
@@ -4084,6 +4141,19 @@ export interface ArchenemyView {
   scheme_deck_count: number;
   active_scheme_ids?: ObjectId[];
   hero_player_ids?: PlayerId[];
+}
+
+/**
+ * Mirrors `engine::game::derived_views::HordeView`: engine-authored Horde
+ * seat, survivor, and deployed-Boss identity. The HUD renders this directly
+ * instead of selecting a Boss from command-zone objects or classifying seats.
+ * `deployed_boss_ids[0]` is the representative Boss (first in command-zone
+ * order); the face-down Boss pile is never listed. Omitted outside Horde games.
+ */
+export interface HordeView {
+  horde_seat_ids?: PlayerId[];
+  hero_player_ids?: PlayerId[];
+  deployed_boss_ids?: ObjectId[];
 }
 
 /** Mirrors `engine::analysis::resource::ObjectClass` (unit variants → strings). */
@@ -4422,8 +4492,10 @@ export interface TurnOrderSlotView {
   turns_from_now: number;
   turn_number: number;
   is_viewer?: boolean;
-  is_starting_player?: boolean;
 }
+
+/** Mirrors `engine::game::derived_views::PlayDrawPosition` (CR 103.1 + CR 103.1a). */
+export type PlayDrawPosition = "OnThePlay" | "OnTheDraw";
 
 /** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
 export type BlockerAssignmentPair = [ObjectId, ObjectId];
@@ -4482,6 +4554,17 @@ export interface SharedPilesView {
  * themselves (CLAUDE.md: engine owns all logic). Mirrors
  * `engine::game::derived_views::DerivedViews`.
  */
+/** Mirrors `engine::game::derived_views::UnlessDrawPaymentStage`. */
+export type UnlessDrawPaymentStage = "Offered" | "Continuing";
+
+/** Mirrors `engine::game::derived_views::UnlessDrawCostView`. */
+export interface UnlessDrawCostView {
+  cards: number;
+  instructions: number;
+  /** "Continuing": part of the payment is performed, so it cannot be declined. */
+  stage: UnlessDrawPaymentStage;
+}
+
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
@@ -4504,6 +4587,11 @@ export interface DerivedViews {
    * per-player.
    */
   shared_piles?: SharedPilesView;
+  /** CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks for —
+   *  the resolved cards per printed instruction and how many instructions the
+   *  payment performs. Present only for a draw-cost prompt. Mirrors
+   *  `engine::game::derived_views::DerivedViews::unless_draw_cost`. */
+  unless_draw_cost?: UnlessDrawCostView;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -4562,6 +4650,14 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::dungeon_rooms`.
    */
   dungeon_rooms?: Record<string, DungeonRoomView>;
+  /**
+   * CR 704.5c / CR 704.6b: the poison-loss rule each poisoned player is
+   * measured against (scope, threshold, near-lethal), keyed by
+   * PlayerId-as-string — the threshold the SBA actually uses, so the HUD never
+   * hard-codes ten. Omitted when nobody is poisoned. Mirrors
+   * `engine::game::derived_views::DerivedViews::poison_loss`.
+   */
+  poison_loss?: Record<string, PoisonLossView>;
   /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this
@@ -4634,18 +4730,28 @@ export interface DerivedViews {
   player_status?: PlayerStatusView[];
   /**
    * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
-   * for a spell, the portion of the locked cost still UNPAID by the pool units
-   * they have pinned (selected). The payment UI renders this as the cost shrinks
-   * while the player picks mana; an empty/`NoCost` value means their selection
-   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
-   * viewer controls. Mirrors
+   * for a spell or a manual mana ability, the portion of the locked cost still
+   * UNPAID by the pool units they have pinned (selected). The payment UI renders
+   * this as the cost shrinks while the player picks mana; an empty/`NoCost`
+   * value means their selection alone covers the whole cost. Omitted outside a
+   * non-convoke spell payment or a manual mana-ability payment the viewer
+   * controls. Mirrors
    * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
    */
   pending_payment_remaining?: ManaCost;
+  /**
+   * CR 601.2g + CR 602.2b + CR 605.3a: the viewing player's own manual payment
+   * of a mana ability's mana cost — its source, the mana it costs (X announced)
+   * and the pool units they've directed. Omitted outside that window. Mirrors
+   * `engine::game::derived_views::DerivedViews::mana_ability_payment`.
+   */
+  mana_ability_payment?: ManaAbilityPaymentView;
   /** Engine-authored Planechase state and planar-die legality. */
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
   archenemy?: ArchenemyView | null;
+  /** Engine-authored Horde seat and deployed-Boss identity. */
+  horde?: HordeView | null;
   /**
    * Engine-authored multiplayer turn-order rows. Duplicate players are
    * intentional when extra turns put the same player in multiple slots.
@@ -4653,6 +4759,13 @@ export interface DerivedViews {
   turn_order?: TurnOrderSlotView[];
   /** One-based projected turn position for the current viewer. */
   viewer_turn_number?: number;
+  /**
+   * Engine-authored side-relative play/draw position for the viewer in a
+   * two-sided game; absent before the starting player is determined and in
+   * multiplayer pods (use `viewer_turn_number`). Mirrors
+   * `engine::game::derived_views::DerivedViews::viewer_play_draw`.
+   */
+  viewer_play_draw?: PlayDrawPosition;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
@@ -4899,6 +5012,13 @@ export interface GameState {
    */
   debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
+  /**
+   * Seats the engine designated as the self-piloting Horde at game setup.
+   * Mirrors `engine::types::game_state::GameState::horde_seats` and is omitted
+   * on the wire outside Horde games. The Horde HUD uses the seat identities in
+   * `derived.horde`, including when the Horde has a life total.
+   */
+  horde_seats?: PlayerId[];
   public_revealed_cards?: ObjectId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;

@@ -31,7 +31,7 @@ use crate::types::ability::{
     Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
     PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
     SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TypedFilter,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -54,8 +54,9 @@ use super::lower::{
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
-    gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
-    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
+    gate_reflexive_rider_on_declined_optional_target, inherit_this_way_cause_from_antecedent,
+    is_exile_until_cast_bottom_cleanup, is_land_enters_tapped_rider,
+    is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
@@ -2274,7 +2275,23 @@ fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
+    assemble_effect_chain_with_provenance(ir).value
+}
+
+pub(crate) fn assemble_effect_chain_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let mut history_transport =
+        crate::parser::oracle_ir::history_provenance::HistoryTransport::default();
+    // Declare every committed occurrence, including a clause a later fold removes.
+    // An untransported producer stays explicitly dangling instead of losing its record.
+    for clause in &ir.clauses {
+        for pending in &clause.parsed.history {
+            history_transport.capture(pending.committed(clause.id), None);
+        }
+    }
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -3761,6 +3778,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         for current in &mut current_defs {
             apply_where_x_ability_expression(current, clause_ir.where_x_binding());
         }
+        // Bind the declared producer before delayed wrapping and spine linking move it.
+        // A compound follower may have become a separate current_defs entry.
+        for pending in &clause_ir.parsed.history {
+            let mut path = pending.locator.clone().unwrap_or_default();
+            let index = if clause_sub.is_some()
+                && path.0.first()
+                    == Some(
+                        &crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                    ) {
+                path.0.remove(0);
+                1
+            } else {
+                0
+            };
+            let producer = pending
+                .locator
+                .as_ref()
+                .and_then(|_| current_defs.get(index).and_then(|def| path.resolve(def)));
+            history_transport.capture(pending.committed(clause_ir.id), producer);
+        }
 
         // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
         // surface phrase "that source's controller" lowers to
@@ -4448,6 +4485,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
     resolve_those_tokens_anaphors(&mut defs);
     resolve_populated_unsuspect_anaphors(&mut defs);
+    inherit_this_way_cause_from_antecedent(&mut defs);
 
     // CR 701.36a + CR 603.7c: Resolve "the token created this way …" and the
     // "sacrifice it" anaphors that follow a token-creating effect (Populate,
@@ -4701,19 +4739,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
     // Stonehewer Giant (the searcher is not the moved Equipment).
     //
-    // CR 608.2c: The same flag also wires sub-chains whose own clauses
-    // anchor on the just-moved card via the bare-"it" anaphor
-    // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
-    // card exiled with this creature onto the battlefield […]. It gains
-    // haste. Sacrifice it at the beginning of the next end step." The
-    // trailing GenericEffect/Pump and CreateDelayedTrigger subs target
-    // `SelfRef` so the runtime's `source_id` rewrite resolves them to the
-    // moved card instead of Emperor itself.
+    // CR 608.2c: the same flag supplies a returned-object context to ParentTarget
+    // anaphora and legacy embedded generic grants (Emperor of Bones' "It gains
+    // haste. Sacrifice it at the beginning of the next end step"). Those operands
+    // bind the moved card separately from the ability's printed source.
     //
-    // The `forward_result` flag makes the runtime forward the just-moved
-    // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
-    // forward_result branch), so `Attach::resolve` operates on the correct
-    // attaching object.
+    // The runtime retains its legacy moved-object binding for attachment roles,
+    // but a primary SelfRef names the creating source and cannot be rebound by
+    // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
@@ -4827,7 +4860,54 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `refuse_unenforced_aggregate_resolution_selection`.
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
-    result
+    // CR 115.1c + CR 608.2d: "Target opponent chooses a permanent they control
+    // and returns it..." needs a resolution-time choice by the announced
+    // opponent. The generic target parser produces a TargetOnly permanent plus
+    // Bounce; refuse the whole shape until that lowering lands (Teferi,
+    // Temporal Pilgrim -12 follow-up), so no object target is announced.
+    refuse_unsupported_target_opponent_choice(&mut result);
+
+    history_transport.finish(result)
+}
+
+fn refuse_unsupported_target_opponent_choice(def: &mut AbilityDefinition) {
+    let is_target_opponent_permanent = matches!(
+        &*def.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(filter),
+        } if filter.controller == Some(ControllerRef::TargetOpponent)
+            && filter.type_filters.contains(&TypeFilter::Permanent)
+    );
+    let bounces_parent = def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            &*sub.effect,
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+    });
+    if is_target_opponent_permanent && bounces_parent {
+        let description =
+            "Target opponent chooses a permanent they control and returns it to its owner's hand."
+                .to_string();
+        // Drop the executable return itself; promote any later sequential
+        // siblings so the independently unsupported shuffle remains visible.
+        let later = def
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|bounce| bounce.sub_ability.take());
+        *def.effect =
+            Effect::unimplemented("target-opponent permanent choice", description.as_str());
+        def.sub_ability = later;
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        refuse_unsupported_target_opponent_choice(sub);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref_mut() {
+        refuse_unsupported_target_opponent_choice(otherwise);
+    }
 }
 
 /// CR 608.2c: validate the structural "repeat this process" directives of an
@@ -5673,6 +5753,7 @@ mod arena_tests {
 
     fn zone_change(destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,

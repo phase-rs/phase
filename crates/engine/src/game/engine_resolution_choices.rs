@@ -376,6 +376,169 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
     }
 }
 
+/// CR 800.4a + CR 608.2d + CR 608.2m: after a player leaves, bring an open
+/// resolution-time object choice ("choose a creature you control") back in line
+/// with the game. The candidates stored on the prompt were scanned when it was
+/// raised; the leaving player's objects are gone and their control effects have
+/// ended, and a player can't choose an illegal or impossible option.
+///
+/// - The chooser is still in the game and two or more objects are eligible: the
+///   prompt is re-offered with the current set.
+/// - The chooser is still in the game and one or no object is eligible: the
+///   parked instruction runs again, binding the only candidate or recording that
+///   the choice named nothing, exactly as when it is first reached.
+/// - The chooser left and still controls the resolving object as last known:
+///   the parked instruction runs again for them; they control nothing now, so
+///   it records that the choice named nothing.
+/// - The chooser left and the resolving spell reverted to another controller
+///   (CR 109.5: "you" is that player now): the parked instruction runs again
+///   for that controller, prompting them among the objects they control.
+///
+/// When the parked instruction runs again and does not prompt, the resolution's
+/// remaining instructions run here, and the events they emit are collected for
+/// triggers (a concession is not scanned by the post-action pipeline). If those
+/// instructions pause again, this retains the triggers of the events already
+/// produced and nothing more: finishing the paused instruction belongs to its
+/// own handler, and `DestroyAll` does not resume the objects after the one a
+/// replacement-order prompt interrupted (`effects/destroy.rs`). Reports whether
+/// it settled, so a departed controller's spell this continued is not retired
+/// as eliminated.
+pub(crate) fn settle_resolution_object_choice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    // CR 109.5 + CR 800.4a: when the departure ended a control effect over the
+    // resolving spell (the player who took it with Commandeer left), the spell is
+    // its previous controller's again and "you" is that player. The parked
+    // instruction runs again for them: it prompts them among the objects they
+    // control, binds their only candidate, or records that the choice named
+    // nothing. CR 800.4g does not apply: the instruction asks its controller,
+    // who is still in the game.
+    let reverted_to = effects::rebind_open_resolution_object_choice_to_live_controller(state);
+    let Some(current) = effects::open_resolution_object_choice_candidates(state) else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    let WaitingFor::ChooseFromZoneChoice { player, cards, .. } = &state.waiting_for else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    let chooser = *player;
+    if let Some(controller) = reverted_to {
+        // CR 800.4a: priority never names a player who has left the game.
+        let holder = if super::players::is_alive(state, controller) {
+            controller
+        } else {
+            super::players::next_player(state, controller)
+        };
+        set_priority(state, holder);
+    } else if super::players::is_alive(state, chooser) {
+        if cards.len() == current.len() && current.iter().all(|id| cards.contains(id)) {
+            return Ok(DepartureSettlement::NotSettled);
+        }
+        if current.len() >= 2 {
+            if let WaitingFor::ChooseFromZoneChoice { cards, .. } = &mut state.waiting_for {
+                *cards = current;
+            }
+            return Ok(DepartureSettlement::NotSettled);
+        }
+        set_priority(state, chooser);
+    } else {
+        // CR 800.4a: priority never names a player who has left the game.
+        set_priority(state, super::players::next_player(state, chooser));
+    }
+    // CR 603.10a: the departure's own zone changes are not part of the resumed
+    // instructions' event span.
+    let base = events.len();
+    resume_with_error_propagation(state, events)?;
+    // CR 603.2: collect the resumed instructions' observers ("whenever a creature
+    // dies").
+    if let Some(outcome) = collect_resumed_span_observer_triggers(state, events, base) {
+        adopt_departure_choice_outcome(state, events, outcome);
+    }
+    // CR 603.7: and the delayed triggers watching those events ("When that
+    // creature dies this turn"), through the occurrence-aware delayed collector.
+    // The departure's own delayed scan ran before this settlement, and when the
+    // resumed instructions pause again (a replacement-order prompt during
+    // "Destroy all creatures") the later answer runs on a new event buffer.
+    retain_delayed_triggers_of_resumed_span(state, events, base);
+    Ok(DepartureSettlement::Settled)
+}
+
+/// CR 603.2 + CR 603.7: retain, for a later priority boundary, the ordinary
+/// observers and the delayed triggers of `events[start..]`, the span the
+/// instructions of a resumed resolution-time object choice produced before they
+/// paused again.
+/// Trigger retention only: it does not continue the instruction that paused.
+fn retain_triggers_of_resumed_span(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) {
+    super::triggers::park_observer_triggers_if_paused(state, events, start);
+    retain_delayed_triggers_of_resumed_span(state, events, start);
+}
+
+/// CR 603.2 + CR 603.2c: collect the ordinary observers of `events[start..]`,
+/// the span the instructions resumed by a departure produced. The span is a
+/// whole continuation drain, not one owner's completion slice: a `ChangeZone`
+/// in it has already queued its own observers, so the shared ownership
+/// authority drops the occurrences already collected. Returns the outcome to
+/// adopt when the resolution settled, `None` when it paused again.
+fn collect_resumed_span_observer_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) -> Option<ResolutionChoiceOutcome> {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        super::triggers::park_observer_triggers_if_paused(state, events, start);
+        return None;
+    }
+    // CR 601.2h + CR 603.3: a live announcement takes custody of the span it owns.
+    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, start);
+    let announced = owned.is_empty() && owned.end < events.len();
+    let candidates = super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &events[..owned.end],
+        start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    // CR 603.2c: the same ownership rule the paused route applies. A spell copy's
+    // observers are collected by `copy_spell`, and a parked entry event by its
+    // replay site.
+    let trigger_events = super::triggers::paused_observer_trigger_events(state, candidates);
+    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+    if announced {
+        return Some(ResolutionChoiceOutcome::WaitingFor(
+            state.waiting_for.clone(),
+        ));
+    }
+    Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+        state.waiting_for.clone(),
+    ))
+}
+
+/// CR 603.7: the delayed half of [`retain_triggers_of_resumed_span`], through
+/// the occurrence-aware delayed collector, so an occurrence another collector
+/// claims is not collected twice (CR 603.2c).
+fn retain_delayed_triggers_of_resumed_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+) {
+    let mut consumed = Vec::new();
+    let delayed_input = super::engine_priority::unclaimed_delayed_trigger_input(
+        state,
+        events,
+        start,
+        &mut consumed,
+        None,
+    );
+    super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
+        state,
+        events,
+        &delayed_input,
+    );
+}
+
 /// CR 800.4a + CR 603.3d + CR 601.2c: a departure answers or settles an open
 /// resolution choice inside the concession, whose reducer adopts no handler
 /// outcome. Adopt the outcome exactly as the resolution-choice arm of
@@ -630,6 +793,7 @@ fn deliver_search_found_event(
 ) -> bool {
     let crate::types::proposed_event::ProposedEvent::SearchFound {
         object_id,
+        searcher,
         disposition,
         ..
     } = event
@@ -650,11 +814,18 @@ fn deliver_search_found_event(
     };
     let move_result = super::zone_pipeline::move_object(
         state,
+        // CR 608.2c: the searcher's exile records the searcher. No ownership
+        // input, as before: `performer` names nobody off Exile, and an exile
+        // never rebinds entry ownership.
         super::zone_pipeline::ZoneMoveRequest::effect(
             object_id,
             disposition.destination,
             disposition.source.object_id,
-        ),
+        )
+        .actors(super::zone_pipeline::MoveActors {
+            performed_by: disposition.performer(searcher),
+            ownership_actor: None,
+        }),
         events,
     );
     match move_result {
@@ -5951,6 +6122,21 @@ pub(super) fn handle_resolution_choice(
                     "A zone-choice card may be selected only once".to_string(),
                 ));
             }
+            // CR 608.2d: a resolution-time object choice is validated against the
+            // objects eligible now, not only the candidates stored when the
+            // prompt was raised (a player can't choose an illegal option).
+            let answers_resolution_object_choice =
+                match effects::open_resolution_object_choice_candidates(state) {
+                    Some(current) => {
+                        if chosen.iter().any(|id| !current.contains(id)) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected object is no longer eligible for this choice".to_string(),
+                            ));
+                        }
+                        true
+                    }
+                    None => false,
+                };
             if !effects::choose_from_zone::selection_satisfies_constraint(
                 state,
                 &chosen,
@@ -6260,8 +6446,20 @@ pub(super) fn handle_resolution_choice(
                 state.current_trigger_match_count = ctx.match_count;
                 state.die_result_this_resolution = ctx.die_result;
             }
+            let events_before_resume = events.len();
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled zone choice must resume its continuation");
+            // CR 603.2 + CR 603.3 + CR 603.7: the instructions an answered
+            // resolution-time object choice resumed can pause again (a
+            // replacement-order prompt during "Destroy all creatures"). The
+            // paused action is not scanned by the post-action pipeline and the
+            // later answer has a new event buffer, so the resumed span's
+            // observers and delayed triggers are retained now.
+            if answers_resolution_object_choice
+                && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                retain_triggers_of_resumed_span(state, events, events_before_resume);
+            }
             state.current_trigger_event = prev_trigger_event;
             state.current_trigger_match_count = prev_trigger_match_count;
             state.die_result_this_resolution = prev_die_result;
@@ -6816,14 +7014,17 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_in_exile,
                 face_down_profile,
+                with_entry_effect,
                 enter_with_counters,
                 conditional_enter_with_counters,
                 count_param,
                 library_position,
+                library_shuffle,
                 mass_library_order,
                 is_cost_payment,
                 enters_modified_if,
                 duration,
+                performed_by,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -7495,6 +7696,9 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
+                            // CR 608.2c: the performer resolved before the
+                            // pause; a save without it credits the chooser.
+                            performed_by: performed_by.unwrap_or(player),
                             origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
@@ -7515,7 +7719,14 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
+                            // CR 611.2e + CR 614.12: the with-entry effect derived at the
+                            // instruction's resolver entry, carried across the round-trip;
+                            // never re-derived here.
+                            with_entry_effect: with_entry_effect.clone(),
                             library_placement: library_position.clone(),
+                            // CR 701.24a + CR 730.3: the parked choice carries
+                            // whether its position is a terminal shuffle's.
+                            library_shuffle,
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -7528,7 +7739,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -7575,6 +7790,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -7599,7 +7815,9 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7652,6 +7870,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -7676,7 +7895,9 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7992,6 +8213,7 @@ pub(super) fn handle_resolution_choice(
                     let ctx = effects::change_zone::ChangeZoneIterationCtx {
                         source_id,
                         controller: player,
+                        performed_by: player,
                         origin: Some(zone),
                         destination: dest_zone,
                         enter_transformed,
@@ -8004,7 +8226,10 @@ pub(super) fn handle_resolution_choice(
                         track_exiled_by_source,
                         face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
+                        // CR 611.2e + CR 614.12: carried across the round-trip, never re-derived.
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: None,
+                        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                         enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
@@ -8050,7 +8275,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -8083,6 +8312,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
@@ -8092,7 +8322,9 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -8133,6 +8365,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
@@ -8142,7 +8375,9 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -13040,6 +13275,7 @@ mod tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination,
@@ -13136,6 +13372,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination,
@@ -13270,6 +13507,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
@@ -13949,6 +14187,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -14263,6 +14502,7 @@ mod tests {
         );
         let printed_destination = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
@@ -15233,6 +15473,7 @@ mod tests {
         ));
 
         let waiting = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![eligible],
             count: 1,
@@ -15250,10 +15491,12 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -15344,6 +15587,7 @@ mod tests {
                 rider.set_optional_effect_performed_recursive(!pick);
                 state.park_ability_continuation(PendingContinuation::new(Box::new(rider), &state));
                 let waiting = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: PlayerId(0),
                     cards: vec![eligible],
                     count: 1,
@@ -15361,10 +15605,12 @@ mod tests {
                     track_exiled_by_source: false,
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
+                    with_entry_effect: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
@@ -15981,6 +16227,7 @@ mod random_result_resolution_context_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,

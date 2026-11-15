@@ -354,7 +354,6 @@
     "pickNone": "なし",
     "underAttack_one": "{{count}}体のクリーチャーから攻撃されています",
     "underAttack_other": "{{count}}体のクリーチャーから攻撃されています",
-    "target": "対象",
     "sacrifice": "生け贄",
     "token": "トークン",
     "tokenTooltip": "実在カードのトークンコピー",
@@ -607,7 +606,9 @@
     "dungeonTooltip": "{{name}}を踏破中",
     "poisonAriaLabel_one": "毒カウンター{{count}}個",
     "poisonAriaLabel_other": "毒カウンター{{count}}個",
-    "poisonTooltip": "毒カウンター: {{count}}\n毒カウンターが10個以上あるプレイヤーはゲームに敗北します。",
+    "poisonTooltip": "毒カウンター: {{count}}",
+    "poisonLossPlayer": "毒カウンターが{{threshold}}個以上あるプレイヤーはゲームに敗北します。",
+    "poisonLossTeam": "毒カウンターが{{threshold}}個以上あるチームはゲームに敗北します。",
     "energyAriaLabel_one": "エネルギー・カウンター{{count}}個",
     "energyAriaLabel_other": "エネルギー・カウンター{{count}}個",
     "energyTooltip": "エネルギー・カウンター: {{count}}\nエネルギー・カウンターはカード能力が使う、プレイヤーが持つリソースです。",
@@ -705,6 +706,8 @@
     "commander": "統率者",
     "commanderTitle": "統率者: {{name}}",
     "commanderTitleTax": "統率者: {{name}}（税: +{{tax}}）",
+    "boss": "ボス",
+    "bossTitle": "ボス: {{name}}",
     "castCommander": "{{name}}を唱える — ダブルクリックまたはドラッグしてプレイ",
     "castCommanderTax": "{{name}}を唱える（税: +{{tax}}） — ダブルクリックまたはドラッグしてプレイ",
     "ninjutsuCommander": "統率者忍術: {{name}} — クリックしてブロックされていない攻撃クリーチャーを手札に戻し、この統率者をタップ状態で攻撃中に戦場へ出す",
@@ -1218,6 +1221,11 @@
       "drawFirst": "後攻",
       "drawFirstDescription": "最初のターンに追加のドローを得る"
     },
+    "startingPlayer": {
+      "title": "先攻を選択",
+      "playerPlaysFirst": "{{name}}が先攻",
+      "opponentChoosing": "{{name}}が先攻を選択しています…"
+    },
     "mulligan": {
       "opponentDeciding": "対戦相手が初手を検討中…",
       "londonTitle": "ロンドン・マリガン（{{count}}回目）",
@@ -1240,7 +1248,10 @@
       "subtitleKeepWithBottom": "この手札で始める（{{count}}枚を一番下に置く）か、再びマリガンして新たに7枚引きます。",
       "subtitleKeepFree": "この手札で始める（フリー・マリガンのため一番下に置くカードなし）か、再びマリガンして新たに7枚引きます。",
       "subtitleOpeningFree": "この手札で始めるか、フリー・マリガンできます（一番下に置くカードなし）。",
-      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。"
+      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。",
+      "onThePlay": "あなたが先攻",
+      "onTheDraw": "あなたが後攻",
+      "takeTurn": "あなたの{{turn}}ターン目"
     },
     "companion": {
       "eyebrow": "ゲーム開始前",
@@ -1361,7 +1372,10 @@
         "Ticket": "チケット"
       },
       "generic": "コスト",
-      "pay": "{{cost}}を支払う"
+      "pay": "{{cost}}を支払う",
+      "draw": "カードを1枚引く",
+      "drawCount_one": "カードを{{count}}枚引く",
+      "drawCount_other": "カードを{{count}}枚引く"
     },
     "unlessPayment": {
       "defaultEffect": "支払わなければ打ち消す",
@@ -1457,6 +1471,8 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
+      "commanderDamage": "統率者ダメージ",
+      "poisonCounters": "毒カウンター",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {

@@ -303,16 +303,13 @@
     "skip": "Zum Überspringen tippen",
     "continue": "Zum Fortfahren tippen",
     "you": "Du",
-    "youPlayFirst": "Du beginnst",
-    "playerPlaysFirst": "{{name}} beginnt",
+    "youWonRoll": "Du hast den Wurf gewonnen",
+    "playerWonRoll": "{{name}} hat den Wurf gewonnen",
     "heads": "Kopf",
     "tails": "Zahl",
     "coinFlip": "Münzwurf",
     "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
     "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
-    "turnOrder": "Zugreihenfolge",
-    "turnOrderItem": "Zug {{turn}}: {{name}}",
-    "youTakeTurn": "Du bist in Zug {{turn}} dran",
     "ignoredDie": "Ignoriert"
   },
   "chrome": {
@@ -333,6 +330,11 @@
     "heading": "Etwas ist schiefgelaufen",
     "body": "Die App ist auf einen unerwarteten Fehler gestoßen und kann auf diesem Bildschirm nicht fortfahren. Ein Neuladen behebt das meist.",
     "reload": "Neu laden"
+  },
+  "stateCodec": {
+    "actionInterrupted": "Die Übertragung des Spielzustands wurde während der Aktion unterbrochen",
+    "submissionNotSent": "Die Übertragung des Spielzustands wird wiederhergestellt; diese Aktion wurde nicht gesendet.",
+    "reconnectSubmissionNotSent": "Die Verbindung wird wiederhergestellt; diese Aktion wurde nicht gesendet."
   },
   "actionError": {
     "title": "{{action}} fehlgeschlagen",

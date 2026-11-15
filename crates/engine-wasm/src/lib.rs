@@ -265,6 +265,24 @@ fn resolve_and_validate_initialize_format_config(
     Ok(format_config)
 }
 
+/// A local or P2P-host start may reuse a config persisted by an earlier engine,
+/// so it takes the persisted migration.
+fn decode_initialize_format_config(mut config: serde_json::Value) -> Result<FormatConfig, String> {
+    FormatConfig::migrate_persisted(&mut config);
+    serde_json::from_value(config).map_err(|error| error.to_string())
+}
+
+/// The P2P host's saved pregame seat state may carry a format persisted by an
+/// earlier engine, so its `format` takes the persisted migration.
+fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if let Some(format) = value.get_mut("format") {
+        FormatConfig::migrate_persisted(format);
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -281,8 +299,11 @@ mod external_format_config_tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use engine::types::custom_format::CustomFormatId;
+    use engine::types::custom_format::{
+        CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
+    };
     use engine::types::format::RangeOfInfluenceConfig;
+    use seat_reducer::types::SeatKind;
 
     #[test]
     fn best_of_three_ceiling_reads_the_format_axis_and_fails_closed() {
@@ -400,6 +421,7 @@ mod external_format_config_tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Unlimited,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                    poison_counter_threshold: 10,
                 },
                 legality: LegalityRules {
                     legal_sets: None,
@@ -461,6 +483,104 @@ mod external_format_config_tests {
             resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
                 .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
                 .contains("player_count")
+        );
+    }
+
+    fn with_damage_threshold(config: FormatConfig) -> serde_json::Value {
+        let mut value = serde_json::to_value(config).expect("config serializes");
+        value["commander_damage_threshold"] = serde_json::json!(21);
+        value
+    }
+
+    /// A Custom config with Standard eligibility and no threshold, stored with the
+    /// `uses_commander: false` an earlier engine derived for it.
+    fn legacy_custom_config() -> (FormatConfig, serde_json::Value) {
+        let mut rules =
+            CustomFormatDef::from_lobby_config("Legacy".to_string(), &FormatConfig::commander())
+                .expect("Commander saves as a custom format")
+                .rules;
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold: None,
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        };
+        let current = FormatConfig::for_custom_rules(&rules);
+        assert!(current.uses_commander);
+        let mut legacy = serde_json::to_value(&current).expect("config serializes");
+        legacy["uses_commander"] = false.into();
+        (current, legacy)
+    }
+
+    /// Each persisted config paired with the config today's rules install for it.
+    fn legacy_config_rows() -> Vec<(serde_json::Value, FormatConfig)> {
+        let (custom, legacy_custom) = legacy_custom_config();
+        let mut commander = FormatConfig::commander();
+        commander.commander_damage_threshold = Some(21);
+        vec![
+            (
+                with_damage_threshold(FormatConfig::brawl()),
+                FormatConfig::brawl(),
+            ),
+            (
+                with_damage_threshold(FormatConfig::historic_brawl()),
+                FormatConfig::historic_brawl(),
+            ),
+            (legacy_custom, custom),
+            (with_damage_threshold(FormatConfig::commander()), commander),
+        ]
+    }
+
+    #[test]
+    fn public_initializer_starts_a_legacy_config_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            clear_game_state();
+            initialize_game_inner(
+                None,
+                42,
+                Some(Ok(persisted)),
+                MatchConfig::default(),
+                2,
+                Some(0),
+                InitSessionKind::Local,
+            )
+            .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let installed = with_installed_state(|state| state.format_config.clone())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let recorded = REPLAY_LOG.with(|cell| {
+                let log = cell.take();
+                let recorded = log.as_ref().map(|log| log.header.format_config.clone());
+                cell.set(log);
+                recorded
+            });
+            assert_eq!(installed, expected, "{label:?}");
+            assert_eq!(recorded, Some(expected), "{label:?}");
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn persisted_seat_state_decodes_a_legacy_format_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            let mut seat_state = serde_json::to_value(SeatState {
+                seats: vec![SeatKind::HostHuman, SeatKind::WaitingHuman],
+                tokens: vec!["host-token".to_string(), String::new()],
+                format: FormatConfig::standard(),
+                game_started: false,
+            })
+            .expect("seat state serializes");
+            seat_state["format"] = persisted;
+            let decoded = decode_persisted_seat_state(&seat_state.to_string())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            assert_eq!(decoded.format, expected, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn direct_format_config_decode_still_rejects_a_brawl_damage_threshold() {
+        assert!(
+            serde_json::from_value::<FormatConfig>(with_damage_threshold(FormatConfig::brawl()))
+                .is_err()
         );
     }
 
@@ -2056,30 +2176,59 @@ fn initialize_game_impl(
     first_player: Option<u8>,
     kind: InitSessionKind,
 ) -> JsValue {
-    let seed = seed.map(|s| s as u64).unwrap_or(42);
-
-    // Resolved before the format config: an undeclared config's default must
-    // be chosen FOR this seat count (see
-    // `resolve_and_validate_initialize_format_config`), so `count` has to be
-    // known first.
-    let count = player_count.unwrap_or(2);
-
-    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
-        ) {
-            Ok(config) => Some(config),
-            Err(error) => return to_js(&error),
-        }
+    let deck_data = (!deck_data.is_null() && !deck_data.is_undefined()).then(|| {
+        serde_wasm_bindgen::from_value::<DeckList>(deck_data).map_err(|error| error.to_string())
+    });
+    let format_config =
+        (!format_config_js.is_null() && !format_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
+                .map_err(|error| error.to_string())
+        });
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+            .unwrap_or_else(|_| MatchConfig::default())
     } else {
-        None
+        MatchConfig::default()
+    };
+    match initialize_game_inner(
+        deck_data,
+        seed.map(|s| s as u64).unwrap_or(42),
+        format_config,
+        match_config,
+        player_count.unwrap_or(2),
+        first_player,
+        kind,
+    ) {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
+}
+
+/// Natively callable body of `initialize_game_impl`, after the
+/// `restore_game_state_inner` precedent.
+fn initialize_game_inner(
+    deck_data: Option<Result<DeckList, String>>,
+    seed: u64,
+    format_config: Option<Result<serde_json::Value, String>>,
+    match_config: MatchConfig,
+    count: u8,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
+) -> Result<ActionResult, serde_json::Value> {
+    // `count` is resolved before the format config: an undeclared config's
+    // default must be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`).
+    let decoded_format_config = match format_config {
+        Some(config) => Some(parse_initialize_format_config(
+            config.and_then(decode_initialize_format_config),
+        )?),
+        None => None,
     };
     let format_config =
         match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
             Ok(config) => config,
             Err(reason) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [reason],
                 }));
@@ -2092,12 +2241,6 @@ fn initialize_game_impl(
     // thread-local is still clear here and a host game would otherwise be given
     // local debug permissions.
     initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
-    };
     // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
     // onto the runtime `loop_detection` gate via the single engine authority shared
     // with the server path. The detector is player-count-agnostic, so it carries
@@ -2120,11 +2263,11 @@ fn initialize_game_impl(
     // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
     // returning that envelope here gives the user a real failure message
     // instead of a silently-broken match.
-    if !deck_data.is_null() && !deck_data.is_undefined() {
-        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
+    if let Some(deck_data) = deck_data {
+        let deck_list = match deck_data {
             Ok(d) => d,
             Err(e) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [format!("Deck payload deserialization failed: {e}")],
                 }));
@@ -2133,7 +2276,7 @@ fn initialize_game_impl(
         // Resource bound on every seat's printings sidecar (the decoder has already
         // refused more than the entry cap): refused before the list is recorded.
         if let Some(reasons) = deck_list_printings_violations(&deck_list) {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -2142,7 +2285,7 @@ fn initialize_game_impl(
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [
                     "Card database not loaded in engine worker. \
@@ -2185,7 +2328,7 @@ fn initialize_game_impl(
         });
 
         if let Some(reasons) = validation_error {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -2213,7 +2356,7 @@ fn initialize_game_impl(
                     .map(|e| vec![e.to_string()])
             });
             if let Some(reasons) = cedh_error {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "cedh_bracket_violation": true,
                     "reasons": reasons,
@@ -2235,7 +2378,7 @@ fn initialize_game_impl(
             .map(|seat| seat.0)
             .collect();
         if !empty_seats.is_empty() {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [format!(
                     "Empty library after deck load for seat(s): {empty_seats:?}. \
@@ -2280,7 +2423,7 @@ fn initialize_game_impl(
     invalidate_ai_proposals();
     reset_hand_disclosure();
 
-    to_js(&result)
+    Ok(result)
 }
 
 /// Submit a game action on behalf of `actor` and return the ActionResult
@@ -4674,6 +4817,702 @@ mod restored_card_db_requirements_tests {
 
         clear_game_state();
     }
+
+    /// CR 118.12 + CR 614.17a: a staged payment parked on a recovery checkpoint
+    /// carries a second executable board, and settling the payment installs
+    /// it. The restore refreshes printed faces on that board as on the live
+    /// one: the saved discard prompt is answered and the refreshed face is
+    /// still there afterwards.
+    ///
+    /// The board is the one of the engine's
+    /// `a_recovered_payment_reopens_through_checked_restore_and_settles`
+    /// (verbatim Oracle texts): P0's draw is a Dredge prompt (Stinkweed Imp),
+    /// Maralen of the Mornsong is muted by P2's Humility, and P2 concedes after
+    /// the draw leg. Synthetic: the `Composite[draw, discard]` cost is no
+    /// printed card's; "Test Card" is the test database's printed face, saved
+    /// with Vigilance and printed with Trample.
+    #[test]
+    fn restore_refreshes_printed_faces_on_a_parked_payments_checkpoint() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr,
+            ResolvedAbility, TargetFilter,
+        };
+        use engine::types::keywords::Keyword;
+        use engine::types::zones::Zone;
+
+        let face = |keyword| engine::types::card::CardFace {
+            name: "Test Card".to_string(),
+            card_type: engine::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![engine::types::card_type::CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            },
+            power: Some(engine::types::ability::PtValue::Fixed(2)),
+            toughness: Some(engine::types::ability::PtValue::Fixed(2)),
+            keywords: vec![keyword],
+            scryfall_oracle_id: Some("oracle-1".to_string()),
+            ..Default::default()
+        };
+        let stale = face(Keyword::Vigilance);
+        let printed_faces =
+            std::collections::HashMap::from([("test card".to_string(), face(Keyword::Trample))]);
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the face serializes"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+        ];
+        for player in 0..3 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        scenario.add_creature_from_oracle(
+            P1,
+            "Maralen of the Mornsong",
+            2,
+            3,
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that \
+             player loses 3 life, searches their library for a card, puts it into their hand, \
+             then shuffles.",
+        );
+        scenario.add_enchantment_from_oracle(
+            PlayerId(2),
+            "Humility",
+            "All creatures lose all abilities and have base power and toughness 1/1.",
+        );
+        scenario.add_card_to_hand(P0, "Hand A");
+        scenario.add_card_to_hand(P0, "Hand B");
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let printed = engine::game::deck_loading::create_object_from_card_face(state, &stale, P0);
+        engine::game::zones::move_to_zone(state, printed, Zone::Battlefield, &mut Vec::new());
+        engine::game::layers::evaluate_layers(state);
+
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::EffectCost {
+                            effect: Box::new(Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            }),
+                        },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: CardSelectionMode::Chosen,
+                            self_scope: DiscardSelfScope::FromHand,
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining Dredge accepts the draw");
+        apply(
+            state,
+            PlayerId(2),
+            GameAction::Concede {
+                player_id: PlayerId(2),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(matches!(
+            checkpoint.state.waiting_for,
+            WaitingFor::DiscardChoice { .. }
+        ));
+        assert!(
+            checkpoint.state.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Vigilance),
+            "reach: the checkpoint holds the face as saved"
+        );
+        let drawn = checkpoint
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::CardDrawn {
+                    player_id,
+                    object_id,
+                    ..
+                } if *player_id == P0 => Some(*object_id),
+                _ => None,
+            })
+            .expect("the accepted prefix drew a card");
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the recovered payment restores")
+            .state;
+        assert!(
+            restored.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Trample),
+            "reach: the restore refreshed the live board"
+        );
+
+        apply(
+            &mut restored,
+            P0,
+            GameAction::SelectCards { cards: vec![drawn] },
+        )
+        .expect("the restored prompt is answered with the prefix-drawn card");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert!(
+            restored.players[0].graveyard.contains(&drawn),
+            "the drawn card was discarded"
+        );
+        let settled = &restored.objects[&printed];
+        assert_eq!(
+            (
+                settled.base_keywords.contains(&Keyword::Trample),
+                settled.base_keywords.contains(&Keyword::Vigilance),
+            ),
+            (true, false),
+            "settlement keeps the refreshed face"
+        );
+        clear_game_state();
+    }
+
+    /// CR 613.1f + CR 616.1: a recovery checkpoint parked on a replacement
+    /// choice is checked after its refreshed faces went through the layers.
+    /// Humility and Hullbreacher are printed objects of the test database
+    /// (verbatim Oracle texts): the face refresh gives Hullbreacher its
+    /// printed replacement back until Humility is applied again, and a restore
+    /// that checked the prompt before that refused the valid Dredge-only
+    /// choice as leaving Hullbreacher out.
+    ///
+    /// Synthetic: the `Composite[draw, draw]` cost is no printed card's.
+    #[test]
+    fn restore_applies_layers_to_a_checkpoint_before_checking_its_prompt() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use engine::types::card::{CardFace, PrintedCardRef};
+        use engine::types::zones::Zone;
+
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+            "Library 7",
+        ];
+        for player in 0..4 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        let hullbreacher = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Hullbreacher",
+                3,
+                2,
+                "Flash\nIf an opponent would draw a card except the first one they draw in \
+                 each of their draw steps, instead you create a Treasure token. (It's an \
+                 artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            )
+            .id();
+        let humility = scenario
+            .add_enchantment_from_oracle(
+                PlayerId(2),
+                "Humility",
+                "All creatures lose all abilities and have base power and toughness 1/1.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        // Make the two interacting permanents printed objects of the database.
+        let mut printed_faces = std::collections::HashMap::new();
+        for (id, oracle_id) in [
+            (hullbreacher, "oracle-hullbreacher"),
+            (humility, "oracle-humility"),
+        ] {
+            let object = state.objects.get_mut(&id).expect("the permanent exists");
+            let face = CardFace {
+                name: object.name.clone(),
+                card_type: object.base_card_types.clone(),
+                power: object
+                    .base_power
+                    .map(engine::types::ability::PtValue::Fixed),
+                toughness: object
+                    .base_toughness
+                    .map(engine::types::ability::PtValue::Fixed),
+                keywords: object.base_keywords.clone(),
+                abilities: (*object.base_abilities).clone(),
+                triggers: (*object.base_trigger_definitions).clone(),
+                static_abilities: (*object.base_static_definitions).clone(),
+                replacements: (*object.base_replacement_definitions).clone(),
+                scryfall_oracle_id: Some(oracle_id.to_string()),
+                ..Default::default()
+            };
+            object.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: face.name.clone(),
+            });
+            object.base_printed_ref = object.printed_ref.clone();
+            printed_faces.insert(face.name.to_lowercase(), face);
+        }
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the faces serialize"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+        engine::game::layers::evaluate_layers(state);
+
+        let draw_leg = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![draw_leg(), draw_leg()],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining leg 1's Dredge accepts the draw");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+            "reach: leg 2's Dredge is offered, got {:?}",
+            state.waiting_for
+        );
+        apply(
+            state,
+            PlayerId(3),
+            GameAction::Concede {
+                player_id: PlayerId(3),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(
+            matches!(
+                checkpoint.state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "reach: the checkpoint is parked on leg 2's Dredge choice"
+        );
+        // Reach: on the checkpoint Humility mutes Hullbreacher, and the face
+        // refresh alone gives it its printed replacement back.
+        let mut refreshed = (*checkpoint.state).clone();
+        let functioning = |state: &GameState| {
+            state.objects[&hullbreacher]
+                .replacement_definitions
+                .iter_all()
+                .count()
+        };
+        assert_eq!(functioning(&refreshed), 0);
+        rehydrate_game_from_card_db_with_finalization(
+            &mut refreshed,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(functioning(&refreshed), 1);
+        let hand_before = state.players[0].hand.len();
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the Dredge-only prompt is the one the game offers under Humility")
+            .state;
+        apply(
+            &mut restored,
+            P0,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("the restored prompt is answered");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert_eq!(
+            restored.players[0].hand.len(),
+            hand_before + 2,
+            "both legs' cards were drawn"
+        );
+        assert!(
+            !restored
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Battlefield && object.name == "Treasure"),
+            "Hullbreacher stayed muted"
+        );
+        clear_game_state();
+    }
+}
+
+/// Production-restore owner pin for the Smackdown ref repair (R8-F1): the
+/// engine test proves the shared decode chokepoint heals the ref, but it
+/// supplies its own rehydration closure and reads the projection directly —
+/// a production restore caller that skipped rehydration would still pass.
+/// This test feeds the legacy Turtle Team-Up save through the actual solo
+/// owner (`restore_game_state_inner`, the same body the `restore_game_state`
+/// shell runs) and asserts on the FIRST SERIALIZED viewer snapshot, exactly
+/// like the `exported_state_projects_ai_hand_identity_by_request`
+/// precedent: the installed state is read back, projected for the local
+/// seat, and asserted on the wire value.
+///
+/// Real card: Event: Leatherhead's Smackdown, TTMC #20. Verbatim Oracle
+/// text: "As a team, the heroes choose a creature with the greatest power
+/// among creatures they control. Destroy it. The bosses lose life equal to
+/// that creature's power." (preset f13c9091-91b6-51b4-91d5-214180ff03ee,
+/// oracle 4e7833c7-e9ff-4550-b2fd-36afe6087e0f). The old-save shape splices
+/// the ORIGINAL typo'd scryfall_id (444 for 4a44, no face_name) at the
+/// serialized boundary. The expectation is computed from the preset record
+/// the repair itself reads, plus a pinned-literal guard — never re-typed.
+///
+/// Discrimination: a production restore caller that skipped the card-DB
+/// rehydration — or a reverted ref repair — leaves the projected graveyard
+/// Event carrying the typo'd ref, so the corrected-ref equality on the
+/// serialized snapshot flips. Every concealment assertion pairs with a
+/// positive reach-guard (revealed + corrected pre-serialize; piles
+/// non-empty pre-serialize).
+#[cfg(test)]
+mod production_restore_owner_regression_tests {
+    use super::*;
+    use engine::game::deck_loading::{load_deck_into_state, load_horde_library, DeckPayload};
+    use engine::game::token_presets::known_token_preset_by_id;
+    use engine::types::format::ChallengeDeck;
+    use engine::types::phase::Phase;
+
+    #[test]
+    fn production_restore_owner_repairs_revealed_smackdown_ref_on_first_serialized_snapshot() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let saved_card_db = CARD_DB.with(|cell| cell.borrow().clone());
+        load_minimal_test_card_database();
+
+        // Two-seat Turtle Team-Up, mirroring `boss.rs::turtle_teamup_game`:
+        // emblem plus stage-1 deploy, then the 27-card event library
+        // (token-layout, so no card DB is needed for setup).
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        assert_eq!(horde, PlayerId(0), "the Horde occupies the local seat");
+        load_deck_into_state(&mut state, &DeckPayload::default());
+        load_horde_library(
+            &mut state,
+            &CardDatabase::default(),
+            horde,
+            ChallengeDeck::TurtleTeamUpHorde,
+        );
+        let hero = state
+            .players
+            .iter()
+            .map(|player| player.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        // The repair's own authority for the expectation: preset identity
+        // in, corrected ref out. The Smackdown preset carries its art ref,
+        // so this is exactly what the in-engine repair stamps.
+        let expected_smackdown_ref =
+            known_token_preset_by_id("f13c9091-91b6-51b4-91d5-214180ff03ee")
+                .expect("Smackdown preset resolves")
+                .token_image_ref
+                .clone()
+                .expect("Smackdown preset carries its art ref");
+        assert_eq!(
+            expected_smackdown_ref.scryfall_id, "fac36345-b2fb-4a44-a499-f68bbe87e736",
+            "the preset carries the corrected post-PR art ref"
+        );
+        assert_eq!(
+            expected_smackdown_ref.preset_id, "f13c9091-91b6-51b4-91d5-214180ff03ee",
+            "preset identity round-trips"
+        );
+
+        // Rig the Smackdown on top of the event deck (the established
+        // `boss.rs` reveal-driver pattern).
+        let library: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|player| player.id == horde)
+            .expect("horde seat")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let smackdown = library
+            .into_iter()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.name == "Event: Leatherhead's Smackdown")
+            })
+            .expect("the event deck must contain Leatherhead's Smackdown");
+        {
+            let seat = state
+                .players
+                .iter_mut()
+                .find(|player| player.id == horde)
+                .expect("horde seat");
+            seat.library.retain(|id| *id != smackdown);
+            seat.library.push_front(smackdown);
+        }
+
+        // Park priority with the survivor on the Horde's turn — the beat
+        // after the Horde's own pass. The survivor's production pass hands
+        // priority back to the Horde, and the pipeline's wave gate
+        // (`player == active_player`, empty stack, positive budget) fires
+        // the reveal on that same beat. This is the production action path
+        // (`submit_action_inner`, the same body the live shell runs), not a
+        // direct reveal call — engine-wasm cannot reach the `pub(crate)`
+        // reveal driver, which is exactly why the R7 engine test had to
+        // call it directly.
+        state.phase = Phase::PreCombatMain;
+        state.active_player = horde;
+        state.priority_player = hero;
+        state.waiting_for = WaitingFor::Priority { player: hero };
+        state.horde_wave_remaining = 1;
+        install_game_state(Some(state));
+        match submit_action_inner(hero, GameAction::PassPriority) {
+            Ok(SubmittedAction::Applied { .. }) => {}
+            Ok(SubmittedAction::Rejected { rejection }) => {
+                panic!("the survivor's pass must apply, got rejection {rejection:?}")
+            }
+            Err(error) => panic!("the survivor's pass must apply, got error {error:?}"),
+        }
+
+        // Positive reach-guards on the live installed state: the reveal
+        // settled synchronously with no parked prompt, the Event sits in
+        // the Boss graveyard carrying the corrected ref, and both hidden
+        // piles are non-empty — so no later assertion passes vacuously.
+        let (hidden_library, pile_boss) = with_installed_state(|state| {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "no prompt parks on the reveal beat"
+            );
+            assert!(
+                state
+                    .players
+                    .iter()
+                    .find(|player| player.id == horde)
+                    .expect("horde seat")
+                    .graveyard
+                    .contains(&smackdown),
+                "the revealed Smackdown must sit in the Boss graveyard pre-serialize"
+            );
+            assert_eq!(
+                state
+                    .objects
+                    .get(&smackdown)
+                    .expect("revealed Event")
+                    .token_image_ref,
+                Some(expected_smackdown_ref.clone()),
+                "precondition: the live reveal stamps the corrected ref"
+            );
+            (
+                *state
+                    .players
+                    .iter()
+                    .find(|player| player.id == horde)
+                    .expect("horde seat")
+                    .library
+                    .front()
+                    .expect("the event deck still holds cards after one reveal"),
+                *state
+                    .boss_deck
+                    .front()
+                    .expect("the Boss pile survives setup"),
+            )
+        })
+        .expect("a game is installed");
+
+        // Production envelope (`export_game_state_json` shape), then the
+        // pre-PR regression spliced in AT THE SERIALIZED BOUNDARY: every
+        // display route omitted, and every Smackdown ref rewritten to the
+        // historical typo'd printing (444 for 4a44, no face_name).
+        let json = export_game_state_json().expect("production export serializes");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse the envelope");
+        let objects = value
+            .get_mut("state")
+            .and_then(|envelope| envelope.get_mut("objects"))
+            .and_then(|objects| objects.as_object_mut())
+            .expect("the envelope carries the objects map");
+        for obj in objects.values_mut() {
+            obj.as_object_mut()
+                .expect("saved object")
+                .remove("display_source");
+        }
+        let mut rewrote = 0;
+        for obj in objects.values_mut() {
+            let is_smackdown = obj
+                .get("token_image_ref")
+                .and_then(|image_ref| image_ref.get("preset_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some("f13c9091-91b6-51b4-91d5-214180ff03ee");
+            if is_smackdown {
+                obj["token_image_ref"] = serde_json::json!({
+                    "scryfall_id": "fac36345-b2fb-444-a499-f68bbe87e736",
+                    "scryfall_oracle_id": "4e7833c7-e9ff-4550-b2fd-36afe6087e0f",
+                    "preset_id": "f13c9091-91b6-51b4-91d5-214180ff03ee",
+                });
+                rewrote += 1;
+            }
+        }
+        assert!(
+            rewrote >= 1,
+            "the boundary splice must regress at least the revealed Smackdown"
+        );
+        let stripped = serde_json::to_string(&value).expect("re-serialize the old save");
+        assert!(
+            !stripped.contains("display_source"),
+            "precondition: the old save omits every display route"
+        );
+
+        // Through THE ACTUAL OWNER: the solo restore caller with its own
+        // rehydrate wiring, not a test-supplied closure.
+        assert!(!is_multiplayer_mode(), "restore runs as the solo owner");
+        restore_game_state_inner(&stripped).expect("the production owner restores the old save");
+
+        // FIRST SERIALIZED viewer snapshot, exactly like the hand-disclosure
+        // precedent: installed state, local-seat (Horde-seat) projection,
+        // then assertions on the wire value.
+        let wire = with_installed_state(|state| {
+            serde_json::to_value(local_seat_client_state(state)).expect("client state serializes")
+        })
+        .expect("a game is installed");
+        let shown = &wire["state"]["objects"][smackdown.0.to_string()];
+        assert_eq!(
+            shown["name"].as_str(),
+            Some("Event: Leatherhead's Smackdown"),
+            "the graveyard Event keeps its name"
+        );
+        assert_eq!(
+            shown["display_visible_to_viewer"].as_bool(),
+            Some(true),
+            "the revealed Event is visible to the viewer"
+        );
+        assert_eq!(
+            shown["display_source"].as_str(),
+            Some("Token"),
+            "routing repaired through the production owner"
+        );
+        // THE discriminating assertion: a production restore caller that
+        // skipped rehydration leaves the typo'd ref here, so this flips.
+        assert_eq!(
+            shown["token_image_ref"]["scryfall_id"].as_str(),
+            Some(expected_smackdown_ref.scryfall_id.as_str()),
+            "the first serialized snapshot must show the corrected ref for the graveyard Event"
+        );
+        assert_eq!(
+            shown["token_image_ref"]["preset_id"].as_str(),
+            Some("f13c9091-91b6-51b4-91d5-214180ff03ee"),
+            "preset identity survives the owner restore"
+        );
+
+        // Both hidden piles stay concealed in the Horde-seat snapshot: the
+        // remaining event library and the face-down Boss pile.
+        for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
+            let hidden = &wire["state"]["objects"][id.0.to_string()];
+            assert_eq!(
+                hidden["name"].as_str(),
+                Some("Hidden Card"),
+                "{what} name concealed"
+            );
+            assert!(
+                !hidden["display_visible_to_viewer"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "{what} visibility concealed"
+            );
+            // `Card` is the skip-serialized default: the concealed routing
+            // rides the wire as an absent key (the same shape as the
+            // pre-PR omission, which deserializes back to `Card`).
+            assert!(
+                hidden.get("display_source").is_none(),
+                "{what} routing concealed"
+            );
+            assert!(
+                hidden.get("token_image_ref").is_none(),
+                "{what} art ref concealed"
+            );
+            assert!(
+                !hidden
+                    .get("is_horde_deck_token")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                "{what} Horde flag concealed"
+            );
+        }
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = saved_card_db);
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
 }
 
 #[cfg(test)]
@@ -6210,7 +7049,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
         }
     }
 
-    let mut state: SeatState = serde_json::from_str(state_json)
+    let mut state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     let mutation: SeatMutation = serde_json::from_str(mutation_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatMutation: {e}")))?;
@@ -6237,7 +7076,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
 /// need to understand format topology details.
 #[wasm_bindgen]
 pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
-    let state: SeatState = serde_json::from_str(state_json)
+    let state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     Ok(to_js(&state.to_view()))
 }
@@ -7936,6 +8775,7 @@ mod tests {
 #[cfg(test)]
 mod replay_bridge_tests {
     use super::*;
+    use engine::game::start_game_winner_plays_first;
     use engine::types::game_state::WaitingFor;
 
     #[test]
@@ -7986,7 +8826,7 @@ mod replay_bridge_tests {
         clear_replay_playback();
 
         let mut state = GameState::new_two_player(99);
-        let start_result = start_game(&mut state);
+        let start_result = start_game_winner_plays_first(&mut state);
         let _ = start_result;
 
         let header = ReplayHeader {
@@ -8043,6 +8883,82 @@ mod replay_bridge_tests {
             0,
             "clear_replay_playback should drop the loaded replay"
         );
+        clear_game_state();
+    }
+
+    /// CR 103.1: a local game started by the engine's own contest rests at the
+    /// choice; the chooser's answer starts it, is recorded like any other
+    /// action, and a reloaded recording replays it to the same start.
+    #[test]
+    fn wasm_local_game_records_the_starting_player_choice() {
+        clear_game_state();
+        clear_replay_playback();
+
+        // Mirrors `initialize_game_impl`'s `first_player: None` start with no
+        // deck data: `start_game`, the replay header, the interaction bind and
+        // the install.
+        let mut state = GameState::new_two_player(99);
+        let _ = start_game(&mut state);
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let header = ReplayHeader {
+            format_config: state.format_config.clone(),
+            match_config: state.match_config,
+            player_count: state.players.len() as u8,
+            first_player: None,
+            seed: state.rng_seed,
+            deck_data: None,
+        };
+        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        bind_interaction_session(&mut state);
+        install_game_state(Some(state));
+        assert!(
+            matches!(
+                with_installed_state(|state| state.waiting_for.clone()),
+                Ok(WaitingFor::ChooseStartingPlayer { .. })
+            ),
+            "reach: the installed game waits on the choice"
+        );
+
+        let submitted =
+            submit_action_inner(winner, GameAction::ChooseStartingPlayer { player: starter })
+                .expect("a game is installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "the chooser's answer applies"
+        );
+        let live = with_installed_state(GameState::clone).expect("a game is installed");
+        assert_eq!(live.turn_number, 1);
+        assert_eq!(live.current_starting_player, starter);
+        assert!(!matches!(
+            live.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+
+        let replay_json = export_replay_log().expect("the recording survives the answer");
+        assert!(
+            replay_json.contains("ChooseStartingPlayer"),
+            "the answer is a recorded action"
+        );
+        let length =
+            load_replay_for_playback(&replay_json).expect("exported replay should load back");
+        let replayed = REPLAY_PLAYER.with(|cell| {
+            let mut player = cell.take().expect("a replay is loaded");
+            let replayed = player
+                .seek(length)
+                .expect("the recorded answer replays")
+                .clone();
+            cell.set(Some(player));
+            replayed
+        });
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(replayed.turn_number, live.turn_number);
+        assert_eq!(replayed.phase, live.phase);
+        assert_eq!(replayed.waiting_for, live.waiting_for);
+
+        clear_replay_playback();
         clear_game_state();
     }
 

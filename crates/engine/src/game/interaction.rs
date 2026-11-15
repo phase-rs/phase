@@ -59,8 +59,9 @@ use crate::types::interaction::{
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceOutput,
-    ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaPipId, ManaPool, ManaRestriction,
+    ManaSourceOutput, ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion,
+    ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -321,6 +322,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
@@ -588,6 +590,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
@@ -934,7 +937,17 @@ pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Op
 /// Not [`GameAction::is_submitter_scoped`], whose near-identical list answers a
 /// different question — whether an action may skip the seat check. The two
 /// lists may diverge.
-pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
+pub(crate) fn action_preserves_interaction(state: &GameState, action: &GameAction) -> bool {
+    // A touch outside a priority boundary only parks its triggers; the decision
+    // being made stays exactly as it was.
+    if matches!(
+        action,
+        GameAction::UnAction {
+            action: crate::types::un_actions::UnAction::TouchObject { .. }
+        }
+    ) {
+        return !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    }
     matches!(
         action,
         GameAction::SetPhaseStops { .. }
@@ -2264,22 +2277,7 @@ fn mana_payment_direct_actions(
             .filter(|object_id| undo_seen.insert(*object_id))
             .map(|object_id| GameAction::UntapLandForMana { object_id }),
     );
-    actions.extend(
-        pool.mana_pool
-            .units()
-            .filter(|unit| unit.pip_id.0 != 0)
-            .map(|unit| {
-                if pinned.contains(&unit.pip_id) {
-                    GameAction::UnspendPoolMana {
-                        pip_id: unit.pip_id,
-                    }
-                } else {
-                    GameAction::SpendPoolMana {
-                        pip_id: unit.pip_id,
-                    }
-                }
-            }),
-    );
+    actions.extend(pool_pin_actions(&pool.mana_pool, pinned));
     if has_delve {
         actions.extend(state.objects.values().filter_map(|object| {
             state
@@ -2357,6 +2355,26 @@ fn mana_payment_direct_actions(
     Ok(actions)
 }
 
+/// CR 118.3a: one pin or unpin choice per spendable pool unit.
+fn pool_pin_actions<'a>(
+    pool: &'a ManaPool,
+    pinned: &'a [ManaPipId],
+) -> impl Iterator<Item = GameAction> + 'a {
+    pool.units()
+        .filter(|unit| unit.pip_id.0 != 0)
+        .map(move |unit| {
+            if pinned.contains(&unit.pip_id) {
+                GameAction::UnspendPoolMana {
+                    pip_id: unit.pip_id,
+                }
+            } else {
+                GameAction::SpendPoolMana {
+                    pip_id: unit.pip_id,
+                }
+            }
+        })
+}
+
 fn direct_choice_projection(
     waiting_for: &WaitingFor,
     state: &GameState,
@@ -2388,12 +2406,29 @@ fn direct_choice_projection(
         }
         // CR 605.3a + CR 733.1: the window's moves are the mana activations and
         // withdrawing the pending activation.
-        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+        WaitingFor::ManaAbilityManaPayment {
+            player,
+            pending_mana_ability,
+        } => {
             if *player != semantic_owner {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
             let mut actions =
                 super::mana_sources::activatable_mana_actions_for_player(state, *player);
+            // CR 601.2g-h + CR 118.3a: a manual window adds confirming and
+            // directing pool units.
+            if super::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode) {
+                let payer = state
+                    .players
+                    .iter()
+                    .find(|candidate| candidate.id == *player)
+                    .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
+                actions.push(GameAction::PassPriority);
+                actions.extend(pool_pin_actions(
+                    &payer.mana_pool,
+                    &pending_mana_ability.pinned_pool_units,
+                ));
+            }
             if actions.len() >= MAX_INTERACTION_LIST_LEN {
                 return Err(InteractionReasonCode::PayloadTooLarge);
             }
@@ -5089,6 +5124,7 @@ fn selection_projection(
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -6244,6 +6280,9 @@ fn project_action_payload(
         GameAction::ChoosePlayDraw { play_first } => {
             push_value_surface(surfaces, InteractionRoleCode::PlayFirst, play_first)
         }
+        GameAction::ChooseStartingPlayer { player } => {
+            push_player_surface(surfaces, *player, InteractionRoleCode::Player)
+        }
         GameAction::ChooseOption { choice } => {
             push_value_surface(surfaces, InteractionRoleCode::Option, choice)
         }
@@ -6907,6 +6946,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::TurnFaceUp { .. } => InteractionActionCode::TurnFaceUp,
         GameAction::SubmitSideboard { .. } => InteractionActionCode::SubmitSideboard,
         GameAction::ChoosePlayDraw { .. } => InteractionActionCode::ChoosePlayDraw,
+        GameAction::ChooseStartingPlayer { .. } => InteractionActionCode::ChooseStartingPlayer,
         GameAction::ChooseOption { .. } => InteractionActionCode::ChooseOption,
         GameAction::SubmitVoteCandidate { .. } => InteractionActionCode::SubmitVoteCandidate,
         GameAction::SubmitSpellbookDraft { .. } => InteractionActionCode::SubmitSpellbookDraft,
@@ -7057,35 +7097,6 @@ fn actor_candidates(
     if candidates.len() > MAX_INTERACTION_LIST_LEN {
         return Err(InteractionReasonCode::PayloadTooLarge);
     }
-    let manual_cast_candidates = candidates
-        .iter()
-        .filter_map(|candidate| {
-            // CR 605.3a: a mana ability has no payment of its own to make by hand.
-            if super::casting::activates_mana_ability(state, &candidate.action) {
-                return None;
-            }
-            let mut manual = candidate.clone();
-            let payment_mode = manual.action.payment_mode_mut()?;
-            if *payment_mode == CastPaymentMode::Manual {
-                return None;
-            }
-            *payment_mode = CastPaymentMode::Manual;
-            Some(manual)
-        })
-        .collect::<Vec<_>>();
-    let pipeline = FilterPipeline::default_pipeline();
-    for candidate in manual_cast_candidates {
-        // CR 601.2g: manual payment is a distinct human declaration path. Validate each
-        // sibling independently through the canonical reducer-backed legality pipeline;
-        // never infer its legality merely from the corresponding Auto candidate.
-        if !pipeline.accepts(state, &candidate) {
-            continue;
-        }
-        if candidates.len() == MAX_INTERACTION_LIST_LEN {
-            return Err(InteractionReasonCode::PayloadTooLarge);
-        }
-        candidates.push(candidate);
-    }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let mana_actions =
             super::mana_sources::activatable_mana_actions_for_player(state, semantic_owner);
@@ -7111,6 +7122,37 @@ fn actor_candidates(
                 metadata: ActionMetadata::for_actor(Some(semantic_owner), TacticalClass::Mana),
             });
         }
+    }
+    let manual_cast_candidates = candidates
+        .iter()
+        .filter_map(|candidate| {
+            // CR 605.3a: a mana ability with no mana in its cost has no payment to
+            // make by hand.
+            if super::casting::activates_mana_ability_without_mana_payment(state, &candidate.action)
+            {
+                return None;
+            }
+            let mut manual = candidate.clone();
+            let payment_mode = manual.action.payment_mode_mut()?;
+            if *payment_mode == CastPaymentMode::Manual {
+                return None;
+            }
+            *payment_mode = CastPaymentMode::Manual;
+            Some(manual)
+        })
+        .collect::<Vec<_>>();
+    let pipeline = FilterPipeline::default_pipeline();
+    for candidate in manual_cast_candidates {
+        // CR 601.2g: manual payment is a distinct human declaration path. Validate each
+        // sibling independently through the canonical reducer-backed legality pipeline;
+        // never infer its legality merely from the corresponding Auto candidate.
+        if !pipeline.accepts(state, &candidate) {
+            continue;
+        }
+        if candidates.len() == MAX_INTERACTION_LIST_LEN {
+            return Err(InteractionReasonCode::PayloadTooLarge);
+        }
+        candidates.push(candidate);
     }
     candidates.sort_by(|a, b| a.action.cmp_stable(&b.action));
     Ok(candidates)
@@ -8076,7 +8118,9 @@ fn materialize_counter_response(
             selected: assignments.len().min(u32::MAX as usize) as u32,
             minimum: projection.total,
             maximum: Some(projection.total),
-            aggregate: Some(total as i32),
+            // The aggregate is an `i32` progress value; a `u32` counter total
+            // past `i32::MAX` saturates instead of wrapping negative.
+            aggregate: Some(crate::game::arithmetic::u32_to_i32_saturating(total)),
             confirmable: true,
         },
     ))
@@ -12541,5 +12585,60 @@ mod tests {
             }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod counter_cost_progress_tests {
+    use super::*;
+
+    fn distribution(
+        amounts: &[u32],
+    ) -> (
+        InteractionId,
+        CounterDistributionProjection,
+        InteractionResponse,
+    ) {
+        let interaction_id = InteractionId("t.0.0".to_string());
+        let candidates = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| CounterAssignmentCandidate {
+                object_id: ObjectId(40 + index as u64),
+                counter_type: CounterType::Plus1Plus1,
+                available: *amount,
+            })
+            .collect();
+        let assignments = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| AmountAssignment {
+                choice_id: interaction_choice_id(&interaction_id, 'a', index),
+                amount: *amount,
+            })
+            .collect();
+        let projection = CounterDistributionProjection {
+            candidates,
+            total: amounts.iter().sum(),
+        };
+        (
+            interaction_id,
+            projection,
+            InteractionResponse::AssignAmounts { assignments },
+        )
+    }
+
+    /// A remove-counter cost total above `i32::MAX` reports a saturated
+    /// aggregate, never a wrapped negative one.
+    #[test]
+    fn counter_cost_progress_aggregate_saturates() {
+        let (id, projection, response) = distribution(&[1 << 30, 1 << 30]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.minimum, 1 << 31);
+        assert_eq!(progress.aggregate, Some(i32::MAX));
+
+        let (id, projection, response) = distribution(&[3, 1]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.aggregate, Some(4));
     }
 }
