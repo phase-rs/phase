@@ -7931,6 +7931,13 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards were taken
+        /// from. Only top-edge moves publish `Milled` events.
+        #[serde(default)]
+        position: LibraryPosition,
+        /// CR 701.17a: Destination zone for the cards. Only Graveyard counts as mill.
+        #[serde(default = "default_zone_graveyard")]
+        destination: Zone,
     },
     /// Horde advanced legendary rule
     /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
@@ -7949,6 +7956,10 @@ pub enum BatchCompletion {
         /// battlefield phases out synchronously (CR 702.26).
         legendary_cohort: Vec<ObjectId>,
     },
+}
+
+const fn default_zone_graveyard() -> Zone {
+    Zone::Graveyard
 }
 
 /// CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused for a
@@ -13356,7 +13367,33 @@ pub(crate) struct PrecastShortcutBreakpoint {
 #[derive(Debug, Clone)]
 pub struct TrustedGameStateEnvelope {
     state: GameState,
+    // Persistence metadata only. Absence retains legacy repair authority until restore.
+    block_history_format: Option<BlockHistoryFormat>,
     precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+/// The block-history format a trusted envelope was written in. An envelope
+/// without one predates it: its writer recorded a creature put onto the
+/// battlefield blocking as having blocked (CR 509.4), so restore repairs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockHistoryFormat {
+    /// CR 509.4: only declared blocks are recorded.
+    DeclaredOnly,
+}
+
+impl BlockHistoryFormat {
+    const fn wire_value(self) -> u64 {
+        match self {
+            Self::DeclaredOnly => 1,
+        }
+    }
+
+    fn from_wire_value(value: &serde_json::Value) -> Option<Self> {
+        match value.as_u64() {
+            Some(1) => Some(Self::DeclaredOnly),
+            _ => None,
+        }
+    }
 }
 
 fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameState, String> {
@@ -16691,6 +16728,12 @@ impl Serialize for TrustedGameStateEnvelope {
         S: serde::Serializer,
     {
         let mut value = serde_json::Map::new();
+        if let Some(format) = self.block_history_format {
+            value.insert(
+                "block_history_format".to_string(),
+                format.wire_value().into(),
+            );
+        }
         value.insert(
             "state".to_string(),
             serde_json::to_value(ResolutionStateWire::from_game_state(self.state.clone()))
@@ -16714,6 +16757,13 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         let object = value
             .as_object_mut()
             .ok_or_else(|| serde::de::Error::custom("trusted state must be a JSON object"))?;
+        let block_history_format = match object.remove("block_history_format") {
+            None => None,
+            Some(value) => Some(
+                BlockHistoryFormat::from_wire_value(&value)
+                    .ok_or_else(|| serde::de::Error::custom("unsupported block history format"))?,
+            ),
+        };
         let state = object
             .remove("state")
             .ok_or_else(|| serde::de::Error::custom("trusted state is missing state"))?;
@@ -16728,6 +16778,7 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
             state,
+            block_history_format,
             precast_shortcut_runtime,
         })
     }
@@ -16739,6 +16790,7 @@ impl TrustedGameStateEnvelope {
     pub fn capture(state: GameState) -> Self {
         Self {
             precast_shortcut_runtime: state.precast_shortcut_runtime.clone(),
+            block_history_format: Some(BlockHistoryFormat::DeclaredOnly),
             state,
         }
     }
@@ -17551,6 +17603,10 @@ impl PersistedGameState {
     /// without publishing it. This is private on purpose: every external
     /// restore must first pass the checked terminal-rest preparation below.
     fn into_game_state_unchecked(self) -> GameState {
+        let repair_legacy_history = match &self {
+            Self::Raw(_) => true,
+            Self::Trusted(envelope) => envelope.block_history_format.is_none(),
+        };
         let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
@@ -17565,14 +17621,20 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
+        if repair_legacy_history {
+            crate::game::combat::migrate_restored_entering_block_history(&mut state);
+        }
         // The recovery checkpoint nested in a staged payment is restored state
-        // too; its parked replacement prompt gets the same repair.
+        // too; its parked replacement prompt and block history get the same repairs.
         if let Some(checkpoint) = state
             .payment_transaction
             .as_deref_mut()
             .and_then(|transaction| transaction.recovered.as_deref_mut())
         {
             checkpoint.state.migrate_restored_replacement_choice_kind();
+            if repair_legacy_history {
+                crate::game::combat::migrate_restored_entering_block_history(&mut checkpoint.state);
+            }
         }
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the

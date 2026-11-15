@@ -6344,6 +6344,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(*target, TargetFilter::Player);
             assert_eq!(*destination, Zone::Graveyard);
@@ -6385,6 +6386,7 @@ fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(*target, TargetFilter::Player);
             assert_eq!(*destination, Zone::Graveyard);
@@ -23080,6 +23082,7 @@ fn fraying_sanity_mills_zone_change_count_this_turn() {
             count,
             target,
             destination,
+            ..
         } => {
             assert_eq!(
                 *target,
@@ -40658,7 +40661,10 @@ fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &s
         .properties
         .push(FilterProp::Attacking { defender: None });
     expected.properties.push(FilterProp::CombatRelation {
-        relation: CombatRelation::BlockingOrBlockedBy,
+        relation: CombatRelation::BlockPairing {
+            direction: BlockPairDirection::Either,
+            scope: None,
+        },
         subject: CombatRelationSubject::Source,
     });
     assert_eq!(filter, &expected);
@@ -42243,7 +42249,10 @@ fn parse_card(
 fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-            relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(scope),
+            },
             subject: CombatRelationSubject::Source,
         }]),
     )
