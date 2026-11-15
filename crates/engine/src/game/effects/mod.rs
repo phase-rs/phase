@@ -25856,15 +25856,14 @@ fn resolve_chain_body(
                     Vec::new()
                 };
             let result = ForwardedResultContext::from_object_ids(state, &produced);
+            // CR 118.12 + CR 119.4: the payment's own inputs are untouched. It
+            // inherits exactly the occurrences and pins any other empty child
+            // would, so a cost that reads an inherited target ("life equal to
+            // that creature's mana value") still prices against it. The
+            // produced card is not the payment's binding; it rides separately,
+            // to the gated move alone.
             let mut payment = sub.as_ref().clone();
-            // The payment keeps only the player context it inherits ("that
-            // player"); the object result rides separately, below.
-            payment.replace_target_occurrences(
-                inherited_parent_occurrences(ability, sub)
-                    .into_iter()
-                    .filter(|(target, _)| matches!(target, TargetRef::Player(_)))
-                    .collect(),
-            );
+            payment.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
             apply_parent_chain_context(
                 &mut payment,
                 ability,
@@ -25873,14 +25872,13 @@ fn resolve_chain_body(
             );
             // Bind the result onto the gated move itself, pinned to the
             // incarnations produced, so it rides the payment through its
-            // optional prompt. A completed-but-empty `Some([])` result makes
-            // the payment's hand-off prune the move instead of letting it
-            // inherit anything else.
+            // optional prompt and is never replaced by the payment's inherited
+            // targets at the payment's hand-off. A completed-but-empty
+            // `Some([])` result makes that hand-off prune the move instead.
             if let Some(consumer) = payment.sub_ability.as_deref_mut() {
-                consumer.context.forwarded_result_context = Some(Box::new(result.clone()));
+                consumer.context.forwarded_result_context = Some(Box::new(result));
                 bind_forwarded_result_targets_for_legacy_effect(consumer);
             }
-            payment.context.forwarded_result_context = Some(Box::new(result));
             progress = resolve_ability_chain_step(state, &payment, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()

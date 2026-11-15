@@ -464,3 +464,132 @@ fn payment_moves_only_the_producers_object_not_an_inherited_target() {
     );
     assert!(state.players[P1.0 as usize].graveyard.is_empty());
 }
+
+/// Wand's printed payment and move, with the payment repriced to "life equal to
+/// that creature's mana value" (`ObjectManaValue { scope: Target }`, the first
+/// object target of the payment). Synthetic on purpose: no printed card chains
+/// an inherited object target, a separate look/reveal producer, and a payment
+/// priced off that inherited target before a move of the produced card. Wand of
+/// Denial pays a fixed 2 life and Protection Racket prices off the revealed card
+/// itself, so neither can tell the payment's own binding apart from the result
+/// it forwards to the move.
+fn wand_payment_priced_by_target_mana_value() -> AbilityDefinition {
+    use engine::types::ability::{ObjectScope, QuantityRef};
+    let mut pay = wand_payment_then_move_then_guard();
+    let Effect::PayCost {
+        cost: AbilityCost::PayLife { amount },
+        ..
+    } = &mut pay.effect
+    else {
+        panic!("Wand's payment is a life payment, got {:?}", pay.effect);
+    };
+    *amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        },
+    };
+    pay
+}
+
+/// Target creature A (mana value 4) -> `producer` -> the repriced payment and
+/// move. Returns the runner after the payment was accepted, with A's id and
+/// the probe's id.
+fn activate_priced_probe(producer: Effect) -> (GameRunner, ObjectId, ObjectId) {
+    use engine::types::mana::ManaCost;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let inherited = {
+        let mut builder = scenario.add_creature(P1, "Inherited Target", 2, 2);
+        builder.with_mana_cost(ManaCost::generic(4));
+        builder.id()
+    };
+    let mut produce = AbilityDefinition::new(AbilityKind::Spell, producer);
+    produce.sub_ability = Some(Box::new(wand_payment_priced_by_target_mana_value()));
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        },
+    )
+    .cost(AbilityCost::Tap);
+    ability.sub_ability = Some(Box::new(produce));
+    let probe = {
+        let mut builder = scenario.add_artifact_from_oracle(P0, "Probe", "");
+        builder.with_ability_definition(ability);
+        builder.id()
+    };
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&inherited].mana_cost,
+        ManaCost::generic(4),
+        "precondition: the inherited target has mana value 4"
+    );
+    activate_probe_and_pay(&mut runner, probe, Some(inherited));
+    (runner, inherited, probe)
+}
+
+/// CR 118.12 + CR 119.4 + CR 608.2c: the payment keeps the object target it
+/// inherits while the look/reveal's result is forwarded to the move alone.
+/// Chain: target creature A (mana value 4) -> reveal the source B -> pay life
+/// equal to A's mana value -> move "it". P0 pays exactly 4 (not 0, as a
+/// payment stripped of A would), B moves to the graveyard, A stays put.
+#[test]
+fn payment_priced_by_an_inherited_target_still_moves_only_the_produced_card() {
+    let (runner, inherited, probe) = activate_priced_probe(Effect::Reveal {
+        target: TargetFilter::SelfRef,
+    });
+    let state = runner.state();
+    assert_eq!(
+        state.last_revealed_ids,
+        vec![probe],
+        "reach guard: the reveal produced the source"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 15,
+        "P0 paid 4 life (A's mana value) and the trailing guard took 1"
+    );
+    assert_eq!(state.objects[&probe].zone, Zone::Graveyard);
+    assert_eq!(
+        state.players[P0.0 as usize]
+            .graveyard
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![&probe],
+        "only the revealed source moved"
+    );
+    assert_eq!(
+        state.objects[&inherited].zone,
+        Zone::Battlefield,
+        "the payment's inherited target is not the move's referent"
+    );
+    assert!(state.players[P1.0 as usize].graveyard.is_empty());
+}
+
+/// CR 608.2c + CR 609.3: the same payment after a producer that yielded nothing.
+/// Chain: target creature A (mana value 4) -> turn the (already face-up) source
+/// face up -> pay life equal to A's mana value -> move "it". P0 still pays
+/// exactly 4, and the move has no referent: neither A (the payment's own
+/// binding) nor the source moves.
+#[test]
+fn payment_priced_by_an_inherited_target_after_an_empty_producer_moves_nothing() {
+    let (runner, inherited, probe) = activate_priced_probe(Effect::TurnFaceUp {
+        target: TargetFilter::SelfRef,
+    });
+    let state = runner.state();
+    assert!(
+        !state.objects[&probe].face_down,
+        "the source was already face up, so turning it up produced nothing"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 15,
+        "P0 paid 4 life (A's mana value) and the trailing guard took 1"
+    );
+    assert_eq!(
+        state.objects[&inherited].zone,
+        Zone::Battlefield,
+        "the payment's inherited target must not become the move's referent"
+    );
+    assert_eq!(state.objects[&probe].zone, Zone::Battlefield);
+    assert!(state.players[P0.0 as usize].graveyard.is_empty());
+    assert!(state.players[P1.0 as usize].graveyard.is_empty());
+}
