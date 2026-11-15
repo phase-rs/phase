@@ -12787,6 +12787,10 @@ pub struct GraveyardPermissionLatch {
     pub extra_cost: Option<crate::types::statics::CastExtraCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    /// CR 614.1d + CR 607.1c: the grant's "that artifact enters tapped" rider
+    /// (Edgar, Master Machinist), kept from announcement (CR 601.2a).
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
     /// CR 601.3 + CR 601.2i: a `Single` grant allows one cast and ends when
     /// this cast becomes cast.
     #[serde(
@@ -26703,7 +26707,7 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
-    /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
+    /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` / library search came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
@@ -40368,6 +40372,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // spell remains on the stack.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
+        // CR 614.1d: the cast-this-way enters-tapped rider decides the entry's
+        // tap state, so two stack spells differing only in it are different.
+        && x.cast_permission_enter_tapped == y.cast_permission_enter_tapped
         // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
         // never equates to its pre-reveal self on this axis alone.
         && x.is_horde_deck_token == y.is_horde_deck_token
@@ -58436,6 +58443,129 @@ mod tests {
         );
     }
 
+    /// CR 614.1d + CR 104.4b: two stack spells identical except for the
+    /// cast-this-way enters-tapped rider (Edgar, Master Machinist) resolve
+    /// differently, so object, loop-state and departed-spell equality must all
+    /// tell them apart. Revert-failing: dropping the field's line from
+    /// `object_content_eq` makes all three compare equal.
+    #[test]
+    fn equality_distinguishes_cast_permission_enter_tapped() {
+        use crate::types::ability::Effect;
+        use crate::types::zones::EtbTapState;
+
+        let spell = |rider: EtbTapState| {
+            let mut object = GameObject::new(
+                ObjectId(600),
+                CardId(1),
+                PlayerId(0),
+                "Ornithopter".to_string(),
+                Zone::Stack,
+            );
+            object.cast_permission_enter_tapped = rider;
+            object
+        };
+        let tapped = spell(EtbTapState::Tapped);
+        let plain = spell(EtbTapState::Unspecified);
+        assert!(object_content_eq(&tapped, &tapped.clone()), "reach guard");
+        assert!(!object_content_eq(&tapped, &plain));
+
+        let mut a = GameState::new_two_player(7);
+        a.objects.insert(ObjectId(600), tapped.clone());
+        let mut b = a.clone();
+        b.objects.insert(ObjectId(600), plain.clone());
+        assert!(loop_states_equal(
+            &a.normalize_for_loop(),
+            &a.normalize_for_loop()
+        ));
+        assert!(!loop_states_equal(
+            &a.normalize_for_loop(),
+            &b.normalize_for_loop()
+        ));
+
+        let departed = |object: GameObject| DepartedStackSpell {
+            entry: StackEntry {
+                id: ObjectId(600),
+                source_id: ObjectId(600),
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: ObjectId(600),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(600),
+                        PlayerId(0),
+                    )),
+                },
+            },
+            object: Box::new(object),
+        };
+        assert!(departed(tapped.clone()) == departed(tapped.clone()));
+        assert!(departed(tapped) != departed(plain));
+    }
+
+    /// C25c + C26: a populated `GraveyardPermissionLatch` written without
+    /// `enter_tapped` (the pre-field shape: the key is skipped when
+    /// `Unspecified`) loads as `Unspecified` with its other terms intact, and a
+    /// latch carrying the rider round-trips. Same for the `GameObject` carrier.
+    #[test]
+    fn enter_tapped_carriers_load_legacy_json_and_round_trip() {
+        use crate::types::zones::EtbTapState;
+
+        let latch = |rider: EtbTapState| GraveyardPermissionLatch {
+            permission: GraveyardPermissionId {
+                source: ObjectId(7),
+                grant: PermissionGrant::Static { index: 0 },
+            },
+            extra_cost: None,
+            enters_with_counter: Some(crate::types::counter::CounterType::Finality),
+            enter_tapped: rider,
+            cast_limit: crate::types::statics::PermissionCastLimit::Single,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            enters_modifications: Default::default(),
+        };
+        let legacy = serde_json::to_value(latch(EtbTapState::Unspecified)).unwrap();
+        let keys = legacy.as_object().unwrap();
+        assert!(
+            !keys.contains_key("enter_tapped"),
+            "pre-field shape: {legacy}"
+        );
+        assert!(
+            keys.contains_key("enters_with_counter")
+                && keys.contains_key("cast_limit")
+                && keys.contains_key("mana_spend_permission"),
+            "reach guard: a populated latch, {legacy}"
+        );
+        let loaded: GraveyardPermissionLatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded, latch(EtbTapState::Unspecified));
+
+        let populated = latch(EtbTapState::Tapped);
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(json.contains("\"enter_tapped\":\"Tapped\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<GraveyardPermissionLatch>(&json).unwrap(),
+            populated
+        );
+
+        let mut object = GameObject::new(
+            ObjectId(8),
+            CardId(1),
+            PlayerId(0),
+            "Ornithopter".to_string(),
+            Zone::Stack,
+        );
+        let legacy = serde_json::to_value(&object).unwrap();
+        assert!(legacy.get("cast_permission_enter_tapped").is_none());
+        let loaded: GameObject = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            loaded.cast_permission_enter_tapped,
+            EtbTapState::Unspecified
+        );
+        object.cast_permission_enter_tapped = EtbTapState::Tapped;
+        let loaded: GameObject =
+            serde_json::from_str(&serde_json::to_string(&object).unwrap()).unwrap();
+        assert_eq!(loaded.cast_permission_enter_tapped, EtbTapState::Tapped);
+    }
+
     /// L1 / CR 104.4b: an object's `timestamp` is layer-ordering metadata
     /// (CR 613.7) that `objects_content_eq` deliberately omits, like
     /// `incarnation`. Two states differing ONLY in a per-object timestamp must
@@ -63768,6 +63898,7 @@ mod tests {
             },
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             cast_limit: crate::types::statics::PermissionCastLimit::Single,
             mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
             enters_modifications: Default::default(),
