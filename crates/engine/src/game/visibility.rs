@@ -7331,6 +7331,7 @@ mod tests {
                     pending_effect: effect(),
                     remaining: 1,
                     min_total_power: None,
+                    trigger_event: None,
                 }),
             ),
             (

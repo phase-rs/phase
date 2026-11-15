@@ -399,6 +399,7 @@ mod wand_of_orcus_compound_subject_6965;
 mod ward_discard_cost_shapes;
 mod ward_of_bones_relative_count_cast_prohibition;
 mod ward_of_bones_relative_count_land_prohibition;
+mod ward_sacrifice_concession_shortfall;
 mod warning_source_shield_persists_across_damage_steps;
 mod warped_space_alt_cost_from_exile;
 mod wedding_announcement_transform;

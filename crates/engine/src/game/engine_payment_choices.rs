@@ -1101,7 +1101,13 @@ fn handle_player_scope_token_unless_payment(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    let WaitingFor::UnlessPayment { player, cost, .. } = waiting_for else {
+    let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        trigger_event,
+        ..
+    } = waiting_for
+    else {
         unreachable!("aggregate payment uses UnlessPayment")
     };
     if !pay {
@@ -1130,6 +1136,7 @@ fn handle_player_scope_token_unless_payment(
         pending_effect,
         remaining: 1,
         min_total_power: None,
+        trigger_event,
     };
     Ok(action_result(events, state.waiting_for.clone()))
 }
@@ -1513,6 +1520,7 @@ pub(super) fn handle_unless_payment(
                             pending_effect: pending_effect.clone(),
                             remaining: *count,
                             min_total_power: None,
+                            trigger_event: trigger_event.clone(),
                         };
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
@@ -1545,6 +1553,7 @@ pub(super) fn handle_unless_payment(
                             permanents: eligible,
                             pending_effect: pending_effect.clone(),
                             remaining: 0,
+                            trigger_event: trigger_event.clone(),
                             min_total_power: matches!(
                                 (stat, comparator),
                                 (
@@ -3120,11 +3129,13 @@ fn pause_ward_sacrifice_payment(
     pending_effect: Box<ResolvedAbility>,
     resume: WardSacrificePaymentResume,
     choice_player: PlayerId,
+    trigger_event: Option<GameEvent>,
 ) -> WaitingFor {
     state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
         player,
         pending_effect,
         resume,
+        trigger_event,
     });
     if state.pending_replacement.is_some() {
         costs::pause_cost_payment_for_replacement_choice(state, choice_player);
@@ -3162,6 +3173,82 @@ fn finish_ward_sacrifice_payment(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 702.21a + CR 118.3: Settle a Ward sacrifice payment its payer can no
+/// longer complete as UNPAID. The Ward cost fails and the pending effect
+/// resolves through the same unpaid-unless settlement a `PayUnlessCost { pay:
+/// false }` answer reaches (`finish_unless_payment`'s `!pay || payment_failed`
+/// branch), minus the any-player re-poll: Ward names a single payer, and the
+/// sacrifice prompt carries no poll cursor to re-emit. The trigger event the
+/// Ward counter reads "that spell" from rides on the prompt (and across
+/// pauses on the resume record), snapshot at offer like `UnlessPayment`'s.
+///
+/// Callers are the guards that fire only when NO selection can still pay the
+/// full remaining cost (pool shortfalls and pause-window bars). Returning
+/// `Err` there restores the same unpayable choice with no way out — the payer
+/// has no decline action on `WardSacrificeChoice` — so the shortfall settles
+/// instead of stranding.
+///
+/// Partial spends stand: a sacrifice committed before the world changed (a
+/// concession or bar landing mid-payment) cannot be rewound — paper Magic
+/// cannot un-sacrifice either — so the Ward fails with the spent permanent
+/// staying spent. The pre-spend guards keep the common case fully atomic
+/// (nothing spent); CR 118.3's full-payment rule is enforced there, at the
+/// decision to spend.
+///
+/// Retires the Ward payment continuation: the resume path consumed
+/// `pending_cost_move_resume` on entry (re-pauses re-install it; this path
+/// does not), and the answer path never installs one, so settling here
+/// leaves nothing parked.
+fn settle_ward_sacrifice_payment_unpaid(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Player-scope aggregate Ward shares this prompt (`finish_ward_sacrifice_
+    // payment` routes paid completions back to it); an unpaid shortfall
+    // advances the same aggregate as a decline. Currently unreachable — the
+    // aggregate gate admits exactly one sacrifice, which cannot shortfall —
+    // carried for symmetry with the paid path.
+    if state
+        .pending_player_scope_unless_payment
+        .as_ref()
+        .is_some_and(|pending| pending.pending_effect.source_id == pending_effect.source_id)
+    {
+        return advance_player_scope_token_unless_payment(state, player, false, events);
+    }
+    let ability = pending_effect.as_ref().clone();
+    clear_echo_due_for_echo_payment(state, &ability);
+    set_active_priority(state);
+    // CR 608.2k + CR 603.7c: the Ward counter reads "that spell" from the
+    // trigger event the prompt carried (the resolving trigger has left the
+    // stack by answer time, and the ambient event is gone once the payer
+    // elects to pay). Fall back to ambient for prompts constructed without
+    // one — matching a direct decline's `None` exactly when neither holds it.
+    let trigger_event = trigger_event.or_else(|| state.current_trigger_event.clone());
+    let event_start = Some(resolve_ability_chain_for_unless_payment(
+        state,
+        &ability,
+        events,
+        &trigger_event,
+        Some(AutoMayChoice::Decline),
+    )?);
+    resume_pending_continuation_if_priority(state, events)?;
+    if let Some(event_start) = event_start {
+        let default_wf = state.waiting_for.clone();
+        state.waiting_for = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+    }
+    Ok(state.waiting_for.clone())
+}
+
 /// CR 702.21a + CR 701.21 + CR 614.1 + CR 616.1: Resume only the ward
 /// sacrifice work that followed the sacrifice completed by the replacement
 /// action. This is reached exclusively through the typed cost-move dispatcher.
@@ -3173,6 +3260,7 @@ pub(super) fn resume_ward_sacrifice_payment(
         player,
         pending_effect,
         resume,
+        trigger_event,
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("ward sacrifice payment resume requires its typed continuation")
@@ -3181,24 +3269,35 @@ pub(super) fn resume_ward_sacrifice_payment(
     match resume {
         WardSacrificePaymentResume::MultiSacrifice { remaining } => {
             // CR 118.3: the replacement pause is a live-board window — a bar
-            // granted while parked must fail the resume BEFORE the first
-            // resumed sacrifice spends, not strand mid-batch at Prohibited.
+            // granted while parked fails the resume BEFORE the first resumed
+            // sacrifice spends. The replay list is fixed (no selection to
+            // retry), so the Ward settles unpaid rather than stranding.
             if remaining.iter().any(|id| {
                 crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, *id)
             }) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot sacrifice this permanent as a cost".to_string(),
-                ));
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
             }
             for (index, id) in remaining.iter().enumerate() {
                 match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                     crate::game::sacrifice::SacrificeOutcome::Complete => {}
-                    // CR 601.2h: a mid-payment bar fails the Ward cost instead
-                    // of recording an unsacrificed permanent as paid.
+                    // CR 601.2h: a mid-replay bar fails the Ward cost instead
+                    // of recording an unsacrificed permanent as paid. The
+                    // replay list is fixed (no selection to retry), so the
+                    // Ward settles unpaid; earlier replayed spends stand.
                     crate::game::sacrifice::SacrificeOutcome::Prohibited => {
-                        return Err(EngineError::ActionNotAllowed(
-                            "Cannot sacrifice this permanent as a cost".to_string(),
-                        ));
+                        return settle_ward_sacrifice_payment_unpaid(
+                            state,
+                            player,
+                            pending_effect,
+                            trigger_event,
+                            events,
+                        );
                     }
                     crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
                         choice_player,
@@ -3211,6 +3310,7 @@ pub(super) fn resume_ward_sacrifice_payment(
                                 remaining: remaining[index + 1..].to_vec(),
                             },
                             choice_player,
+                            trigger_event,
                         ));
                     }
                 }
@@ -3248,9 +3348,13 @@ pub(super) fn resume_ward_sacrifice_payment(
                 // the prompt then strands the payer at an unsatisfiable
                 // choice. Take the decline path (fail the Ward cost) instead.
                 if eligible.len() < (remaining - 1) as usize {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot sacrifice this permanent as a cost".to_string(),
-                    ));
+                    return settle_ward_sacrifice_payment_unpaid(
+                        state,
+                        player,
+                        pending_effect,
+                        trigger_event,
+                        events,
+                    );
                 }
                 state.waiting_for = WaitingFor::WardSacrificeChoice {
                     player,
@@ -3258,6 +3362,7 @@ pub(super) fn resume_ward_sacrifice_payment(
                     pending_effect,
                     remaining: remaining - 1,
                     min_total_power: None,
+                    trigger_event,
                 };
                 Ok(state.waiting_for.clone())
             } else {
@@ -3540,6 +3645,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         pending_effect,
         remaining,
         min_total_power,
+        trigger_event,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -3600,6 +3706,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                             remaining: chosen[index + 1..].to_vec(),
                         },
                         choice_player,
+                        trigger_event,
                     ));
                 }
             }
@@ -3620,13 +3727,12 @@ pub(super) fn handle_ward_sacrifice_choice(
         // CR 118.3 + CR 601.2h + CR 702.21a (Ward atomicity): pre-validate
         // the FULL remaining set before committing ANY sacrifice. A
         // 2-remaining Ward whose second permanent is already barred (or gone)
-        // fails here with nothing spent, instead of stranding the first
-        // sacrifice at a later `ActionNotAllowed`. `payment_transaction`
+        // settles unpaid here with nothing spent. `payment_transaction`
         // spans only Composite PayCost, so no replay restores a Ward
         // sacrifice committed mid-round-trip — the only atomic seam is to
         // refuse the first spend. Bars granted DURING the spend (replacement
-        // pause) still strand; that window is owned by the resume shortfall
-        // check below, not restorable here.
+        // pause) settle unpaid at the resume below; nothing committed
+        // mid-round-trip is restorable.
         if remaining > 1 {
             let payable_others = permanents
                 .iter()
@@ -3644,9 +3750,13 @@ pub(super) fn handle_ward_sacrifice_choice(
                 })
                 .count();
             if payable_others < (remaining - 1) as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot sacrifice this permanent as a cost".to_string(),
-                ));
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
             }
         }
 
@@ -3677,6 +3787,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                         remaining,
                     },
                     choice_player,
+                    trigger_event,
                 ));
             }
         }
@@ -3704,11 +3815,15 @@ pub(super) fn handle_ward_sacrifice_choice(
             // it ran) can shrink the pool BELOW the still-owed count —
             // installing the prompt then strands the payer at an
             // unsatisfiable choice. Take the decline path (fail the Ward
-            // cost) instead.
+            // cost) instead; the just-spent sacrifice stands.
             if eligible.len() < (remaining - 1) as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot sacrifice this permanent as a cost".to_string(),
-                ));
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
             }
             state.waiting_for = WaitingFor::WardSacrificeChoice {
                 player,
@@ -3716,6 +3831,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                 pending_effect,
                 remaining: remaining - 1,
                 min_total_power: None,
+                trigger_event,
             };
             return Ok(state.waiting_for.clone());
         }
@@ -7824,6 +7940,7 @@ mod tests {
             pending_effect: Box::new(pending),
             remaining: 2,
             min_total_power: None,
+            trigger_event: None,
         };
     }
 
@@ -7850,17 +7967,21 @@ mod tests {
     }
 
     /// CR 118.3 + CR 601.2h: a pool that shrinks below the still-owed count
-    /// takes the decline path — never an unsatisfiable prompt.
+    /// settles the Ward unpaid — never an unsatisfiable prompt, never a
+    /// restored strand.
     ///
     /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
     /// rock_b]; rock_b leaves the battlefield before the payer submits
-    /// rock_a. The Ward cost fails (`ActionNotAllowed`) with rock_a still on
-    /// the battlefield, and no `WardSacrificeChoice` re-prompt is installed.
-    /// The fully-payable control completes both sacrifices.
+    /// rock_a. The Ward settles unpaid with rock_a still on the battlefield,
+    /// no `WardSacrificeChoice` re-prompt is installed, and the payment
+    /// continuation is retired. The fully-payable control completes both
+    /// sacrifices.
     ///
     /// Revert-to-red: deleting the shortfall checks (and the pre-validation)
     /// installs `WardSacrificeChoice { remaining: 1, permanents: [] }` — an
-    /// unsatisfiable prompt — and the first assertion fails.
+    /// unsatisfiable prompt — and the no-reprompt assertion fails.
+    /// Restoring `Err` instead of settling strands the payer: the public
+    /// boundary would restore this same unpayable choice.
     #[test]
     fn ward_reprompt_declines_when_pool_shrinks_below_remaining() {
         assert_ulamog_parses_to_ward_sacrifice_two();
@@ -7877,8 +7998,8 @@ mod tests {
         let outcome =
             handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
         assert!(
-            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
-            "a pool shrunk below remaining-1 must decline, got {outcome:?}"
+            matches!(outcome, Ok(_)),
+            "a pool shrunk below remaining-1 must settle (not error), got {outcome:?}"
         );
         assert_eq!(
             state.objects[&rock_a].zone,
@@ -7886,12 +8007,14 @@ mod tests {
             "nothing may be spent when the Ward cost is unpayable"
         );
         assert!(
-            !matches!(
-                &state.waiting_for,
-                WaitingFor::WardSacrificeChoice { remaining: 1, .. }
-            ),
-            "no unsatisfiable re-prompt may be installed, got {:?}",
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
             state.waiting_for
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the payment continuation must be retired, got {:?}",
+            state.pending_cost_move_resume
         );
 
         // Control: the fully-payable Ward completes both sacrifices.
@@ -7928,9 +8051,10 @@ mod tests {
     ///
     /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
     /// rock_b]; rock_b carries Hithlain Rope's "can't be sacrificed" bar.
-    /// Submitting rock_a fails (`ActionNotAllowed`) with BOTH permanents
-    /// still on the battlefield — the first sacrifice is not stranded by the
-    /// later failure. The fully-payable mixed control (no bar) pays in full.
+    /// Submitting rock_a settles the Ward unpaid with BOTH permanents still
+    /// on the battlefield — the first sacrifice is never committed, and no
+    /// unsatisfiable re-prompt strands the payer. The fully-payable mixed
+    /// control (no bar) pays in full.
     ///
     /// Revert-to-red: deleting the pre-validation spends rock_a, installs
     /// the re-prompt, and the battlefield assertion fails.
@@ -7950,8 +8074,8 @@ mod tests {
         let outcome =
             handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
         assert!(
-            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
-            "a Ward whose second permanent is barred must fail before spending, got {outcome:?}"
+            matches!(outcome, Ok(_)),
+            "a Ward whose second permanent is barred must settle (not error), got {outcome:?}"
         );
         assert_eq!(
             state.objects[&rock_a].zone,
@@ -7962,6 +8086,11 @@ mod tests {
             state.objects[&rock_b].zone,
             Zone::Battlefield,
             "the barred permanent must still be on the battlefield"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
         );
 
         // Mixed control: both permanents payable, no bar — pays in full.
@@ -7983,15 +8112,17 @@ mod tests {
 
     /// CR 118.3 + CR 601.2h: the replacement-pause resume takes the same
     /// decline path when its window shrinks the pool below the still-owed
-    /// count — no unsatisfiable re-prompt.
+    /// count — the Ward settles unpaid, no unsatisfiable re-prompt, and the
+    /// consumed continuation is not re-installed.
     ///
     /// A Sequential resume owed one more sacrifice (`remaining: 2`, rock_a
-    /// spent pre-pause) whose survivor rock_b leaves during the pause fails
-    /// the resume instead of installing `WardSacrificeChoice { remaining: 1,
-    /// permanents: [] }`.
+    /// spent pre-pause) whose survivor rock_b leaves during the pause settles
+    /// unpaid instead of installing `WardSacrificeChoice { remaining: 1,
+    /// permanents: [] }`. The pre-pause spend stands (paper cannot
+    /// un-sacrifice either).
     ///
     /// Revert-to-red: deleting the resume shortfall check installs the empty
-    /// prompt and the first assertion fails.
+    /// prompt and the no-reprompt assertion fails.
     #[test]
     fn ward_sequential_resume_declines_when_pause_window_shrinks_pool() {
         assert_ulamog_parses_to_ward_sacrifice_two();
@@ -8014,16 +8145,22 @@ mod tests {
                 sacrificed: rock_a,
                 remaining: 2,
             },
+            trigger_event: None,
         });
         let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
         assert!(
-            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
-            "a resume whose pool shrank below remaining-1 must decline, got {outcome:?}"
+            matches!(outcome, Ok(_)),
+            "a resume whose pool shrank below remaining-1 must settle (not error), got {outcome:?}"
         );
         assert!(
             !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
             "no unsatisfiable re-prompt may be installed, got {:?}",
             state.waiting_for
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the consumed continuation must not be re-installed, got {:?}",
+            state.pending_cost_move_resume
         );
     }
 }
