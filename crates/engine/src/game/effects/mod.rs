@@ -16336,9 +16336,9 @@ pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause>
 }
 
 /// CR 608.2c + CR 611.2c: targeted pumps publish their affected population for a
-/// following tracked-set grant, pump, or single tap/untap instruction, provided
-/// only pumps intervene. The tap/untap consumer must name the current chain's
-/// plain sentinel set, not a named or filtered population (CR 701.26b).
+/// following tracked-set grant, pump, or single tap/untap instruction (CR 701.26a,
+/// CR 701.26b), provided only pumps intervene. The tap/untap consumer must name the
+/// current chain's plain sentinel set, not a named or filtered population.
 /// Triton Tactics and Colossal Heroics use that set for "Untap those creatures".
 fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     let mut node = ability.sub_ability.as_deref();

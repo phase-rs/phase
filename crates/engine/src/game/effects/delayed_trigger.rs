@@ -620,7 +620,7 @@ pub fn resolve(
             } else {
                 Vec::new()
             };
-            let illegal = creation_illegal_referents(state, ability, &targets);
+            let illegal = creation_illegal_referents(state, ability, &targets, &pins);
             (targets, pins, illegal)
         } else if effect_references_last_created(&delayed_ability.effect)
             && !state.last_created_token_ids.is_empty()
@@ -1121,10 +1121,13 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
 /// CR 608.2b + CR 603.7c: latch unavailable creation referents without deleting
 /// positional snapshot entries. One legal announcement of the same object keeps
 /// that object's information available to this object-level history reader.
+/// Each referent is recorded by the incarnation the snapshot pins for it (`pins`),
+/// the same incarnation the reader compares, falling back to the live object.
 fn creation_illegal_referents(
     state: &GameState,
     ability: &ResolvedAbility,
     snapshot: &[TargetRef],
+    pins: &[crate::types::identifiers::ObjectIncarnationRef],
 ) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
     if !crate::game::targeting::resolves_on_stack(state, ability) {
         return Vec::new();
@@ -1151,10 +1154,15 @@ fn creation_illegal_referents(
             {
                 return None;
             }
-            state
-                .objects
-                .get(id)
-                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+            pins.iter()
+                .find(|pin| pin.object_id == *id)
+                .copied()
+                .or_else(|| {
+                    state
+                        .objects
+                        .get(id)
+                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                })
         })
         .collect()
 }
@@ -3330,13 +3338,13 @@ mod tests {
             assert_eq!(snapshot, vec![TargetRef::Object(id)]);
             assert_eq!(ObjectIncarnationRef::from_object(&state.objects[&id]), pin);
             assert_eq!(
-                creation_illegal_referents(&state, &body, &snapshot),
+                creation_illegal_referents(&state, &body, &snapshot, &[]),
                 expected
             );
         }
         assert!(!crate::game::targeting::resolves_on_stack(&base, &body));
         assert_eq!(
-            creation_illegal_referents(&base, &body, &snapshot),
+            creation_illegal_referents(&base, &body, &snapshot, &[]),
             Vec::<ObjectIncarnationRef>::new()
         );
     }

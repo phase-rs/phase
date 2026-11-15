@@ -29624,23 +29624,13 @@ fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
 /// a ParentTarget referent is active and carrying forward (e.g. Code of Constraint's
 /// "tap that creature and it doesn't untap...").
 fn chain_has_prior_parent_target_carrier(clauses: &[ClauseIr]) -> bool {
-    let Some(prev) = clauses.last() else {
-        return false;
-    };
-    if let Some(cond) = prev.condition.as_ref() {
-        if !cond.has_when_you_do_marker()
-            && !cond.is_affirmative_reflexive_gate()
-            && !cond.is_casting_condition()
-        {
-            return false;
-        }
-    }
-    effect_is_parent_target_carrier(&prev.parsed.effect)
+    nearest_ungated_clause(clauses)
+        .is_some_and(|prev| effect_is_parent_target_carrier(&prev.parsed.effect))
 }
 
-/// CR 608.2c + CR 701.26a/b: the nearest clause's mass tap/untap population, the
-/// antecedent of a following bare "it" affected object.
-fn chain_prior_mass_tap_selection(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+/// CR 608.2c: the nearest clause, when no condition other than a "when you do",
+/// affirmative reflexive or casting gate separates it from the next instruction.
+fn nearest_ungated_clause(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     let prev = clauses.last()?;
     if let Some(cond) = prev.condition.as_ref() {
         if !cond.has_when_you_do_marker()
@@ -29650,6 +29640,13 @@ fn chain_prior_mass_tap_selection(clauses: &[ClauseIr]) -> Option<TargetFilter> 
             return None;
         }
     }
+    Some(prev)
+}
+
+/// CR 608.2c + CR 701.26a/b: the nearest clause's mass tap/untap population, the
+/// antecedent of a following bare "it" affected object.
+fn chain_prior_mass_tap_selection(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    let prev = nearest_ungated_clause(clauses)?;
     let Effect::SetTapState {
         scope: EffectScope::All,
         target,

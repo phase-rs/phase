@@ -2586,6 +2586,73 @@ fn triton_tactics_tapped_creatures_skip_one_untap_step() {
     ));
 }
 
+/// CR 502.3 + CR 608.2c + CR 611.2a: the defender's use. P1 casts Triton Tactics
+/// on its blocker B. P0's attackers T and T2 (Alaborn Troopers, no vigilance) are
+/// already tapped from attacking. At end of combat T, blocked by B, is tapped again
+/// and doesn't untap during P0's next untap step; P1's own untap step before it
+/// does not use up the restriction. T2, blocked only by the non-target B2, untaps
+/// there. T untaps in P0's untap step after that.
+#[test]
+fn triton_tactics_cast_by_the_defender_restricts_the_attackers_controller() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let t = s.add_real_card(P0, "Alaborn Trooper", Zone::Battlefield, db);
+    let t2 = s.add_real_card(P0, "Alaborn Trooper", Zone::Battlefield, db);
+    let b = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let b2 = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let triton = free_spell(&mut s, P1, "Triton Tactics", TRITON);
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    attack_block(&mut runner, &[t, t2], &[(b, t), (b2, t2)]);
+    assert!(
+        tapped(&runner, t) && tapped(&runner, t2),
+        "reach: the attackers tapped to attack"
+    );
+    pass_priority_to(&mut runner, P1);
+    runner.cast(triton).target_objects(&[b]).resolve();
+    drain(&mut runner);
+    assert_eq!(
+        zone(&runner, triton),
+        Zone::Graveyard,
+        "reach: cast resolved"
+    );
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    past_end_of_combat(&mut runner);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "reach: it fired"
+    );
+    assert!(tapped(&runner, t) && tapped(&runner, t2));
+
+    let turn = runner.state().turn_number;
+    pass_until(&mut runner, "P1's next upkeep", |state| {
+        state.active_player == P1 && state.phase == Phase::Upkeep
+    });
+    pass_until(&mut runner, "P0's next upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 2
+    });
+    assert!(
+        !tapped(&runner, t2),
+        "reach: P0's untap step ran and untapped T2"
+    );
+    assert!(
+        tapped(&runner, t),
+        "T doesn't untap during its controller's next untap step"
+    );
+    pass_until(&mut runner, "P0's following upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 4
+    });
+    assert!(
+        !tapped(&runner, t),
+        "the restriction ends after one untap step"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
 /// CR 115.6 + CR 608.2c: Triton Tactics cast with zero targets leaves a delayed
 /// ability with no referent, which taps nothing. No row of the board is tapped
 /// by it: A, which a target-bound cast would tap (the targets row above), stays
@@ -2739,6 +2806,10 @@ fn triton_tactics_ignores_a_target_given_hexproof_in_response() {
     };
     for persisted in [false, true] {
         let mut x = triton_blocked_board(db);
+        // Both targets start tapped, so "Untap those creatures" is observable.
+        for id in [x.b, x.b3] {
+            x.runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
         x.runner
             .cast(x.triton)
             .target_objects(&[x.b, x.b3])
@@ -2781,6 +2852,14 @@ fn triton_tactics_ignores_a_target_given_hexproof_in_response() {
             state.objects[&x.b3].toughness,
             Some(7),
             "only Defense affected B3"
+        );
+        assert!(
+            !state.objects[&x.b].tapped,
+            "Triton untapped the legal target B"
+        );
+        assert!(
+            state.objects[&x.b3].tapped,
+            "CR 608.2b: Triton does not untap the illegal target B3"
         );
         assert_eq!(
             state.delayed_triggers.len(),
