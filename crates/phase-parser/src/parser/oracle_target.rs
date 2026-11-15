@@ -6993,7 +6993,8 @@ fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// source outright, a bare `Pronoun` names the source or, in a history clause,
 /// an earlier instruction's target only when the parse context supplies that
 /// antecedent, `Demonstrative` names an earlier instruction's target the same
-/// way, and `TargetCreature` names the ability's first object target.
+/// way, `OneOfThose` names any of the creature targets an earlier instruction
+/// announced, and `TargetCreature` names the ability's first object target.
 /// `resolve_relation_subject` is the single binding authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CombatRelationSubjectWord {
@@ -7005,6 +7006,9 @@ pub(crate) enum CombatRelationSubjectWord {
     TargetCreature,
     /// "that creature" — a demonstrative for an earlier instruction's target.
     Demonstrative,
+    /// "one of those creatures" — any member of the plural antecedent an earlier
+    /// instruction announced.
+    OneOfThose,
 }
 
 /// The grammatical form of a postnominal current-block-pairing clause.
@@ -7100,7 +7104,8 @@ pub(crate) struct BlockHistoryClause {
 /// The partner a block-history clause names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistoryPartner {
-    /// A subject word the relation can bind ("it", "~", "that creature").
+    /// A subject word the relation can bind ("it", "~", "that creature", "one of
+    /// those creatures").
     Subject(CombatRelationSubjectWord),
     /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
     /// of a kind, not one object. No relation represents it yet, so like `Unbound` it
@@ -7108,7 +7113,7 @@ pub(crate) enum HistoryPartner {
     /// distinct because a filter-subject relation could represent it, which an unbound
     /// partner cannot.
     Filter,
-    /// Any other phrase no subject word covers ("target Wall", "one of those creatures").
+    /// Any other phrase no subject word covers ("target Wall", "another creature").
     Unbound,
 }
 
@@ -7144,6 +7149,10 @@ fn parse_history_partner(input: &str) -> OracleResult<'_, (HistoryPartner, Comba
                     value(
                         CombatRelationSubjectWord::Demonstrative,
                         tag("that creature"),
+                    ),
+                    value(
+                        CombatRelationSubjectWord::OneOfThose,
+                        (tag("one of "), tag("those creatures")),
                     ),
                     parse_source_subject_word,
                 )),
@@ -7254,8 +7263,8 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
 /// one, so a represented clause can't vouch for a second clause of the same shape, and
 /// two populations of one instruction can't cover another instruction's dropped clause.
 /// Both ways a parse drops the clause land here: a partner no subject word covers
-/// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
-/// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
+/// ("target Wall"; Time to Reflect's filter phrase "a Zombie"), and a recognized "it",
+/// "that creature" or "one of those creatures" whose antecedent `resolve_relation_subject`
 /// rejects ("destroy target creature and all creatures it blocked this turn").
 pub(crate) fn population_drops_block_history_clause(
     lower: &str,
@@ -7391,7 +7400,8 @@ enum CombatClauseKind {
 }
 
 /// The single subject-binding authority. CR 608.2c + CR 115.10a: a pronoun or demonstrative
-/// bound to an earlier instruction's target gives `AnaphoricTarget`. A self-reference, or a
+/// bound to an earlier instruction's target, or "one of those creatures" bound to the
+/// creature targets an earlier instruction announced, gives `AnaphoricTarget`. A self-reference, or a
 /// pronoun whose antecedent is the source, gives `Source`. Any other antecedent, or none,
 /// has no subject, and the clause stays unconsumed for the swallow audit.
 fn resolve_relation_subject(
@@ -7412,6 +7422,13 @@ fn resolve_relation_subject(
         }
         CombatRelationSubjectWord::Demonstrative => {
             names_earlier_target(&ctx.demonstrative_object_ref)
+                .then_some(CombatRelationSubject::AnaphoricTarget)
+        }
+        // CR 608.2c + CR 601.2c: "those creatures" names the creatures the earlier
+        // instruction announced as targets when they are the nearest antecedent;
+        // the relation holds for any of them.
+        CombatRelationSubjectWord::OneOfThose => {
+            names_earlier_target(&ctx.plural_demonstrative_object_ref)
                 .then_some(CombatRelationSubject::AnaphoricTarget)
         }
         CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
@@ -12053,7 +12070,7 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 
 #[cfg(test)]
 mod tests {
-    use super::CombatRelationSubjectWord::{Demonstrative, Pronoun, SelfName};
+    use super::CombatRelationSubjectWord::{Demonstrative, OneOfThose, Pronoun, SelfName};
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -13100,7 +13117,10 @@ mod tests {
             ("an elf", HistoryPartner::Filter),
             ("another creature", HistoryPartner::Unbound),
             ("target wall", HistoryPartner::Unbound),
-            ("one of those creatures", HistoryPartner::Unbound),
+            (
+                "one of those creatures",
+                HistoryPartner::Subject(OneOfThose),
+            ),
         ];
         for (head, direction) in [
             ("that blocked or was blocked by ", Either),
@@ -13155,7 +13175,7 @@ mod tests {
         population_drops_block_history_clause(lower, instructions, |word| match word {
             CombatRelationSubjectWord::Pronoun => Some(it),
             CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
-            CombatRelationSubjectWord::Demonstrative => {
+            CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
                 Some(CombatRelationSubject::AnaphoricTarget)
             }
             CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),

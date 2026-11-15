@@ -5240,9 +5240,11 @@ pub(crate) fn apply_parent_chain_context(
 }
 
 /// CR 608.2d: whether `ability`'s already-chosen targets should propagate into
-/// an empty-targeted `sub`. Single authority for every `sub.targets =
-/// ability.targets.clone()` propagation site in this file — a `Resolution`-
-/// timed sub makes its OWN untargeted choice at its own resolution (see the
+/// an empty-targeted `sub`. Callers using this predicate decide whether to copy
+/// targets. Ordinary synchronous continuation projects occurrences through
+/// `inherited_parent_occurrences`; both handoff owners consult
+/// `mass_selection_names_grant_referent`.
+/// A `Resolution`-timed sub makes its OWN untargeted choice at its own resolution (see the
 /// interactive `PutCounter` recipient prompt in `resolve_chain_body`) and must
 /// NOT inherit an earlier instruction's already-chosen recipient, or every
 /// replicated instruction in a chain collapses onto whichever single object
@@ -16333,23 +16335,11 @@ pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause>
     }
 }
 
-/// CR 608.2c + CR 611.2c: a targeted `Pump` is an antecedent of a following plural
-/// anaphor only when every instruction between it and that anaphor is itself a
-/// `Pump` and the anaphor is a continuous grant or pump over the chain tracked set
-/// ("... gets +2/+2, and up to one other target creature gets +1/+1. Those creatures
-/// gain vigilance until end of turn.").
-///
-/// The gate's reason is NARROW, and is written narrowly on purpose: this arm exists
-/// ONLY to feed the tracked set that the parse-layer stamp points a grant or pump at.
-/// It is NOT a claim that every other consumer names some other population. On
-/// Triton Tactics and Colossal Heroics ("Untap those creatures") the pump IS the
-/// antecedent. Those cards are preserved by a different mechanism: a consumer bound
-/// to `TargetFilter::ParentTarget` reads the ability's declared targets and never
-/// consults the tracked set, because `effect.rs` gates that fallback on
-/// `ability.targets.is_empty()`. Publishing there would REPLACE a population that is
-/// already right, so this arm declines and base behaviour stands. Urge to Feed
-/// ("... on each of those Vampires") is the witness for a consumer that really does
-/// name its own population.
+/// CR 608.2c + CR 611.2c: targeted pumps publish their affected population for a
+/// following tracked-set grant, pump, or single tap/untap instruction, provided
+/// only pumps intervene. The tap/untap consumer must name the current chain's
+/// plain sentinel set, not a named or filtered population (CR 701.26b).
+/// Triton Tactics and Colossal Heroics use that set for "Untap those creatures".
 fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     let mut node = ability.sub_ability.as_deref();
     while let Some(next) = node {
@@ -16359,6 +16349,14 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
                 ..
             } => return true,
             Effect::Pump { .. } => node = next.sub_ability.as_deref(),
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                target:
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ..
+            } => return true,
             Effect::GenericEffect {
                 static_abilities, ..
             } => {
@@ -16508,11 +16506,10 @@ fn affected_objects_from_events(
         // for this shape by design: several targeted `Pump`s legitimately union into
         // ONE antecedent, so each is a later producer relative to the one before it
         // and the guard would make every pump decline. That is measured — re-adding
-        // it turns Arm the Cathars' runtime row red. Legs 1 and 3 (no earlier
-        // producer; the `DetachedRemainder` player-scope fan-out) are dropped with
-        // MEASURED zero reach: the gate above admits only a pure `Pump` run ending in
-        // a tracked-set consumer, which corpus-wide is 3 nodes on 1 card. Do NOT
-        // "harmonise" this arm with its neighbours.
+        // it turns Arm the Cathars' runtime row red. The explicit consumer guard
+        // above admits a pure `Pump` run ending in a tracked-set grant, pump, or
+        // single tap/untap of the current chain's plain sentinel set. Any other
+        // intervening instruction stops the run.
         Effect::Pump {
             target: TargetFilter::Typed(_),
             ..
@@ -29201,6 +29198,9 @@ pub(super) fn inherited_parent_occurrences(
 )> {
     if sub.has_authoritative_empty_binding()
         || (sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty())
+        // CR 608.2c: the grant consumes the mass instruction's published
+        // population, not the inherited occurrences used to select it.
+        || mass_selection_names_grant_referent(parent, sub)
     {
         return Vec::new();
     }
@@ -36355,8 +36355,14 @@ mod tests {
         );
         assert!(can_inherit_parent_targets(&grant));
         assert!(grant_affects_parent_target(&grant.effect));
+        let first_pin = crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(10), 3);
+        let second_pin = crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(11), 7);
+        let occurrences = vec![
+            (TargetRef::Object(ObjectId(10)), Some(first_pin)),
+            (TargetRef::Object(ObjectId(11)), Some(second_pin)),
+        ];
         for state in [TapStateChange::Tap, TapStateChange::Untap] {
-            let parent = ResolvedAbility::new(
+            let mut parent = ResolvedAbility::new(
                 Effect::SetTapState {
                     scope: EffectScope::All,
                     target: TargetFilter::Typed(TypedFilter::creature()),
@@ -36369,9 +36375,13 @@ mod tests {
                 ObjectId(900),
                 PlayerId(0),
             );
+            parent.target_pins = vec![Some(first_pin), Some(second_pin)];
             assert!(!parent.targets.is_empty());
+            assert_eq!(parent.target_occurrences(), occurrences);
             assert!(!crate::game::ability_utils::node_has_stack_target_declaration(&parent));
+            assert!(mass_selection_names_grant_referent(&parent, &grant));
             assert!(!should_propagate_parent_targets(&parent, &grant));
+            assert_eq!(inherited_parent_occurrences(&parent, &grant), Vec::new());
 
             let mut single = parent.clone();
             single.effect = Effect::SetTapState {
@@ -36380,6 +36390,7 @@ mod tests {
                 state,
             };
             assert!(should_propagate_parent_targets(&single, &grant));
+            assert_eq!(inherited_parent_occurrences(&single, &grant), occurrences);
 
             // A companion player slot (Sleep's shape) is a real declaration,
             // even though All itself exposes no chosen creature target.
@@ -36392,8 +36403,13 @@ mod tests {
                 state,
             };
             declaring.targets = vec![TargetRef::Player(PlayerId(1))];
+            declaring.target_pins = vec![None];
             assert!(crate::game::ability_utils::node_has_stack_target_declaration(&declaring));
             assert!(should_propagate_parent_targets(&declaring, &grant));
+            assert_eq!(
+                inherited_parent_occurrences(&declaring, &grant),
+                vec![(TargetRef::Player(PlayerId(1)), None)]
+            );
 
             let mut other_child = grant.clone();
             other_child.effect = Effect::Draw {
@@ -36402,6 +36418,10 @@ mod tests {
             };
             assert!(can_inherit_parent_targets(&other_child));
             assert!(should_propagate_parent_targets(&parent, &other_child));
+            assert_eq!(
+                inherited_parent_occurrences(&parent, &other_child),
+                occurrences
+            );
 
             let mut empty = parent;
             empty.targets.clear();
