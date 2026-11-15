@@ -5284,6 +5284,22 @@ pub(crate) fn should_propagate_parent_targets(
         // own subject rather than inherit an object used to calculate damage.
         && !(matches!(ability.effect, Effect::DamageEachPlayer { .. })
             && sub.target_choice_timing == TargetChoiceTiming::Resolution)
+        && !mass_selection_names_grant_referent(ability, sub)
+}
+
+// CR 608.2c: a mass tap/untap instruction that announced no target of its own is the
+// antecedent of the next instruction's pronoun; the grant names the population it
+// selected and publishes for that grant, not the creation-time referents it carries
+// for its own filter (CR 603.7c).
+fn mass_selection_names_grant_referent(parent: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+    matches!(
+        parent.effect,
+        Effect::SetTapState {
+            scope: EffectScope::All,
+            ..
+        }
+    ) && !super::ability_utils::node_has_stack_target_declaration(parent)
+        && grant_affects_parent_target(&sub.effect)
 }
 
 /// CR 608.2b: whether an empty-targeted child can inherit the parent's bound targets.
@@ -6727,8 +6743,8 @@ fn moved_objects_continuation(
 /// (`effect_parent_ref_slots`, which include `target_filter()`) and its mass population
 /// (`mass_population_target`).
 ///
-/// Known gap: a scope-`All` effect outside `mass_population_target` (`SetTapState`,
-/// `Transform`, `PreventDamage`, `ForceAttack` with `EffectScope::All`, `GoadAll`) hides its
+/// Known gap: a scope-`All` effect outside `mass_population_target` (`Transform`,
+/// `PreventDamage`, `ForceAttack` with `EffectScope::All`, `GoadAll`) hides its
 /// population from both authorities. No printed return chain with a rider has such a later node.
 fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) -> bool {
     let names = |filter: &TargetFilter| {
@@ -8586,12 +8602,7 @@ fn prepare_declined_search_node_with_input<'a>(
             bind(population);
         } else {
             match &mut prepared.effect {
-                Effect::SetTapState {
-                    scope: EffectScope::All,
-                    target,
-                    ..
-                }
-                | Effect::Transform {
+                Effect::Transform {
                     scope: EffectScope::All,
                     target,
                     ..
@@ -36324,6 +36335,78 @@ mod tests {
             crate::game::ability_utils::declared_targets_in_chain(&child),
             vec![recipient]
         );
+    }
+
+    /// Owning-module contract for Triton Tactics: "Up to two target creatures
+    /// each get +0/+3 until end of turn. Untap those creatures. At this turn's
+    /// next end of combat, tap each creature that was blocked by one of those
+    /// creatures this turn and it doesn't untap during its controller's next
+    /// untap step." Typed inputs isolate the handoff; this is not a cast test.
+    /// CR 608.2c: the following "it" names the selected mass population.
+    #[test]
+    fn mass_selection_grant_keeps_its_own_population_binding() {
+        let grant = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"GenericEffect","static_abilities":[{"mode":"CantUntap","affected":{"type":"ParentTarget"},"modifications":[{"type":"AddStaticMode","mode":"CantUntap"}]}],"duration":{"UntilNextStepOf":{"step":"Untap","player":{"type":"Controller"}}},"target":null}"#,
+            ),
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert!(can_inherit_parent_targets(&grant));
+        assert!(grant_affects_parent_target(&grant.effect));
+        for state in [TapStateChange::Tap, TapStateChange::Untap] {
+            let parent = ResolvedAbility::new(
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    state,
+                },
+                vec![
+                    TargetRef::Object(ObjectId(10)),
+                    TargetRef::Object(ObjectId(11)),
+                ],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            assert!(!parent.targets.is_empty());
+            assert!(!crate::game::ability_utils::node_has_stack_target_declaration(&parent));
+            assert!(!should_propagate_parent_targets(&parent, &grant));
+
+            let mut single = parent.clone();
+            single.effect = Effect::SetTapState {
+                scope: EffectScope::Single,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                state,
+            };
+            assert!(should_propagate_parent_targets(&single, &grant));
+
+            // A companion player slot (Sleep's shape) is a real declaration,
+            // even though All itself exposes no chosen creature target.
+            let mut declaring = parent.clone();
+            declaring.effect = Effect::SetTapState {
+                scope: EffectScope::All,
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+                state,
+            };
+            declaring.targets = vec![TargetRef::Player(PlayerId(1))];
+            assert!(crate::game::ability_utils::node_has_stack_target_declaration(&declaring));
+            assert!(should_propagate_parent_targets(&declaring, &grant));
+
+            let mut other_child = grant.clone();
+            other_child.effect = Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            };
+            assert!(can_inherit_parent_targets(&other_child));
+            assert!(should_propagate_parent_targets(&parent, &other_child));
+
+            let mut empty = parent;
+            empty.targets.clear();
+            assert!(!should_propagate_parent_targets(&empty, &grant));
+        }
     }
 
     /// CR 608.2b: only an empty node carrying measured removal evidence refuses
@@ -70054,6 +70137,57 @@ mod attached_set_walker_tests {
             &negated,
             &TargetFilter::TriggeringSource
         ));
+    }
+
+    /// Same population slot as the immutable AST owner (Triton Tactics' mass
+    /// history tap); these typed inputs test authority parity, not card support.
+    #[test]
+    fn mass_tap_population_mutates_the_immutable_authoritys_slot() {
+        use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
+        let contextual = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        for state in [TapStateChange::Tap, TapStateChange::Untap] {
+            for target in [
+                contextual.clone(),
+                TargetFilter::Typed(TypedFilter::creature()),
+            ] {
+                let mut all = Effect::SetTapState {
+                    scope: EffectScope::All,
+                    target: target.clone(),
+                    state,
+                };
+                assert_eq!(mass_population_target(&all), Some(&target));
+                assert_eq!(
+                    mass_population_target_mut(&mut all).as_deref(),
+                    Some(&target)
+                );
+                *mass_population_target_mut(&mut all).expect("mass population slot") =
+                    TargetFilter::None;
+                assert_eq!(mass_population_target(&all), Some(&TargetFilter::None));
+                assert_eq!(
+                    all,
+                    Effect::SetTapState {
+                        scope: EffectScope::All,
+                        target: TargetFilter::None,
+                        state
+                    }
+                );
+            }
+            let mut single = Effect::SetTapState {
+                scope: EffectScope::Single,
+                target: contextual.clone(),
+                state,
+            };
+            assert_eq!(mass_population_target(&single), None);
+            assert_eq!(mass_population_target_mut(&mut single), None);
+        }
     }
 
     /// P17: the concretion gate — `DestroyAll` concretizes a positive parent
