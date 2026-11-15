@@ -4393,6 +4393,9 @@ const AWE_STRIKE: &str = "The next time target creature would deal damage this t
 /// Mending Hands, and waits for that choice instead of spending the shield first. Mending Hands
 /// for the Giant leaves 1 of it for the Baloth: the Wall takes 3 and P0 gains nothing. Awe Strike
 /// for the Giant leaves all 4 for the Baloth: the Wall takes none and P0 gains 3.
+/// STRICT FAILURE (CR 615.7, fenced by the `shared_shield_split_unoffered` coverage gap): P1 may
+/// also split Mending Hands, 2 on each source (the Wall takes 2 and P0 gains 1). That split is not
+/// offered; the shield meets one source's damage in full.
 #[test]
 fn a_batch_keeps_a_shared_shield_for_the_players_choice() {
     for (baloth_first, pick_hands) in [(false, true), (false, false), (true, true), (true, false)] {

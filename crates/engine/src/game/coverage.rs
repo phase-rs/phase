@@ -10295,6 +10295,14 @@ enum StructuralFeature {
     /// parses, and with no competing shield on the recipient it works, so nothing else in
     /// coverage can see it.
     CappedRedirectRecipientChoiceIncomplete,
+    /// CR 615.7: several sources of one simultaneous damage instruction can deal damage to one
+    /// recipient (Allies at Last: "each deal damage equal to their power to target creature";
+    /// Rakdos Charm: "Each creature deals 1 damage to its controller"). A limited shield there
+    /// ("Prevent the next 4 damage") may be split among those sources, as the recipient's
+    /// controller chooses; the engine offers which source's damage the shield meets first and
+    /// spends it on that damage in full. The card parses, and with no limited shield on a shared
+    /// recipient it works, so nothing else in coverage can see it.
+    SharedShieldSplitUnoffered,
 }
 
 impl StructuralFeature {
@@ -10328,6 +10336,7 @@ impl StructuralFeature {
             CappedRedirectRecipientChoiceIncomplete => {
                 "structural:capped_redirect_recipient_choice_incomplete"
             }
+            SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
         }
     }
 
@@ -10374,6 +10383,11 @@ impl StructuralFeature {
             // Silver Knight's protection prevents the redirected point and Test of Faith is never
             // offered, so no counter is placed).
             CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `damage_substitution_replacements`
+            // (`a_batch_keeps_a_shared_shield_for_the_players_choice`: Mending Hands meets the
+            // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
+            // 2-and-2 split, 2/21, is never offered).
+            SharedShieldSplitUnoffered => FeatureSupport::Unhandled,
         }
     }
 }
@@ -11140,6 +11154,13 @@ fn extract_ability_features_with_token_statics(
     }
     if counter_exile_rider_drops_its_tail(def) {
         emit_structural(features, StructuralFeature::CounterExileRiderTailDropped);
+    }
+    // CR 615.7: several sources of one instruction can hit one shielded recipient.
+    if matches!(
+        &*def.effect,
+        Effect::EachDealsDamageEqualToPower { .. } | Effect::EachSourceDealsDamage { .. }
+    ) {
+        emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
     }
     // CR 614.9: a shield that redirects only the next N damage.
     if matches!(
@@ -16758,6 +16779,45 @@ mod tests {
     /// target"), Swans of Bryn Argoll (the source's controller draws), Weeping Angel (the creature
     /// it would damage is shuffled into its owner's library) and Wolverine, Fierce Fighter (its
     /// other damage is healed). Purity's shield is noncombat-only, so combat never meets it.
+    /// CR 615.7: a damage instruction whose several sources can hit one recipient (Allies at
+    /// Last, Rakdos Charm's third mode) is fenced as `shared_shield_split_unoffered`; a fight,
+    /// whose two sources each hit the other (Pit Fight), is not.
+    #[test]
+    fn a_shared_recipient_damage_instruction_is_a_coverage_gap() {
+        const TAG: &str = "structural:shared_shield_split_unoffered";
+        type Case = (&'static str, &'static str, &'static [&'static str], bool);
+        let cards: [Case; 3] = [
+            (
+                "Allies at Last",
+                "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)\nUp to two target creatures you control each deal damage equal to their power to target creature an opponent controls.",
+                &["Instant"],
+                true,
+            ),
+            (
+                "Rakdos Charm",
+                "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.",
+                &["Instant"],
+                true,
+            ),
+            (
+                "Pit Fight",
+                "Target creature you control fights another target creature. (Each deals damage equal to its power to the other.)",
+                &["Instant"],
+                false,
+            ),
+        ];
+        for (name, oracle, types, fenced) in cards {
+            let face = counter_rider_face(name, oracle, &[], types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                fenced.then_some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+    }
+
     /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
     /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
     /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
