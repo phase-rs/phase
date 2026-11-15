@@ -319,6 +319,8 @@ pub(crate) fn push_copy_to_stack(
         let announcement = state.mint_spell_announcement();
         if let Some(object) = state.objects.get_mut(&entry.id) {
             object.cast_occurrence = None;
+            // CR 707.10: the copy wasn't cast, so it wasn't cast "this way".
+            object.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
             object.spell_announcement = Some(announcement);
         }
         if let Some(ability) = entry.ability_mut() {
@@ -5426,6 +5428,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
             count: QuantityExpr::Fixed { .. },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            ..
         }
     );
 
@@ -11011,6 +11014,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         }
 

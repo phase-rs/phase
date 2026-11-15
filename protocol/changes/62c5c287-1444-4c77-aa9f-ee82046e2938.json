@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Edgar, Master Machinist (#9770): StaticMode::GraveyardCastPermission and GraveyardPermissionLatch gain enter_tapped (the 'if you cast a spell this way, that artifact enters tapped' rider), and GameObject gains cast_permission_enter_tapped (the rider latched on the spell, offered as a CR 616.1 entry replacement). An older peer drops these keys and the artifact enters untapped."
+}

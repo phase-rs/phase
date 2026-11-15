@@ -3554,16 +3554,13 @@ fn pending_next_spell_chosen_creature_type_flash_uses_grant_source() {
             source_id: Some(icon_id),
         });
 
-    let goblin_keywords = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
     assert!(
-        goblin_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
-        "Goblin spell matching Icon's chosen type must gain flash"
+        spell_has_effective_flash(&state, PlayerId(0), goblin_spell_id, false),
+        "Goblin spell matching Icon's chosen type may be cast as though it had flash"
     );
-
-    let elf_keywords = effective_spell_keywords(&state, PlayerId(0), elf_spell_id);
     assert!(
-        !elf_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
-        "Elf spell not matching Icon's chosen type must not gain flash"
+        !spell_has_effective_flash(&state, PlayerId(0), elf_spell_id, false),
+        "Elf spell not matching Icon's chosen type has no flash permission"
     );
 
     state.pending_next_spell_modifiers.clear();
@@ -3577,11 +3574,8 @@ fn pending_next_spell_chosen_creature_type_flash_uses_grant_source() {
             )),
             source_id: None,
         });
-    let goblin_without_source = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
     assert!(
-        !goblin_without_source
-            .iter()
-            .any(|k| matches!(k, Keyword::Flash)),
+        !spell_has_effective_flash(&state, PlayerId(0), goblin_spell_id, false),
         "chosen-type filter without grant source must not match the cast spell"
     );
 }
@@ -32453,6 +32447,7 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -32604,6 +32599,7 @@ fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -34210,9 +34206,11 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         WaitingFor::PayCost {
             kind: PayCostKind::ExileFromZone { .. },
             choices: cards,
-            resume: CostResume::Spell {
-                spell: pending_cast,
-            },
+            resume:
+                CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
+                },
             count: 3,
             ..
         } => (cards, pending_cast),
@@ -34228,6 +34226,7 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         3,
         &exile_cards,
         &chosen,
+        None,
         &mut events,
     )
     .expect("exile cost payment should succeed");
@@ -46640,6 +46639,7 @@ fn cast_spell_propagates_player_scope_into_resolved_ability() {
                 count: QuantityExpr::Fixed { value: 8 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         )
         .player_scope(PlayerFilter::Opponent);
@@ -51074,7 +51074,7 @@ mod flash_timing_grant_seam {
     }
 
     fn sorcery_has_flash(state: &GameState, player: PlayerId, sorcery: ObjectId) -> bool {
-        effective_spell_keyword_kinds(state, player, sorcery).contains(&KeywordKind::Flash)
+        spell_has_effective_flash(state, player, sorcery, false)
     }
 
     /// (a) After +1, a sorcery is instant-castable even outside the
@@ -51269,11 +51269,9 @@ mod flash_timing_grant_seam {
     /// must let the controller cast a CREATURE spell at instant speed —
     /// and must NOT grant flash timing to a non-creature spell.
     ///
-    /// CR 601.3b + CR 702.8a: this parses to a battlefield `CastWithKeyword
-    /// { Flash }` static carrying a creature spell filter, read by
-    /// `granted_spell_keywords`. The bug was that the line parsed to the
-    /// dead `CastWithFlash` mode (no filter, never consumed) — so the grant
-    /// silently did nothing.
+    /// CR 601.3b + CR 609.4: this parses to a battlefield `CastWithFlash`
+    /// static carrying a creature spell filter, the timing permission
+    /// `spell_has_effective_flash` reads.
     #[test]
     fn vivien_creature_flash_static_scopes_to_creature_spells() {
         let mut state = setup_game_at_main_phase();
@@ -51319,14 +51317,12 @@ mod flash_timing_grant_seam {
 
         // CR 601.3b: the creature spell gains flash timing via the static.
         assert!(
-            effective_spell_keyword_kinds(&state, PlayerId(0), creature)
-                .contains(&KeywordKind::Flash),
+            spell_has_effective_flash(&state, PlayerId(0), creature, false),
             "creature spell must gain Flash from Vivien's static"
         );
         // The filter scopes to creature spells — the sorcery is unaffected.
         assert!(
-            !effective_spell_keyword_kinds(&state, PlayerId(0), sorcery)
-                .contains(&KeywordKind::Flash),
+            !spell_has_effective_flash(&state, PlayerId(0), sorcery, false),
             "sorcery must NOT gain Flash (static is creature-scoped)"
         );
     }
@@ -63179,5 +63175,37 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
     assert!(
         can_cast_object_now(&scenario.state, P0, even),
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
+}
+
+/// CR 601.2a (C27): a menu answer is bound to the grant's digest, so a grant
+/// whose enters-tapped rider changed (Edgar, Master Machinist) must digest
+/// differently and be refused as stale.
+#[test]
+fn grant_digest_covers_the_enters_tapped_rider() {
+    use crate::types::zones::EtbTapState;
+    let grant = |enter_tapped: EtbTapState| {
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            enter_tapped,
+            required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
+        })
+    };
+    assert_eq!(
+        grant_digest(&grant(EtbTapState::Tapped)),
+        grant_digest(&grant(EtbTapState::Tapped)),
+        "reach guard: the digest is stable"
+    );
+    assert_ne!(
+        grant_digest(&grant(EtbTapState::Tapped)),
+        grant_digest(&grant(EtbTapState::Unspecified))
     );
 }
