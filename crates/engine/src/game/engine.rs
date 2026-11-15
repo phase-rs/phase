@@ -6194,7 +6194,8 @@ pub(crate) fn shortcut_count_is_drivable(
 /// CR 800.4a + CR 800.4j: the seat that should receive priority where the active player
 /// would: when a loop-shortcut resolution hands priority back, when a completed
 /// resolution's carrier settles (including the restore-boundary recoveries), and when an
-/// answered resolution prompt hands the resolution back. Priority passes to the next player in turn order still in
+/// answered resolution prompt hands the resolution back, a step's own grant (`turns::active_player_priority`), the
+/// trigger-ordering completion, and the answer to a state-based choice. Priority passes to the next player in turn order still in
 /// the game — the
 /// active player if it is still in the game, otherwise the next living seat in turn order
 /// (elimination does not advance `active_player` when a non-acting seat concedes during the

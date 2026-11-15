@@ -200,7 +200,7 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     PriorityBoundary,
     /// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: an ability that triggered during a
     /// turn-based action performed as a step or phase begins (the untap step's actions, the
-    /// draw, the archenemy's scheme action, a Saga's lore counters), together with the step's
+    /// draw, the archenemy's scheme action, a Saga's lore counters, the roll to visit (CR 703.4g)), together with the step's
     /// own beginning triggers, held as it begins (CR 500.6), and the abilities its state-based
     /// check before that batch triggers (CR 704.3), before any player
     /// received priority in that step. It is held until the next time a player would receive
@@ -9132,15 +9132,17 @@ pub(crate) fn handle_order_triggers(
     }
     // No trigger-specific pause remains. Restore an interrupted casting/payment
     // state if this ordering pass preempted one; otherwise fall through to
-    // Priority for the active player.
+    // Priority for the active player (CR 800.4j: or the next living player).
     // CR 603.3b: the batch dispatched fully (the paused paths returned earlier at the
     // two `return Ok` above); drop the per-batch ephemeral coverage markers before the
     // next Priority frame. Guarded so a mid-batch pause (non-empty) never clears them.
     if state.deferred_triggers.is_empty() {
         state.clear_ephemeral_trigger_order_templates();
     }
+    // CR 603.3b + CR 800.4j: once the batch is on the stack the active player receives priority, or the next
+    // player in turn order still in the game when the active player has left.
     Ok(resume_after_ordering.unwrap_or(WaitingFor::Priority {
-        player: state.active_player,
+        player: super::engine::living_priority_seat(state),
     }))
 }
 

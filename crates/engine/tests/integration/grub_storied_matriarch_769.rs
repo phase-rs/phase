@@ -6027,6 +6027,7 @@ fn cult_of_the_waxing_moon_sees_feldons_copy_of_brutal_cathar_transform_and_it_s
 }
 
 const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 /// A three-player Arcane Artisan board at night, P0 active: P0 has Arcane Artisan, able to
 /// activate, and Grizzly Bears; P1 has Cult of the Waxing Moon; P2 has a stocked library. With
@@ -7593,6 +7594,14 @@ fn untap_held_trigger_is_pruned_when_its_controller_loses() {
             assert!(!runner.state().stack.iter().any(|e| e.source_id == imp));
             assert!(runner.state().deferred_triggers.is_empty());
             assert!(runner.state().pending_trigger.is_none());
+            // R1c — CR 800.4j: the departed active player cannot receive upkeep priority.
+            assert_player_lost_once(&events, P1);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P2 }
+            );
+            assert_departed_seat_refused(&runner, P1);
+            survivors_pass_to_the_next_turn(&mut runner, P2, P0, P2);
         } else {
             assert!(!runner.state().players[1].is_eliminated);
             assert_eq!(runner.state().stack.iter().filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == imp) && e.controller == P1).count(), 1);
@@ -10190,4 +10199,877 @@ fn archenemy_teammate_who_cast_twice_and_then_conceded_makes_it_day() {
         vec![("Day".to_string(), Some(DayNight::Night))]
     );
     assert_eq!(celestus_triggers(&runner, celestus), 1);
+}
+
+const CLOWN_EXTRUDER: &str = "Clown Extruder";
+const CLOWN_EXTRUDER_ORACLE: &str =
+    "Visit — Create a 1/1 white Clown Robot artifact creature token.";
+const DEADBEAT_ATTENDANT: &str = "Deadbeat Attendant";
+const DEADBEAT_ATTENDANT_ORACLE: &str = "When this creature enters, open an Attraction. (Put the top card of your Attraction deck onto the battlefield.)";
+const LINE_CUTTER: &str = "Line Cutter";
+const LINE_CUTTER_ORACLE: &str = "When this creature enters, roll to visit your Attractions.";
+const BLOOD_TYRANT: &str = "Blood Tyrant";
+const BLOOD_TYRANT_ORACLE: &str = "Flying, trample\nAt the beginning of your upkeep, each player loses 1 life. Put a +1/+1 counter on this creature for each 1 life lost this way.\nWhenever a player loses the game, put five +1/+1 counters on this creature.";
+const ACADEMY_LOREMASTER: &str = "Academy Loremaster";
+const ACADEMY_LOREMASTER_ORACLE: &str = "At the beginning of each player's draw step, that player may draw an additional card. If they do, spells they cast this turn cost {2} more to cast.";
+const CONTROL_MAGIC: &str = "Control Magic";
+const CONTROL_MAGIC_ORACLE: &str = "Enchant creature\nYou control enchanted creature.";
+const BARBARIAN_CLASS: &str = "Barbarian Class";
+const BARBARIAN_CLASS_ORACLE: &str = "(Gain the next level as a sorcery to add its ability.)\nIf you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.\n{1}{R}: Level 2\nWhenever you roll one or more dice, target creature you control gets +2/+0 and gains menace until end of turn.\n{2}{R}: Level 3\nCreatures you control have haste.";
+const PIXIE_GUIDE: &str = "Pixie Guide";
+const PIXIE_GUIDE_ORACLE: &str = "Flying\nGrant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
+const RAGAVAN: &str = "Ragavan, Nimble Pilferer";
+const RAGAVAN_ORACLE: &str = "Whenever Ragavan deals combat damage to a player, create a Treasure token and exile the top card of that player's library. Until end of turn, you may cast that card.\nDash {1}{R} (You may cast this spell for its dash cost. If you do, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step.)";
+const LIGHTNING_BOLT: &str = "Lightning Bolt";
+const LIGHTNING_BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
+const INVASION_OF_GOBAKHAN: &str = "Invasion of Gobakhan";
+const INVASION_OF_GOBAKHAN_ORACLE: &str = "(As a Siege enters, choose an opponent to protect it. You and others can attack it. When it's defeated, exile it, then cast it transformed.)\nWhen this Siege enters, look at target opponent's hand. You may exile a nonland card from it. For as long as that card remains exiled, its owner may play it. A spell cast this way costs {2} more to cast.";
+
+/// P1's next normal draw is empty; other seats have cards to finish the surrounding turns.
+fn departed_draw_board(
+    players: u8,
+    stage: impl FnOnce(&mut GameScenario, &CardDatabase),
+) -> GameRunner {
+    let db = load_db().expect("card db");
+    let mut scenario = if players == 2 {
+        GameScenario::new()
+    } else {
+        GameScenario::new_n_player(players, 769)
+    };
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Top One", "Top Two", "Top Three"]);
+    if players > 2 {
+        scenario.with_library_top(P2, &["Top One", "Top Two", "Top Three"]);
+    }
+    stage(&mut scenario, db);
+    let runner = scenario.build();
+    assert!(runner.state().players[1].library.is_empty());
+    runner
+}
+
+/// Like `pass_until`, with enough actions for four full multiplayer turns.
+fn drive_until(
+    runner: &mut GameRunner,
+    budget: usize,
+    stop: impl Fn(&GameRunner) -> bool,
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..budget {
+        if stop(runner) {
+            return events;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            _ => return events,
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("advance through living seats")
+                .events,
+        );
+    }
+    panic!("drive exhausted at {:?}", runner.state().phase);
+}
+
+fn assert_departed_seat_refused(runner: &GameRunner, departed: PlayerId) {
+    assert!(runner.state().players[departed.0 as usize].is_eliminated);
+    assert!(engine::game::engine::apply(
+        &mut runner.state().clone(),
+        departed,
+        GameAction::PassPriority
+    )
+    .is_err());
+}
+
+/// CR 800.4j: both survivors pass, completing the departed player's turn.
+fn survivors_pass_to_the_next_turn(
+    runner: &mut GameRunner,
+    first: PlayerId,
+    second: PlayerId,
+    next_active: PlayerId,
+) {
+    engine::game::engine::apply(runner.state_mut(), first, GameAction::PassPriority)
+        .expect("first survivor passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: second }
+    );
+    engine::game::engine::apply(runner.state_mut(), second, GameAction::PassPriority)
+        .expect("second survivor passes");
+    assert_eq!(runner.state().active_player, next_active);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority {
+            player: next_active
+        }
+    );
+}
+
+fn assert_player_lost_once(events: &[GameEvent], player: PlayerId) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PlayerLost { player_id } if *player_id == player))
+            .count(),
+        1
+    );
+}
+
+/// R1a — CR 121.4 + CR 704.5b + CR 800.4j: an empty draw removes P1 before draw priority.
+#[test]
+fn departed_draw_active_player_yields_priority_to_survivors() {
+    let mut runner = departed_draw_board(3, |_, _| {});
+    let events = pass_until(&mut runner, |r| r.state().players[1].is_eliminated);
+    assert_player_lost_once(&events, P1);
+    assert_eq!(runner.state().phase, Phase::Draw);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(runner.state().game_end.is_none());
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+    assert_departed_seat_refused(&runner, P1);
+    let turn = runner.state().turn_number;
+    survivors_pass_to_the_next_turn(&mut runner, P2, P0, P2);
+    assert_eq!(runner.state().turn_number, turn + 1);
+}
+
+/// R1b — CR 121.4 + CR 704.5b: the same empty draw in two players ends the game.
+#[test]
+fn departed_draw_two_player_game_ends() {
+    let mut runner = departed_draw_board(2, |_, _| {});
+    let events = pass_until(&mut runner, |r| r.state().game_end.is_some());
+    assert_player_lost_once(&events, P1);
+    assert!(runner.state().game_end.is_some());
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+}
+
+/// R1d — CR 702.26b + CR 704.5a + CR 800.4j: Teferi's Curse phases out Platinum Angel
+/// ("You can't lose the game and your opponents can't win the game."). Eon Hub skips upkeep;
+/// Necropotence skips the draw step, so the first main's check discovers the loss.
+#[test]
+fn departed_first_main_active_player_yields_priority_to_survivors() {
+    let db = load_db().expect("card db");
+    for (name, oracle) in [
+        (PLATINUM_ANGEL, PLATINUM_ANGEL_ORACLE),
+        (TEFERIS_CURSE, TEFERIS_CURSE_ORACLE),
+        (EON_HUB, EON_HUB_ORACLE),
+        (NECROPOTENCE, NECROPOTENCE_ORACLE),
+    ] {
+        assert_oracle(db, name, oracle);
+    }
+    let mut s = GameScenario::new_n_player(3, 769);
+    s.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        s.with_library_top(player, &["Top One", "Top Two", "Top Three"]);
+    }
+    let angel = s.add_real_card(P1, PLATINUM_ANGEL, Zone::Battlefield, db);
+    let curse = s.add_real_card(P0, TEFERIS_CURSE, Zone::Hand, db);
+    s.add_real_card(P0, EON_HUB, Zone::Battlefield, db);
+    s.add_real_card(P1, NECROPOTENCE, Zone::Battlefield, db);
+    let mut runner = s.build();
+    // Setup only: the Angel keeps its controller alive at zero life.
+    runner.state_mut().players[1].life = 0;
+    fund(&mut runner, ManaType::Blue, 2);
+    runner.cast(curse).target_object(angel).commit();
+    pass_until_settled(&mut runner);
+    settle(&mut runner);
+    let events = pass_until(&mut runner, |r| r.state().players[1].is_eliminated);
+    assert_player_lost_once(&events, P1);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+    assert_departed_seat_refused(&runner, P1);
+    survivors_pass_to_the_next_turn(&mut runner, P2, P0, P2);
+}
+
+/// R1e — CR 507.2 + CR 513.1 + CR 117.3a + CR 800.4j: each later grant skips a departed seat.
+/// Setup-only zero life at the last pass: no printed card makes this loss due precisely at these checks.
+/// Grizzly Bears is the vanilla 2/2 combat witness.
+#[test]
+fn departed_active_player_yields_priority_at_later_step_checks() {
+    for (before, target) in [
+        (Phase::PreCombatMain, Phase::BeginCombat),
+        (Phase::PostCombatMain, Phase::End),
+        (Phase::DeclareBlockers, Phase::CombatDamage),
+    ] {
+        let db = load_db().expect("card db");
+        let mut s = GameScenario::new_n_player(3, 769);
+        s.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1, P2] {
+            s.with_library_top(player, &["Top One", "Top Two", "Top Three", "Top Four"]);
+        }
+        let bears = s.add_real_card(P1, BEARS, Zone::Battlefield, db);
+        let mut runner = s.build();
+        if target == Phase::CombatDamage {
+            pass_until(&mut runner, |r| {
+                r.state().active_player == P1 && r.state().phase == Phase::BeginCombat
+            });
+            // Setup only: the Bears can attack this turn.
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&bears)
+                .unwrap()
+                .summoning_sick = false;
+            runner
+                .act(GameAction::DeclareAttackers {
+                    attacks: vec![(bears, AttackTarget::Player(P2))],
+                    bands: vec![],
+                })
+                .expect("Bears attack P2");
+            for _ in 0..6 {
+                match runner.state().waiting_for.clone() {
+                    WaitingFor::DeclareBlockers { player, .. } => {
+                        engine::game::engine::apply(
+                            runner.state_mut(),
+                            player,
+                            GameAction::DeclareBlockers {
+                                assignments: vec![],
+                            },
+                        )
+                        .expect("no blockers");
+                    }
+                    WaitingFor::Priority { .. }
+                        if runner.state().phase == Phase::DeclareBlockers =>
+                    {
+                        break
+                    }
+                    WaitingFor::Priority { .. } => {
+                        runner
+                            .act(GameAction::PassPriority)
+                            .expect("pass to blockers");
+                    }
+                    other => panic!("unexpected combat prompt: {other:?}"),
+                }
+            }
+        } else {
+            pass_until(&mut runner, |r| {
+                r.state().active_player == P1 && r.state().phase == before
+            });
+        }
+        pass_until(&mut runner, |r| {
+            r.state().waiting_for == WaitingFor::Priority { player: P0 }
+        });
+        assert_eq!(runner.state().phase, before);
+        assert_eq!(runner.state().active_player, P1);
+        runner.state_mut().players[1].life = 0;
+        let events = runner
+            .act(GameAction::PassPriority)
+            .expect("last pass enters next step")
+            .events;
+        assert_player_lost_once(&events, P1);
+        assert_eq!(runner.state().phase, target);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P2 }
+        );
+        assert_departed_seat_refused(&runner, P1);
+    }
+}
+
+/// R1g — CR 704.5j + CR 800.4a + CR 800.4j: Control Magic ("You control enchanted creature.")
+/// leaves with P0, returning Isamaru to P2; answering P2's legend choice must not revive P0's priority.
+#[test]
+fn departed_active_player_legend_answer_yields_living_priority() {
+    let db = load_db().expect("card db");
+    assert_oracle(db, CONTROL_MAGIC, CONTROL_MAGIC_ORACLE);
+    let mut s = GameScenario::new_n_player(3, 769);
+    s.at_phase(Phase::PreCombatMain);
+    for player in [P1, P2] {
+        s.with_library_top(player, &["Top One", "Top Two", "Top Three"]);
+    }
+    let a = s.add_real_card(P2, ISAMARU, Zone::Battlefield, db);
+    let b = s.add_real_card(P2, ISAMARU, Zone::Battlefield, db);
+    let magic = s.add_real_card(P0, CONTROL_MAGIC, Zone::Hand, db);
+    let mut runner = s.build();
+    // Setup only: Reality Ripple phased the first Isamaru out.
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        a,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut Vec::new(),
+    );
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(magic).target_object(b).commit();
+    pass_until_settled(&mut runner);
+    assert_eq!(runner.state().objects[&b].controller, P0);
+    let events = drive_until(&mut runner, 120, |r| r.state().players[0].is_eliminated);
+    assert_player_lost_once(&events, P0);
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player: P2,
+            candidates,
+            ..
+        } => {
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.contains(&a) && candidates.contains(&b));
+        }
+        other => panic!("expected P2 legend choice: {other:?}"),
+    }
+    assert_eq!(runner.state().objects[&b].controller, P2);
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep first Isamaru");
+    assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_departed_seat_refused(&runner, P0);
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+}
+
+fn commander_answer_board() -> (GameRunner, ObjectId, ObjectId) {
+    let db = load_db().expect("card db");
+    assert_oracle(db, RAGAVAN, RAGAVAN_ORACLE);
+    assert_oracle(db, LIGHTNING_BOLT, LIGHTNING_BOLT_ORACLE);
+    let mut s = GameScenario::new_n_player(3, 769);
+    s.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        s.with_library_top(player, &["Top One", "Top Two", "Top Three"]);
+    }
+    let ragavan = s.add_real_card(P2, RAGAVAN, Zone::Battlefield, db);
+    let bolt = s.add_real_card(P1, LIGHTNING_BOLT, Zone::Hand, db);
+    let mut runner = s.build();
+    // Setup only: Ragavan is P2's designated commander (the make_commander shape).
+    runner.state_mut().format_config.command_zone = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&ragavan)
+        .unwrap()
+        .is_commander = true;
+    fund_player(&mut runner, P1, ManaType::Red, 1);
+    (runner, ragavan, bolt)
+}
+
+fn answer_commander_after_departure(accept: bool) {
+    let (mut runner, ragavan, bolt) = commander_answer_board();
+    engine::game::engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::Concede { player_id: P0 },
+    )
+    .expect("P0 concedes");
+    assert!(runner.state().players[0].is_eliminated);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    runner.cast(bolt).target_object(ragavan).commit();
+    drive_until(&mut runner, 6, |r| {
+        !matches!(r.state().waiting_for, WaitingFor::Priority { .. })
+    });
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::CommanderZoneChoice { player: P2, commander_id, current_zone: Zone::Graveyard } if commander_id == ragavan)
+    );
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::DecideOptionalEffect { accept })
+        .expect("answer commander choice");
+    assert_eq!(
+        runner.state().objects[&ragavan].zone,
+        if accept {
+            Zone::Command
+        } else {
+            Zone::Graveyard
+        }
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_departed_seat_refused(&runner, P0);
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+}
+
+/// R1h — CR 903.9a + CR 800.4a + CR 800.4j: Lightning Bolt deals 3 damage to Ragavan;
+/// its owner accepts the command-zone return after the active player has conceded.
+#[test]
+fn departed_active_player_commander_accept_yields_living_priority() {
+    answer_commander_after_departure(true);
+}
+
+/// R1k — CR 903.9a + CR 800.4j: Lightning Bolt kills commander Ragavan;
+/// declining its command-zone return also hands priority to the next living seat.
+#[test]
+fn departed_active_player_commander_decline_yields_living_priority() {
+    answer_commander_after_departure(false);
+}
+
+/// R1l — CR 704.5x + CR 310.11 + CR 800.4j: Invasion of Gobakhan's Siege protector
+/// leaves at its draw; P2 chooses a new protector before living P1 receives priority.
+#[test]
+fn departed_active_player_battle_protector_answer_yields_living_priority() {
+    let db = load_db().expect("card db");
+    assert_oracle(db, INVASION_OF_GOBAKHAN, INVASION_OF_GOBAKHAN_ORACLE);
+    let mut s = GameScenario::new_n_player(4, 769);
+    s.at_phase(Phase::PreCombatMain);
+    for player in [P1, P2, P3] {
+        s.with_library_top(player, &["Top One", "Top Two", "Top Three"]);
+    }
+    let siege = s.add_real_card(P2, INVASION_OF_GOBAKHAN, Zone::Battlefield, db);
+    // Setup only: placing the Siege abandoned its as-enters choice; restore P0's opening window.
+    s.at_phase(Phase::PreCombatMain);
+    let mut runner = s.build();
+    // Setup only: its earlier as-enters choice named P0; it has its three printed defense counters.
+    let obj = runner.state_mut().objects.get_mut(&siege).unwrap();
+    obj.chosen_attributes.push(ChosenAttribute::Player(P0));
+    obj.counters.insert(CounterType::Defense, 3);
+    assert_eq!(runner.state().objects[&siege].protector(), Some(P0));
+    let events = drive_until(&mut runner, 400, |r| r.state().players[0].is_eliminated);
+    assert_player_lost_once(&events, P0);
+    assert_eq!(runner.state().phase, Phase::Draw);
+    assert!(runner.state().stack.is_empty());
+    match &runner.state().waiting_for {
+        WaitingFor::BattleProtectorChoice {
+            player: P2,
+            battle_id,
+            candidates,
+        } => {
+            assert_eq!(*battle_id, siege);
+            assert_eq!(candidates, &[P1, P3]);
+        }
+        other => panic!("expected new protector: {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseBattleProtector { protector: P3 })
+        .expect("choose P3 protector");
+    assert_eq!(runner.state().objects[&siege].protector(), Some(P3));
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_departed_seat_refused(&runner, P0);
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+}
+
+/// R1i — CR 117.5 + CR 603.3b + CR 101.4: Howling Mine's additional draw and Blood Tyrant's
+/// "Whenever a player loses the game, put five +1/+1 counters on this creature" share one APNAP batch.
+#[test]
+fn departed_draw_batches_departure_and_step_triggers_in_apnap_order() {
+    let (mut tyrant, mut mine) = (ObjectId(0), ObjectId(0));
+    let mut runner = departed_draw_board(3, |s, db| {
+        assert_oracle(db, BLOOD_TYRANT, BLOOD_TYRANT_ORACLE);
+        assert_oracle(db, HOWLING_MINE, HOWLING_MINE_ORACLE);
+        mine = s.add_real_card(P0, HOWLING_MINE, Zone::Battlefield, db);
+        tyrant = s.add_real_card(P2, BLOOD_TYRANT, Zone::Battlefield, db);
+    });
+    let events = pass_until(&mut runner, |r| r.state().players[1].is_eliminated);
+    assert_player_lost_once(&events, P1);
+    assert_eq!(stack_sources(&runner), vec![tyrant, mine]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+}
+
+/// R1j — CR 603.3b + CR 800.4j: Academy Loremaster's optional additional draw and Blood Tyrant's
+/// player-loss counters belong in P2's one orderable batch, followed by living P2's priority.
+#[test]
+fn departed_draw_orders_departure_and_step_triggers_together() {
+    let (mut tyrant, mut loremaster) = (ObjectId(0), ObjectId(0));
+    let mut runner = departed_draw_board(3, |s, db| {
+        assert_oracle(db, BLOOD_TYRANT, BLOOD_TYRANT_ORACLE);
+        assert_oracle(db, ACADEMY_LOREMASTER, ACADEMY_LOREMASTER_ORACLE);
+        tyrant = s.add_real_card(P2, BLOOD_TYRANT, Zone::Battlefield, db);
+        loremaster = s.add_real_card(P2, ACADEMY_LOREMASTER, Zone::Battlefield, db);
+    });
+    let events = pass_until(&mut runner, |r| r.state().players[1].is_eliminated);
+    assert_player_lost_once(&events, P1);
+    assert!(runner.state().stack.is_empty());
+    let sources = order_prompt_sources(&runner, P2);
+    assert_eq!(sources.len(), 2);
+    assert!(sources.contains(&tyrant) && sources.contains(&loremaster));
+    for (first, other) in [(tyrant, loremaster), (loremaster, tyrant)] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        order_first(&mut branch, &sources, first);
+        assert_eq!(stack_sources(&branch), vec![first, other]);
+        assert_eq!(
+            branch.state().waiting_for,
+            WaitingFor::Priority { player: P2 }
+        );
+        assert_departed_seat_refused(&branch, P1);
+    }
+}
+
+struct ExtruderIds {
+    first_legend: Option<ObjectId>,
+    second_legend: Option<ObjectId>,
+    pilferer: Option<ObjectId>,
+    grub: Option<ObjectId>,
+    extruder: ObjectId,
+}
+
+/// Builds the first-main witnesses from their printed Oracle text; all special state below is setup only.
+fn extruder_board(
+    lights: Vec<u8>,
+    legend: bool,
+    pilferer: bool,
+    grub: bool,
+    replacements: bool,
+) -> (GameRunner, ExtruderIds) {
+    let (mut runner, (first_legend, second_legend, pilferer, grub)) =
+        board(Phase::PreCombatMain, |s, db| {
+            for (name, oracle) in [
+                (CLOWN_EXTRUDER, CLOWN_EXTRUDER_ORACLE),
+                (DEADBEAT_ATTENDANT, DEADBEAT_ATTENDANT_ORACLE),
+                (EON_HUB, EON_HUB_ORACLE),
+                (NECROPOTENCE, NECROPOTENCE_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            s.add_real_card(P1, EON_HUB, Zone::Battlefield, db);
+            s.add_real_card(P1, NECROPOTENCE, Zone::Battlefield, db);
+            if replacements {
+                assert_oracle(db, BARBARIAN_CLASS, BARBARIAN_CLASS_ORACLE);
+                assert_oracle(db, PIXIE_GUIDE, PIXIE_GUIDE_ORACLE);
+                s.add_real_card(P1, BARBARIAN_CLASS, Zone::Battlefield, db);
+                s.add_real_card(P1, PIXIE_GUIDE, Zone::Battlefield, db);
+            }
+            if grub {
+                s.add_real_card(P1, DEADBEAT_ATTENDANT, Zone::Battlefield, db);
+            }
+            let first = legend.then(|| s.add_real_card(P1, ISAMARU, Zone::Battlefield, db));
+            let second = legend.then(|| s.add_real_card(P1, ISAMARU, Zone::Battlefield, db));
+            let pil = pilferer.then(|| {
+                assert_oracle(db, GHOSTLY_PILFERER, GHOSTLY_PILFERER_ORACLE);
+                s.add_real_card(P1, GHOSTLY_PILFERER, Zone::Battlefield, db)
+            });
+            let matriarch = grub.then(|| {
+                assert_oracle(db, MATRIARCH, MATRIARCH_ORACLE);
+                s.add_real_card(P1, MATRIARCH, Zone::Battlefield, db)
+            });
+            (first, second, pil, matriarch)
+        });
+    let db = load_db().expect("card db");
+    let face = db.get_face_by_name(CLOWN_EXTRUDER).expect("Extruder face");
+    let extruder =
+        engine::game::deck_loading::create_attraction_deck_card(runner.state_mut(), face, P1);
+    // Setup only: Deadbeat Attendant's "When this creature enters, open an Attraction" resolved on an earlier turn.
+    engine::game::attractions::open_attractions(runner.state_mut(), P1, 1, &mut Vec::new())
+        .expect("open Extruder");
+    // Setup only: printing 204a lights 2 and 6; the replacement-pause row instead lights every number.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&extruder)
+        .unwrap()
+        .attraction_lights = lights;
+    if let Some(second) = second_legend {
+        // Setup only: Reality Ripple phased the second Isamaru out.
+        engine::game::phasing::phase_out_object(
+            runner.state_mut(),
+            second,
+            engine::game::game_object::PhaseOutCause::Directly,
+            &mut Vec::new(),
+        );
+    }
+    if let Some(pil) = pilferer {
+        runner.state_mut().objects.get_mut(&pil).unwrap().tapped = true;
+    }
+    (
+        runner,
+        ExtruderIds {
+            first_legend,
+            second_legend,
+            pilferer,
+            grub,
+            extruder,
+        },
+    )
+}
+
+/// Reaches P1's precombat main from `board` with a roll-to-visit result `wanted` accepts. Seeds only pick the
+/// die result; every other step is the production pass. (Prototype: seed 0 rolls 4, seed 1 rolls 2.)
+fn first_main_roll(
+    board: &GameRunner,
+    wanted: impl Fn(u8) -> bool,
+) -> (GameRunner, Vec<GameEvent>) {
+    for seed in 0..64u64 {
+        let mut runner = GameRunner::from_state(board.state().clone());
+        runner.state_mut().rng = engine::types::game_state::GameRng::seed_from_u64(seed);
+        let events = pass_until(&mut runner, |r| {
+            r.state().active_player == P1 && r.state().phase == Phase::PreCombatMain
+        });
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DieRolled {
+                    result: Some(r), ..
+                } => Some(*r),
+                _ => None,
+            })
+            .collect();
+        if let [roll] = rolls[..] {
+            if wanted(roll) {
+                return (runner, events);
+            }
+        }
+    }
+    panic!("no seed in 0..64 rolled the wanted result");
+}
+
+fn assert_extruder_roll(events: &[GameEvent], extruder: ObjectId, visited: bool) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    result: Some(_),
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::AttractionsRolledToVisit { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::AttractionVisited { attraction_id, .. } if *attraction_id == extruder)).count(), usize::from(visited));
+}
+
+fn keep_extruder_legend(runner: &mut GameRunner, ids: &ExtruderIds) {
+    let a = ids.first_legend.expect("first legend");
+    let b = ids.second_legend.expect("second legend");
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player: P1,
+            candidates,
+            ..
+        } => {
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.contains(&a) && candidates.contains(&b));
+        }
+        other => panic!("expected legend choice before trigger placement: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep first legend");
+    assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+}
+
+/// CR 603.3b: exercise every possible first source; each trigger is placed once in the chosen order.
+fn assert_each_first_places_once(runner: &GameRunner, expected: &[ObjectId]) {
+    let sources = order_prompt_sources(runner, P1);
+    assert_eq!(sources.len(), expected.len());
+    assert!(expected.iter().all(|source| sources.contains(source)));
+    assert!(runner.state().stack.is_empty());
+    for first in expected {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        order_first(&mut branch, &sources, *first);
+        let placed = stack_sources(&branch);
+        assert_eq!(placed.len(), expected.len());
+        assert_eq!(placed[0], *first);
+        for source in expected {
+            assert_eq!(placed.iter().filter(|id| *id == source).count(), 1);
+        }
+        assert_eq!(
+            branch.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        );
+    }
+}
+
+/// R2a — CR 117.5 + CR 703.4g + CR 717.4: an unlit Clown Extruder roll waits for Isamaru's
+/// legend choice before Grub's "At the beginning of your first main phase, you may pay {R}" trigger.
+#[test]
+fn attraction_unlit_roll_holds_grub_until_legend_choice() {
+    let (board, ids) = extruder_board(vec![2, 6], true, false, true, false);
+    let (mut runner, events) = first_main_roll(&board, |r| r != 2 && r != 6);
+    assert_extruder_roll(&events, ids.extruder, false);
+    keep_extruder_legend(&mut runner, &ids);
+    assert_eq!(stack_sources(&runner), vec![ids.grub.unwrap()]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+}
+
+/// R2b — CR 603.3b + CR 702.159a: Clown Extruder's "Visit — Create a 1/1 white Clown Robot
+/// artifact creature token" and Grub share one orderable batch after Isamaru's legend choice.
+#[test]
+fn attraction_lit_roll_orders_visit_and_grub_after_legend_choice() {
+    let (board, ids) = extruder_board(vec![2, 6], true, false, true, false);
+    let (mut runner, events) = first_main_roll(&board, |r| r == 2 || r == 6);
+    assert_extruder_roll(&events, ids.extruder, true);
+    keep_extruder_legend(&mut runner, &ids);
+    assert_each_first_places_once(&runner, &[ids.grub.unwrap(), ids.extruder]);
+}
+
+/// R2c — CR 603.3b + CR 717.4: without a pending legend choice, Clown Extruder's visit and
+/// Grub's first-main trigger still wait for one ordering prompt with no earlier stack entries (#245).
+#[test]
+fn attraction_lit_roll_places_visit_and_grub_once() {
+    let (board, ids) = extruder_board(vec![2, 6], false, false, true, false);
+    let (runner, events) = first_main_roll(&board, |r| r == 2 || r == 6);
+    assert_extruder_roll(&events, ids.extruder, true);
+    assert_each_first_places_once(&runner, &[ids.grub.unwrap(), ids.extruder]);
+}
+
+/// R2d — CR 603.3 + CR 717.4: an unlit Extruder does not visit; Grub's first-main trigger is placed once.
+#[test]
+fn attraction_unlit_roll_places_grub_once_without_legend_choice() {
+    let (board, ids) = extruder_board(vec![2, 6], false, false, true, false);
+    let (runner, events) = first_main_roll(&board, |r| r != 2 && r != 6);
+    assert_extruder_roll(&events, ids.extruder, false);
+    assert_eq!(stack_sources(&runner), vec![ids.grub.unwrap()]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+}
+
+/// R2e — CR 603.3 + CR 702.159a: Clown Extruder's "Visit — Create a 1/1 white Clown Robot
+/// artifact creature token" is placed once and creates exactly one token, without another trigger (#245).
+#[test]
+fn attraction_visit_alone_resolves_once() {
+    let (board, ids) = extruder_board(vec![2, 6], false, false, false, false);
+    let (mut runner, events) = first_main_roll(&board, |r| r == 2 || r == 6);
+    assert_extruder_roll(&events, ids.extruder, true);
+    assert_eq!(stack_sources(&runner), vec![ids.extruder]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    let events = resolve_stack(&mut runner);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::TokenCreated { .. }))
+            .count(),
+        1
+    );
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 1);
+    assert!(runner.state().objects[&created[0]]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Clown"));
+    assert!(runner.state().objects[&created[0]]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Robot"));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+}
+
+/// R2f — CR 616.1 + CR 706.1 + CR 117.5: Barbarian Class and Pixie Guide each roll an extra die
+/// and ignore the lowest. Their ordering prompt parks Grub, Ghostly Pilferer's untap, and the
+/// Extruder's visit, with and without Isamaru's later legend choice. CR 706.6 ignores two results.
+#[test]
+fn attraction_replacement_order_parks_first_main_batch() {
+    for legend in [false, true] {
+        let (mut runner, ids) = extruder_board(vec![1, 2, 3, 4, 5, 6], legend, true, true, true);
+        let events = pass_until(&mut runner, |r| {
+            r.state().active_player == P1 && r.state().phase == Phase::PreCombatMain
+        });
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: P1,
+                candidate_count: 2,
+                ..
+            }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DieRolled { .. })));
+        assert!(runner.state().pending_replacement.is_some());
+        assert!(runner.state().pending_die_roll_instruction.is_some());
+        let answer = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("order roll replacements")
+            .events;
+        assert_extruder_roll(&answer, ids.extruder, true);
+        assert!(runner.state().pending_replacement.is_none());
+        assert!(runner.state().pending_die_roll_instruction.is_none());
+        if legend {
+            keep_extruder_legend(&mut runner, &ids);
+        }
+        assert_each_first_places_once(
+            &runner,
+            &[ids.pilferer.unwrap(), ids.grub.unwrap(), ids.extruder],
+        );
+    }
+}
+
+/// R2g — CR 603.3: Line Cutter's "When this creature enters, roll to visit your Attractions"
+/// places Clown Extruder's visit once at the resolution boundary, without a phase-entry batch.
+#[test]
+fn line_cutter_roll_places_visit_once_at_resolution_boundary() {
+    let (mut runner, cutter) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, LINE_CUTTER, LINE_CUTTER_ORACLE);
+        assert_oracle(db, CLOWN_EXTRUDER, CLOWN_EXTRUDER_ORACLE);
+        s.add_real_card(P0, LINE_CUTTER, Zone::Hand, db)
+    });
+    let db = load_db().expect("card db");
+    let face = db.get_face_by_name(CLOWN_EXTRUDER).expect("Extruder face");
+    let extruder =
+        engine::game::deck_loading::create_attraction_deck_card(runner.state_mut(), face, P0);
+    // Setup only: an earlier open-Attraction effect resolved, and all lights ensure a deterministic visit.
+    engine::game::attractions::open_attractions(runner.state_mut(), P0, 1, &mut Vec::new())
+        .expect("open Extruder");
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&extruder)
+        .unwrap()
+        .attraction_lights = vec![1, 2, 3, 4, 5, 6];
+    fund(&mut runner, ManaType::Black, 4);
+    runner.cast(cutter).commit();
+    let mut observed = None;
+    for _ in 0..8 {
+        let events = runner
+            .act(GameAction::PassPriority)
+            .expect("resolve creature and its enters trigger")
+            .events;
+        if events.iter().any(|e| matches!(e, GameEvent::AttractionVisited { attraction_id, .. } if *attraction_id == extruder)) { observed = Some(events); break; }
+    }
+    let events = observed.expect("the enters trigger rolled and visited");
+    assert_extruder_roll(&events, extruder, true);
+    assert_eq!(stack_sources(&runner), vec![extruder]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
 }

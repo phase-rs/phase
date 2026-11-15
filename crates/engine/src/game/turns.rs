@@ -2326,7 +2326,7 @@ pub fn execute_untap_with_choices(
 /// CR 117.3a + CR 502.4 + CR 503.1a: hold every ability that `events[event_start..]` triggered
 /// during a turn-based action performed as a step or phase begins — the untap step's actions
 /// (CR 502.1 + CR 502.2 + CR 502.3), the draw (CR 504.1 + CR 703.4d), the archenemy's scheme
-/// action (CR 703.4e + CR 904.9), a Saga's lore counters (CR 703.4f + CR 714.3c),
+/// action (CR 703.4e + CR 904.9), a Saga's lore counters (CR 703.4f + CR 714.3c), rolling to visit (CR 703.4g),
 /// and the state-based check before a step's first batch (CR 704.3). CR 603.3:
 /// they go on the stack the next time a player would receive priority, together with that
 /// boundary's own triggers (`process_phase_triggers`). CR 603.2c: the occurrences are claimed,
@@ -3994,6 +3994,9 @@ fn hold_step_beginning_triggers(state: &mut GameState, events: &mut Vec<GameEven
 /// left one due. The abilities their events trigger wait with the step's batch (CR 603.3b). A state-based choice
 /// (`ChooseLegend`, CR 704.5j) parks the batch behind it ([`park_step_entry_triggers`]); a game that ended
 /// places nothing (CR 104.1). Returns the wait the step stops at, or `None` to place the batch.
+/// A player who leaves the game at this check (CR 800.4a) does not have the step's held batch put on the stack in the
+/// middle of the check: the in-pass form leaves the queue to [`process_phase_triggers`], so the departure's own triggers
+/// join the same CR 603.3b batch (CR 800.4d drops the departed player's).
 fn check_state_based_actions_before_step_batch(
     state: &mut GameState,
     events: &[GameEvent],
@@ -4001,7 +4004,7 @@ fn check_state_based_actions_before_step_batch(
 ) -> Option<WaitingFor> {
     let waiting_before = state.waiting_for.clone();
     let sba_start = events_out.len();
-    super::sba::check_state_based_actions(state, events_out);
+    super::sba::check_state_based_actions_in_pass(state, events_out);
     // CR 104.1: a game the check ended places nothing; ending it already retired the queue
     // (`elimination` → `retire_finished_game_triggers`, elimination.rs:502).
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -4115,7 +4118,7 @@ fn process_phase_triggers(
 /// CR 500.6 + CR 117.5 + CR 603.3 + CR 603.3b: this step's beginning processing returned
 /// to a wait before [`process_phase_triggers`] put its first batch on the stack — a
 /// state-based choice at the step's check before placement (CR 704.3), a CR 616.1 replacement choice on the draw (CR 504.1) or
-/// on a Saga's lore counter (CR 714.3c), the contraption prompt, the Paradigm offer, or a
+/// on a Saga's lore counter (CR 714.3c) or on the roll to visit (CR 706.1), the contraption prompt, the Paradigm offer, or a
 /// Horde reveal or post-combat activation. That batch has already triggered and no player
 /// receives priority for the wait, so it is queued behind it, stamped the way the
 /// post-action pipeline stamps its own parked batch (`engine_priority::parked_batch_origin`):
@@ -4139,6 +4142,15 @@ fn park_step_entry_triggers(state: &mut GameState, events: &[GameEvent]) {
         .filter(|event| matches!(event, GameEvent::PhaseChanged { .. }))
         .collect();
     super::triggers::collect_parked_delayed_triggers_into_deferred(state, &phase_changes, origin);
+}
+
+/// CR 117.3a + CR 800.4j: the priority a step grants where its active player would receive it. When the active
+/// player left the game during the step's beginning — at its state-based check (CR 704.3) or its turn-based
+/// action — the next player in turn order still in the game receives it (`engine::living_priority_seat`).
+fn active_player_priority(state: &GameState) -> WaitingFor {
+    WaitingFor::Priority {
+        player: super::engine::living_priority_seat(state),
+    }
 }
 
 /// CR 800.4: Skip an eliminated active player's remaining turn through the
@@ -4357,9 +4369,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // user's `phase_stops` / full-control preferences) is decided by
             // `run_auto_pass_loop` and the frontend, not by skipping the step
             // here. Mirrors the pattern in PreCombatMain and DeclareBlockers.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::Draw => {
             // CR 103.8a + CR 614.10: decided by step_skip.
@@ -4396,9 +4406,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 504.2 + CR 117.1c: The active player ALWAYS receives priority
             // during the draw step (after the turn-based draw and any triggers).
             // See the Upkeep arm above for the rationale — same pattern.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::PreCombatMain | Phase::PostCombatMain => {
             // CR 703.3 + CR 703.4e: an entry that paused inside the scheme action resumes after it, with
@@ -4448,10 +4456,18 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     park_step_entry_triggers(state, events);
                     return AutoAdvanceStep::waiting(state.waiting_for.clone());
                 }
-                // CR 703.4g + CR 717.4: rolling to visit is the next turn-based action. It is not
-                // held here: `attractions::complete_roll_to_visit` puts its visit triggers on the
-                // stack itself.
-                super::attractions::perform_roll_to_visit_turn_based_action(state, events);
+                // CR 703.4g + CR 717.4: rolling to visit is the next turn-based action. Its triggers (each visited
+                // Attraction's visit ability, CR 702.159a; die-roll observers) wait for this phase's batch, after
+                // the state-based check (CR 117.5). At its CR 616.1 replacement choice (CR 706.1) the phase's
+                // triggers wait behind it (`park_step_entry_triggers`).
+                let roll_start = events.len();
+                let roll_pause =
+                    super::attractions::perform_roll_to_visit_turn_based_action(state, events);
+                hold_turn_based_action_triggers(state, events, roll_start);
+                if let Some(prompt) = roll_pause {
+                    park_step_entry_triggers(state, events);
+                    return AutoAdvanceStep::waiting(prompt);
+                }
                 // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                 // the start of the active player's first precombat main
                 // phase: offer to cast a copy of each exiled paradigm
@@ -4497,9 +4513,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 return AutoAdvanceStep::waiting(prompt);
             }
             // CR 505.6: The active player receives priority during a main phase.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::BeginCombat => {
             // CR 507.1 + CR 507.2: The beginning-of-combat step always occurs, then
@@ -4520,9 +4534,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 507.2 + CR 117.3a: priority belongs semantically to the
             // active player. `finish_enter_phase` separately records the
             // authorized submitter for controlled-turn windows.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::DeclareAttackers => {
             // CR 508.1: Active player declares attackers as a turn-based action.
@@ -4551,9 +4563,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 508.8 + CR 509.2: a creature attacked this combat, so the step happens
             // even with every attacker gone; nobody declares blockers and the active
             // player receives priority.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::CombatDamage => {
             // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
@@ -4571,24 +4581,18 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 603.3b + issue #1350: deferred triggers collapsed during
             // elimination must drain before advancing past combat damage.
             if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
+                return AutoAdvanceStep::waiting(active_player_priority(state));
             }
             // If triggers were placed on the stack (DamageReceived, dies, etc.),
             // grant priority so they can resolve before advancing.
             if !state.stack.is_empty() {
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
+                return AutoAdvanceStep::waiting(active_player_priority(state));
             }
             // CR 117.3a: After the combat-damage turn-based action and its
             // triggered abilities are handled, the active player receives
             // priority before the step ends. This also gives phase stops a
             // Priority window in which to interrupt auto-pass.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::EndCombat => {
             // CR 500.6 + CR 511.1: "At end of combat" triggers trigger now.
@@ -4601,9 +4605,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 511.1: The active player receives priority as the End Combat step
             // begins, even when no ability triggered. Keeping the phase active until
             // all players pass lets phase stops interrupt auto-pass here.
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::End => {
             // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
@@ -4628,9 +4630,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                 return AutoAdvanceStep::waiting(prompt);
             }
-            return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                player: state.active_player,
-            });
+            return AutoAdvanceStep::waiting(active_player_priority(state));
         }
         Phase::Cleanup => {
             // CR 514: Cleanup step — discard to hand size (CR 514.1), remove damage and expire effects (CR 514.2).
