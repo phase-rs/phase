@@ -1981,6 +1981,17 @@ fn staged_batch_admission(state: &GameState, reqs: &[ZoneMoveRequest]) -> bool {
             req.to == Zone::Graveyard || (req.to == Zone::Library && req.placement.is_some())
         })
         && !reqs.iter().any(|req| req.cause.is_exempt())
+        // CR 701.20b + CR 701.20d: a batch that reorders a card already in the library keeps
+        // main's per-member delivery, which reorders it in announcement order through the
+        // library authority (`library_to_library_completion`) and settles the instruction's
+        // whole-library reorder (`PendingBatchDeliveries::library_reorder`) once.
+        && !reqs.iter().any(|req| {
+            req.to == Zone::Library
+                && state
+                    .objects
+                    .get(&req.object_id)
+                    .is_some_and(|object| object.zone == Zone::Library)
+        })
 }
 
 /// CR 400.3: freeze the original membership, pre-consultation
@@ -3334,6 +3345,26 @@ fn consult_staged_member(
             owner,
             member.announcement_index as usize,
             ZoneMoveCompletion::Remained,
+            events,
+        );
+        return StagedConsult::Continue;
+    }
+    // CR 701.20b + CR 701.20d: a library card put into its own library is reordered, not
+    // moved: no proposal, no replacement consult (the same authority the legacy mover uses).
+    if object.zone == Zone::Library && request.to == Zone::Library {
+        let identity = ObjectIncarnationRef::from_object(object);
+        let completion = library_to_library_completion(
+            state,
+            request.object_id,
+            identity,
+            request.placement.as_ref(),
+            events,
+        );
+        mark_staged_member_terminal(
+            state,
+            owner,
+            member.announcement_index as usize,
+            completion,
             events,
         );
         return StagedConsult::Continue;
@@ -9726,6 +9757,36 @@ fn prepare_zone_move_proposal(
     Some(proposed)
 }
 
+/// CR 701.20b + CR 701.20d + CR 400.7: a card already in the library put into its own
+/// library does not change zones. When a placement position is stated, reorder it within
+/// the library through the library authority without constructing a zone-change proposal
+/// or consulting replacements. Without a stated position it remains in place. The single
+/// authority for both movers (the legacy per-member mover and the staged consultation).
+fn library_to_library_completion(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    member: ObjectIncarnationRef,
+    placement: Option<&LibraryPosition>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveCompletion {
+    let Some(position) = placement else {
+        return ZoneMoveCompletion::Remained;
+    };
+    let index = match position {
+        LibraryPosition::Top => Some(0),
+        LibraryPosition::Bottom => None,
+        LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+        LibraryPosition::BeneathTop { depth } => match depth {
+            crate::types::ability::QuantityExpr::Fixed { value } => Some((*value).max(0) as usize),
+            _ => None,
+        },
+        LibraryPosition::RandomWithinTop { .. } => None,
+    };
+    let delivery_start = events.len();
+    zones::move_to_library_at_index(state, obj_id, index, events);
+    zone_move_completion_from_delivery(member, &events[delivery_start..])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_zone_move_with_applied_terminal(
     state: &mut GameState,
@@ -9768,32 +9829,14 @@ fn execute_zone_move_with_applied_terminal(
     else {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
-    // CR 701.20b + CR 701.20d + CR 400.7: a card already in the library put into its own
-    // library does not change zones. When a placement position is stated, reorder it within
-    // the library through the library authority without constructing a zone-change proposal
-    // or consulting replacements. Without a stated position it remains in place.
     if from_zone == Zone::Library && dest_zone == Zone::Library {
-        if let Some(position) = library_placement.as_ref() {
-            let index = match position {
-                LibraryPosition::Top => Some(0),
-                LibraryPosition::Bottom => None,
-                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
-                LibraryPosition::BeneathTop { depth } => match depth {
-                    crate::types::ability::QuantityExpr::Fixed { value } => {
-                        Some((*value).max(0) as usize)
-                    }
-                    _ => None,
-                },
-                LibraryPosition::RandomWithinTop { .. } => None,
-            };
-            let delivery_start = events.len();
-            zones::move_to_library_at_index(state, obj_id, index, events);
-            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
-                member,
-                &events[delivery_start..],
-            ));
-        }
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        return ZoneMoveTerminalResult::Completed(library_to_library_completion(
+            state,
+            obj_id,
+            member,
+            library_placement.as_ref(),
+            events,
+        ));
     }
     let Some(proposed) = prepare_zone_move_proposal(
         state,
