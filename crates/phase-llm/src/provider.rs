@@ -15,8 +15,12 @@ pub enum LlmProvider {
     Anthropic,
     Gemini,
     DeepSeek,
+    /// OpenRouter's unified gateway. Speaks the OpenAI chat-completions
+    /// contract at a fixed root, with vendor-prefixed model ids
+    /// (`openai/gpt-5`, `anthropic/claude-sonnet-4.5`, ...).
+    OpenRouter,
     /// Any third-party endpoint implementing OpenAI's `/chat/completions`
-    /// contract (Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, ...).
+    /// contract (Ollama, LM Studio, vLLM, Together, Groq, ...).
     OpenAiCompatible,
     /// TypeSafe's Jev, a System One model that answers typed questions rather
     /// than generating text. Reached through a phase-server relay
@@ -30,7 +34,7 @@ pub enum LlmProvider {
 /// so an OpenAI-compatible vendor needs no parser of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireProtocol {
-    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, and every
+    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, OpenRouter, and every
     /// OpenAI-compatible endpoint.
     OpenAiChat,
     /// `POST {base}/messages` — Anthropic.
@@ -43,6 +47,50 @@ pub enum WireProtocol {
     SystemOneRelay,
 }
 
+impl WireProtocol {
+    /// Every [`DecisionContext`] this protocol can carry a seat's game in.
+    ///
+    /// Only the Anthropic Messages API has message threads. The other protocols
+    /// would need the client to replay its own multi-turn history, which is a
+    /// different feature with a different cost profile.
+    pub const fn decision_contexts(self) -> &'static [DecisionContext] {
+        match self {
+            WireProtocol::AnthropicMessages => &[
+                DecisionContext::SelfContained,
+                DecisionContext::MessageThread,
+            ],
+            WireProtocol::OpenAiChat
+            | WireProtocol::GeminiGenerateContent
+            | WireProtocol::SystemOneRelay => &[DecisionContext::SelfContained],
+        }
+    }
+
+    /// Whether this protocol can keep a seat's game in one server-side
+    /// conversation ([`DecisionContext::MessageThread`]).
+    pub fn supports_message_threads(self) -> bool {
+        self.decision_contexts()
+            .contains(&DecisionContext::MessageThread)
+    }
+}
+
+/// How an endpoint carries one seat's game from one decision to the next.
+///
+/// A two-variant enum rather than a `bool` so the setting names what it does
+/// on the wire, and so a later strategy (a client-kept history for the OpenAI
+/// and Gemini protocols) has a place to go.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DecisionContext {
+    /// Every decision is a complete request of its own. The default, and the
+    /// only context any protocol but Anthropic Messages uses.
+    #[default]
+    SelfContained,
+    /// Each seat's game is one Anthropic message thread: the first decision
+    /// creates it with the full request, and every later decision sends only
+    /// what changed since the seat's last answer. See [`crate::game_thread`].
+    MessageThread,
+}
+
 /// Every label [`LlmProvider::from_label`] maps to a real provider rather than
 /// failing. Mirrors `ACCEPTED_DIFFICULTY_LABELS` in `phase_ai::config`: a
 /// transport that must *validate* a label references this list instead of
@@ -52,6 +100,7 @@ pub const ACCEPTED_PROVIDER_LABELS: &[&str] = &[
     "Anthropic",
     "Gemini",
     "DeepSeek",
+    "OpenRouter",
     "OpenAiCompatible",
     "Jev",
 ];
@@ -76,6 +125,7 @@ impl LlmProvider {
             "anthropic" | "claude" => LlmProvider::Anthropic,
             "gemini" | "google" | "googleai" => LlmProvider::Gemini,
             "deepseek" => LlmProvider::DeepSeek,
+            "openrouter" => LlmProvider::OpenRouter,
             "jev" | "typesafe" | "systemone" => LlmProvider::Jev,
             _ => LlmProvider::OpenAiCompatible,
         }
@@ -88,6 +138,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic",
             LlmProvider::Gemini => "Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAiCompatible",
             LlmProvider::Jev => "Jev",
         }
@@ -100,6 +151,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic (Claude)",
             LlmProvider::Gemini => "Google Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAI-compatible endpoint",
             LlmProvider::Jev => "Jev (TypeSafe)",
         }
@@ -107,9 +159,10 @@ impl LlmProvider {
 
     pub const fn wire(self) -> WireProtocol {
         match self {
-            LlmProvider::OpenAi | LlmProvider::DeepSeek | LlmProvider::OpenAiCompatible => {
-                WireProtocol::OpenAiChat
-            }
+            LlmProvider::OpenAi
+            | LlmProvider::DeepSeek
+            | LlmProvider::OpenRouter
+            | LlmProvider::OpenAiCompatible => WireProtocol::OpenAiChat,
             LlmProvider::Anthropic => WireProtocol::AnthropicMessages,
             LlmProvider::Gemini => WireProtocol::GeminiGenerateContent,
             LlmProvider::Jev => WireProtocol::SystemOneRelay,
@@ -124,6 +177,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => Some("https://api.anthropic.com/v1"),
             LlmProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta"),
             LlmProvider::DeepSeek => Some("https://api.deepseek.com/v1"),
+            LlmProvider::OpenRouter => Some("https://openrouter.ai/api/v1"),
             // The relay is a phase-server, which the display layer knows (the
             // multiplayer server the player is connected to), not a vendor.
             LlmProvider::OpenAiCompatible | LlmProvider::Jev => None,
@@ -161,9 +215,21 @@ pub struct LlmEndpointConfig {
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Defaults to [`DecisionContext::SelfContained`], so a config saved before
+    /// this setting existed keeps sending exactly the requests it always sent.
+    #[serde(default)]
+    pub decision_context: DecisionContext,
 }
 
 impl LlmEndpointConfig {
+    /// Whether game decisions for this endpoint go through a message thread:
+    /// the player asked for one AND the endpoint's protocol has them. A setting
+    /// left on after switching to another protocol is inert, never an error.
+    pub fn uses_message_threads(&self) -> bool {
+        self.decision_context == DecisionContext::MessageThread
+            && self.provider.wire().supports_message_threads()
+    }
+
     /// The API root this config resolves to.
     ///
     /// Normalizes whatever the player pasted down to the root, because the
@@ -423,6 +489,19 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_resolves_to_its_own_provider_and_default_root() {
+        for label in ["OpenRouter", "openrouter", "open_router", "Open-Router"] {
+            assert_eq!(LlmProvider::from_label(label), LlmProvider::OpenRouter);
+        }
+        assert_eq!(LlmProvider::OpenRouter.wire(), WireProtocol::OpenAiChat);
+        assert_eq!(
+            LlmProvider::OpenRouter.default_base_url(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert!(LlmProvider::OpenRouter.requires_api_key());
+    }
+
+    #[test]
     fn every_variant_appears_in_the_accepted_labels() {
         // Wildcard-free so a new variant fails to compile here rather than
         // silently escaping the accepted-label list.
@@ -431,6 +510,7 @@ mod tests {
             LlmProvider::Anthropic,
             LlmProvider::Gemini,
             LlmProvider::DeepSeek,
+            LlmProvider::OpenRouter,
             LlmProvider::OpenAiCompatible,
             LlmProvider::Jev,
         ] {
@@ -439,6 +519,7 @@ mod tests {
                 LlmProvider::Anthropic => "Anthropic",
                 LlmProvider::Gemini => "Gemini",
                 LlmProvider::DeepSeek => "DeepSeek",
+                LlmProvider::OpenRouter => "OpenRouter",
                 LlmProvider::OpenAiCompatible => "OpenAiCompatible",
                 LlmProvider::Jev => "Jev",
             };
@@ -468,6 +549,7 @@ mod tests {
             model: "gpt-5".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         };
         assert_eq!(
             config.resolved_base_url().unwrap(),
@@ -483,6 +565,7 @@ mod tests {
             model: "m".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         }
         .resolved_base_url()
         .unwrap()
@@ -579,6 +662,7 @@ mod tests {
             model: "llama-3".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         };
         assert!(matches!(
             config.validate(),
@@ -594,6 +678,7 @@ mod tests {
             model: "m".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         }
         .validate()
     }
@@ -640,6 +725,7 @@ mod tests {
             model: "llama-3".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         };
         assert_eq!(config.validate(), Ok(()));
     }
@@ -655,6 +741,7 @@ mod tests {
             model: "m".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         };
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
@@ -779,6 +866,7 @@ mod tests {
                 model: "m".to_string(),
                 max_output_tokens: None,
                 temperature: None,
+                decision_context: DecisionContext::SelfContained,
             };
             let built = crate::wire::build_chat_request(&config, &prompt);
             assert!(
@@ -813,6 +901,7 @@ mod tests {
                 model: "llama-3".to_string(),
                 max_output_tokens: None,
                 temperature: None,
+                decision_context: DecisionContext::SelfContained,
             }
             .validate()
         };
@@ -885,6 +974,7 @@ mod tests {
                 model: "m".to_string(),
                 max_output_tokens: None,
                 temperature: None,
+                decision_context: DecisionContext::SelfContained,
             };
             let spec = crate::wire::build_chat_request(&config, &prompt)
                 .unwrap_or_else(|error| panic!("{endpoint} must build: {error:?}"));
@@ -943,6 +1033,7 @@ mod tests {
             model: "llama-3".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         };
         assert_eq!(config.validate(), Ok(()));
     }

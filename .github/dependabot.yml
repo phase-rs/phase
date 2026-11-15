@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    # "/" covers .github/workflows only. Composite actions under
+    # .github/actions/* pin external actions too (cache, create-pull-request),
+    # so scope them in explicitly; the glob keeps future actions covered.
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"

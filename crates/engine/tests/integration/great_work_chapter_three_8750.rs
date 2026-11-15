@@ -409,8 +409,12 @@ fn a_printed_own_graveyard_permission_refuses_the_opponents_card_at_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             // No controller on the filter: the pool is the only owner check.
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),

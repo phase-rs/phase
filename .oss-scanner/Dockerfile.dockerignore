@@ -1,0 +1,25 @@
+# Build context for .oss-scanner/Dockerfile.
+#
+# BuildKit uses this file instead of the repository-root .dockerignore when
+# building the scanner Dockerfile. The root file is written for phase's
+# production images and excludes data/*, which hides
+# data/mtgjson/test_fixture.json from the scanner build. phase-engine tests
+# embed that fixture with include_str!, so it must be present here.
+#
+# Keep the root file's other exclusions, but do not exclude data/.
+
+.git
+.github
+.planning
+.cache
+.deploy-cache
+
+target
+client/node_modules
+client/dist
+client/coverage
+client/src/wasm
+
+*.log
+*.tmp
+tmp

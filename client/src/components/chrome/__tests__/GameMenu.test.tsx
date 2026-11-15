@@ -268,6 +268,48 @@ describe("GameMenu", () => {
     );
   });
 
+  it("toggles click mode directly from the menu", () => {
+    const onToggleDebugInteractionMode = vi.fn();
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      onToggleDebugInteractionMode,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    const toggle = screen.getByRole("button", { name: "Click Mode K" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    expect(onToggleDebugInteractionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows click mode as on in the menu", () => {
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      debugInteractionMode: true,
+      onToggleDebugInteractionMode: vi.fn(),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Click Mode K" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("offers no click mode toggle without its handler", () => {
+    renderGameMenu({ showSandboxTools: true, onSandboxToolsClick: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    // Reach guard: the Tools section rendered in this open menu.
+    expect(screen.getByRole("button", { name: "Open Sandbox Tools" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Click Mode K" })).not.toBeInTheDocument();
+  });
+
   // The takeback item's gate used to be `isOnlineMode && onRequestTakeback`,
   // which hid it for desktop solo-vs-AI (`native-ai` reaches GamePage as
   // `mode=ai`, so `isOnlineMode` is false) even though that game has a real
@@ -358,4 +400,48 @@ describe("GameMenu", () => {
     expect(screen.getByRole("button", { name: "Close Game Log" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open Game Log" })).toBeNull();
   });
+
+  it.each([
+    {
+      preview: true,
+      origin: "https://preview.phase-rs.dev",
+      text: `v${__APP_VERSION__} ${__BUILD_HASH__}`,
+      href: `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`,
+    },
+    {
+      preview: false,
+      origin: "https://preview.phase-rs.dev",
+      text: `v${__APP_VERSION__}`,
+      href: __GIT_REPO_URL__,
+    },
+    {
+      preview: true,
+      origin: "https://phase-rs.dev",
+      text: `v${__APP_VERSION__}`,
+      href: __GIT_REPO_URL__,
+    },
+  ])(
+    "shows the build hash beside the version only on preview builds at the preview origin (preview=$preview, origin=$origin)",
+    ({ preview, origin, text, href }) => {
+      const originalLocation = window.location;
+      vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...originalLocation, origin },
+        writable: true,
+      });
+      try {
+        renderGameMenu();
+        fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+        expect(screen.getByRole("link", { name: text })).toHaveAttribute("href", href);
+      } finally {
+        vi.unstubAllGlobals();
+        Object.defineProperty(window, "location", {
+          configurable: true,
+          value: originalLocation,
+          writable: true,
+        });
+      }
+    },
+  );
 });

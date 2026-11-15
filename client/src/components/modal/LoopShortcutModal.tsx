@@ -24,6 +24,7 @@ import type { IterationCount, ResourceAxis, WaitingFor, WinKind } from "../../ad
 import { dispatchInteraction, previewInteractionResponse } from "../../game/dispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { assertNever } from "../../utils/assertNever.ts";
 import { familyOf, UNBOUNDED_FAMILY_LABEL_KEY, UnboundedBadge } from "../hud/HudBadges.tsx";
 import { AmountInput, parseAmount } from "../mana/AmountInput.tsx";
 import { DialogShell } from "./DialogShell.tsx";
@@ -142,6 +143,23 @@ function shortcutReplyCandidates(
  *  routing, rendering and the dispatch cannot disagree about which point is answered. */
 type TargetsControl = { kind: "allocation" | "subject"; point: InteractionShortcutPoint };
 
+/** CR 732.2a + CR 601.2c: the control an announced-target point opens under the offer's published count. */
+function targetsControlFor(
+  count: ShortcutSpec["count"],
+  point: InteractionShortcutPoint,
+  previewed: boolean,
+): TargetsControl | null {
+  switch (count.type) {
+    case "untilLethal":
+      return { kind: "subject", point };
+    case "fixed":
+    case "withoutEnd":
+      return previewed ? { kind: "allocation", point } : null;
+    default:
+      return assertNever(count);
+  }
+}
+
 /** Positional equality of two allocations. Not `JSON.stringify`: stringify equality also depends
  *  on key insertion order, which would move the gate for a reason unrelated to the allocation. */
 function sameAllocation(a: AmountAssignment[], b: AmountAssignment[]): boolean {
@@ -208,18 +226,26 @@ function SubjectControl({ subject, children }: { subject: string; children: Reac
 // offer, not the pick.
 function CountLine({ count }: { count: IterationCount }) {
   const { t } = useTranslation("game");
-  return (
-    <p className="text-sm text-slate-300">
-      {count === "UntilLethal"
-        ? t("comboShortcut.untilLethal")
-        : t("comboShortcut.fixedCount", { count: count.Fixed })}
-    </p>
-  );
+  return <p className="text-sm text-slate-300">{countText(t, count)}</p>;
 }
 
-// CR 704.5a/704.5c etc.: the certificate's determinate win kind, a pure key lookup.
-function WinKindLine({ kind }: { kind: WinKind }) {
+function countText(t: TFunction<"game">, count: IterationCount): string {
+  if (typeof count === "object") return t("comboShortcut.fixedCount", { count: count.Fixed });
+  switch (count) {
+    case "UntilLethal":
+      return t("comboShortcut.untilLethal");
+    case "WithoutEnd":
+      return t("comboShortcut.withoutEnd");
+    default:
+      return assertNever(count);
+  }
+}
+
+// CR 704.5a/704.5c etc.: the certificate's determinate win kind, a pure key lookup. An outcome the
+// engine decided at one count (`at`) is stated only beside that count.
+function WinKindLine({ kind, at, count }: { kind?: WinKind; at?: number; count: number | null }) {
   const { t } = useTranslation("game");
+  if (kind === undefined || (at !== undefined && at !== count)) return null;
   return <p className="text-sm font-semibold text-white">{t(`comboShortcut.winKind.${kind}`)}</p>;
 }
 
@@ -336,13 +362,9 @@ function DeclareShortcutOffer({
   // Computed AFTER `allocationPoint` and null whenever it is absent, so no arm can name a control
   // with no candidate list to stand on.
   const targetsControl: TargetsControl | null =
-    allocationPoint === null
+    allocationPoint === null || spec === null
       ? null
-      : spec?.count.type === "untilLethal"
-        ? { kind: "subject", point: allocationPoint }
-        : previewElements.length > 0
-          ? { kind: "allocation", point: allocationPoint }
-          : null;
+      : targetsControlFor(spec.count, allocationPoint, previewElements.length > 0);
 
   const renderable = (p: InteractionShortcutPoint): boolean => {
     switch (p.kind) {
@@ -659,7 +681,7 @@ function DeclareShortcutOffer({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine kind={certificate.win_kind} />
+        <WinKindLine kind={certificate.win_kind} at={certificate.win_kind_at} count={chosen} />
         <CountLine count={schema.iteration_count} />
         {countSpec && (
           <AmountInput
@@ -942,7 +964,11 @@ function RespondToShortcut({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine kind={proposal.win_kind} />
+        <WinKindLine
+          kind={proposal.win_kind}
+          at={proposal.win_kind_at}
+          count={typeof proposal.count === "object" ? proposal.count.Fixed : null}
+        />
         <CountLine count={proposal.count} />
         <FamilyBadges axes={proposal.unbounded} />
         {declared && <PreviewLines preview={declared} />}

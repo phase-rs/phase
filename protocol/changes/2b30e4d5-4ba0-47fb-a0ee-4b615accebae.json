@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ActivateAbility gains payment_mode (Manual activation payment), with a Phyrexian announcement prompt/answer, a pending-cast announcement record, and RemoveCountersChoice gains an optional max_total cap. Older peers would drop the Manual mode and the cap, silently changing how activations are paid and how many counters may be removed."
+}

@@ -5,6 +5,7 @@ import {
   bumpProfileReplacementGeneration,
   captureSavedDeck,
   createFolder,
+  DECKS_CHANGED_EVENT,
   deleteFolder,
   DRAFT_WORKSPACE_PREFERENCES_KEY,
   freeDeckName,
@@ -18,10 +19,13 @@ import {
   migrateDeckMeta,
   PROFILE_REPLACEMENT_KEY,
   profileReplacementGeneration,
+  removeSavedDeckData,
   renameFolder,
   requireSavedDeckUnchanged,
   saveBuilderDeck,
   savedDeckUnchanged,
+  saveDeckOrigins,
+  saveFeedSubscriptions,
   saveSavedDeckBracket,
   setDeckFolder,
   stampDeckMeta,
@@ -640,5 +644,24 @@ describe("draft autosave ownership", () => {
 
     expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed")).toBe("sealed-data");
+  });
+});
+
+describe("deck-inventory change notifications", () => {
+  it("emits phase-decks-changed on every inventory write so mounted catalogs rescan", () => {
+    let events = 0;
+    const listener = () => {
+      events += 1;
+    };
+    window.addEventListener(DECKS_CHANGED_EVENT, listener);
+    try {
+      writeSavedDeckData(testSavedDeckTxn, "Deck", JSON.stringify({ main: [], sideboard: [] }));
+      removeSavedDeckData(testSavedDeckTxn, "Deck");
+      saveFeedSubscriptions([]);
+      saveDeckOrigins({});
+    } finally {
+      window.removeEventListener(DECKS_CHANGED_EVENT, listener);
+    }
+    expect(events).toBe(4);
   });
 });

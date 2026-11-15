@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TurnOrderSlotView drops is_starting_player: the game-start dice overlay, its only reader, now reports the roll winner from StartingPlayerContest.winner and no longer presents turn order (CR 103.1: the roll decides who chooses the starting player). An older client paired with a newer server or P2P host silently loses the starter highlight on its contest turn-order chips. Full-game and P2P move in lockstep"
+}

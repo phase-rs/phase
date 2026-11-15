@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useState } from "react";
 
 import type { DebugAction, Phase, PlayerId } from "../../adapter/types";
@@ -30,15 +31,16 @@ interface Props {
 }
 
 function SetPhaseForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [phase, setPhase] = useState<Phase>("PreCombatMain");
   const [activePlayer, setActivePlayer] = useState<PlayerId>(0);
 
   return (
     <>
-      <FieldRow label="Phase">
+      <FieldRow label={t("sandboxTools.phase")}>
         <SelectInput value={phase} onChange={setPhase} options={PHASES} />
       </FieldRow>
-      <FieldRow label="Active Player">
+      <FieldRow label={t("sandboxTools.activePlayer")}>
         <PlayerSelect value={activePlayer} onChange={setActivePlayer} />
       </FieldRow>
       <SubmitButton
@@ -46,23 +48,24 @@ function SetPhaseForm({ onDispatch }: Props) {
           onDispatch({ type: "SetPhase", data: { phase, active_player: activePlayer } })
         }
       >
-        Set Phase
+        {t("sandboxTools.setPhase")}
       </SubmitButton>
     </>
   );
 }
 
 export function DebugFlowActions({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const { expanded, toggle } = useAccordion();
 
   return (
     <div>
-      <AccordionItem label="Set Phase" expanded={expanded === "phase"} onToggle={() => toggle("phase")}>
+      <AccordionItem label={t("sandboxTools.setPhase")} expanded={expanded === "phase"} onToggle={() => toggle("phase")}>
         <SetPhaseForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Run SBAs" expanded={expanded === "sba"} onToggle={() => toggle("sba")}>
+      <AccordionItem label={t("sandboxTools.runSBAs")} expanded={expanded === "sba"} onToggle={() => toggle("sba")}>
         <SubmitButton onClick={() => onDispatch({ type: "RunStateBasedActions" })}>
-          Run State-Based Actions
+          {t("sandboxTools.runStateBasedActions")}
         </SubmitButton>
       </AccordionItem>
     </div>

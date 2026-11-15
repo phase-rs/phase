@@ -109,6 +109,7 @@ fn jeweled_amulet_notes_and_produces_matching_mana_type() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the mana ability (CR 605.3b: resolves immediately, no stack)");
 
@@ -144,6 +145,7 @@ fn jeweled_amulet_tracks_a_different_noted_color() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the mana ability");
 
@@ -187,6 +189,7 @@ fn jeweled_amulet_produces_no_mana_with_nothing_noted() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the mana ability");
 
@@ -231,6 +234,7 @@ fn jeweled_amulet_bounced_mid_stack_does_not_note_on_new_incarnation() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating ability 0 must succeed");
     assert_eq!(
@@ -312,6 +316,7 @@ fn jeweled_amulet_notes_nothing_before_resolution() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating ability 0 must succeed");
     assert_eq!(
@@ -355,6 +360,7 @@ fn jeweled_amulet_second_note_replaces_not_appends() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("removing the charge counter must succeed");
     runner.state_mut().players[P0.0 as usize].mana_pool.clear();
@@ -427,6 +433,7 @@ fn jeweled_amulet_lifo_stacked_activations_each_note_their_own_payment() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("first activation (red) must succeed");
     assert_eq!(runner.state().stack.len(), 1);
@@ -453,6 +460,7 @@ fn jeweled_amulet_lifo_stacked_activations_each_note_their_own_payment() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("second activation (green), still no charge counter yet, must succeed");
     assert_eq!(
@@ -518,6 +526,7 @@ fn jeweled_amulet_copied_activation_does_not_note_original_payment() {
         .act(GameAction::ActivateAbility {
             source_id: amulet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating ability 0 must succeed");
     let original_entry_id = runner

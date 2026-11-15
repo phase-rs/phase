@@ -15,6 +15,7 @@ use crate::game::engine::{
     apply_actionless_priority_pass_for_prospective, apply_interaction_for_prospective_simulation,
     apply_interaction_for_simulation, ProspectiveSimulationOutcome,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,
@@ -989,6 +990,7 @@ fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) 
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = candidate.action
     else {
         return false;
@@ -1191,6 +1193,10 @@ fn cast_bound_card_terminal(
     finish_payment_terminal(state, owner, cast, budget)
 }
 
+/// Depth-first search over the payer's mana candidates until the bound cast
+/// commits. `budget.payment_applications_remaining` is shared by the whole
+/// tree: each application (successful or not) spends one unit, and once it is
+/// spent the search returns `None` rather than certifying an unexplored route.
 fn finish_payment_terminal(
     state: &mut GameState,
     owner: PlayerId,
@@ -1205,6 +1211,12 @@ fn finish_payment_terminal(
         .filter(|candidate| candidate.metadata.tactical_class == TacticalClass::Mana)
         .collect();
     for candidate in mana {
+        // The allowance is one hard bound for this whole search tree: every
+        // application takes a unit only while one remains, and a subtree that
+        // spent the last unit ends the search here (fail closed).
+        if budget.payment_applications_remaining == 0 {
+            return None;
+        }
         let frozen = FrozenCandidate::capture(state, &candidate)?;
         let mut next = state.clone();
         budget.payment_applications_remaining -= 1;
@@ -1517,6 +1529,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -1565,6 +1579,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: *source_id,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(player),

@@ -152,6 +152,7 @@ fn kylox_cast_rider_lowers_to_library_bottom_parent_target() {
             target,
             count,
             position,
+            arranger: _,
         } => {
             assert_eq!(
                 *target,
@@ -288,6 +289,7 @@ fn kylox_collect_evidence_charges_cost_and_animates() {
         .act(GameAction::ActivateAbility {
             source_id: kylox,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Kylox's collect-evidence ability must be accepted");
 
@@ -347,6 +349,7 @@ fn kylox_collect_evidence_unpayable_is_refused() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: kylox,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),

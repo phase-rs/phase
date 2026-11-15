@@ -27,6 +27,7 @@ import {
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useFocusScopePortalBranch } from "../ui/FocusScope";
+import { formatCounterType } from "../../viewmodel/cardProps";
 
 // How a submenu's panel is rendered: stacked inline below its button (mobile,
 // where there is no horizontal room) or as a side flyout (tablet/desktop). The
@@ -114,6 +115,12 @@ const COMMON_KEYWORDS: readonly Keyword[] = [
   "Defender",
 ];
 
+// CR 122.1a: +1/+1 and -1/-1 counters modify a creature's power and
+// toughness, and are the counters sandbox setups reach for most — offer them
+// on every battlefield creature even before it has one. Any other counter
+// type gets a row once the permanent carries it.
+const PT_COUNTER_TYPES: readonly CounterType[] = ["P1P1", "M1M1"];
+
 export function DebugCardContextMenu({
   surface,
   anchorRef,
@@ -159,6 +166,7 @@ function DebugCardContextMenuInner({
   onClose: () => void;
   anchorRef?: RefObject<HTMLElement | null>;
 }) {
+  const { t } = useTranslation("game");
   const ref = useRef<HTMLDivElement | null>(null);
   const fallbackAnchorRef = useRef<HTMLElement | null>(null);
   const liveObject = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -360,7 +368,7 @@ function DebugCardContextMenuInner({
         id={headerId}
         className="truncate border-b border-gray-800 px-3 py-1.5 font-mono text-xs font-semibold text-gray-300"
       >
-        {obj.name || `Object ${objectId}`}
+        {obj.name || t("sandboxTools.objectFallback", { id: objectId })}
         {obj.class_level != null && (
           <span className="ml-1 text-amber-400">Lv.{obj.class_level}</span>
         )}
@@ -389,12 +397,12 @@ function DebugCardContextMenuInner({
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
           <MenuItem
-            label={obj.tapped ? "Untap" : "Tap"}
+            label={obj.tapped ? t("sandboxTools.untap") : t("sandboxTools.tap")}
             onClick={() => dispatchDebug({ type: "SetTapped", data: { object_id: objectId, tapped: !obj.tapped } })}
           />
           {isCreature && (
             <MenuItem
-              label={hasSummoningSickness ? "Remove Summoning Sickness" : "Give Summoning Sickness"}
+              label={hasSummoningSickness ? t("sandboxTools.removeSickness") : t("sandboxTools.giveSickness")}
               onClick={() =>
                 dispatchDebug({ type: "SetSummoningSickness", data: { object_id: objectId, sick: !hasSummoningSickness } })
               }
@@ -402,13 +410,13 @@ function DebugCardContextMenuInner({
           )}
           {/* Transform / Flip / Face Down */}
           <MenuItem
-            label={obj.transformed ? "Un-transform" : "Transform"}
+            label={obj.transformed ? t("sandboxTools.untransform") : t("sandboxTools.transform")}
             onClick={() =>
               dispatchDebug({ type: "SetFaceState", data: { object_id: objectId, transformed: !obj.transformed } })
             }
           />
           <MenuItem
-            label={obj.face_down ? "Turn Face Up" : "Turn Face Down"}
+            label={obj.face_down ? t("sandboxTools.turnFaceUp") : t("sandboxTools.turnFaceDown")}
             onClick={() =>
               dispatchDebug({ type: "SetFaceState", data: { object_id: objectId, face_down: !obj.face_down } })
             }
@@ -435,22 +443,23 @@ function DebugCardContextMenuInner({
       {/* Counter actions */}
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
-          {Object.entries(obj.counters ?? {})
-            .flatMap(([counterType, count]) => {
-              const current = count ?? 0;
-              return current > 0
-                ? [
-                    <CounterRow
-                      key={counterType}
-                      label={counterType}
-                      objectId={objectId}
-                      counterType={counterType}
-                      current={current}
-                      onDispatch={dispatchDebugKeepOpen}
-                    />,
-                  ]
-                : [];
-            })}
+          {[
+            ...new Set<CounterType>([
+              ...(isCreature ? PT_COUNTER_TYPES : []),
+              ...Object.entries(obj.counters ?? {}).flatMap(([counterType, count]) =>
+                (count ?? 0) > 0 ? [counterType] : [],
+              ),
+            ]),
+          ].map((counterType) => (
+            <CounterRow
+              key={counterType}
+              label={formatCounterType(counterType)}
+              objectId={objectId}
+              counterType={counterType}
+              current={obj.counters?.[counterType] ?? 0}
+              onDispatch={dispatchDebugKeepOpen}
+            />
+          ))}
         </div>
       )}
 
@@ -472,7 +481,7 @@ function DebugCardContextMenuInner({
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
           <MenuItem
-            label="Sacrifice"
+            label={t("sandboxTools.sacrifice")}
             onClick={() => dispatchDebug({ type: "Sacrifice", data: { object_id: objectId } })}
           />
         </div>
@@ -481,7 +490,7 @@ function DebugCardContextMenuInner({
       {/* Destructive action */}
       <div className="py-0.5">
         <MenuItem
-          label="Remove"
+          label={t("sandboxTools.remove")}
           danger
           onClick={() => dispatchDebug({ type: "RemoveObject", data: { object_id: objectId } })}
         />
@@ -607,7 +616,7 @@ function ZoneSubmenu({
   const [runEtb, setRunEtb] = useState(false);
 
   return (
-    <Submenu label="Zone" badge={currentZone} {...chrome}>
+    <Submenu label={t("sandboxTools.zone")} badge={currentZone} {...chrome}>
       <button
         role="menuitemcheckbox"
         type="button"
@@ -625,12 +634,12 @@ function ZoneSubmenu({
         zone === "Library" ? (
           <div key={zone}>
             <MenuItem
-              label="Library (top)"
+              label={t("sandboxTools.libraryTop")}
               onClick={() => onSelectZone(zone, runEtb, { type: "Top" })}
               compact
             />
             <MenuItem
-              label="Library (bottom)"
+              label={t("sandboxTools.libraryBottom")}
               onClick={() => onSelectZone(zone, runEtb, { type: "Bottom" })}
               compact
             />
@@ -661,8 +670,9 @@ function ControllerSubmenu({
   onDispatch: (action: DebugAction) => Promise<void>;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
   return (
-    <Submenu label="Controller" badge={`P${currentController}`} {...chrome}>
+    <Submenu label={t("sandboxTools.controller")} badge={`P${currentController}`} {...chrome}>
       {players
         .filter((p) => p.id !== currentController)
         .map((p) => (
@@ -698,10 +708,11 @@ function CounterRow({
           role="menuitem"
           type="button"
           aria-label={`${label}: −1`}
+          disabled={current === 0}
           onClick={() =>
             onDispatch({ type: "ModifyCounters", data: { object_id: objectId, counter_type: counterType, delta: -1 } })
           }
-          className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400 transition-colors hover:bg-gray-700 hover:text-gray-200"
+          className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400 transition-colors hover:bg-gray-700 hover:text-gray-200 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-gray-800 disabled:hover:text-gray-400"
         >
           −
         </button>
@@ -731,6 +742,7 @@ function PowerToughnessInput({
   currentToughness: number | null;
   onSet: (power: number | null, toughness: number | null) => void;
 }) {
+  const { t } = useTranslation("game");
   const [editing, setEditing] = useState(false);
   const [power, setPower] = useState(String(currentPower ?? 0));
   const [toughness, setToughness] = useState(String(currentToughness ?? 0));
@@ -743,7 +755,7 @@ function PowerToughnessInput({
         onClick={() => setEditing(true)}
         className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-gray-300 transition-colors hover:bg-white/10"
       >
-        <span>Set Base P/T</span>
+        <span>{t("sandboxTools.setBasePT")}</span>
         <span className="font-mono text-[10px] text-gray-600">
           {currentPower ?? "?"}/{currentToughness ?? "?"}
         </span>
@@ -784,7 +796,7 @@ function PowerToughnessInput({
         onClick={() => onSet(parseInt(power) || 0, parseInt(toughness) || 0)}
         className="rounded bg-cyan-800/50 px-1.5 py-0.5 text-[10px] text-cyan-300 transition-colors hover:bg-cyan-700/50"
       >
-        Set
+        {t("sandboxTools.set")}
       </button>
     </div>
   );
@@ -801,11 +813,12 @@ function KeywordSubmenu({
   onDispatch: (action: DebugAction) => Promise<void>;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
   const stringKeywords = currentKeywords.filter((k): k is string => typeof k === "string");
 
   return (
     <Submenu
-      label="Keywords"
+      label={t("sandboxTools.keywords")}
       badge={stringKeywords.length > 0 ? stringKeywords.length : ""}
       {...chrome}
     >

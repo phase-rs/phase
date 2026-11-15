@@ -96,7 +96,7 @@ def event_text(event: Any, fallback: str, reference: Any = None) -> str:
 def tone_for(action: Any) -> str:
     if action in {"hard_stop", "request_changes", "blocked"}:
         return "danger"
-    if action in {"hold", "hold_ci", "warn_stale_changes_for_handler"}:
+    if action in {"hold", "hold_ci"}:
         return "warning"
     if action in {"review", "approve_ready_for_handler", "queued"}:
         return "ready"

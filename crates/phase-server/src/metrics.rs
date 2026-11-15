@@ -13,6 +13,11 @@
 //! `phase_drafts_with_connected_humans`) exist for one decision: a StatefulSet
 //! always removes its highest ordinal, so an autoscaler must be able to ask
 //! "does *this* replica still hold someone?" before it is allowed to shrink.
+//!
+//! `phase_ws_sent_payload_bytes_total` retains six process-lifetime totals for
+//! completed socket-writer payloads, separately from queue occupancy. Classes
+//! have no connection/game/player labels. Automatic protocol Pongs bypass the
+//! writer and are excluded; raw/gzip prefixes are included, framing is not.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -21,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::State;
 use axum::response::IntoResponse;
 
+use crate::socket_disconnect::Cause as DisconnectCause;
 use crate::{AppState, ServerMode};
 
 /// Prometheus' text exposition content type (the format this module writes).
@@ -132,10 +138,55 @@ impl JevRelayStatus {
     }
 }
 
+/// Bounded telemetry classes, selected before writing from typed messages or
+/// the actual codec frame kind. These are not wire-protocol variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WsFrameType {
+    Full,
+    Delta,
+    StateUpdate,
+    GameStarted,
+    Other,
+    Control,
+}
+
+impl WsFrameType {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Full,
+        Self::Delta,
+        Self::StateUpdate,
+        Self::GameStarted,
+        Self::Other,
+        Self::Control,
+    ];
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Full => 0,
+            Self::Delta => 1,
+            Self::StateUpdate => 2,
+            Self::GameStarted => 3,
+            Self::Other => 4,
+            Self::Control => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Delta => "delta",
+            Self::StateUpdate => "state_update",
+            Self::GameStarted => "game_started",
+            Self::Other => "other",
+            Self::Control => "control",
+        }
+    }
+}
+
 /// Process-wide counters that cannot be recovered by reading live state.
 ///
-/// Everything else in [`Snapshot`] is sampled from the session/connection maps
-/// at scrape time; rejections leave no trace there, so they are counted here.
+/// Rejections, disconnects and successful writer bytes leave no live-state
+/// history. Occupancy gauges in [`Snapshot`] are sampled separately.
 #[derive(Debug, Default)]
 pub struct ServerMetrics {
     connection_limit: AtomicU64,
@@ -150,6 +201,9 @@ pub struct ServerMetrics {
     jev_busy: AtomicU64,
     jev_upstream_timeout: AtomicU64,
     jev_upstream_unreachable: AtomicU64,
+    ws_disconnects: [AtomicU64; DisconnectCause::ALL.len()],
+    ws_quota_discards: AtomicU64,
+    ws_sent_payload_bytes: [AtomicU64; WsFrameType::ALL.len()],
 }
 
 impl ServerMetrics {
@@ -191,6 +245,40 @@ impl ServerMetrics {
     pub fn jev_relay_count(&self, status: JevRelayStatus) -> u64 {
         self.jev_relay_counter(status).load(Ordering::Relaxed)
     }
+
+    pub(crate) fn record_ws_disconnect(&self, cause: DisconnectCause) {
+        self.ws_disconnects[cause.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_disconnect_count(&self, cause: DisconnectCause) -> u64 {
+        self.ws_disconnects[cause.index()].load(Ordering::Relaxed)
+    }
+
+    /// Count only a successfully completed writer operation, independently of
+    /// acknowledgement delivery or codec-baseline commit. Payload includes the
+    /// raw/gzip prefix, not WebSocket/TCP/TLS framing. Automatic protocol Pongs
+    /// bypass the writer and are excluded; peer-close completion uses the
+    /// declared echo payload, without sending a duplicate Close for telemetry.
+    pub(crate) fn record_ws_sent_payload_bytes(
+        &self,
+        frame_type: WsFrameType,
+        payload_bytes: usize,
+    ) {
+        self.ws_sent_payload_bytes[frame_type.index()]
+            .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_sent_payload_bytes(&self, frame_type: WsFrameType) -> u64 {
+        self.ws_sent_payload_bytes[frame_type.index()].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_ws_quota_discard(&self) {
+        self.ws_quota_discards.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_quota_discard_count(&self) -> u64 {
+        self.ws_quota_discards.load(Ordering::Relaxed)
+    }
 }
 
 /// Build identity, mirroring what `ServerHello` advertises to clients.
@@ -214,8 +302,8 @@ impl BuildInfo {
     }
 }
 
-/// One scrape's worth of values. Separated from both collection and rendering
-/// so the exposition can be asserted byte-for-byte against known numbers.
+/// One scrape's worth of values, allowing collection and public exposition
+/// to be checked independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub connections: u32,
@@ -232,6 +320,11 @@ pub struct Snapshot {
     pub rejects: Vec<(RejectReason, u64)>,
     /// `/jev/systemone` relay requests by outcome.
     pub jev_relay: Vec<(JevRelayStatus, u64)>,
+    /// First-observed transport failures, using a fixed label set.
+    pub ws_disconnects: [u64; DisconnectCause::ALL.len()],
+    pub ws_discarded_frames: u64,
+    /// Independently sampled relaxed counters, not an atomic frame transaction.
+    pub ws_sent_payload_bytes: [u64; WsFrameType::ALL.len()],
     pub build: BuildInfo,
 }
 
@@ -309,6 +402,11 @@ pub async fn collect(app: &AppState) -> Snapshot {
             .iter()
             .map(|&status| (status, app.context.metrics.jev_relay_count(status)))
             .collect(),
+        ws_disconnects: DisconnectCause::ALL
+            .map(|cause| app.context.metrics.ws_disconnect_count(cause)),
+        ws_discarded_frames: app.context.metrics.ws_quota_discard_count(),
+        ws_sent_payload_bytes: WsFrameType::ALL
+            .map(|frame_type| app.context.metrics.ws_sent_payload_bytes(frame_type)),
         build: BuildInfo::current(app.mode),
     }
 }
@@ -399,6 +497,40 @@ pub fn render(snapshot: &Snapshot) -> String {
         );
     }
 
+    let _ =
+        writeln!(&mut out,
+        "# HELP phase_ws_disconnects_total WebSocket transports closed by first-observed cause.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_disconnects_total counter");
+    for (cause, count) in DisconnectCause::ALL
+        .into_iter()
+        .zip(snapshot.ws_disconnects)
+    {
+        let _ = writeln!(
+            &mut out,
+            "phase_ws_disconnects_total{{cause=\"{}\"}} {count}",
+            cause.label()
+        );
+    }
+    let _ = writeln!(&mut out, "# HELP phase_ws_sent_payload_bytes_total Payload bytes of successfully completed application socket-writer operations, including explicit control operations and raw/gzip envelope prefixes; excludes automatic protocol Pong replies and WebSocket framing, TCP and TLS overhead.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_sent_payload_bytes_total counter");
+    for (frame_type, bytes) in WsFrameType::ALL
+        .into_iter()
+        .zip(snapshot.ws_sent_payload_bytes)
+    {
+        let _ = writeln!(
+            &mut out,
+            "phase_ws_sent_payload_bytes_total{{frame_type=\"{}\"}} {bytes}",
+            frame_type.label()
+        );
+    }
+    let _ = writeln!(&mut out, "# HELP phase_ws_discarded_frames_total WebSocket frames discarded by bounded ingress policy.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_discarded_frames_total counter");
+    let _ = writeln!(
+        &mut out,
+        "phase_ws_discarded_frames_total{{reason=\"quota_exhausted\"}} {}",
+        snapshot.ws_discarded_frames
+    );
+
     let _ = writeln!(
         &mut out,
         "# HELP phase_admission_rejects_total Connections and games refused at admission."
@@ -453,6 +585,9 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            ws_disconnects: Default::default(),
+            ws_sent_payload_bytes: Default::default(),
+            ws_discarded_frames: 12,
             connections: 7,
             connections_capacity: 200,
             games_active: 4,
@@ -485,58 +620,81 @@ mod tests {
         }
     }
 
-    /// The exposition is a wire contract a scraper parses, so assert the whole
-    /// body rather than probing for substrings: a renamed metric, a dropped
-    /// TYPE line or a value read from the wrong field all fail here.
     #[test]
-    fn render_emits_every_family_with_its_values() {
-        let expected = concat!(
-            "# HELP phase_connections Currently open WebSocket connections.\n",
-            "# TYPE phase_connections gauge\n",
-            "phase_connections 7\n",
-            "# HELP phase_connections_capacity Connections this process admits before refusing upgrades.\n",
-            "# TYPE phase_connections_capacity gauge\n",
-            "phase_connections_capacity 200\n",
-            "# HELP phase_games_active Game sessions held by this process.\n",
-            "# TYPE phase_games_active gauge\n",
-            "phase_games_active 4\n",
-            "# HELP phase_games_with_connected_humans Game sessions with at least one live player or spectator socket.\n",
-            "# TYPE phase_games_with_connected_humans gauge\n",
-            "phase_games_with_connected_humans 2\n",
-            "# HELP phase_games_capacity Game sessions this process admits before refusing CreateGame.\n",
-            "# TYPE phase_games_capacity gauge\n",
-            "phase_games_capacity 100\n",
-            "# HELP phase_drafts_active Draft sessions held by this process.\n",
-            "# TYPE phase_drafts_active gauge\n",
-            "phase_drafts_active 1\n",
-            "# HELP phase_drafts_with_connected_humans Draft sessions with at least one connected seat or live spectator socket.\n",
-            "# TYPE phase_drafts_with_connected_humans gauge\n",
-            "phase_drafts_with_connected_humans 1\n",
-            "# HELP phase_replica_ordinal Ordinal of this replica within its StatefulSet.\n",
-            "# TYPE phase_replica_ordinal gauge\n",
-            "phase_replica_ordinal 3\n",
-            "# HELP phase_admission_rejects_total Connections and games refused at admission.\n",
-            "# TYPE phase_admission_rejects_total counter\n",
-            "phase_admission_rejects_total{reason=\"connection_limit\"} 5\n",
-            "phase_admission_rejects_total{reason=\"game_limit\"} 0\n",
-            "phase_admission_rejects_total{reason=\"origin_not_allowed\"} 2\n",
-            "# HELP phase_jev_relay_requests_total Requests answered by the /jev/systemone relay, by outcome.\n",
-            "# TYPE phase_jev_relay_requests_total counter\n",
-            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11\n",
-            "phase_jev_relay_requests_total{status=\"upstream_4xx\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_5xx\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_other\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"bad_request\"} 4\n",
-            "phase_jev_relay_requests_total{status=\"payload_too_large\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"busy\"} 0\n",
-            "phase_jev_relay_requests_total{status=\"upstream_timeout\"} 1\n",
-            "phase_jev_relay_requests_total{status=\"upstream_unreachable\"} 0\n",
-            "# HELP phase_build_info Build identity of this process; the value is always 1.\n",
-            "# TYPE phase_build_info gauge\n",
-            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1\n",
+    fn ws_sent_payload_render_uses_bounded_frame_types() {
+        let counters = ServerMetrics::default();
+        counters.record_ws_sent_payload_bytes(WsFrameType::Full, 120);
+        counters.record_ws_sent_payload_bytes(WsFrameType::Full, 7);
+        counters.record_ws_sent_payload_bytes(WsFrameType::Control, 13);
+        let mut fixture = snapshot();
+        fixture.ws_sent_payload_bytes =
+            WsFrameType::ALL.map(|kind| counters.ws_sent_payload_bytes(kind));
+        let body = render(&fixture);
+        assert!(body
+            .lines()
+            .any(|line| line == "# TYPE phase_ws_sent_payload_bytes_total counter"));
+        let samples: Vec<_> = body
+            .lines()
+            .filter(|line| line.starts_with("phase_ws_sent_payload_bytes_total{"))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                "phase_ws_sent_payload_bytes_total{frame_type=\"full\"} 127",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"delta\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"state_update\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"game_started\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"other\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"control\"} 13",
+            ]
         );
+        assert_eq!(render(&fixture), body, "scraping does not consume totals");
+    }
 
-        assert_eq!(render(&snapshot()), expected);
+    /// Scrapers depend on family names, types, labels and values, not HELP
+    /// prose or the order in which independent metric families are rendered.
+    #[test]
+    fn render_preserves_scraper_types_labels_and_values() {
+        let mut fixture = snapshot();
+        fixture.ws_disconnects[DisconnectCause::QuotaRefusalOverflow.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaDiscardOverflow.index()] = 2;
+        let body = render(&fixture);
+        for expected in [
+            "# TYPE phase_connections gauge",
+            "phase_connections 7",
+            "# TYPE phase_connections_capacity gauge",
+            "phase_connections_capacity 200",
+            "# TYPE phase_games_active gauge",
+            "phase_games_active 4",
+            "# TYPE phase_games_with_connected_humans gauge",
+            "phase_games_with_connected_humans 2",
+            "# TYPE phase_games_capacity gauge",
+            "phase_games_capacity 100",
+            "# TYPE phase_drafts_active gauge",
+            "phase_drafts_active 1",
+            "# TYPE phase_drafts_with_connected_humans gauge",
+            "phase_drafts_with_connected_humans 1",
+            "# TYPE phase_replica_ordinal gauge",
+            "phase_replica_ordinal 3",
+            "# TYPE phase_ws_disconnects_total counter",
+            "phase_ws_disconnects_total{cause=\"quota_refusal_overflow\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_discard_overflow\"} 2",
+            "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
+            "# TYPE phase_ws_discarded_frames_total counter",
+            "phase_ws_discarded_frames_total{reason=\"quota_exhausted\"} 12",
+            "# TYPE phase_admission_rejects_total counter",
+            "phase_admission_rejects_total{reason=\"connection_limit\"} 5",
+            "# TYPE phase_jev_relay_requests_total counter",
+            "phase_jev_relay_requests_total{status=\"upstream_2xx\"} 11",
+            "# TYPE phase_build_info gauge",
+            "phase_build_info{version=\"1.2.3\",commit=\"abc123\",mode=\"full\"} 1",
+        ] {
+            assert_eq!(
+                body.lines().filter(|line| *line == expected).count(),
+                1,
+                "missing or duplicated scraper contract: {expected}\n{body}",
+            );
+        }
     }
 
     /// `None` must drop the family entirely. Emitting `phase_replica_ordinal 0`

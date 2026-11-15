@@ -49,6 +49,7 @@ const wasm = vi.hoisted(() => ({
   start_quick_cube_draft: vi.fn(),
   import_draft_session: vi.fn(),
   load_card_database: vi.fn((_json: string) => 0),
+  set_draft_pick_enhancements: vi.fn(),
   submit_pick: vi.fn(),
   submit_pick_with_draft_effect: vi.fn(),
   auto_pick: vi.fn(),
@@ -118,6 +119,7 @@ import {
 } from "../../test/helpers/webLocks";
 import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
 import { useAppNotificationStore } from "../appToastStore";
+import { usePreferencesStore } from "../preferencesStore";
 
 function card(instanceId: string, name = instanceId): DraftCardInstance {
   return {
@@ -392,6 +394,20 @@ describe("draft store workspace authority", () => {
 
     useDraftStore.getState().reset();
     expect(useDraftStore.getState().difficulty).toBe(4);
+  });
+
+  it("forwards the draft pick enhancement preference to the engine when a draft starts", async () => {
+    wasm.start_quick_draft.mockReturnValue(view([]));
+    wasm.load_card_database.mockReturnValue(0);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
+
+    usePreferencesStore.getState().setDraftPickEnhancements(true);
+    await useDraftStore.getState().startDraft("pool", "MRD", "Mirrodin", 3);
+    expect(wasm.set_draft_pick_enhancements).toHaveBeenLastCalledWith(true);
+
+    usePreferencesStore.getState().setDraftPickEnhancements(false);
+    await useDraftStore.getState().startDraft("pool", "MRD", "Mirrodin", 3);
+    expect(wasm.set_draft_pick_enhancements).toHaveBeenLastCalledWith(false);
   });
 
   it("loads the typed database before a fresh difficulty-2 Quick match requests a bot deck", async () => {

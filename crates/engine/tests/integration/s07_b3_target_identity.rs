@@ -5,7 +5,10 @@
 //! reverted. See `.planning/coverage-analysis/S07-PLAN-FINAL.md` §3/§6.
 
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -179,6 +182,7 @@ fn run_yenna(copy_is_aura: bool) -> bool {
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: yenna,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Yenna");
     for _ in 0..40 {
@@ -335,4 +339,376 @@ fn charging_hooligan_gains_trample_only_when_a_rat_is_attacking() {
     // Discriminating: reverting parse_a_type_is_in_combat makes the whole trigger
     // unparseable (empty abilities), so trample is never granted → the positive
     // assert flips.
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #10143 — Yenna's NEGATED name comparison on an activated target filter:
+// "Choose target enchantment you control that doesn't have the same name as
+// another permanent you control." CR 201.2a + CR 201.2c define the comparison;
+// CR 602.2b announces the target and CR 608.2b re-judges it at resolution
+// against the live board.
+//
+// Before the fix the whole relative clause was dropped from Yenna's stored
+// target filter (`Typed{[Enchantment], You, []}`), so every enchantment she
+// controlled was legal — including ones that share a name with another
+// permanent.
+// ─────────────────────────────────────────────────────────────────────────
+
+struct YennaBoard {
+    runner: GameRunner,
+    yenna: ObjectId,
+    /// P0's creature named "Gamma" — the NON-enchantment that shares its name
+    /// with the enchantment "Gamma" on the hostile board.
+    gamma_creature: ObjectId,
+    beta: ObjectId,
+}
+
+/// The legal targets of the slot the runner is currently asking about.
+fn current_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        }
+        | WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => target_slots
+            .get(selection.current_slot)
+            .map(|slot| slot.legal_targets.clone())
+            .unwrap_or_default(),
+        other => panic!("expected a target-declaration window, got {other:?}"),
+    }
+}
+
+/// Sorted names of the legal targets the runner currently offers.
+///
+/// The engine auto-announces a forced unique target (CR 601.2c: a single
+/// possible assignment is not a choice), so every fixture here keeps at least
+/// TWO legal targets; that is also what makes the set comparison meaningful.
+fn legal_target_names(runner: &GameRunner) -> Vec<String> {
+    let mut names: Vec<String> = current_legal_targets(runner)
+        .iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => runner.state().objects[id].name.clone(),
+            other => panic!("expected object targets, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Builds the Yenna board and drives the activation to the target-declaration
+/// window (CR 602.2b).
+///
+/// `duplicate_names` selects the hostile board — enchantments "Alpha" ×2 and a
+/// creature "Gamma" beside an enchantment "Gamma" — or its unique-name sibling.
+/// "Beta" and "Epsilon" are plain (non-Aura) enchantments with unique names, so
+/// the narrowed filter still offers two choices and the activation resolves
+/// without the untap/scry rider.
+fn yenna_name_comparison_board(duplicate_names: bool) -> YennaBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // {2} generic for the activation cost.
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let yenna = scenario
+        .add_creature_from_oracle(P0, "Yenna, Redtooth Regent", 3, 4, YENNA)
+        .id();
+
+    let (alpha_one_name, alpha_two_name, gamma_enchantment_name) = if duplicate_names {
+        ("Alpha", "Alpha", "Gamma")
+    } else {
+        ("Alpha One", "Alpha Two", "Gamma Enchantment")
+    };
+    let add_enchantment = |scenario: &mut GameScenario, name: &str| {
+        let mut builder = scenario.add_creature(P0, name, 0, 0);
+        builder.as_enchantment();
+        builder.id()
+    };
+    add_enchantment(&mut scenario, alpha_one_name);
+    add_enchantment(&mut scenario, alpha_two_name);
+    let gamma_creature = scenario.add_creature(P0, "Gamma", 2, 2).id();
+    add_enchantment(&mut scenario, gamma_enchantment_name);
+    let beta = add_enchantment(&mut scenario, "Beta");
+    // A second uniquely named enchantment keeps the forced-unique auto-announce
+    // out of the way, so the legal SET is observable.
+    add_enchantment(&mut scenario, "Epsilon");
+
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&yenna).unwrap().tapped = false;
+    runner
+        .act(engine::types::actions::GameAction::ActivateAbility {
+            source_id: yenna,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Yenna");
+    for _ in 0..20 {
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(engine::types::actions::GameAction::PassPriority)
+                    .expect("pay the {2} activation cost");
+            }
+            WaitingFor::TargetSelection { .. } => break,
+            other => panic!("unexpected window before Yenna's target declaration: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "Yenna's activation must reach target declaration, got {:?}",
+        runner.state().waiting_for
+    );
+    YennaBoard {
+        runner,
+        yenna,
+        gamma_creature,
+        beta,
+    }
+}
+
+/// Passes priority (paying the mana cost if the engine still asks for it) until
+/// the stack is empty with priority back to a player, returning every event the
+/// driven actions emitted.
+fn drive_to_empty_stack(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..40 {
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                let result = runner
+                    .act(engine::types::actions::GameAction::PassPriority)
+                    .expect("pay the {2} activation cost");
+                events.extend(result.events);
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    return events;
+                }
+                let result = runner
+                    .act(engine::types::actions::GameAction::PassPriority)
+                    .expect("resolve the activation");
+                events.extend(result.events);
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            other => panic!("unexpected window while resolving Yenna's activation: {other:?}"),
+        }
+    }
+    panic!(
+        "Yenna's activation never finished, waiting_for={:?}, stack={:?}",
+        runner.state().waiting_for,
+        runner.state().stack.len()
+    );
+}
+
+/// CR 405.1 + CR 608: the stack-entry ids the driven actions pushed and resolved.
+fn stack_entry_lifecycle(events: &[GameEvent]) -> (Vec<ObjectId>, Vec<ObjectId>) {
+    let mut pushed = Vec::new();
+    let mut resolved = Vec::new();
+    for event in events {
+        match event {
+            GameEvent::StackPushed { object_id } => pushed.push(*object_id),
+            GameEvent::StackResolved { object_id } => resolved.push(*object_id),
+            _ => {}
+        }
+    }
+    (pushed, resolved)
+}
+
+fn copy_token_resolutions(events: &[GameEvent], source: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CopyTokenOf,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )
+        })
+        .count()
+}
+
+fn token_count_named(runner: &GameRunner, name: &str, controller: PlayerId) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| obj.is_token && obj.name == name && obj.controller == controller)
+        .count()
+}
+
+#[test]
+fn yenna_target_excludes_same_named_permanents_including_non_enchantments() {
+    let mut board = yenna_name_comparison_board(true);
+    // Discriminating: at base the filter carries no name comparison, so the
+    // legal set is all five enchantments. After the fix "Alpha" (twice) and
+    // "Gamma" (shared with a CREATURE you control) are illegal.
+    assert_eq!(
+        legal_target_names(&board.runner),
+        vec!["Beta", "Epsilon"],
+        "only the uniquely named enchantments are legal; a same-named non-enchantment \
+         permanent you control disqualifies its enchantment namesake (CR 201.2a)"
+    );
+    // Positive reach-guard: choosing the legal target still resolves the copy.
+    board
+        .runner
+        .act(engine::types::actions::GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.beta)),
+        })
+        .expect("choose Beta");
+    drive_to_empty_stack(&mut board.runner);
+    assert!(
+        board.runner.state().stack.is_empty(),
+        "the activation must leave the stack"
+    );
+    assert_eq!(
+        token_count_named(&board.runner, "Beta", P0),
+        1,
+        "choosing the legal target must still create the copy token"
+    );
+}
+
+#[test]
+fn yenna_target_allows_every_enchantment_when_names_are_unique() {
+    // Sibling of the hostile board: with unique names every enchantment Yenna's
+    // controller controls is legal. This proves the narrowed filter still admits
+    // targets rather than rejecting everything.
+    let mut board = yenna_name_comparison_board(false);
+    assert_eq!(
+        legal_target_names(&board.runner),
+        vec![
+            "Alpha One",
+            "Alpha Two",
+            "Beta",
+            "Epsilon",
+            "Gamma Enchantment"
+        ],
+        "no duplicate names → every enchantment is legal"
+    );
+    // Reach-guard: the window is live and the activation resolves a copy.
+    board
+        .runner
+        .act(engine::types::actions::GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.beta)),
+        })
+        .expect("choose Beta");
+    drive_to_empty_stack(&mut board.runner);
+    assert!(board.runner.state().stack.is_empty());
+}
+
+#[test]
+fn yenna_target_is_rejudged_against_the_live_reference_at_resolution() {
+    let mut board = yenna_name_comparison_board(true);
+    // (a) announcement-time reach-guard: the two uniquely named enchantments.
+    assert_eq!(
+        legal_target_names(&board.runner),
+        vec!["Beta", "Epsilon"],
+        "the uniquely named enchantments are the only legal targets at announcement"
+    );
+    let mut events = board
+        .runner
+        .act(engine::types::actions::GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.beta)),
+        })
+        .expect("choose Beta")
+        .events;
+    // CR 201.2a: a same-named permanent that arrives after announcement makes
+    // the chosen target illegal (CR 608.2b), so the ability does nothing.
+    board
+        .runner
+        .state_mut()
+        .objects
+        .get_mut(&board.gamma_creature)
+        .unwrap()
+        .name = "Beta".to_string();
+    events.extend(drive_to_empty_stack(&mut board.runner));
+    // (b) the perturbation is observable.
+    assert_eq!(
+        board.runner.state().objects[&board.gamma_creature].name,
+        "Beta",
+        "the post-announcement rename must take effect"
+    );
+    // (c) the activation reached the stack and left it (StackResolved is
+    // emitted for fizzles too, so this is not an early-return artifact).
+    let (pushed, resolved) = stack_entry_lifecycle(&events);
+    assert_eq!(
+        pushed.len(),
+        1,
+        "exactly one activation must reach the stack, events={events:?}"
+    );
+    assert!(
+        resolved.contains(&pushed[0]),
+        "the activation must have left the stack, events={events:?}"
+    );
+    // Discriminating: with a latched announcement-time verdict the copy resolves
+    // and the token appears.
+    assert_eq!(
+        copy_token_resolutions(&events, board.yenna),
+        0,
+        "an illegal target at resolution means the ability does nothing (CR 608.2b), events={events:?}"
+    );
+    assert_eq!(
+        token_count_named(&board.runner, "Beta", P0),
+        0,
+        "no copy token may be created after the target became illegal"
+    );
+}
+
+#[test]
+fn yenna_target_stays_legal_when_a_different_name_appears_at_resolution() {
+    // Negative sibling for the re-read above: a DIFFERENT name arriving after
+    // announcement does not make the chosen target illegal, so the copy still
+    // resolves. Without this row the fizzle row could pass for the wrong reason
+    // (e.g. a mutation that breaks the ability outright).
+    let mut board = yenna_name_comparison_board(true);
+    let mut events = board
+        .runner
+        .act(engine::types::actions::GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.beta)),
+        })
+        .expect("choose Beta")
+        .events;
+    board
+        .runner
+        .state_mut()
+        .objects
+        .get_mut(&board.gamma_creature)
+        .unwrap()
+        .name = "Delta".to_string();
+    events.extend(drive_to_empty_stack(&mut board.runner));
+    assert_eq!(
+        board.runner.state().objects[&board.gamma_creature].name,
+        "Delta"
+    );
+    let (pushed, resolved) = stack_entry_lifecycle(&events);
+    assert_eq!(pushed.len(), 1, "exactly one activation, events={events:?}");
+    assert!(
+        resolved.contains(&pushed[0]),
+        "the activation must have left the stack, events={events:?}"
+    );
+    assert_eq!(
+        copy_token_resolutions(&events, board.yenna),
+        1,
+        "a differently named permanent does not make the chosen target illegal, events={events:?}"
+    );
+    assert_eq!(
+        token_count_named(&board.runner, "Beta", P0),
+        1,
+        "the copy must resolve"
+    );
 }

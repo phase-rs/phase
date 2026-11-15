@@ -359,6 +359,7 @@ fn leonardos_counter_applies_after_it_is_sacrificed_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: altar,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ashnod's Altar is activatable during payment");
     runner
@@ -384,6 +385,8 @@ fn leonardos_counter_applies_after_it_is_sacrificed_mid_payment() {
         "Leonardo's rider was latched at announcement, counters: {:?}",
         entered.counters
     );
+    // CR 110.5b: Leonardo prints no tapped rider, so the Decoy enters untapped.
+    assert!(!entered.tapped);
 }
 
 // --- Muldrotha vs Exploration Broodship ----------------------------------
@@ -520,6 +523,7 @@ fn announced_broodship_is_kept_when_it_leaves_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: ironworks,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ironworks is activatable during payment");
     runner
@@ -1307,8 +1311,12 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: Some(CounterType::Finality),
+        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+        cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+        mana_spend_permission: None,
+        enters_modifications: Default::default(),
     })
     .affected(TargetFilter::Typed(TypedFilter::creature()));
     let grant = StaticDefinition::continuous()
@@ -1351,6 +1359,7 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: ironworks,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ironworks is activatable during payment");
     runner
@@ -1418,8 +1427,12 @@ fn land_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         },
     )
     .affected(engine::types::ability::TargetFilter::Typed(affected))

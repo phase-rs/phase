@@ -19,6 +19,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
+import { useFrameFailure } from "./useFrameFailure.ts";
 
 interface Coin3DProps {
   /** Which face to land on after the flip. */
@@ -86,6 +87,7 @@ export function Coin3D({
   const settledRef = useRef(false);
   const onSettleRef = useRef(onSettle);
   onSettleRef.current = onSettle;
+  const failFrame = useFrameFailure();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -180,10 +182,21 @@ export function Coin3D({
         return;
       }
 
-      rafId = requestAnimationFrame(tick);
+      rafId = requestAnimationFrame(guardedTick);
     };
 
-    rafId = requestAnimationFrame(tick);
+    // A frame that throws (e.g. a lost WebGL context) stops the loop and
+    // hands the error to the overlay's boundary, which shows the static result.
+    const guardedTick = (now: number) => {
+      try {
+        tick(now);
+      } catch (error) {
+        cancelAnimationFrame(rafId);
+        failFrame(error);
+      }
+    };
+
+    rafId = requestAnimationFrame(guardedTick);
 
     return () => {
       disposed = true;
@@ -199,7 +212,7 @@ export function Coin3D({
         container.removeChild(renderer.domElement);
       }
     };
-  }, [face, speedMultiplier, size, labels.heads, labels.tails]);
+  }, [face, speedMultiplier, size, labels.heads, labels.tails, failFrame]);
 
   return (
     <div

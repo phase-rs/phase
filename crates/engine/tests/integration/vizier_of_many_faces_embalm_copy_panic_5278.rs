@@ -194,6 +194,7 @@ fn activate_embalm(runner: &mut GameRunner, vizier: engine::types::identifiers::
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm ability");
     // Resolve the token-copy ability on the stack: pass priority until an entry

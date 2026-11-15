@@ -268,7 +268,7 @@ While waiting, inspect every new review surface: review decisions, review bodies
 
 1. Verify it against the PR and code; do not apply speculative or already-obsolete suggestions.
 2. Make the focused fix in the ship worktree, validate it proportionally, commit it, and push the same branch with `--no-verify`.
-3. Reply or resolve the comment with a concise evidence-backed disposition when GitHub permits it.
+3. Reply or resolve the comment with a concise evidence-backed disposition when GitHub permits it. Evidence about engine behavior follows [real cards](../engine-implementer/SKILL.md#real-cards).
 4. Re-run `gh pr merge "$PR_NUMBER" --auto` if the push disabled auto-merge, then continue waiting for a non-null `mergeQueueEntry`.
 
 Do not report success while required CI is still pending, an actionable review comment is outstanding, or `mergeQueueEntry` is null. Continue checking at a reasonable cadence; stop only for a failed check or ambiguous/out-of-scope review request that genuinely needs user direction.

@@ -24,6 +24,18 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text + body fingerprint), not the index —
+/// derived through the production constructor so the fingerprint matches.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    engine::game::restrictions::ability_usage_key(state, id, idx)
+        .expect("the tested slot resolves through the activation lookup")
+}
+
 /// Locate the index of the (only) power-up-tagged ability on `object`.
 fn power_up_index(runner: &GameRunner, object: ObjectId) -> usize {
     runner.state().objects[&object]
@@ -95,7 +107,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game activation counter must record exactly one activation"
@@ -111,6 +123,7 @@ fn power_up_activates_only_once_per_game() {
     let retry = runner.act(GameAction::ActivateAbility {
         source_id: hero,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         retry.is_err(),
@@ -120,7 +133,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game counter must remain 1 after the rejected second activation"
@@ -158,6 +171,7 @@ fn once_each_turn_ability_resets_across_turns() {
     let same_turn = runner.act(GameAction::ActivateAbility {
         source_id: pinger,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         same_turn.is_err(),
@@ -174,6 +188,7 @@ fn once_each_turn_ability_resets_across_turns() {
     let retry = runner.act(GameAction::ActivateAbility {
         source_id: pinger,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         retry.is_ok(),
@@ -278,6 +293,7 @@ fn power_up_cost_not_reduced_when_entered_prior_turn() {
     let attempt = runner.act(GameAction::ActivateAbility {
         source_id: hulk,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         attempt.is_err(),
@@ -347,6 +363,7 @@ fn hulk_static_reduces_other_power_up_abilities() {
     let own = runner.act(GameAction::ActivateAbility {
         source_id: hulk,
         ability_index: hulk_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         own.is_err(),
@@ -379,6 +396,7 @@ fn power_up_without_hulk_static_is_not_reduced() {
     let attempt = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         attempt.is_err(),
@@ -431,6 +449,7 @@ fn wonder_man_static_raises_power_up_limit_to_two() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         second.is_ok(),
@@ -443,6 +462,7 @@ fn wonder_man_static_raises_power_up_limit_to_two() {
     let third = runner.act(GameAction::ActivateAbility {
         source_id: ally,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         third.is_err(),
@@ -496,6 +516,7 @@ fn wonder_man_does_not_raise_non_power_up_once_limit() {
     let second = runner.act(GameAction::ActivateAbility {
         source_id: other,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         second.is_err(),
@@ -558,6 +579,7 @@ fn tagged_mana_pays_power_up_but_not_other_activations() {
     let other_attempt = runner.act(GameAction::ActivateAbility {
         source_id: other,
         ability_index: other_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         other_attempt.is_err(),
@@ -839,6 +861,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let creation_turn_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero,
         ability_index: hero_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         creation_turn_attempt.is_ok(),
@@ -860,6 +883,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let extra_turn_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero2,
         ability_index: hero2_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         extra_turn_attempt.is_err(),
@@ -877,6 +901,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let plain_attempt = runner.act(GameAction::ActivateAbility {
         source_id: plain,
         ability_index: plain_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         plain_attempt.is_ok(),
@@ -912,6 +937,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     let post_expiry_attempt = runner.act(GameAction::ActivateAbility {
         source_id: hero2,
         ability_index: hero2_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         post_expiry_attempt.is_ok(),

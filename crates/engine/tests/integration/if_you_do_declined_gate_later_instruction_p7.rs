@@ -365,11 +365,22 @@ fn localized_destruction_declined_destroys_every_creature() {
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
 
-/// J-2e: paid, the creature whose power equals the energy paid survives.
-/// GREEN AT BASE: reach guard of J-2c; preservation only.
+/// J-2e VACUITY PIN (PR #10008 round 2, B3a): the "pay one or more {E}" clause
+/// is deliberately unimplemented — a min-1 variable payment needing prompt-min
+/// machinery (see `one_or_more_energy_range_declines_while_neighbors_parse` in
+/// `parser::oracle_effect::imperative`). Accepting the optional therefore
+/// spends no energy and applies no power filter: c1's survival rides the
+/// pre-existing unfiltered indestructible grant, a filter gap that pre-dates
+/// this PR (report for triage; out of scope here). This row pins the decline:
+/// energy kept plus the resolution assertions that still hold.
 #[test]
-fn localized_destruction_paid_spares_the_matching_creature() {
+fn localized_destruction_accepted_pay_unimplemented_energy_kept() {
     let (runner, c1, o1) = localized_destruction(true);
+    assert_eq!(
+        runner.state().players[0].energy,
+        1,
+        "no energy spent: the pay clause is unimplemented"
+    );
     assert_eq!(runner.state().objects[&c1].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
@@ -492,6 +503,7 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: wyll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("specialize is activated");
     runner

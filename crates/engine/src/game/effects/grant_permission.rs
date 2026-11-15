@@ -19,7 +19,8 @@ use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use std::sync::Arc;
 
 /// CR 608.2h + CR 108.3: the player `grantee` binds to for `obj_id`, fixed once at resolution;
-/// `ObjectOwner` binds each object's owner, the others one player for the whole resolution.
+/// `ObjectOwner` binds each object's owner and `ObjectExiler` its recorded exiling player,
+/// the others one player for the whole resolution.
 /// `None` when a `TriggeringSourceController` grant has no triggering object to read: no
 /// player is granted rather than a stand-in.
 pub(crate) fn resolve_grantee(
@@ -46,6 +47,9 @@ pub(crate) fn resolve_grantee(
                 .get(&obj_id)
                 .map_or(ability.controller, |o| o.owner),
         ),
+        // CR 406.3a + CR 608.2c: the player who performed this object's exile.
+        // An unattributed exile grants nobody rather than a stand-in.
+        PermissionGrantee::ObjectExiler => state.objects.get(&obj_id)?.exiled_by,
         // CR 603.2 + CR 109.4: the controller of the object that caused the
         // trigger, through the event-context authority (CR 608.2h fallback).
         PermissionGrantee::TriggeringSourceController => {
@@ -419,6 +423,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -485,6 +490,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
         };
@@ -568,6 +574,7 @@ mod tests {
                     single_use: true,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -794,6 +801,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -854,6 +862,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -927,6 +936,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -1012,6 +1022,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         };
@@ -1093,6 +1104,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         };
@@ -1160,6 +1172,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         }];
@@ -1200,6 +1213,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -1273,6 +1287,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             }];
@@ -1319,6 +1334,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             }];
@@ -1380,6 +1396,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },

@@ -1,7 +1,9 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import { isAiDifficulty } from "../../../constants/ai";
 import { ACTIVE_DECK_KEY, isRandomDeckSelection } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
@@ -25,8 +27,8 @@ interface ActionDef {
   tone: MenuTileTone;
   icon: string;
   motif: TileMotif;
-  titleKey: string;
-  descKey: string;
+  titleKey: ParseKeys<"menu">;
+  descKey: ParseKeys<"menu">;
   gated: boolean;
 }
 const ACTIONS: ActionDef[] = [
@@ -61,7 +63,7 @@ function CardActionButton({ action, disabled }: { action: ActionDef; disabled: b
 function ResumeHero() {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
-  const { match, matchSummary, quickDraft, pod, resumeMatch } = useResumables();
+  const { match, matchSummary, retainedResult, quickDraft, pod, resumeMatch, viewRetainedResult } = useResumables();
 
   // Build the ordered candidate list: the saved match leads (most-relevant
   // resumable), then drafts by recency. Nothing to resume → render nothing.
@@ -77,7 +79,7 @@ function ResumeHero() {
   // turn it is, and your own life — never bare unlabeled numbers.
   const modeLabel = match ? t(`home.dashboard.mode.${match.mode}`) : "";
   const difficultyLabel =
-    match && match.mode === "ai" && match.difficulty
+    match && match.mode === "ai" && isAiDifficulty(match.difficulty)
       ? t(`aiDifficulty.levels.${match.difficulty}`)
       : null;
   // GameFormat is PascalCase ("PauperCommander"); space compound names for display.
@@ -106,7 +108,20 @@ function ResumeHero() {
     onResume: resumeMatch,
   };
 
-  const ordered = [matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
+  // A finished match whose result is retained locally still owes the server an
+  // acknowledgement. It is not resumable gameplay, but the Menu must not strand
+  // it: the unresolved result leads the list so reopening re-displays it and
+  // retries the ACK. A successful ACK clears the pointer, which removes it.
+  const retainedFormatLabel = retainedResult?.formatConfig?.format?.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const retainedEntry = retainedResult && {
+    cta: t("home.resume.viewResult"),
+    title: retainedFormatLabel || t(`home.dashboard.mode.${retainedResult.mode}`) || t("home.resume.title"),
+    chip: "",
+    meta: [] as string[],
+    onResume: viewRetainedResult,
+  };
+
+  const ordered = [retainedEntry, matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
   if (ordered.length === 0) return null;
   const [primary, secondary] = ordered;
 

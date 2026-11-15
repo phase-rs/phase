@@ -42,6 +42,7 @@ fn coastal_wizard_returns_self_and_another_target_to_hand() {
         .act(GameAction::ActivateAbility {
             source_id: wizard,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Coastal Wizard's {T} ability must succeed");
     runner.advance_until_stack_empty();

@@ -152,7 +152,9 @@ fn tireless_provisioner_landfall_parses_as_choose_one_of() {
         .expect("landfall trigger");
     let execute = trigger.definition.execute.as_ref().expect("execute");
     match &*execute.effect {
-        Effect::ChooseOneOf { chooser, branches } => {
+        Effect::ChooseOneOf {
+            chooser, branches, ..
+        } => {
             assert_eq!(*chooser, PlayerFilter::Controller);
             assert_eq!(branches.len(), 2);
             assert!(matches!(&*branches[0].effect, Effect::Token { name, .. } if name == "Food"));

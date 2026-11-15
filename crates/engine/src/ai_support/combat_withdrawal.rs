@@ -8,6 +8,7 @@
 use std::ops::ControlFlow;
 
 use crate::game::combat_damage::{assess_combat_impact, CombatImpact};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
 use crate::types::ability_visit::visit_ability_def;
 use crate::types::actions::GameAction;
@@ -179,6 +180,7 @@ pub fn activation_may_yield_combat_withdrawal(state: &GameState, action: &GameAc
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = action
     else {
         return true;
@@ -613,6 +615,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activation reaches target selection");
@@ -673,6 +676,7 @@ mod tests {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         }
     }
 
@@ -768,6 +772,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 1,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 },
             ),
             "index past the abilities list"

@@ -2,7 +2,6 @@ import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { seatStatusKey } from "../../game/waitingForRegistry.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -18,7 +17,6 @@ type ZoneName = "graveyard" | "exile" | "library";
 interface OpponentSeatPaneProps {
   playerId: PlayerId;
   battlefieldView: PlayerBattlefieldView;
-  showCards: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
   onViewZone: (
     zone: ZoneName,
@@ -37,7 +35,6 @@ const pileSize = { width: "var(--card-w)", height: "var(--card-h)" };
 export function OpponentSeatPane({
   playerId,
   battlefieldView,
-  showCards,
   onKickPlayer,
   onViewZone,
 }: OpponentSeatPaneProps) {
@@ -47,7 +44,7 @@ export function OpponentSeatPane({
   const isActiveTurn = activePlayerId === playerId;
   const isWaitingOnThisPlayer = waitingSeatId === playerId;
   const waitingReasonText = isWaitingOnThisPlayer
-    ? t(seatStatusKey(reason), reason?.params)
+    ? t(`status.seat.${reason?.id ?? "thinking"}`, reason?.params)
     : null;
   const seatStyle = {
     "--card-size-scale": "0.62",
@@ -117,7 +114,7 @@ export function OpponentSeatPane({
           )}
         </div>
         <div className="pointer-events-none">
-          <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
+          <OpponentHand playerId={playerId} layout="split" />
         </div>
       </div>
       <div className="relative z-30 flex min-h-0 min-w-0 flex-col px-1 pb-1 pt-[calc(var(--game-seat-header-height,2.25rem)+0.45rem)]">
