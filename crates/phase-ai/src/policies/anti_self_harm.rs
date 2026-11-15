@@ -853,7 +853,7 @@ fn is_deliberate_self_target_rider(effect: &&Effect) -> bool {
 }
 
 /// At a single-object target slot, refuse to spend a harmful spell on
-/// one of the AI's own permanents while that same slot still offers an
+/// a permanent the AI's team controls while that same slot still offers an
 /// opponent-controlled object. Without this the only residual signal was
 /// `score_target_object`'s `controller_delta * 2.0`; a land carries no creature
 /// value, so "Beast Within my own Forest" priced at −2.0 and was routinely
@@ -907,7 +907,7 @@ fn own_permanent_with_opponent_alternative(
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
 }
 
-/// Refuse an ACTIVATION whose every legal target is a permanent the AI itself
+/// Refuse an ACTIVATION whose every legal target is a permanent the AI's team
 /// controls, and whose effect on that permanent is harmful.
 ///
 /// # Activation only, deliberately
@@ -1017,8 +1017,8 @@ fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<
             TargetRef::Object(id) => ctx.state.objects.get(id).is_none_or(|object| {
                 players::is_opponent(ctx.state, ctx.ai_player, object.controller)
             }),
-            // CR 115.4: a player slot the AI can point somewhere other than
-            // itself is a real alternative, so the pool is not own-board-only.
+            // CR 115.4: a player slot the AI can point at an opponent is a real
+            // alternative, so the pool is not own-board-only.
             TargetRef::Player(player) => players::is_opponent(ctx.state, ctx.ai_player, *player),
         });
         if reaches_beyond_own_board {
@@ -3575,7 +3575,8 @@ mod tests {
     }
 
     /// Zombify's target is a creature card in the graveyard, not a creature on the
-    /// battlefield, so a board with no battlefield recipient does not refuse the cast.
+    /// battlefield, so its filter admitting no battlefield creature, even beside P0's own
+    /// Grizzly Bears, does not refuse the cast.
     #[test]
     fn a_reanimation_spell_is_not_refused_for_want_of_a_battlefield_recipient() {
         for (format, players) in [
