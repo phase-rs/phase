@@ -338,6 +338,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
                 },
+                scope: crate::types::ability::EffectScope::Single,
             },
         );
         let choice = AbilityDefinition::new(

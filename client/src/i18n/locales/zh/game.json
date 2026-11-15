@@ -1555,6 +1555,7 @@
     "gameOver": {
       "backToDraft": "返回轮抽",
       "backToLobby": "返回大厅",
+      "complete": "游戏结束",
       "continueRun": "继续挑战",
       "defeat": "失败",
       "draw": "平局",
@@ -2168,6 +2169,7 @@
     "fromBoosterPack": "来自 {{setCode}} 补充包",
     "fromCubeBoosterPack": "来自 Cube 补充包",
     "fromExile": "来自放逐区",
+    "fromCompanion": "来自伙伴",
     "fromSideboard": "来自备牌"
   },
   "passButton": {
@@ -2787,6 +2789,8 @@
     "commander": "指挥官",
     "commanderTitle": "指挥官：{{name}}",
     "commanderTitleTax": "指挥官：{{name}}（税：+{{tax}}）",
+    "boss": "头目",
+    "bossTitle": "头目: {{name}}",
     "companion": "行侣",
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",

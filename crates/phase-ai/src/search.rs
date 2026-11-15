@@ -1997,6 +1997,10 @@ pub fn fallback_action(
                                 pack_slot: *pack_slot,
                             }
                         }
+                        // CR 702.139a: the revealed companion is one card.
+                        OutsideGameChoiceSource::Companion { .. } => {
+                            OutsideGameSelection::Companion
+                        }
                     })
                 })
                 .take(*count)
@@ -9299,6 +9303,7 @@ mod tests {
                     },
                     target: TargetFilter::Player,
                     destination: Zone::Graveyard,
+                    position: engine::types::ability::LibraryPosition::Top,
                 },
             ),
         ];
@@ -14773,7 +14778,7 @@ mod tests {
         state.waiting_for = WaitingFor::NamedChoice {
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -14793,7 +14798,7 @@ mod tests {
         state.waiting_for = WaitingFor::NamedChoice {
             free_entry: None,
             player: P0,
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -14826,7 +14831,7 @@ mod tests {
         state.waiting_for = WaitingFor::NamedChoice {
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -17368,6 +17373,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
@@ -18382,6 +18388,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_in_exile: engine::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
+                with_entry_effect: None,
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: Vec::new(),
                 count_param: 0,

@@ -706,6 +706,8 @@
     "commander": "Commander",
     "commanderTitle": "Commander: {{name}}",
     "commanderTitleTax": "Commander: {{name}} (Tax: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
@@ -1274,6 +1276,7 @@
       "draw": "DRAW",
       "victory": "VICTORY",
       "defeat": "DEFEAT",
+      "complete": "GAME OVER",
       "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turns: {{count}}",
       "duration": "Duration: {{time}}",
@@ -2692,6 +2695,7 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
+    "fromCompanion": "From companion",
     "fromSideboard": "From sideboard",
     "fromBoosterPack": "From {{setCode}} booster pack",
     "fromCubeBoosterPack": "From a Cube booster pack"

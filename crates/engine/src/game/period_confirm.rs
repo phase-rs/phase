@@ -37,7 +37,8 @@ use crate::types::ability::{ObjectSelectionCardinality, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntryKind, WaitingFor, YieldTarget,
+    CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntry, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::ManaSourceSelection;
@@ -404,7 +405,7 @@ fn renamed(
 
 /// CR 603.2c: one occurrence of a triggered ability, by its source and text.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Occurrence {
+pub(crate) struct Occurrence {
     source_name: String,
     description: Option<String>,
 }
@@ -420,20 +421,25 @@ impl Occurrence {
 
 /// What a replayed cycle ends on: the trigger occurrence on top, or the kind of entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TopOfStack {
+pub(crate) enum TopOfStack {
     Trigger(Occurrence),
     Other(std::mem::Discriminant<StackEntryKind>),
 }
 
-fn top_of_stack(state: &GameState) -> Option<TopOfStack> {
-    state.stack.back().map(|entry| match &entry.kind {
+/// A stack entry's identity: the trigger occurrence it is, or its kind of entry.
+pub(crate) fn entry_identity(entry: &StackEntry) -> TopOfStack {
+    match &entry.kind {
         StackEntryKind::TriggeredAbility {
             source_name,
             description,
             ..
         } => TopOfStack::Trigger(Occurrence::of(source_name, description.as_ref())),
         other => TopOfStack::Other(std::mem::discriminant(other)),
-    })
+    }
+}
+
+fn top_of_stack(state: &GameState) -> Option<TopOfStack> {
+    state.stack.back().map(entry_identity)
 }
 
 /// Where a cycle must end: priority back with `holder`, with the frame's top of stack and at least
@@ -2175,22 +2181,57 @@ mod tests {
         state
     }
 
-    /// The first priority frame of a mandatory loop at which the recurrence span is known,
-    /// with the offers before it declined (CR 732.2a), and that span.
+    /// Where [`first_mandatory_recurrence`] reads a mandatory loop's frame.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FrameAt {
+        /// The frame the engine offers the shortcut from (CR 732.2a), restored to the proposer's
+        /// priority.
+        Offer,
+        /// A priority frame play reaches after declining the offers before it (CR 732.2a).
+        AfterDecline,
+    }
+
+    /// The first frame of a mandatory loop, read `at`, at which the recurrence span is known, with
+    /// the offers before it declined; that span; and the counted take of the latest offer at or
+    /// before the frame.
     fn first_mandatory_recurrence(
         runner: &mut crate::game::scenario::GameRunner,
-    ) -> (GameState, NamedSpan) {
+        at: FrameAt,
+    ) -> (
+        GameState,
+        NamedSpan,
+        Option<crate::analysis::loop_check::CountedTake>,
+    ) {
+        let mut offered = None;
         for _ in 0..80 {
             let state = runner.state();
             match &state.waiting_for {
-                WaitingFor::LoopShortcut { .. } => {
+                WaitingFor::LoopShortcut {
+                    proposer,
+                    counted_take,
+                    ..
+                } => {
+                    offered = Some(*counted_take);
+                    let mut frame = state.clone();
+                    frame.waiting_for = WaitingFor::Priority { player: *proposer };
+                    if at == FrameAt::Offer {
+                        if let Some(span) =
+                            crate::game::play_trace::mandatory_recurrence_span(&frame)
+                        {
+                            return (frame, span, offered);
+                        }
+                    }
                     runner
                         .act(GameAction::DeclineShortcut)
                         .expect("decline the offer");
                 }
                 WaitingFor::Priority { .. } => {
-                    if let Some(span) = crate::game::play_trace::mandatory_recurrence_span(state) {
-                        return (state.clone(), span);
+                    if at == FrameAt::AfterDecline {
+                        if let Some(span) =
+                            crate::game::play_trace::mandatory_recurrence_span(state)
+                        {
+                            return (state.clone(), span, offered);
+                        }
                     }
                     runner.act(GameAction::PassPriority).expect("pass priority");
                 }
@@ -2212,7 +2253,7 @@ mod tests {
                 other => panic!("unexpected prompt {}", other.variant_name()),
             }
         }
-        panic!("the loop never exposed a mandatory recurrence span at a priority frame");
+        panic!("the loop never exposed a mandatory recurrence span at a frame read there");
     }
 
     /// CR 104.4b + CR 732.4: the MANDATORY-REPLAY caller over real damage history.
@@ -2276,7 +2317,7 @@ mod tests {
         runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
         let _ = runner.cast(shock).target_object(polyraptor).commit();
 
-        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        let (frame, span, _) = first_mandatory_recurrence(&mut runner, FrameAt::AfterDecline);
         let rows = frame.damage_dealt_this_turn.len();
         assert!(
             rows >= 3,
@@ -2315,17 +2356,19 @@ mod tests {
     /// returned Animate Dead reanimates the Dragon, whose entry exiles it again: a loop with no
     /// choice in it, above the Sniper's trigger, which it never reaches (CR 405.5), and in
     /// which the Warden gains life each cycle. P1's Mountain and Lightning Bolt are the out
-    /// that turns the loop into an offer (CR 732.5). The offer is declined (CR 732.2a) so play
-    /// reaches a priority frame inside the loop. The counters are reset there, then
-    /// `mandatory_period_holds` replays the span and settles each replayed frame against
-    /// `take_boundary`.
+    /// that turns the loop into an offer (CR 732.5). The frame read is the one the engine offers
+    /// the shortcut from (CR 732.2a), with Animate Dead's enters trigger on top, restored to the
+    /// proposer's priority. The counters are reset there, then `mandatory_period_holds`
+    /// replays the span and settles each replayed frame against `take_boundary`.
     ///
-    /// What it shows: the period holds and the take PERFORMS, so a replayed settle frame
-    /// recurred against the boundary; the buried trigger owns the damage event and reads its
-    /// recipient, so the replay's projections read the damage history play wrote; and they
+    /// What it shows: the engine's offer carries a performing take; the period holds and the
+    /// take PERFORMS, so a replayed settle frame recurred against the boundary; Soul Warden
+    /// resolves twice each period (CR 603.6a); the buried trigger owns the damage event and reads
+    /// its recipient, so the replay's projections read the damage history play wrote; and they
     /// read it at most once per projection.
     #[test]
     fn mandatory_replay_performs_its_take_over_a_buried_damage_recipient_reader() {
+        use crate::analysis::loop_check::CountedTake;
         use crate::analysis::resource::{
             loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
         };
@@ -2452,10 +2495,15 @@ mod tests {
         assert_eq!(runner.state().waiting_for.acting_players(), vec![p0]);
         drop(runner.cast(murder).target_object(dragon).commit());
 
-        let (frame, span) = first_mandatory_recurrence(&mut runner);
+        let (frame, span, offered) = first_mandatory_recurrence(&mut runner, FrameAt::Offer);
         assert!(
             reader_on_stack(&frame),
             "reach guard: the Sniper's trigger is still buried under the loop"
+        );
+        assert_eq!(
+            offered,
+            Some(CountedTake::Performs),
+            "the engine's offer carries a performing take"
         );
         reset_loop_detect_cost();
         DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
@@ -2464,8 +2512,20 @@ mod tests {
         let projections = loop_detect_cost().projected_clones as usize;
         assert_eq!(
             held.map(|held| held.counted_take),
-            Some(crate::analysis::loop_check::CountedTake::Performs),
+            Some(CountedTake::Performs),
             "the period holds and a replayed settle frame recurs against the boundary"
+        );
+        // Replayed after the measured window so its projections are not counted above.
+        let period = replay_period(&frame, span, None).expect("the period replays");
+        assert_eq!(
+            period
+                .performed
+                .iter()
+                .filter(|name| *name == "Soul Warden")
+                .count(),
+            2,
+            "CR 603.6a: the Warden sees the returning Bears and the Dragon: {:?}",
+            period.performed
         );
         assert!(
             scans >= rows,
