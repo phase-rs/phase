@@ -37546,6 +37546,12 @@ impl GameState {
                     exploiter_incarnation: Some(incarnation),
                     ..
                 } => f(*exploiter, incarnation),
+                // CR 509.3c + CR 509.3e + CR 400.7: the blocked attacker's stamp
+                // is the same class of pin as a tap stamp.
+                GameEvent::AttackerBecameBlocked {
+                    attacker,
+                    attacker_incarnation: Some(incarnation),
+                } => f(*attacker, incarnation),
                 // Exhaustive on purpose: a new event that names an incarnation must
                 // decide here whether loop normalization renumbers it.
                 GameEvent::PermanentTapped {
@@ -37553,6 +37559,10 @@ impl GameState {
                 }
                 | GameEvent::DamageDealt {
                     source_incarnation: None,
+                    ..
+                }
+                | GameEvent::AttackerBecameBlocked {
+                    attacker_incarnation: None,
                     ..
                 }
                 | GameEvent::ZoneChanged { .. }
@@ -37620,7 +37630,6 @@ impl GameState {
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }
@@ -37987,7 +37996,7 @@ impl GameState {
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlocked { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }
@@ -38163,7 +38172,7 @@ impl GameState {
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlocked { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }

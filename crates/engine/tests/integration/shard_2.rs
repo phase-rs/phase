@@ -136,6 +136,7 @@ mod blessed_orator_other_anthem;
 mod block_capacities_blocker_prompt;
 mod block_pairing_relations;
 mod block_trigger_cardinality;
+mod blocked_by_at_least_threshold;
 mod blocked_history_primitive;
 mod blocked_status_filter;
 mod bolas_citadel_regression;

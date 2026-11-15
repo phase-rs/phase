@@ -40823,6 +40823,20 @@ impl CoinFlipRun {
     }
 }
 
+/// CR 509.3e: "becomes blocked by `minimum` or more <blocker>" — the threshold
+/// of [`TriggerDefinition::blocker_count`]. Only the "at least N" form is
+/// representable: every printed card uses it, and an "exactly"/"or fewer" form
+/// would need blocker-removal crossings. `minimum == 0` is never produced by
+/// the parser, and the matcher treats it as never firing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerCountThreshold {
+    pub minimum: u32,
+    /// The blockers that count. `None` counts every blocker (all blockers are
+    /// creatures, CR 509.1a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<TargetFilter>,
+}
+
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
 /// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
 /// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE
@@ -40960,6 +40974,14 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
+    /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
+    /// When `Some`, the trigger fires once for an attacker whose matching
+    /// blockers reach the threshold: when blockers are declared, or (for an
+    /// unfiltered threshold only) when an effect adds a blocker. Matched at the
+    /// event, never rechecked on resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_count: Option<BlockerCountThreshold>,
     /// Typed player actions for PlayerPerformedAction trigger mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_actions: Option<Vec<PlayerActionKind>>,
@@ -41887,6 +41909,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,
@@ -48247,6 +48270,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,
