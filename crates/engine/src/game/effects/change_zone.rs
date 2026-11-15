@@ -685,6 +685,16 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
+fn target_filter_contains_self_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_self_ref)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -707,6 +717,22 @@ pub(super) fn publish_finalized_owner_library_subjects(
             if let Some(player) = change_zone_all_player_scope(state, ability, target) {
                 participants.push(player);
             }
+        }
+    }
+    // CR 701.24c + CR 400.3: a compound "this creature and target …" move can
+    // resolve after the source has left. The source object is then absent from
+    // the moved set, but its owner is still an affected owner and must be
+    // captured for the terminal shuffle.
+    if matches!(
+        &ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target,
+            ..
+        } if target_filter_contains_self_ref(target)
+    ) {
+        if let Some(owner) = super::source_owner(state, ability) {
+            participants.push(owner);
         }
     }
     participants.sort_unstable();
@@ -770,9 +796,6 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
-/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
-/// effect's origin, or for an event referent the zone the trigger event put it
-/// in.
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -843,9 +866,16 @@ fn zone_move_member_cannot_move(
         return true;
     };
     // CR 114.5: Emblems cannot be moved between zones.
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
+    // so a zone-change effect cannot move it. The phasing effect itself uses
+    // `PhaseOut`/`PhaseIn`, never this boundary. Without this guard Fblthp,
+    // Impossibly Lost's "owner shuffles him into their library" would move a
+    // phased-out Fblthp off the battlefield even though it cannot be affected.
     // CR 400.7 + CR 603.7c: If an origin zone is specified and the object is
     // no longer in that zone, the zone change is impossible — skip silently.
-    object.is_emblem || expected_origin.is_some_and(|zone| object.zone != zone)
+    object.is_emblem
+        || object.is_phased_out_permanent()
+        || expected_origin.is_some_and(|zone| object.zone != zone)
 }
 
 /// The bound members of an untargeted context-referent move and the zone each
@@ -1314,10 +1344,14 @@ pub fn resolve(
         enters_modified_if: effect_enters_modified_if.as_ref(),
     };
 
-    if !targeted_objects.is_empty() {
-        // CR 701.24c-e + CR 400.3: freeze the prospective owner population
-        // after target legality is known and before any replacement can redirect
-        // a member away from the library.
+    // CR 701.24c-e + CR 400.3: freeze the prospective owner population after
+    // target legality is known and before any replacement can redirect a member
+    // away from the library. A stale SelfRef still names a known owner (the
+    // source's live-or-LKI owner) even when it contributes no movable objects,
+    // so the owner's shuffle survives a source that left in response.
+    let stale_self_ref_owner = matches!(target_filter, TargetFilter::SelfRef)
+        && super::source_owner(state, ability).is_some();
+    if !targeted_objects.is_empty() || stale_self_ref_owner {
         publish_finalized_owner_library_subjects(state, ability, &targeted_objects);
     }
 

@@ -703,6 +703,14 @@ fn resolve_revealing_player(
 ) -> Option<PlayerId> {
     match player_filter {
         TargetFilter::Controller => Some(ability.controller),
+        // CR 608.2c + CR 400.3: "This creature's owner shuffles it into their
+        // library. If that player does, they reveal …" — parser lowering binds
+        // that third-person anaphor to `Owner`, the same owner the terminal
+        // Shuffle resolves. Use the shared live-or-LKI source-owner authority so
+        // a nonowner activator never reveals from their own library.
+        TargetFilter::Owner => {
+            Some(super::source_owner(state, ability).unwrap_or(ability.controller))
+        }
         TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
                 .unwrap_or(ability.controller),
