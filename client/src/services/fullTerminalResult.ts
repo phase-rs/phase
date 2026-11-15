@@ -61,8 +61,8 @@ function isObjectId(value: unknown): boolean {
 function isTerminalAbilityRecord(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
   return Array.isArray(value.targets)
-    && (value.sub_ability === undefined || isTerminalAbilityRecord(value.sub_ability))
-    && (value.else_ability === undefined || isTerminalAbilityRecord(value.else_ability))
+    && (value.sub_ability === undefined || value.sub_ability === null || isTerminalAbilityRecord(value.sub_ability))
+    && (value.else_ability === undefined || value.else_ability === null || isTerminalAbilityRecord(value.else_ability))
     && (value.description === undefined || typeof value.description === "string")
     && (value.selected_mode_labels === undefined
       || (Array.isArray(value.selected_mode_labels)

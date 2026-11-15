@@ -1472,6 +1472,55 @@ describe("WebSocketAdapter", () => {
       nativeAdapter.dispose();
     });
 
+    it("retains a delivery whose stack ability carries the serializer's null sub_ability", async () => {
+      // GH #9086: Rust emits `sub_ability: null` for a leaf ResolvedAbility
+      // (no skip_serializing_if), e.g. a Lightning Bolt left on the stack when
+      // the opponent concedes. The chain below ends in null, as on the wire.
+      const delivery: FullTerminalDelivery = {
+        ...nativeDelivery,
+        finalView: {
+          players: [{ id: 0, life: 20 }],
+          objects: {},
+          battlefield: [],
+          stack: [{
+            id: 10,
+            source_id: 101,
+            controller: 0,
+            kind: {
+              type: "Spell",
+              data: {
+                card_id: 101,
+                ability: {
+                  targets: [{ Player: 1 }],
+                  source_card_id: 101,
+                  sub_ability: { targets: [], sub_ability: null },
+                },
+              },
+            },
+          }],
+          exile: [],
+          turn_number: 1,
+          active_player: 0,
+          priority_player: 0,
+          phase: "PreCombatMain",
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+      };
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery },
+      }));
+
+      await vi.waitFor(() => {
+        expect(terminalStore.commit).toHaveBeenCalledWith(delivery);
+        expect(events).toContainEqual({ type: "terminalDelivery", delivery });
+      });
+      expect(events.map((event) => event.type)).not.toContain("terminalUnavailable");
+      nativeAdapter.dispose();
+    });
+
     it.each([
       ["an absent data payload", { type: "TerminalResult" }],
       ["a null data payload", { type: "TerminalResult", data: null }],

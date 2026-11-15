@@ -173,6 +173,51 @@ describe("full terminal result persistence", () => {
         kind: { type: "TriggeredAbility", data: { source_id: 10, ability: { targets: [] } } },
       }],
     })).toBe(true);
+    // Regression for GH #9086: Rust serializes leaf abilities with `sub_ability: null`
+    // (since `ResolvedAbility.sub_ability` has `#[serde(default)]` without
+    // `skip_serializing_if`). The admission guard must accept `null` as well as
+    // `undefined` for `sub_ability` and `else_ability`.
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{
+        ...terminalStackEntry,
+        kind: {
+          type: "TriggeredAbility",
+          data: { source_id: 10, ability: { targets: [], sub_ability: null } },
+        },
+      }],
+    })).toBe(true);
+    // Nested chain ending in null should also be accepted.
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{
+        ...terminalStackEntry,
+        kind: {
+          type: "TriggeredAbility",
+          data: {
+            source_id: 10,
+            ability: {
+              targets: [],
+              sub_ability: { targets: [], sub_ability: null },
+            },
+          },
+        },
+      }],
+    })).toBe(true);
+    // `else_ability: null` should also be accepted for consistency.
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{
+        ...terminalStackEntry,
+        kind: {
+          type: "TriggeredAbility",
+          data: {
+            source_id: 10,
+            ability: { targets: [], else_ability: null },
+          },
+        },
+      }],
+    })).toBe(true);
     expect(isValidFinalView({
       ...finalView,
       stack: [{ ...terminalStackEntry, kind: { type: "UnknownKind", data: {} } }],
