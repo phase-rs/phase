@@ -8601,6 +8601,35 @@ where
             let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
                 read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            } else if let Some(incarnation) = ability
+                .and_then(|a| a.source_incarnation)
+                // CR 400.7 + CR 602.2a: a snapshot at the captured incarnation
+                // proves the source LEFT that incarnation (a departure from the
+                // battlefield, exile or stack). A source that paid its own move
+                // cost has `source_incarnation` stamped AFTER the cost, so it
+                // has no snapshot there and keeps its live read — the Scavenge
+                // shape, a graveyard ability reading the live card.
+                .filter(|incarnation| {
+                    state
+                        .lki_by_incarnation
+                        .get(&ctx.source)
+                        .is_some_and(|history| history.contains_key(incarnation))
+                })
+            {
+                // CR 608.2h: an activated ability's source is read from the
+                // incarnation that activated it. Grenzo, Dungeon Warden's
+                // "power less than or equal to Grenzo's power" is activated on
+                // the battlefield; if Grenzo leaves in response, the moved card
+                // is compared against the power it last had there, not the base
+                // P/T of the graveyard card that now occupies the storage id.
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    ctx.source,
+                    Some(incarnation),
+                    &obj_extract,
+                    &lki_extract,
+                )
+                .unwrap_or(0)
             } else {
                 state
                     .objects

@@ -3523,8 +3523,12 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::DamagePrevented { amount, .. } => Some(*amount as i32),
         GameEvent::LifeChanged { amount, .. } => Some(amount.abs()),
         GameEvent::CardsDrawn { count, .. } => Some(*count as i32),
-        GameEvent::CounterAdded { count, .. } => Some(*count as i32),
-        GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
+        // CR 122.1 + CR 107.1: counter counts are `u32` with no rules maximum;
+        // the event keeps the true count and "that many" saturates at
+        // `i32::MAX` rather than wrapping negative.
+        GameEvent::CounterAdded { count, .. } | GameEvent::CounterRemoved { count, .. } => {
+            Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
+        }
         GameEvent::Discarded { .. } => Some(1),
         // CR 603.2c: one milled card per event.
         GameEvent::Milled { .. } => Some(1),
@@ -3688,9 +3692,15 @@ fn stack_ability_matches_filter(
                 return false;
             }
             tf.properties.iter().all(|property| match property {
-                FilterProp::HasSingleTarget => entry
-                    .ability()
-                    .is_some_and(|ability| ability.targets.len() == 1),
+                // CR 115.9a / CR 115.9c: "with a single target" counts what was
+                // chosen as a target when the entry was put on the stack, as the
+                // requirement says, not what it holds (CR 115.10a). Shared with
+                // the spell arm (`single_target_count`).
+                FilterProp::HasSingleTarget => entry.ability().is_some_and(|ability| {
+                    super::filter::single_target_count(filter).is_some_and(|count| {
+                        count.admits(&super::ability_utils::declared_targets_in_chain(ability))
+                    })
+                }),
                 FilterProp::InZone { zone } => *zone == Zone::Stack,
                 _ => true,
             })
@@ -9771,5 +9781,41 @@ mod parser_oracle_effect_tests {
         for id in [wrong, creature, battlefield] {
             assert!(!legal.contains(&TargetRef::Object(id)));
         }
+    }
+}
+
+#[cfg(test)]
+mod counter_event_amount_tests {
+    use super::extract_amount_from_event;
+    use crate::types::counter::CounterType;
+    use crate::types::events::GameEvent;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    fn removed(count: u32) -> GameEvent {
+        GameEvent::CounterRemoved {
+            object_id: ObjectId(1),
+            counter_type: CounterType::Generic("charge".to_string()),
+            count,
+        }
+    }
+
+    fn added(count: u32) -> GameEvent {
+        GameEvent::CounterAdded {
+            object_id: ObjectId(1),
+            counter_type: CounterType::Plus1Plus1,
+            count,
+            actor: PlayerId(0),
+        }
+    }
+
+    /// CR 122.1 + CR 107.1: "that many" over a counter event above `i32::MAX`
+    /// is `i32::MAX`, never a wrapped negative amount.
+    #[test]
+    fn counter_event_amounts_saturate_at_i32_max() {
+        assert_eq!(extract_amount_from_event(&removed(1 << 31)), Some(i32::MAX));
+        assert_eq!(extract_amount_from_event(&added(u32::MAX)), Some(i32::MAX));
+        assert_eq!(extract_amount_from_event(&removed(7)), Some(7));
+        assert_eq!(extract_amount_from_event(&added(7)), Some(7));
     }
 }
