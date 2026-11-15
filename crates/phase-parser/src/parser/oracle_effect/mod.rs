@@ -7064,6 +7064,8 @@ fn try_parse_you_cant_attack_targeted_player_prohibition(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),

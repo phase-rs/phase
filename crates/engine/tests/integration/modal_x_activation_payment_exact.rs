@@ -19,10 +19,11 @@
 //!   0" is not stamped into the modal funnel's prompt), so only the over-max
 //!   half is locked; see `marath_modal_x_over_max_rejected_at_announcement`.
 //!
-//! CR 107.3a (X bound to the effect) + CR 601.2f/601.2h (X announced as part
-//! of cost determination, before payment) + CR 602.2b (activation announcement
-//! order: modes, then X, then targets) + CR 602.2a (activation cost paid once)
-//! + CR 601.2c (target announcement; vacuous for the untargeted life mode).
+//! CR 107.3a (X bound to the effect) + CR 601.2b + CR 602.2b (X announced
+//! before the cost is paid) + CR 602.2b (activation announcement order:
+//! modes, then X, then targets) + CR 601.2h + CR 602.2b (the activation's
+//! total cost paid once) + CR 601.2c (target announcement; vacuous for the
+//! untargeted life mode).
 //!
 //! Oracle texts (verbatim):
 //! - Marath, Will of the Wild: "Marath enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.\n{X}, Remove X +1/+1 counters from Marath: Choose one \u{2014}\n\u{2022} Put X +1/+1 counters on target creature. X can't be 0.\n\u{2022} Marath deals X damage to any target. X can't be 0.\n\u{2022} Create an X/X green Elemental creature token. X can't be 0."
@@ -148,7 +149,10 @@ fn marath_modal_damage_x2_deducts_exactly_x() {
             runner.waiting_for_kind()
         );
     };
-    assert_eq!(player, P0, "CR 601.2f: the activator announces X");
+    assert_eq!(
+        player, P0,
+        "CR 601.2b + CR 602.2b: the activator announces X"
+    );
     runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("announcing X=2 must succeed");
@@ -252,7 +256,10 @@ fn atalya_modal_life_x2_deducts_exactly_x() {
             runner.waiting_for_kind()
         );
     };
-    assert_eq!(player, P0, "CR 601.2f: the activator announces X");
+    assert_eq!(
+        player, P0,
+        "CR 601.2b + CR 602.2b: the activator announces X"
+    );
     runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("announcing X=2 must succeed");
@@ -324,7 +331,10 @@ fn marath_modal_x_over_max_rejected_at_announcement() {
             runner.waiting_for_kind()
         );
     };
-    assert_eq!(player, P0, "CR 601.2f: the activator announces X");
+    assert_eq!(
+        player, P0,
+        "CR 601.2b + CR 602.2b: the activator announces X"
+    );
     assert_eq!(
         max, 6,
         "the prompt maximum tracks the counter leg (6 counters < 10 pool)"

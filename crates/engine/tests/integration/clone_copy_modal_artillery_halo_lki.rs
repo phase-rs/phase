@@ -257,7 +257,10 @@ fn run_clone_marath_modal_halo() -> (i32, i32) {
             runner.waiting_for_kind()
         );
     };
-    assert_eq!(player, P0, "CR 601.2f: the activator announces X");
+    assert_eq!(
+        player, P0,
+        "CR 601.2b + CR 602.2b: the activator announces X"
+    );
     runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("announcing X=2 must succeed");

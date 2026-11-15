@@ -853,6 +853,7 @@ impl MatchedProtectionQuality {
                     CoreType::Conspiracy => 14,
                     CoreType::Boss => 15,
                     CoreType::Event => 16,
+                    CoreType::Vanguard => 17,
                 },
                 1,
             ),
@@ -925,6 +926,7 @@ impl MatchedProtectionQuality {
                 14 => Some(MatchedProtectionQuality::CardType(CoreType::Conspiracy)),
                 15 => Some(MatchedProtectionQuality::CardType(CoreType::Boss)),
                 16 => Some(MatchedProtectionQuality::CardType(CoreType::Event)),
+                17 => Some(MatchedProtectionQuality::CardType(CoreType::Vanguard)),
                 _ => None,
             },
             2 => Some(MatchedProtectionQuality::CardSubtype(minor)),
@@ -5480,6 +5482,7 @@ mod tests {
             MatchedProtectionQuality::Color(ManaColor::Green),
             MatchedProtectionQuality::CardType(CoreType::Artifact),
             MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardType(CoreType::Vanguard),
             MatchedProtectionQuality::CardSubtype(0),
             MatchedProtectionQuality::CardSubtype(u64::MAX),
             MatchedProtectionQuality::Colorlessness(ProtectionColorlessness::Multicolored),
@@ -5507,7 +5510,7 @@ mod tests {
         );
         assert_eq!(MatchedProtectionQuality::from_replacement_parts(0, 5), None);
         assert_eq!(
-            MatchedProtectionQuality::from_replacement_parts(1, 17),
+            MatchedProtectionQuality::from_replacement_parts(1, 18),
             None
         );
         assert_eq!(MatchedProtectionQuality::from_replacement_parts(4, 1), None);
