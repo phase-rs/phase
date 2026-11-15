@@ -11,9 +11,10 @@ use crate::types::ability::{
     CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
     EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
+    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -1042,6 +1043,48 @@ fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
                 .else_ability
                 .as_deref()
                 .is_some_and(ability_tree_creates_tokens)
+    }
+}
+
+/// CR 614.1a + CR 614.6 + CR 608.2h: bind a token-choice substitution's branch
+/// templates to the creation it replaces (Jinnie Fay: "you may instead create
+/// that many …"). Every `Effect::Token` reached through the same descend set as
+/// [`ability_tree_creates_tokens`] keeps the creating instruction's tapped entry
+/// (`instruction_tapped`), and a count that is exactly "that many"
+/// (`EventContextAmount`) becomes `that_many`, the number of tokens replaced,
+/// fixed when the replacement applies. Any other count is left as authored.
+fn bind_substitute_token_entry(
+    def: &mut AbilityDefinition,
+    instruction_tapped: bool,
+    that_many: i32,
+) {
+    match &mut *def.effect {
+        Effect::Token { tapped, count, .. } => {
+            *tapped |= instruction_tapped;
+            if matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            ) {
+                *count = QuantityExpr::Fixed { value: that_many };
+            }
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                bind_substitute_token_entry(branch, instruction_tapped, that_many);
+            }
+        }
+        _ => {}
+    }
+    for child in [
+        def.sub_ability.as_deref_mut(),
+        def.else_ability.as_deref_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        bind_substitute_token_entry(child, instruction_tapped, that_many);
     }
 }
 
@@ -5409,9 +5452,15 @@ fn create_token_applier(
         if let Some(substitute) = substitute {
             // CR 201.5a: the funnel carries a granted substitute's granter stamp.
             let ability = build_resolved_from_def(&substitute, rid.source, source_controller);
-            if let Some((substitute_spec, _, _, _)) =
+            if let Some((mut substitute_spec, _, _, _)) =
                 crate::game::effects::token::resolve_token_spec(state, &ability)
             {
+                // CR 614.6 + the Divine Visitation ruling ("Anything else
+                // specified in the effect creating the token (such as tapped
+                // …) still applies"): the substitute keeps the creating
+                // instruction's tapped entry, so a batch appended after this
+                // substitution inherits it too.
+                substitute_spec.tapped |= spec.tapped;
                 spec = Box::new(substitute_spec);
             }
         }
@@ -5439,9 +5488,12 @@ fn create_token_applier(
             extra.controller = source_controller;
             // CR 614.1c: the added batch has its own entry state — it does not
             // inherit an `enter_tapped` override applied to the event's own
-            // batch. The appended spec's own `tapped` field (from the parser)
-            // governs it, and a later ETB-tap replacement that matches it still
+            // batch. CR 614.6: the appended spec carries the creating
+            // instruction's `tapped` — the modified event keeps everything else
+            // the creating effect specified (Chatterfang / Peregrin Took
+            // rulings) — and a later ETB-tap replacement that matches it still
             // applies to it as part of the event.
+            extra.tapped |= spec.tapped;
             push_appended_token_batch(
                 &mut appended,
                 &applied,
@@ -5480,6 +5532,9 @@ fn create_token_applier(
                 }
                 extra.source_id = rid.source;
                 extra.controller = source_controller;
+                // CR 614.1c + CR 614.6: as for an added batch above — its own
+                // entry state, carrying the creating instruction's `tapped`.
+                extra.tapped |= spec.tapped;
                 push_appended_token_batch(
                     &mut appended,
                     &applied,
@@ -14283,7 +14338,7 @@ fn continue_replacement_impl(
             }
         };
 
-        let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
+        let (branch, mut post_effect) = if chosen_index == 0 && paid_may_cost {
             // CR 614.1c: Accept path — walk past modifier-only effects (already
             // applied to ProposedEvent by event_modifiers_for_ability) to find the
             // first non-modifier as the real post-replacement work. Covers composed
@@ -14343,11 +14398,21 @@ fn continue_replacement_impl(
         // re-entry, but this gate is the sole stamp site for
         // `post_replacement_token_substitution_count` (B2's "that many" count) —
         // removing it as "redundant" would silently zero the copy count.
-        if let (ProposedEvent::CreateToken { applied, .. }, Some(def)) =
-            (&proposed, post_effect.as_deref())
+        if let (ProposedEvent::CreateToken { applied, spec, .. }, Some(def)) =
+            (&proposed, post_effect.as_deref_mut())
         {
             if is_token_replacement_choice(def) {
                 state.post_replacement_token_choice_applied = Some(applied.clone());
+                // CR 614.6 + CR 608.2h + the Jinnie Fay ruling ("Anything else
+                // specified in the effect creating the tokens (such as tapped
+                // …) still applies"): the chosen branch creates "that many" —
+                // the tokens this replacement replaces — with the creating
+                // instruction's tapped entry. Both are bound into this
+                // continuation's own template, so neither can reach any other
+                // "that many" of the resolution.
+                let that_many =
+                    u32_to_i32_saturating(token_count_affected_by(state, &proposed, rid, registry));
+                bind_substitute_token_entry(def, spec.tapped, that_many);
             } else if is_copy_token_substitution(def) {
                 // CR 614.1a + CR 616.1: Moonlit-class copy substitution. The
                 // continuation inherits this event's applied set (already carries
