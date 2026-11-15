@@ -35,7 +35,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -1747,7 +1747,7 @@ fn apply_action_boundary_core(
     // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
     // Reaching here with something to realize means the action settled WITHOUT running
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
-    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
     // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
     // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
@@ -2377,6 +2377,7 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
     if recovered_terminal_rest {
@@ -2386,7 +2387,6 @@ pub(crate) fn finalize_persisted_restore(
     // publishing it itself. Synchronize that wait before the one display
     // finalization below.
     finalize_rules_state(state);
-    restore_engine_derived_retarget_prompts(state)?;
     finalize_display_state(state);
     Ok(())
 }
@@ -2394,33 +2394,46 @@ pub(crate) fn finalize_persisted_restore(
 /// CR 707.10c + CR 115.7d: re-derive the engine-owned parts of a parked
 /// retarget prompt on the restored board before it is published — the copy
 /// target walk (mode, replayed picks, offered targets and keep permissions)
-/// and a `RetargetChoice`'s per-position `keep_is_distinct`.
+/// and every derived field of a `RetargetChoice`.
 fn restore_engine_derived_retarget_prompts(
     state: &mut GameState,
 ) -> Result<(), PersistedRestoreError> {
     effects::copy_choice::restore_copy_target_walk(state)?;
     if let WaitingFor::RetargetChoice {
+        player,
         stack_entry_index,
-        slots,
-        keep_is_distinct,
+        scope,
         ..
-    } = &state.waiting_for
+    } = state.waiting_for.clone()
     {
-        let recomputed = state
-            .stack
-            .get(*stack_entry_index)
-            .and_then(|entry| entry.ability())
-            .map(|ability| {
-                crate::game::ability_utils::retarget_keep_is_distinct(state, ability, slots)
-            })
-            .unwrap_or_default();
-        if recomputed != *keep_is_distinct {
-            if let WaitingFor::RetargetChoice {
-                keep_is_distinct, ..
-            } = &mut state.waiting_for
-            {
-                *keep_is_distinct = recomputed;
-            }
+        if let Some(prompt) =
+            effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
+        {
+            state.waiting_for = prompt;
+        } else {
+            let mut events = Vec::new();
+            let waiting_for = complete_retarget(state, &mut events, player, stack_entry_index)
+                .map_err(|error| {
+                    PersistedRestoreError::PrioritySettlementFailed(error.to_string())
+                })?;
+            // CR 608.2c + CR 608.2n + CR 603.3: completing the no-choice
+            // instruction also owes the ordinary resolution boundary. Its
+            // pipeline finishes the owning spell and settles the resulting
+            // trigger batch, or preserves a new continuation prompt. It makes
+            // no priority pass or decision to resolve another stack entry.
+            // Scan this same buffer so continuation events are not discarded.
+            // As in persisted terminal-rest settlement, a serialized
+            // construction recipient is not authority for exceptional priority.
+            state.pending_trigger_construction_priority_recipient = None;
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                &mut events,
+                0,
+                &waiting_for,
+                false,
+                false,
+            )
+            .map_err(|error| PersistedRestoreError::PrioritySettlementFailed(error.to_string()))?;
         }
     }
     Ok(())
@@ -10218,14 +10231,6 @@ pub(crate) fn drain_pending_cost_move_resume(
     Ok(Some(waiting_for))
 }
 
-/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
-/// for every state except a parked counter-cost root whose replacement subtree
-/// is still live: `resume_resolution_frames` advances one top frame per pass,
-/// so a subtree several frames deep needs several, and the root resumes in the
-/// pass that retires the last of it (a due root resumes mid-pass through
-/// `resume_due_counter_cost_root`; the cost-move drain admits it at
-/// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
-/// the loop ends.
 /// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
 /// instruction may resume at the common boundary; a cast or activation paused
 /// on an unrelated choice keeps its existing owner.
@@ -10272,6 +10277,19 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
     }
 }
 
+/// CR 605.3b + CR 616.1 + CR 608.2c: the common priority boundary. One pass
+/// for every state except two. First, a parked counter-cost root whose
+/// replacement subtree is still live: `resume_resolution_frames` advances one
+/// top frame per pass, so a subtree several frames deep needs several, and the
+/// root resumes in the pass that retires the last of it (a due root resumes
+/// mid-pass through `resume_due_counter_cost_root`; the cost-move drain admits
+/// it at `PriorityBoundary`). Second (CR 117.2e + CR 614.6), a pass that leaves
+/// a copy owner or a post-replacement drain on top at priority: a substitute's
+/// retired drain or completed inner copy owner exposed it, and the work it
+/// belongs to is unfinished (for a copy owner, the ability whose creation was
+/// replaced is still resolving). That repeat follows the whole pass, so the
+/// pass's entry commits (CR 614.12a) land before the exposed owner completes.
+/// A repeat needs the position to strictly decrease, so the loop ends.
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -10280,8 +10298,20 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = SubtreePosition::at(&state.resolution_stack);
         resume_pending_continuation_pass(state, events)?;
         let after = SubtreePosition::at(&state.resolution_stack);
+        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
+        // leaves a copy owner or a post-replacement drain on top has exposed it (a
+        // substitute's drain retired, or an inner copy owner completed). The work
+        // that frame belongs to is unfinished (for a copy owner, the ability whose
+        // creation the substitute replaced is still resolving), so no player may
+        // receive priority: pass again. The repeat follows the whole pass, so that
+        // pass's entry commits land first (CR 614.12a).
+        let exposes_resolving_owner = matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+                && !exposes_resolving_owner)
             || !after.is_strictly_inside(&before)
         {
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
@@ -14719,6 +14749,7 @@ fn apply_non_priority_pass_action(
                             *count,
                             choices,
                             &chosen,
+                            paid_cost.as_ref().map(|payment| payment.cost),
                             &mut events,
                         )?
                     }
@@ -14730,6 +14761,7 @@ fn apply_non_priority_pass_action(
                         *count,
                         choices,
                         &chosen,
+                        paid_cost.as_ref().map(|payment| payment.cost),
                         &mut events,
                     )?,
                     // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
@@ -15548,12 +15580,15 @@ fn apply_non_priority_pass_action(
             waiting_for @ WaitingFor::TributeChoice { .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
-            return engine_payment_choices::handle_tribute_choice(
+            // CR 603.3b: the resumed entry carrier can emit its committed entry
+            // inside this handler. Run the shared post-action pipeline over those
+            // events even when the boundary has no parked entry left to realize.
+            engine_payment_choices::handle_tribute_choice(
                 state,
                 waiting_for.clone(),
                 accept,
                 &mut events,
-            );
+            )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
@@ -18880,6 +18915,17 @@ fn apply_retarget(
         *stack_ability_mut = mutated;
     }
 
+    complete_retarget(state, events, player, stack_entry_index)
+}
+
+/// CR 608.2c: finish the parked instruction and resume its owning continuation,
+/// including when a restored retarget has no remaining choice to make.
+fn complete_retarget(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    player: PlayerId,
+    stack_entry_index: usize,
+) -> Result<WaitingFor, EngineError> {
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChangeTargets,
         source_id: state
@@ -19202,6 +19248,13 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
+    // occurrence is not a response, including through the legacy pool fallback.
+    if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: single-target change must choose a different target".into(),
+        ));
+    }
     let identities = crate::game::ability_utils::retarget_final_identities(
         state,
         pre,
@@ -32158,7 +32211,7 @@ mod cost_move_drain_priority_boundary_tests {
             completion: PendingCostMoveCompletion::FinishPending,
         });
         state.push_counter_removals(PendingCounterRemovalQueue {
-            remaining: vec![removal],
+            remaining: std::collections::VecDeque::from([removal]),
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(62),
             total: 1,

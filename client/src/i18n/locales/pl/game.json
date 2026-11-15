@@ -2661,6 +2661,7 @@
   },
   "outsideGame": {
     "fromExile": "Z wygnania",
+    "fromCompanion": "Z towarzysza",
     "fromSideboard": "Z zaplecza",
     "fromBoosterPack": "Z boostera {{setCode}}",
     "fromCubeBoosterPack": "Z boostera cube"

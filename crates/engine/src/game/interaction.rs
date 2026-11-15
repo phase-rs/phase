@@ -2064,7 +2064,8 @@ fn outside_selection_projection(
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
                 // CR 400.11b + CR 406.3: a single physical card each.
                 OutsideGameChoiceSource::FaceUpExile { .. }
-                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
+                | OutsideGameChoiceSource::BoosterPack { .. }
+                | OutsideGameChoiceSource::Companion { .. } => 1,
             })
         }
     });
@@ -2092,11 +2093,13 @@ fn outside_selection_projection(
                         pack_slot: *pack_slot,
                     }
                 }
+                OutsideGameChoiceSource::Companion { .. } => OutsideGameSelection::Companion,
             };
             let copies = match &choice.source {
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
                 OutsideGameChoiceSource::FaceUpExile { .. }
-                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
+                | OutsideGameChoiceSource::BoosterPack { .. }
+                | OutsideGameChoiceSource::Companion { .. } => 1,
             };
             (0..copies).map(move |_| OutsideSelectionCandidate {
                 selection: selection.clone(),
@@ -5676,6 +5679,7 @@ fn core_type_code(core_type: CoreType) -> &'static str {
         CoreType::Conspiracy => "conspiracy",
         CoreType::Boss => "boss",
         CoreType::Event => "event",
+        CoreType::Vanguard => "vanguard",
     }
 }
 
@@ -6188,6 +6192,12 @@ fn project_action_payload(
                     // its slot in the opened pack is the surfaced identity.
                     OutsideGameSelection::BoosterPack { pack_slot } => {
                         push_value_surface(surfaces, InteractionRoleCode::CandidateIndex, pack_slot)
+                    }
+                    // CR 702.139a: the revealed companion is not an in-game
+                    // object and there is at most one, so it surfaces as its
+                    // own role.
+                    OutsideGameSelection::Companion => {
+                        push_value_surface(surfaces, InteractionRoleCode::Companion, "companion")
                     }
                 }
             }
@@ -7840,6 +7850,15 @@ fn outside_selection_choices(
                         &candidate.name,
                     );
                 }
+                // CR 702.139a: identified by its role and printed name; a
+                // player has at most one revealed companion.
+                OutsideGameSelection::Companion => {
+                    push_value_surface(
+                        &mut surfaces,
+                        InteractionRoleCode::Companion,
+                        &candidate.name,
+                    );
+                }
             }
             InteractionChoice {
                 id: interaction_choice_id(interaction_id, 'w', index),
@@ -8121,7 +8140,9 @@ fn materialize_counter_response(
             selected: assignments.len().min(u32::MAX as usize) as u32,
             minimum: projection.total,
             maximum: Some(projection.total),
-            aggregate: Some(total as i32),
+            // The aggregate is an `i32` progress value; a `u32` counter total
+            // past `i32::MAX` saturates instead of wrapping negative.
+            aggregate: Some(crate::game::arithmetic::u32_to_i32_saturating(total)),
             confirmable: true,
         },
     ))
@@ -12586,5 +12607,60 @@ mod tests {
             }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod counter_cost_progress_tests {
+    use super::*;
+
+    fn distribution(
+        amounts: &[u32],
+    ) -> (
+        InteractionId,
+        CounterDistributionProjection,
+        InteractionResponse,
+    ) {
+        let interaction_id = InteractionId("t.0.0".to_string());
+        let candidates = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| CounterAssignmentCandidate {
+                object_id: ObjectId(40 + index as u64),
+                counter_type: CounterType::Plus1Plus1,
+                available: *amount,
+            })
+            .collect();
+        let assignments = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| AmountAssignment {
+                choice_id: interaction_choice_id(&interaction_id, 'a', index),
+                amount: *amount,
+            })
+            .collect();
+        let projection = CounterDistributionProjection {
+            candidates,
+            total: amounts.iter().sum(),
+        };
+        (
+            interaction_id,
+            projection,
+            InteractionResponse::AssignAmounts { assignments },
+        )
+    }
+
+    /// A remove-counter cost total above `i32::MAX` reports a saturated
+    /// aggregate, never a wrapped negative one.
+    #[test]
+    fn counter_cost_progress_aggregate_saturates() {
+        let (id, projection, response) = distribution(&[1 << 30, 1 << 30]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.minimum, 1 << 31);
+        assert_eq!(progress.aggregate, Some(i32::MAX));
+
+        let (id, projection, response) = distribution(&[3, 1]);
+        let (_, progress) = materialize_counter_response(&id, &projection, &response).unwrap();
+        assert_eq!(progress.aggregate, Some(4));
     }
 }

@@ -3124,6 +3124,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         track_exiled_by_source,
         face_down_in_exile,
         ref face_down_profile,
+        ref with_entry_effect,
         ref enter_with_counters,
         ref conditional_enter_with_counters,
         count_param,
@@ -3161,6 +3162,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // Face-down entry characteristics are public effect parameters,
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
+                // The with-entry effect is the rider's public text, not private
+                // hand info — pass it through.
+                with_entry_effect: with_entry_effect.clone(),
                 enter_with_counters: enter_with_counters.clone(),
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
@@ -4948,6 +4952,7 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.combat_status = Default::default();
     record.block_pairs.clear();
     record.co_departed.clear();
+    record.co_entered.clear();
 }
 
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {

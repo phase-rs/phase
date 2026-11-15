@@ -2661,6 +2661,7 @@
   },
   "outsideGame": {
     "fromExile": "Aus dem Exil",
+    "fromCompanion": "Als Gefährte",
     "fromSideboard": "Aus dem Sideboard",
     "fromBoosterPack": "Aus einem {{setCode}}-Booster",
     "fromCubeBoosterPack": "Aus einem Cube-Booster"

@@ -5966,6 +5966,7 @@ pub(super) fn handle_resolution_choice(
                 std::collections::HashSet::new();
             let mut pack_slots_seen: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
+            let mut companion_selections = 0usize;
             for selection in &selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -5987,7 +5988,25 @@ pub(super) fn handle_resolution_choice(
                             ));
                         }
                     }
+                    // CR 702.139a: one revealed companion per player, one card.
+                    OutsideGameSelection::Companion => {
+                        companion_selections += 1;
+                        if companion_selections > 1 {
+                            return Err(EngineError::InvalidAction(
+                                "Companion selected more than once".to_string(),
+                            ));
+                        }
+                    }
                 }
+            }
+            if companion_selections > 0
+                && !choices.iter().any(|choice| {
+                    matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                })
+            {
+                return Err(EngineError::InvalidAction(
+                    "Selected companion not in outside-game choices".to_string(),
+                ));
             }
             for (sideboard_index, requested_count) in &sideboard_counts {
                 let Some(choice) = choices.iter().find(|choice| match &choice.source {
@@ -6082,6 +6101,16 @@ pub(super) fn handle_resolution_choice(
                                 card.name
                             ))
                         })?;
+                        chosen_ids.push(object_id);
+                    }
+                    // CR 702.139a + CR 400.11b: the revealed companion is brought
+                    // into the game from outside it, and is then used up.
+                    OutsideGameSelection::Companion => {
+                        let object_id = super::companion::bring_revealed_companion_into_game(
+                            state,
+                            player,
+                            destination,
+                        )?;
                         chosen_ids.push(object_id);
                     }
                     OutsideGameSelection::FaceUpExile { object_id } => {
@@ -7074,6 +7103,7 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_in_exile,
                 face_down_profile,
+                with_entry_effect,
                 enter_with_counters,
                 conditional_enter_with_counters,
                 count_param,
@@ -7783,6 +7813,7 @@ pub(super) fn handle_resolution_choice(
                                 library_placement: None,
                                 library_shuffle,
                                 enter_attached_to: None,
+                                with_entry_effect: with_entry_effect.clone(),
                             };
                             let requests =
                                 effects::change_zone::change_zone_member_requests(&ctx, &members);
@@ -7799,6 +7830,9 @@ pub(super) fn handle_resolution_choice(
                             pending_return_result_producer,
                             own_exile_links:
                                 crate::types::game_state::OwnExileLinkSettlement::Retain,
+                            // CR 603.10 + CR 611.2e: the resumed instruction is not in hand, so a
+                            // parked later instruction is read conservatively, as on the legacy resume.
+                            entry_collector: effects::entry_occurrence_collector(state, None),
                         };
                             match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
                                 state,
@@ -7865,6 +7899,10 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
+                            // CR 611.2e + CR 614.12: the with-entry effect derived at the
+                            // instruction's resolver entry, carried across the round-trip;
+                            // never re-derived here.
+                            with_entry_effect: with_entry_effect.clone(),
                             library_placement: library_position.clone(),
                             // CR 701.24a + CR 730.3: the parked choice carries
                             // whether its position is a terminal shuffle's.
@@ -7881,7 +7919,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -7953,6 +7995,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
                                         library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
@@ -8032,6 +8075,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
                                         library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
@@ -8375,6 +8419,8 @@ pub(super) fn handle_resolution_choice(
                         track_exiled_by_source,
                         face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
+                        // CR 611.2e + CR 614.12: carried across the round-trip, never re-derived.
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: None,
                         library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                         enter_attached_to: None,
@@ -8422,7 +8468,11 @@ pub(super) fn handle_resolution_choice(
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state,
+                            &ctx,
+                            member,
+                            logical_zone_change_group.announced_members(),
+                            events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -8465,6 +8515,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
                                         library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
@@ -8517,6 +8568,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
                                         library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
@@ -11020,9 +11072,19 @@ pub(crate) fn run_batch_completion(
                 .expect("zone result completion publishes once into a live occurrence");
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
-        BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
-            effects::mill::complete_mill_delivery(state, player_id, cards, events)
-        }
+        BatchCompletion::MilledDeliveryComplete {
+            player_id,
+            cards,
+            position,
+            destination,
+        } => effects::mill::complete_mill_delivery(
+            state,
+            player_id,
+            cards,
+            position,
+            destination,
+            events,
+        ),
         BatchCompletion::HordeMillFromLossDeliveryComplete {
             player_id,
             milled,
@@ -11919,6 +11981,30 @@ pub(crate) fn run_batch_completion(
                 .iter()
                 .map(|record| record.object_id)
                 .collect();
+            // CR 608.2c: a population that paused is completed outside the producer's chain
+            // driver, which published from the events of its own slice. A following instruction
+            // that names "those creatures" reads the chain's tracked set, so the arrivals in the
+            // declared destination (a redirected move is not one) are published here, as the
+            // driver does for a population that did not pause.
+            let arrivals: Vec<_> = settled
+                .records
+                .iter()
+                .filter(|record| {
+                    state
+                        .objects
+                        .get(&record.object_id)
+                        .is_some_and(|object| object.zone == tail.destination)
+                })
+                .map(|record| {
+                    (
+                        record.object_id,
+                        effects::this_way_cause_for_zone(tail.destination),
+                    )
+                })
+                .collect();
+            if !arrivals.is_empty() {
+                effects::publish_tracked_set_with_causes(state, arrivals);
+            }
             if let Some((occurrence_id, result_id)) = tail.pending_return_result_producer {
                 effects::publish_return_result(
                     state,
@@ -15717,6 +15803,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -15830,6 +15917,7 @@ mod tests {
                     track_exiled_by_source: false,
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
+                    with_entry_effect: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,

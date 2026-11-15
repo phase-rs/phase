@@ -2661,6 +2661,7 @@
   },
   "outsideGame": {
     "fromExile": "Depuis l'exil",
+    "fromCompanion": "Depuis le compagnon",
     "fromSideboard": "Depuis la réserve",
     "fromBoosterPack": "D'un booster {{setCode}}",
     "fromCubeBoosterPack": "D'un booster du cube"

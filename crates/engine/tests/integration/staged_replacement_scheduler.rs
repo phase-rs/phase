@@ -3088,3 +3088,108 @@ fn checked_restore_rejects_a_pending_logical_slot_no_staged_member_can_settle() 
         .expect("a pending slot no staged member carries is refused at import");
     assert!(error.contains("no staged member to settle it"), "{error}");
 }
+
+const STORM_OF_SOULS: &str = "Return all creature cards from your graveyard to the battlefield. Each of them is a 1/1 Spirit with flying in addition to its other types. Exile Storm of Souls.";
+const DROGSKOL_CAVALRY: &str = "Flying\nWhenever another Spirit you control enters, you gain 2 life.\n{3}{W}: Create a 1/1 white Spirit creature token with flying.";
+const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+
+/// CR 611.2e + CR 603.10 + CR 603.6a + CR 701.8a + CR 101.4c: Storm of Souls
+/// returns Hill Giant and Metallic Mimic in ONE event ("Each of them is a 1/1
+/// Spirit with flying in addition to its other types"), a population this PR
+/// stages; the Mimic's "As this creature enters, choose a creature type" parks
+/// it. Two behaviours must meet here. The rider applies with the entry to every
+/// member that moved, also after the pause (the staged completion publishes the
+/// arrivals the following instruction reads, CR 608.2c). And Drogskol Cavalry,
+/// "Whenever another Spirit you control enters", sees each entrant as the Spirit
+/// it enters as: the population hands its entry occurrences to the post-action
+/// collector (the rider's effect exists then) instead of checking them at its
+/// own completion (#10806).
+///
+/// Revert sensitivity: without the settled-arrival publication the Giant is no
+/// Spirit; with the owner collector (no hand-off) Cavalry sees no Spirit enter
+/// and P0 gains nothing.
+#[test]
+fn a_staged_population_applies_the_with_entry_rider_and_its_observers_see_it() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cavalry = scenario
+        .add_creature_from_oracle(P0, "Drogskol Cavalry", 4, 4, DROGSKOL_CAVALRY)
+        .with_subtypes(vec!["Spirit", "Knight"])
+        .id();
+    let giant = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let mimic = scenario
+        .add_creature_to_graveyard(P0, "Metallic Mimic", 2, 1)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Shapeshifter"])
+        .from_oracle_text(METALLIC_MIMIC)
+        .id();
+    let storm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    runner.cast(storm).commit();
+    let mut paused_on_the_mimic = false;
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { .. } => {
+                paused_on_the_mimic = true;
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Spirit".to_string(),
+                    })
+                    .expect("the Mimic names Spirit");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the replacement is chosen");
+            }
+            WaitingFor::ReplacementDecisionOrder { objects, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![objects[0]],
+                    })
+                    .expect("the first held decision is made first");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes while the stack is not empty");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(
+        paused_on_the_mimic,
+        "reach guard: the Mimic's as-enters choice parked the staged population"
+    );
+    assert_eq!(zone(&runner, giant), Zone::Battlefield);
+    assert_eq!(zone(&runner, mimic), Zone::Battlefield);
+    assert_eq!(
+        zone(&runner, storm),
+        Zone::Exile,
+        "the spell's last clause ran"
+    );
+    for entrant in [giant, mimic] {
+        assert!(
+            runner.state().objects[&entrant]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Spirit"),
+            "{entrant:?} enters as a Spirit"
+        );
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 4,
+        "Drogskol Cavalry ({cavalry:?}) saw both Spirits enter"
+    );
+}

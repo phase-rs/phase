@@ -1626,6 +1626,10 @@ pub fn candidate_actions_broad_with_probe(
                             pack_slot: *pack_slot,
                         });
                     }
+                    // CR 702.139a: the revealed companion is one card.
+                    OutsideGameChoiceSource::Companion { .. } => {
+                        pool.push(OutsideGameSelection::Companion);
+                    }
                 }
             }
             let sizes = if *up_to {
@@ -4380,13 +4384,9 @@ fn retarget_proposals(
     };
 
     match scope {
-        // CR 115.7a: "each target can be changed only to another legal target."
-        // One proposal per member of the pool `apply_retarget` validates
-        // against. That pool normally still contains the current target — that
-        // member IS CR 115.7a's "the original target is unchanged" fallback, so
-        // it is offered rather than filtered out. An empty pool yields no
-        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
-        // state.
+        // CR 115.7a: one proposal per pool member; the reducer's shared
+        // changed-occurrence check removes unchanged picks, including for
+        // outer-empty legacy pools. No alternative means no response.
         //
         // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
         // because `apply_retarget`'s `Single` arm hard-requires exactly one
@@ -9163,6 +9163,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,

@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "draft"
+  ],
+  "reason": "Limited companion designation: DraftAction::SubmitDeck and DraftDeckSubmission carry an optional companion (CR 702.139a); a pre-change P2P draft host would silently drop a guest's designation"
+}
