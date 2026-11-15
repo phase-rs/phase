@@ -238,6 +238,7 @@ fn cards_revealed_events_are_remembered_publicly() {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
+        occurrences: state.disclosed_occurrences(&[card_id]),
     }];
     let pre_state = state.clone();
 
