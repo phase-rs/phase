@@ -3394,6 +3394,18 @@ fn granted_self_sacrifice_surviving_humility_is_held_by_the_reservation() {
                     && state.layers_dirty == real.layers_dirty
                     && state.resolved_rules_journal == real.resolved_rules_journal
                     && serde_json::to_value(&state.objects).unwrap() == objects
+                    // The serde-skipped fields, compared directly.
+                    && state.objects.len() == real.objects.len()
+                    && real.objects.iter().all(|(id, before)| {
+                        state.objects.get(id).is_some_and(|after| {
+                            after.legacy_protection_start_exempt_attachments
+                                == before.legacy_protection_start_exempt_attachments
+                                && after.protection_start_grants == before.protection_start_grants
+                                && after.protection_provenance == before.protection_provenance
+                                && after.extra_loyalty_activations_this_turn
+                                    == before.extra_loyalty_activations_this_turn
+                        })
+                    })
             };
             assert!(!offered(&runner, demon));
             assert!(
