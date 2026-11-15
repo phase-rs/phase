@@ -28634,7 +28634,16 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        // CR 701.3d: in "unattach it" the anaphor IS the attachment and no host
+        // is named, so the host stays `Any`; "unattach all Equipment from it"
+        // names the host by anaphor.
+        Effect::UnattachAll { attachment, target }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !matches!(
+                    attachment,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                ) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         // CR 122.1 + CR 701.10e + CR 608.2c: the counter-target anaphor family.

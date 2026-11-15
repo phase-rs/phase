@@ -391,10 +391,13 @@ fn run_post_action_pipeline_core(
             filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
         } else {
-            // CR 603.2 + CR 603.6a + CR 603.6d: a settled, un-owned as-enters
-            // entry joins this action's batch (with, e.g., the answering
-            // action's `DieRolled`), ahead of the SBA loop. Its delayed half is
-            // already queued by the release; the drain below places it.
+            // CR 603.2 + CR 603.6a: settle the instruction's held cohort first,
+            // so its released rows are recorded for the ordinary trigger scan.
+            filtered_events = triggers::settle_entry_batch_scan(state, filtered_events);
+            // CR 603.6d + CR 614.12a: the as-enters continuation owns its entry
+            // until its choices finish. Release it after the batch gate, which
+            // must not re-park an entry whose continuation has settled. The
+            // release queues its delayed half; the ordinary half joins this scan.
             filtered_events
                 .extend(crate::game::engine_replacement::release_settled_entry_continuation(state));
         }
