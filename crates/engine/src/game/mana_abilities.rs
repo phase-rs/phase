@@ -645,9 +645,6 @@ fn resolve_inline_mana_preamble(
     }
 }
 
-/// Bound on chained replacement-ordering prompts a projection settles.
-const PROJECTED_REPLACEMENT_PROMPT_LIMIT: u8 = 4;
-
 /// CR 601.2g + CR 605.3b + CR 608.2c: the states a mana ability with an inline
 /// preamble could leave behind once that preamble has resolved, for sizing the
 /// mana it will add (an amount that reads the source's counters, Empowered
@@ -681,24 +678,56 @@ pub(super) fn inline_preamble_outcomes(
         None,
         |scratch, resolved| resolve_inline_mana_preamble(scratch, resolved, &mut events),
     );
-    settle_projected_replacements(scratch, PROJECTED_REPLACEMENT_PROMPT_LIMIT)
+    settle_projected_replacements(scratch)
 }
 
-/// CR 616.1: answer every ordering prompt a projection parked on, branching per
-/// option. Iterative (a worklist, not recursion) because a projection runs deep
-/// inside the casting flow's stack. A prompt chain longer than `limit` prompts
-/// yields no outcome (fails closed: the projection claims no mana it cannot
-/// show).
-fn settle_projected_replacements(state: GameState, limit: u8) -> Vec<GameState> {
+/// The part of a parked ordering prompt that decides what the rest of the
+/// chain can produce: the proposed event as modified so far (without which
+/// replacements already applied) and the multiset of replacements still to
+/// apply, by definition rather than by source object.
+fn replacement_prompt_signature(state: &GameState) -> Option<(String, Vec<String>)> {
+    let pending = state.pending_replacement.as_ref()?;
+    let mut event = pending.proposed.clone();
+    event.applied_set_mut().clear();
+    let mut remaining: Vec<String> = pending
+        .candidates
+        .iter()
+        .map(|rid| {
+            state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .map_or_else(|| format!("{rid:?}"), |def| format!("{def:?}"))
+        })
+        .collect();
+    remaining.sort_unstable();
+    Some((format!("{event:?}"), remaining))
+}
+
+/// CR 616.1f: answer every ordering prompt a projection parked on, branching per
+/// option, until no replacement is left to apply. CR 614.5: a replacement
+/// applies to an event at most once, so every answer consumes a candidate and
+/// the chain is bounded by the number of applicable replacements — there is no
+/// fixed prompt limit. Iterative (a worklist, not recursion) because a
+/// projection runs deep inside the casting flow's stack.
+///
+/// The orderings of n interchangeable replacements (five Winding Constrictors)
+/// are n! paths but only O(n) distinct futures: two branches whose proposed
+/// event and remaining-replacement multiset agree continue identically, so each
+/// such prompt is expanded once.
+fn settle_projected_replacements(state: GameState) -> Vec<GameState> {
     let mut settled = Vec::new();
-    let mut work = vec![(Box::new(state), limit)];
-    while let Some((state, remaining)) = work.pop() {
+    let mut expanded = HashSet::new();
+    let mut work = vec![Box::new(state)];
+    while let Some(state) = work.pop() {
         let Some(pending) = state.pending_replacement.as_ref() else {
             settled.push(*state);
             continue;
         };
-        if remaining == 0 {
-            continue;
+        if let Some(signature) = replacement_prompt_signature(&state) {
+            if !expanded.insert(signature) {
+                continue;
+            }
         }
         let options = super::replacement::pending_replacement_option_count(&state, pending);
         for index in 0..options {
@@ -707,7 +736,7 @@ fn settle_projected_replacements(state: GameState, limit: u8) -> Vec<GameState> 
             if super::engine_replacement::handle_replacement_choice(&mut branch, index, &mut events)
                 .is_ok()
             {
-                work.push((branch, remaining - 1));
+                work.push(branch);
             }
         }
     }
