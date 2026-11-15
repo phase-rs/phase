@@ -464,7 +464,9 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     );
     // CR 602.5c: the activation counters are keyed by the per-acquisition
     // `AbilityUsageKey`, so they name the dedicated adapter (`tuple_key_map`
-    // stays with the index-keyed resolution tally).
+    // stays with the index-keyed resolution tally). The departed-incarnation
+    // twins name their own adapter, which reuses the usage-key encoding under
+    // a leading incarnation segment.
     for (field, shape, adapter) in [
         (
             "activated_abilities_this_turn",
@@ -475,6 +477,16 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "activated_abilities_this_game",
             "im::HashMap",
             "with=\"ability_usage_key_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_turn",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_game",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
         ),
         (
             "ability_resolutions_this_turn",
