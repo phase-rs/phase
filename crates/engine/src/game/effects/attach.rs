@@ -668,6 +668,7 @@ pub(crate) fn attach_result_from_events(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: attached,
+        phase_population: false,
     }
 }
 

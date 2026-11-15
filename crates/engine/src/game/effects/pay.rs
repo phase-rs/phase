@@ -5115,6 +5115,7 @@ mod tests {
             root.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: vec![],
                 object_incarnations: vec![],
+                phase_population: false,
             }));
             root.sub_ability = Some(Box::new(ResolvedAbility::new(
                 Effect::Destroy {
