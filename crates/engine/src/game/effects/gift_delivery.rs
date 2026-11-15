@@ -4,10 +4,11 @@ use crate::types::ability::{
     TokenAttackDestination,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingEffectResolved};
 use crate::types::keywords::GiftKind;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use crate::types::zones::EtbTapState;
 
 /// CR 702.174: Deliver a gift to the opponent chosen when the gift cost was paid.
 /// Gift delivery is a no-op when the gift wasn't promised (`additional_cost_paid == false`).
@@ -42,6 +43,42 @@ pub fn resolve(
         return Ok(());
     };
 
+    // CR 702.174j: the gift happens before the spell's other effects, and per
+    // CR 608.2c it has happened only once its work has settled. A replacement
+    // choice on the token creation or the draw — an optional "may instead"
+    // (CR 614.1a), or the affected player's ordering choice when several
+    // replacements apply (CR 616.1) — pauses that work, so the completion is
+    // parked below whatever the pause installed and reported when it drains.
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let (_, progress) = super::LegacyEffectBoundary::run(state, ability, |state, _| {
+        deliver(state, kind, ability, opponent, events)
+    })?;
+    match progress {
+        super::ResolutionProgress::Complete => events.push(GameEvent::EffectResolved {
+            kind: EffectKind::GiftDelivery,
+            source_id: ability.source_id,
+            subject: None,
+        }),
+        super::ResolutionProgress::Queued | super::ResolutionProgress::Waiting => {
+            super::counters::park_pending_counter_completion_at_child_boundary(
+                state,
+                PendingEffectResolved::new(EffectKind::GiftDelivery, ability.source_id),
+                child_stack_start,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// The gift itself, handed to `opponent`.
+fn deliver(
+    state: &mut GameState,
+    kind: GiftKind,
+    ability: &ResolvedAbility,
+    opponent: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     // CR 702.174b: On a permanent, the gift ability triggers when the permanent enters.
     // CR 702.174j: For instants/sorceries, the gift effect always happens first.
     match kind {
@@ -88,12 +125,6 @@ pub fn resolve(
         }
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::GiftDelivery,
-        source_id: ability.source_id,
-        subject: None,
-    });
-
     Ok(())
 }
 
@@ -133,7 +164,7 @@ struct GiftToken {
     power_toughness: i32,
     core_type: &'static str,
     colors: Vec<ManaColor>,
-    tapped: bool,
+    tapped: EtbTapState,
 }
 
 impl GiftToken {
@@ -144,7 +175,7 @@ impl GiftToken {
             power_toughness: 0,
             core_type: "Artifact",
             colors: Vec::new(),
-            tapped: false,
+            tapped: EtbTapState::Unspecified,
         }
     }
 
@@ -155,7 +186,7 @@ impl GiftToken {
             power_toughness: 1,
             core_type: "Creature",
             colors: vec![ManaColor::Blue],
-            tapped: true,
+            tapped: EtbTapState::Tapped,
         }
     }
 }
@@ -181,7 +212,7 @@ fn create_gift_token(
             types: vec![token.core_type.to_string(), token.name.to_string()],
             colors: token.colors,
             keywords: Vec::new(),
-            tapped: token.tapped,
+            tapped: token.tapped.is_tapped(),
             count: QuantityExpr::Fixed { value: 1 },
             owner: TargetFilter::Controller,
             attach_to: None,

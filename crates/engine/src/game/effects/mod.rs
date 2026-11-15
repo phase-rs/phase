@@ -2072,6 +2072,16 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
         ResolutionFrame::CounterAdditions(_) => {
             counters::drain_pending_counter_additions(state, events);
+            // CR 608.2c + CR 117.2e: a settled completion can expose the
+            // interrupted instruction's next written instruction (the spell's
+            // effect after its gift's token entered). It runs in this action, as
+            // the BatchDelivery arm continues its exposed child.
+            // CR 614.12a + CR 111.1: not while a liminal entry is owed its commit;
+            // `engine_replacement::resume_pending_liminal_token_entry` makes it
+            // later in this boundary pass and then resumes the exposed frames.
+            if state.pending_liminal_entry_resume.is_none() {
+                drain_exposed_ability_continuation(state, events);
+            }
         }
         ResolutionFrame::CopyToken(_) => {
             token_copy::drain_pending_copy_token_resolution(state, events);
@@ -2182,6 +2192,27 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                         .expect("post-replacement dispatcher may remove only its active frame");
                 }
             }
+            // CR 608.2c + CR 117.2e: retiring the paused dispatch can expose the
+            // interrupted instruction's own parked completion (a gift's delivery, the
+            // rest of an amass). It is that instruction's remaining work, so it settles
+            // in this action, before the next written instruction is exposed below.
+            // CR 614.12a + CR 111.1: not while a liminal entry is owed its commit — the
+            // retired dispatch was that entry's own "as enters" chain, and the work it
+            // exposes (the token-event cursor's next batch) comes after the entry. The
+            // commit is made later in this same boundary pass
+            // (`engine_replacement::resume_pending_liminal_token_entry`), which then
+            // settles that work itself.
+            if retired_paused_dispatch
+                && state.pending_liminal_entry_resume.is_none()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && !state.counter_cost_root_is_due()
+                && matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterAdditions(_))
+                )
+            {
+                counters::drain_pending_counter_additions(state, events);
+            }
             // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
             // dispatch, or removing an exhausted frame after a nested child
             // already retired its dispatch, can expose the next ordinary
@@ -2189,22 +2220,27 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // it is the remaining Attach operation, its own completion boundary
             // owns the printed tail. A typed Attach-choice owner remains
             // action-owned.
-            if matches!(
-                state.resolution_stack.last(),
-                Some(ResolutionFrame::AbilityContinuation(_))
-            ) && matches!(state.waiting_for, WaitingFor::Priority { .. })
-                && state
-                    .active_ability_continuation()
-                    .is_some_and(|continuation| continuation.attachment_choice.is_none())
-            {
-                drain_pending_continuation(state, events);
-            }
+            drain_exposed_ability_continuation(state, events);
         }
     }
 
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
+    }
+}
+
+/// CR 608.2c + CR 117.2e: settling the top frame can expose the next written
+/// instruction of the same resolution as an ordinary continuation; it runs
+/// in this action, before priority. A typed Attach-choice owner remains
+/// action-owned: its `EffectZoneChoice` handler consumes it.
+fn drain_exposed_ability_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state
+            .active_ability_continuation()
+            .is_some_and(|continuation| continuation.attachment_choice.is_none())
+    {
+        drain_pending_continuation(state, events);
     }
 }
 
@@ -25899,8 +25935,10 @@ fn resolve_chain_body(
                     ability,
                     &state.waiting_for,
                 );
-            if (matches!(ability.effect, Effect::RollDie { .. })
-                || sub_clone.reads_return_result.is_some()
+            if (matches!(
+                ability.effect,
+                Effect::RollDie { .. } | Effect::GiftDelivery { .. }
+            ) || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start))
@@ -25911,7 +25949,9 @@ fn resolve_chain_body(
                 // before resolving the producer. A named-result reader needs this because
                 // a replacement post-effect may have parked a continuation beneath the
                 // producer's batch frame; a copy-token producer parks its own batch owner
-                // at that boundary.
+                // at that boundary; a die roll parks its DieRoll frame, and a gift delivery
+                // (`gift_delivery::resolve`) its own completion, at the boundary captured
+                // before the producer, so the rest of the chain is inserted outside both.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
