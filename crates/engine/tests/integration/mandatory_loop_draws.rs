@@ -4903,8 +4903,9 @@ fn a_shuffle_only_the_replay_draws_until_turn_boundary_is_offered() {
 
 /// CR 603.5 + CR 603.6a + CR 732.2a: Suture Priest ("Whenever another creature you control
 /// enters, you may gain 1 life. Whenever a creature an opponent controls enters, you may have that
-/// player lose 1 life.") beside the Wood Elves loop triggers optionally on each entry, and each
-/// frame at which its trigger tops a stack of three names no span: its trigger's span starts at the
+/// player lose 1 life.") beside the Wood Elves loop triggers optionally on each creature entry,
+/// and each frame at which its trigger tops a stack of three names no `TriggerTop` span: its
+/// trigger's span starts at the
 /// resolution with that frame's entry beneath it, which is the one span P0 is offered.
 #[test]
 fn an_optional_trigger_over_a_frame_entry_names_only_the_period_beneath_it() {
