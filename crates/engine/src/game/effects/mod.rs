@@ -27612,6 +27612,16 @@ fn resolve_chain_body(
                         result,
                     );
                 }
+            } else if ability.forward_result && matches!(ability.effect, Effect::Attach { .. }) {
+                // CR 701.3a + CR 608.2c: the attachment's printed attach-time
+                // choice is followed through the Attached post-effect
+                // continuation, after the attach; later instructions wait for
+                // it, and the attached object is already settled.
+                bind_forwarded_zone_result(
+                    &mut sub_clone,
+                    attach::attach_result_from_events(&events[events_before..]),
+                    Vec::new(),
+                );
             }
             // CR 608.2c + CR 603.7: a selected BounceAll has not finished its
             // zone-change instruction when it opens EffectZoneChoice. Bind its
@@ -28081,7 +28091,25 @@ fn resolve_chain_body(
         // `enter_attached_to` on the zone move. If that move Remained, there is
         // no ZoneChanged event — running Attach would stamp `attached_to` onto
         // an Aura that never left its origin zone.
-        if ability.forward_result
+        if ability.forward_result && matches!(ability.effect, Effect::Attach { .. }) {
+            // CR 608.2c + CR 701.3b: an Attach producer's result is what it
+            // attached. A later "unattach it" names that object, not the host
+            // the earlier instructions targeted, and an attach that did nothing
+            // forwards an empty result rather than falling back to that host.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            bind_forwarded_zone_result(
+                &mut sub_with_context,
+                attach::attach_result_from_events(&events[events_before..]),
+                Vec::new(),
+            );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if ability.forward_result
             && forwarded_objects.is_empty()
             && matches!(
                 ability.effect,

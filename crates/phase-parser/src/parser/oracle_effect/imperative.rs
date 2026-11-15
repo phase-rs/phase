@@ -7573,6 +7573,26 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
         }
     }
+    // CR 701.3d: "unattach it" names one attachment by anaphor and no host, so
+    // it is unattached from whatever it is attached to. Only a parent-referent
+    // anaphor is admitted: other operands ("unattach ~", "unattach enchanted
+    // Equipment") have no resolver binding here and stay unimplemented.
+    if let Some(((), object_text)) = nom_on_lower(text, lower, |input| {
+        value((), tag("unattach ")).parse(input)
+    }) {
+        let (attachment, rem) = parse_target_with_ctx(object_text, ctx);
+        if rem.trim().is_empty()
+            && matches!(
+                attachment,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            )
+        {
+            return Some(UtilityImperativeAst::UnattachAll {
+                attachment,
+                target: TargetFilter::Any,
+            });
+        }
+    }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
     // CR 608.2k: the bare-pronoun and self-deictic arms ("transform it" /
     // "transform itself" / "transform this creature") split into two anaphor

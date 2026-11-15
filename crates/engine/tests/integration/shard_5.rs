@@ -345,6 +345,7 @@ mod umbra_stalker_graveyard_chroma_4066;
 mod un_card_actions;
 mod unbound_flourishing;
 mod undying_malice_edict_sacrifice_5942;
+mod unexpected_request_delayed_unattach;
 mod unholy_citadel_legendary_color_banding_grant;
 mod unique_player_property_leader_condition;
 mod unless_cost_zero_is_acknowledged;
