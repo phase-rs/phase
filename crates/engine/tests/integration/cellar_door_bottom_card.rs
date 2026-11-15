@@ -831,6 +831,62 @@ fn stage_cellar_door_under_magus(activate_magus: bool) -> (GameRunner, ObjectId,
     (runner, cellar_door, bottom)
 }
 
+/// Cellar Door on the stack targeting P0, whose bottom card is a creature,
+/// with P0's Magus of the Will on the battlefield. When `activate_magus`, P0
+/// activates Magus, then activates Cellar Door targeting themselves. Returns
+/// the runner, Cellar Door, and the bottom card.
+fn stage_cellar_door_under_magus_targeting_controller(
+    activate_magus: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut magus = None;
+    let (mut runner, cellar_door, bottom, target) = stage_cellar_door_with(true, 0, |scenario| {
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ],
+        );
+        magus = Some(
+            scenario
+                .add_creature_from_oracle(P0, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+                .id(),
+        );
+    });
+    let magus = magus.expect("Magus of the Will is staged");
+    if activate_magus {
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must hold priority to activate Magus of the Will"
+        );
+        let index = runner.state().objects[&magus]
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("Magus of the Will has an activated ability");
+        runner.activate(magus, index).pay_with(&[magus]).resolve();
+        // Reach guard: the activation resolved, paid its self-exile cost, and
+        // left its floating redirect standing, with P0 back on priority.
+        assert_eq!(runner.state().objects[&magus].zone, Zone::Exile);
+        assert!(runner.state().stack.is_empty());
+        assert!(
+            !runner.state().pending_damage_replacements.is_empty(),
+            "Magus of the Will's redirect must be floating"
+        );
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must hold priority to activate Cellar Door"
+        );
+    }
+    announce_cellar_door(&mut runner, cellar_door, target);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    (runner, cellar_door, bottom)
+}
+
 /// CR 611.2a + CR 614.1a + CR 614.6: a resolved Magus of the Will leaves no
 /// permanent behind, only a floating redirect, yet it still exiles the card
 /// Cellar Door moves out of its activator's library. Stack reach reads that
@@ -849,6 +905,48 @@ fn cellar_door_stack_reach_defers_to_a_floating_graveyard_redirect() {
                     (Vec::new(), Zone::Exile)
                 } else {
                     (vec![TargetRef::Player(P1)], Zone::Graveyard)
+                };
+                assert_eq!(
+                    mill_node_reach(&runner, cellar_door),
+                    reach,
+                    "Magus of the Will activated: {activate_magus}"
+                );
+
+                // The live resolver agrees.
+                runner.advance_until_stack_empty();
+                assert_eq!(
+                    runner.state().objects[&bottom].zone,
+                    zone,
+                    "Magus of the Will activated: {activate_magus}"
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the test thread must not panic");
+}
+
+/// Same scenario but with Cellar Door targeting P0 (the activator), while
+/// P0 controls Magus of the Will. This exercises the ownership filter for
+/// the controller's own graveyard (CR 614.6: the replacement applies to
+/// "your graveyard" from the activator's perspective).
+#[test]
+fn cellar_door_stack_reach_defers_to_floating_redirect_targeting_controller() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for activate_magus in [false, true] {
+                let (mut runner, cellar_door, bottom) =
+                    stage_cellar_door_under_magus_targeting_controller(activate_magus);
+                let (reach, zone) = if activate_magus {
+                    (Vec::new(), Zone::Exile)
+                } else {
+                    (vec![TargetRef::Player(P0)], Zone::Graveyard)
                 };
                 assert_eq!(
                     mill_node_reach(&runner, cellar_door),

@@ -2,6 +2,7 @@ use crate::types::ability::{
     CardSelectionMode, ControllerRef, Effect, EffectScope, LibraryPosition, ManaContribution,
     ManaProduction, PtValue, QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
 };
+use crate::types::counter::parse_counter_type;
 use crate::types::mana::ManaColor;
 use crate::types::zones::EtbTapState;
 use crate::types::Zone;
@@ -256,26 +257,8 @@ fn translate_put_counter(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
-    let counter_type_str = params
-        .get("CounterType")
-        .unwrap_or("P1P1")
-        .replace("P1P1", "+1/+1")
-        .replace("M1M1", "-1/-1")
-        .to_lowercase();
-    let counter_type = match counter_type_str.as_str() {
-        "+1/+1" => crate::types::CounterType::Plus1Plus1,
-        "-1/-1" => crate::types::CounterType::Minus1Minus1,
-        "loyalty" => crate::types::CounterType::Loyalty,
-        "defense" => crate::types::CounterType::Defense,
-        "stun" => crate::types::CounterType::Stun,
-        "lore" => crate::types::CounterType::Lore,
-        "time" => crate::types::CounterType::Time,
-        "fade" => crate::types::CounterType::Fade,
-        "age" => crate::types::CounterType::Age,
-        "shield" => crate::types::CounterType::Shield,
-        "finality" => crate::types::CounterType::Finality,
-        _ => crate::types::CounterType::Generic(counter_type_str),
-    };
+    let counter_type_str = params.get("CounterType").unwrap_or("P1P1");
+    let counter_type = parse_counter_type(counter_type_str);
     let count = resolve_quantity(params, "CounterNum", resolver);
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::PutCounter {

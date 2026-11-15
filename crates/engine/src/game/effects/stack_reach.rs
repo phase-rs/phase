@@ -7,7 +7,6 @@ use crate::game::ability_utils::{
     apply_instead_swap, flatten_specified_targets_in_chain, validate_targets_in_chain,
 };
 use crate::game::functioning_abilities::{active_replacements, replacement_functions_in_zone};
-use crate::game::players::opponents;
 use crate::game::replacement::{
     find_applicable_replacements, live_floating_replacements, replacement_registry,
 };
@@ -791,6 +790,48 @@ fn replacement_valid_card_admits_library_owner(
     evaluate_ownership_filter(valid_card, host, library_owner, board, definition)
 }
 
+/// Check if a `ControllerRef` admits the given `owner` as the owner of the
+/// affected card. This mirrors the logic in `filter::owned_axis_admits` (the
+/// single authority for `FilterProp::Owned` evaluation) but operates with the
+/// data available in stack reach: the replacement's host object (for
+/// host-relative refs like `You`) and the replacement definition's
+/// `source_controller` (for floating replacements where the host is the
+/// sentinel `ObjectId(0)`).
+fn controller_ref_admits_owner(
+    controller: &ControllerRef,
+    host: ObjectId,
+    card_owner: PlayerId,
+    board: &GameState,
+    definition: &ReplacementDefinition,
+) -> bool {
+    // Resolve the source controller for this replacement. For object-hosted
+    // replacements, the host object's controller is the source. For floating
+    // replacements (host == ObjectId(0)), the definition's `source_controller`
+    // carries the installer's controller.
+    let source_controller = board
+        .objects
+        .get(&host)
+        .map(|obj| obj.controller)
+        .or(definition.source_controller);
+
+    match controller {
+        // CR 109.5: "you" means the source controller.
+        ControllerRef::You => source_controller == Some(card_owner),
+        // CR 109.5: "an opponent" means any player other than the source
+        // controller who is still in the game. This is a relation, not a single
+        // player — in multiplayer there are multiple opponents.
+        ControllerRef::Opponent => {
+            source_controller.is_some()
+                && source_controller != Some(card_owner)
+                && crate::game::players::is_alive(board, card_owner)
+        }
+        // Other controller refs are not relevant for ownership constraints on
+        // hidden library cards (they require event/ability context that stack
+        // reach doesn't have). Treat them as non-constraining.
+        _ => true,
+    }
+}
+
 fn evaluate_ownership_filter(
     filter: &TargetFilter,
     host: ObjectId,
@@ -804,18 +845,14 @@ fn evaluate_ownership_filter(
             // If there are no Owned properties, there is no ownership constraint.
             let mut has_owned = false;
             for prop in properties {
-                match prop {
-                    FilterProp::Owned { controller } => {
-                        has_owned = true;
-                        // Resolve controller relative to the replacement's host
-                        if resolve_controller_ref(board, host, controller, definition)
-                            == Some(card_owner)
-                        {
-                            return true;
-                        }
+                if let FilterProp::Owned { controller } = prop {
+                    has_owned = true;
+                    if controller_ref_admits_owner(controller, host, card_owner, board, definition)
+                    {
+                        return true;
                     }
-                    _ => {} // Non-ownership properties don't constrain ownership
                 }
+                // Non-ownership properties don't constrain ownership
             }
             // If no Owned properties, no ownership constraint = admits all
             !has_owned
@@ -837,32 +874,6 @@ fn evaluate_ownership_filter(
         }
         TargetFilter::SelfRef => false, // Already excluded by caller
         _ => true, // Other filters don't constrain ownership for hidden library cards
-    }
-}
-
-fn resolve_controller_ref(
-    board: &GameState,
-    host: ObjectId,
-    controller: &ControllerRef,
-    definition: &ReplacementDefinition,
-) -> Option<PlayerId> {
-    match controller {
-        ControllerRef::You => {
-            // First try to get controller from the host object
-            board
-                .objects
-                .get(&host)
-                .map(|obj| obj.controller)
-                // If host is not found (e.g., ObjectId(0) for floating replacements),
-                // fall back to the replacement's source_controller
-                .or(definition.source_controller)
-        }
-        ControllerRef::Opponent => board
-            .objects
-            .get(&host)
-            .map(|obj| obj.controller)
-            .and_then(|c| opponents(board, c).first().copied()),
-        _ => None, // Other controller refs not relevant for ownership on hidden library cards
     }
 }
 
