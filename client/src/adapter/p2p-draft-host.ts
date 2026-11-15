@@ -96,6 +96,11 @@ function sanitizePublicBackup(
   // `P2P_BACKUP_SECRET_KEYS` in `server-core::p2p_backup_guard`.
   delete rawPublicSnapshot.deckSubmissionReceipts;
   delete rawPublicSnapshot.perSeatWorkspaceSnapshots;
+  // DIGESTS OF DECK-BEARING PAYLOADS. `draftIntergameDigest` is an unsalted,
+  // deterministic 32-bit checksum: a pod member who already knows a candidate
+  // deck or partition can test guesses against it offline, so a retained digest
+  // is a verification oracle for the very contents removed above.
+  delete rawPublicSnapshot.launchDigests;
 
   redactPoolInputCubeList(publicSnapshot.poolInput);
   redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
@@ -146,6 +151,10 @@ function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
       delete command.payload.main;
       delete command.payload.sideboard;
     }
+    // Checksums of the launch / sideboard payload just redacted (see the
+    // `launchDigests` note in `sanitizePublicBackup`).
+    delete command.launchDigest;
+    delete command.payloadDigest;
   }
 }
 

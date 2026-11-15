@@ -15,6 +15,7 @@ vi.mock("../../services/draftPersistence", () => ({
 import { P2PDraftHost } from "../p2p-draft-host";
 import { saveDraftHostSession } from "../../services/draftPersistence";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
+import { draftIntergameDigest } from "../../services/intergameCommandLedger";
 
 /**
  * A submitted deck is private to its seat until its match launches it. The
@@ -109,14 +110,20 @@ describe("P2PDraftHost public backup never carries submitted decks", () => {
         decks: [{ seat: 1, main: [{ name: SECRET.bo3, count: 4 }], sideboard: [] }],
       }],
     ]);
+    // Production-derived digests (unsalted 32-bit checksums): a retained digest
+    // would let a pod member test guessed partitions offline.
+    const commandPayload = { type: "SubmitSideboard", main: [{ name: SECRET.command, count: 4 }], sideboard: [] };
+    const commandLaunch = { deckPayload: { player: launchDeck, opponent: launchDeck, ai_decks: [] } };
+    const payloadDigest = draftIntergameDigest(commandPayload);
+    const launchDigest = draftIntergameDigest(commandLaunch);
     priv.intergameCommands = {
       snapshot: () => [{
         commandId: "c1", matchId: "m1", gameNumber: 2, seat: 1,
-        payload: { type: "SubmitSideboard", main: [{ name: SECRET.command, count: 4 }], sideboard: [] },
-        launchPayload: { deckPayload: { player: launchDeck, opponent: launchDeck, ai_decks: [] } },
-        launchDigest: "d00000000", payloadDigest: "d00000000", status: "Pending",
+        payload: commandPayload, launchPayload: commandLaunch,
+        launchDigest, payloadDigest, status: "Pending",
       }],
     };
+    priv.launchDigests = new Map([["m1", new Map([[1, launchDigest]])]]);
     priv.perSeatWorkspaceSnapshots = new Map([
       [1, { schemaVersion: 1, placements: {}, virtualBasics: [{ name: SECRET.workspace }] }],
     ]);
@@ -141,11 +148,17 @@ describe("P2PDraftHost public backup never carries submitted decks", () => {
     for (const marker of Object.values(SECRET)) expect(uploaded).not.toContain(marker);
     // The receipt fingerprint is the deck JSON itself; its key must be gone too.
     expect(uploaded).not.toContain("payloadFingerprint");
+    // ... and so must every digest of a deck-bearing payload.
+    expect(uploaded).not.toContain(payloadDigest);
+    expect(uploaded).not.toContain(launchDigest);
+    expect(uploaded).not.toContain("payloadDigest");
+    expect(uploaded).not.toContain("launchDigest");
 
     // IndexedDB keeps the recovery data.
-    const saved = vi.mocked(saveDraftHostSession).mock.calls.at(-1)![1] as PersistedDraftHostSession;
+    const saved = vi.mocked(saveDraftHostSession).mock.calls[vi.mocked(saveDraftHostSession).mock.calls.length - 1]![1] as PersistedDraftHostSession;
     const local = JSON.stringify(saved);
     for (const marker of Object.values(SECRET)) expect(local).toContain(marker);
     expect(saved.deckSubmissionReceipts).toHaveLength(1);
+    expect(local).toContain(payloadDigest);
   });
 });

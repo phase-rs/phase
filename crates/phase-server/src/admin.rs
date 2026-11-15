@@ -541,6 +541,9 @@ mod tests {
             "Marker Command",
             "Marker Workspace",
             "Marker Fingerprint",
+            "dmarker0001",
+            "dmarker0002",
+            "dmarker0003",
         ];
         let session = serde_json::json!({
             "submitted_decks": { "1": { "seat": 1, "main_deck": [markers[0]], "commanders": [] } },
@@ -568,7 +571,10 @@ mod tests {
                 "commandId": "c1",
                 "payload": { "type": "SubmitSideboard", "main": [{ "name": markers[5], "count": 4 }], "sideboard": [] },
                 "launchPayload": { "deckPayload": launch_decks },
+                "launchDigest": markers[8],
+                "payloadDigest": markers[9],
             }],
+            "launchDigests": [{ "matchId": "m1", "seat": 1, "digest": markers[10] }],
             "perSeatWorkspaceSnapshots": { "1": { "virtualBasics": [{ "name": markers[6] }] } },
         });
 

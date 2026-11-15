@@ -83,12 +83,19 @@ pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), S
 /// `payloadFingerprint` is the submitted card-name/count JSON itself (not a
 /// one-way hash), and a workspace snapshot is the seat's main/sideboard
 /// partition and virtual basics. The host's IndexedDB copy keeps both.
+///
+/// `launchDigests` (and the per-command `launchDigest` / `payloadDigest`
+/// removed in `redact_intergame_command_launch_pools`) are unsalted 32-bit
+/// checksums of deck-bearing payloads: a pod member who knows a candidate deck
+/// or sideboard partition can test it against them offline, so a retained
+/// digest is a verification oracle for the contents removed here.
 const P2P_BACKUP_SECRET_KEYS: &[&str] = &[
     "seatTokens",
     "kickedTokens",
     "booster_pack_pool",
     "deckSubmissionReceipts",
     "perSeatWorkspaceSnapshots",
+    "launchDigests",
 ];
 
 /// Host snapshot field carrying a serialized [`draft_core::types::DraftSession`].
@@ -276,6 +283,8 @@ fn redact_intergame_command_launch_pools(snapshot: &mut Map<String, Value>) {
                 payload.remove(*key);
             }
         }
+        command.remove("launchDigest");
+        command.remove("payloadDigest");
     }
 }
 
