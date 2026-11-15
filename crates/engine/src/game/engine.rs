@@ -14709,6 +14709,7 @@ fn apply_non_priority_pass_action(
                             *count,
                             choices,
                             &chosen,
+                            paid_cost.as_ref().map(|payment| payment.cost),
                             &mut events,
                         )?
                     }
@@ -14720,6 +14721,7 @@ fn apply_non_priority_pass_action(
                         *count,
                         choices,
                         &chosen,
+                        paid_cost.as_ref().map(|payment| payment.cost),
                         &mut events,
                     )?,
                     // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
