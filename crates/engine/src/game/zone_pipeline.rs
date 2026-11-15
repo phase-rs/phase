@@ -4456,6 +4456,18 @@ pub(crate) fn deliver_staged_change_zone_batch(
                 collector,
             )
             .expect("completed ChangeZone owns every terminal member outcome");
+            // CR 603.7b: a delayed trigger still sees this population's departures, so the
+            // ordinary collectors claim them. A battlefield entry stays unclaimed, exactly as
+            // for a population that is not staged: the post-action scan needs it to know when
+            // the entrant joined the battlefield (CR 603.10, issue #8160), and the group's own
+            // collection is recognised there as already collected.
+            crate::game::triggers::mark_logical_zone_events_consumed_before_priority_for(
+                state,
+                &group,
+                &events[event_start..],
+                crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects,
+                crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+            );
             StagedChangeZoneOutcome::Settled { group, members }
         }
     }
