@@ -13,8 +13,8 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::engine::in_simulation_probe;
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, DelayedAbilityOrigin, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerPrintedOrigin,
+    AbilityDefinition, AbilityKind, DelayedAbilityOrigin, ObjectSelectionCardinality,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerPrintedOrigin,
 };
 use crate::types::actions::GameAction;
 use crate::types::card::PrintedCardRef;
@@ -1152,7 +1152,12 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::HeroEventChoice { up_to, min, .. } => {
             optional_if(*up_to && *min == 0)
         }
-        WaitingFor::RevealChoice { optional, .. } => optional_if(*optional),
+        // CR 107.1c: "any number" always admits the empty selection.
+        WaitingFor::RevealChoice {
+            optional,
+            cardinality,
+            ..
+        } => optional_if(*optional || *cardinality == ObjectSelectionCardinality::AnyNumber),
         // CR 732.2a + CR 104.4b: the shortcut and Resolve All negotiations are not instructions.
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
@@ -2466,6 +2471,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         };
         let may = WaitingFor::OptionalEffectChoice {
             player,
@@ -2504,6 +2511,12 @@ mod tests {
         ];
         let one_card = reveal(vec![source]);
         let two_cards = reveal(vec![source, ObjectId(2)]);
+        // CR 107.1c: with "any number", one eligible card still has two legal answers (none, or
+        // it), so the prompt is neither forced nor mandatory.
+        let mut any_number_one_card = reveal(vec![source]);
+        if let WaitingFor::RevealChoice { cardinality, .. } = &mut any_number_one_card {
+            *cardinality = crate::types::ability::ObjectSelectionCardinality::AnyNumber;
+        }
         let reveals = [
             (
                 "one-card forced reveal",
@@ -2516,6 +2529,12 @@ mod tests {
                 &two_cards,
                 select(vec![source]),
                 Some(Mandatory),
+            ),
+            (
+                "one-card any-number reveal",
+                &any_number_one_card,
+                select(vec![source]),
+                Some(Optional),
             ),
         ];
         let misread: Vec<&str> = rows
