@@ -3715,6 +3715,7 @@ mod tests {
         }
 
         fn activation(&self, _: &DeckFeatures, _: &GameState, _: PlayerId) -> Option<f32> {
+            // activation-constant: a test-only policy that always runs.
             Some(1.0)
         }
 
