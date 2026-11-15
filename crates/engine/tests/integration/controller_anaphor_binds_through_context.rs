@@ -27,8 +27,8 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, TargetChoiceTiming,
-    TargetFilter, TargetRef,
+    AbilityDefinition, ControllerRef, Effect, OpponentMayScope, TargetChoiceTiming, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -518,15 +518,43 @@ fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
     }
 }
 
-/// CR 608.2c: in Temporal Distortion's "at the beginning of each player's
-/// upkeep, remove all hourglass counters from permanents that player
-/// controls", "that player" is the upkeep player, so the source controller's
-/// permanents keep their counters.
-///
-/// The filter currently becomes a stack-time target slot (a pre-existing
-/// defect, #9899), so the drive answers that prompt when it appears and checks
-/// only what the binding decides: whose permanents are offered and reached.
-/// "Every P1 permanent loses its counters" (CR 115.10a) is not asserted.
+/// Drives `upkeep_player`'s upkeep until that player's draw step is reached.
+/// Panics if Temporal Distortion's trigger ever asks for a target (#9899).
+fn drive_temporal_distortion_upkeep(runner: &mut GameRunner, upkeep_player: PlayerId) {
+    // Advance once: re-calling `advance_to_phase` during the upkeep restarts the
+    // step and fires the upkeep trigger again. Settle with `act` only.
+    runner.advance_to_phase(Phase::Draw);
+    for _ in 0..40 {
+        let state = runner.state();
+        if state.phase == Phase::Draw && state.active_player == upkeep_player {
+            return;
+        }
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => panic!(
+                "#9899: Temporal Distortion's mass removal must not ask for a target; \
+                 waiting_for={:?}",
+                state.waiting_for
+            ),
+            other => panic!("unexpected waiting_for during the upkeep: {other:?}"),
+        }
+    }
+    let state = runner.state();
+    panic!(
+        "the drive must reach the upkeep player's draw step; phase={:?} active={:?} \
+         waiting_for={:?}",
+        state.phase, state.active_player, state.waiting_for
+    );
+}
+
+/// CR 608.2c + CR 122.1 + CR 115.10a: in Temporal Distortion's "at the
+/// beginning of each player's upkeep, remove all hourglass counters from
+/// permanents that player controls", "that player" is the upkeep player and the
+/// bare plural names every one of that player's permanents, with no target. So
+/// each of the upkeep player's permanents (creatures and non-creatures alike)
+/// loses its hourglass counters, and the other player's permanents keep theirs.
 #[test]
 fn temporal_distortion_removes_counters_from_the_upkeep_players_permanents() {
     let hourglass = || CounterType::Generic("hourglass".to_string());
@@ -534,84 +562,84 @@ fn temporal_distortion_removes_counters_from_the_upkeep_players_permanents() {
     scenario.with_library_top(P0, &["P0 Top A", "P0 Top B", "P0 Top C"]);
     scenario.with_library_top(P1, &["P1 Top A", "P1 Top B", "P1 Top C"]);
     scenario.at_phase(Phase::End);
-    let td = scenario
-        .add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION)
-        .id();
+    scenario.add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION);
     let c0 = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
     let c1a = scenario.add_creature(P1, "P1 Bear A", 2, 2).id();
     let c1b = scenario.add_creature(P1, "P1 Bear B", 2, 2).id();
-    for creature in [c0, c1a, c1b] {
-        scenario.with_counter(creature, hourglass(), 1);
+    // A non-creature permanent: the population is "permanents", not creatures.
+    let a1 = scenario.add_artifact_from_oracle(P1, "P1 Relic", "").id();
+    for permanent in [c0, c1a, c1b, a1] {
+        scenario.with_counter(permanent, hourglass(), 1);
     }
     let mut runner = scenario.build();
-
-    // Advance once: re-calling `advance_to_phase` during P1's upkeep restarts
-    // the step and fires the upkeep trigger again. Settle with `act` only.
-    runner.advance_to_phase(Phase::Draw);
-    let mut offered: Vec<TargetRef> = Vec::new();
-    for _ in 0..40 {
-        let state = runner.state();
-        if state.phase == Phase::Draw && state.active_player == P1 {
-            break;
-        }
-        match state.waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection {
-                source_id: Some(source),
-                target_slots,
-                ..
-            } if source == td => {
-                let slot = target_slots
-                    .iter()
-                    .find(|slot| slot.effect_kind == EffectKind::RemoveCounter)
-                    .expect("Temporal Distortion's prompt has a RemoveCounter slot");
-                offered.extend(slot.legal_targets.iter().cloned());
-                let first = slot.legal_targets[0].clone();
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(first),
-                    })
-                    .expect("answer Temporal Distortion's target prompt");
-            }
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting_for during P1's upkeep: {other:?}"),
-        }
-    }
-
-    let state = runner.state();
-    // Reach guard: the drive got past P1's upkeep.
-    assert!(
-        state.phase == Phase::Draw && state.active_player == P1,
-        "the drive must reach P1's draw step; phase={:?} active={:?} waiting_for={:?}",
-        state.phase,
-        state.active_player,
-        state.waiting_for
-    );
-    let counters = |id| {
-        state.objects[&id]
+    let counters = |runner: &GameRunner, id| {
+        runner.state().objects[&id]
             .counters
             .get(&hourglass())
             .copied()
             .unwrap_or(0)
     };
+    // Reach guard: every permanent starts with its counter.
+    for permanent in [c0, c1a, c1b, a1] {
+        assert_eq!(counters(&runner, permanent), 1);
+    }
+
+    drive_temporal_distortion_upkeep(&mut runner, P1);
+
     assert_eq!(
-        counters(c0),
+        counters(&runner, c0),
         1,
         "the source controller's creature is not the upkeep player's"
     );
-    assert!(
-        counters(c1a) == 0 || counters(c1b) == 0,
-        "an upkeep player's creature loses its hourglass counter; (c1a, c1b) = ({}, {})",
-        counters(c1a),
-        counters(c1b)
-    );
-    assert!(
-        offered
-            .iter()
-            .all(|target| *target == TargetRef::Object(c1a) || *target == TargetRef::Object(c1b)),
-        "every offered target is the upkeep player's; offered={offered:?}"
-    );
+    for permanent in [c1a, c1b, a1] {
+        assert_eq!(
+            counters(&runner, permanent),
+            0,
+            "every permanent the upkeep player controls loses its hourglass counter"
+        );
+    }
+}
+
+/// The scoped player flips with the upkeep: on the source controller's own
+/// upkeep only that player's permanents lose their hourglass counters.
+#[test]
+fn temporal_distortion_on_its_controllers_upkeep_spares_the_opponent() {
+    let hourglass = || CounterType::Generic("hourglass".to_string());
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.with_library_top(P0, &["P0 Top A", "P0 Top B", "P0 Top C"]);
+    scenario.with_library_top(P1, &["P1 Top A", "P1 Top B", "P1 Top C"]);
+    scenario.at_phase(Phase::End);
+    scenario.add_enchantment_from_oracle(P0, "Temporal Distortion", TEMPORAL_DISTORTION);
+    let c0 = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let l0 = scenario.add_basic_land(P0, ManaColor::Green);
+    let c1 = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    for permanent in [c0, l0, c1] {
+        scenario.with_counter(permanent, hourglass(), 1);
+    }
+    let mut runner = scenario.build();
+    // Start in P1's end step so the next upkeep is P0's.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let counters = |runner: &GameRunner, id| {
+        runner.state().objects[&id]
+            .counters
+            .get(&hourglass())
+            .copied()
+            .unwrap_or(0)
+    };
+    for permanent in [c0, l0, c1] {
+        assert_eq!(counters(&runner, permanent), 1, "reach guard");
+    }
+
+    drive_temporal_distortion_upkeep(&mut runner, P0);
+
+    assert_eq!(counters(&runner, c0), 0, "P0's creature loses its counter");
+    assert_eq!(counters(&runner, l0), 0, "P0's land loses its counter");
+    assert_eq!(counters(&runner, c1), 1, "P1's creature keeps its counter");
 }
 
 /// An opponent (P1) casts "Put a +1/+1 counter on target creature" at a

@@ -201,6 +201,27 @@ fn replacement_source_host(rid: ReplacementId, def: &ReplacementDefinition) -> O
     def.source_object.unwrap_or(rid.source)
 }
 
+/// CR 614.1a + CR 611.2a: the floating replacements a spell or ability created
+/// that still stand (not used up), each with the host its host-relative
+/// references name, as the candidate scan in `find_applicable_replacements`
+/// reads them.
+pub(crate) fn live_floating_replacements(
+    state: &GameState,
+) -> impl Iterator<Item = (ObjectId, &ReplacementDefinition)> {
+    state
+        .pending_damage_replacements
+        .iter()
+        .enumerate()
+        .filter(|(_, def)| !def.is_consumed)
+        .map(|(index, def)| {
+            let rid = ReplacementId {
+                source: ObjectId(0),
+                index,
+            };
+            (replacement_source_host(rid, def), def)
+        })
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,
@@ -19410,6 +19431,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -19531,6 +19553,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -19990,6 +20013,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
@@ -21311,6 +21335,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 },
             ));
         repl.valid_player = Some(ReplacementPlayerScope::Opponent);
