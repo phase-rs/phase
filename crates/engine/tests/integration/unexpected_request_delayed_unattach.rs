@@ -11,7 +11,7 @@
 //! the delayed ability no longer affects.
 
 use engine::game::game_object::AttachTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, OptionalPolicy, P0, P1};
 use engine::types::ability::{ChoiceType, DelayedTriggerCondition, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
@@ -33,17 +33,18 @@ const GALADHRIM_BOW: &str = "Flash\nWhen this Equipment enters, attach it to tar
 /// How the driver answers the resolution's prompts.
 #[derive(Clone, Copy)]
 struct Answers {
-    accept_attach: bool,
+    /// How the driver answers the optional "you may attach" (CR 608.2d).
+    attach: OptionalPolicy,
     /// The Equipment to pick when the attach offers a choice.
     pick: Option<ObjectId>,
 }
 
 const ACCEPT: Answers = Answers {
-    accept_attach: true,
+    attach: OptionalPolicy::Accept,
     pick: None,
 };
 const DECLINE: Answers = Answers {
-    accept_attach: false,
+    attach: OptionalPolicy::Decline,
     pick: None,
 };
 
@@ -68,10 +69,13 @@ fn drive(r: &mut GameRunner, answers: Answers, seen: &mut Seen) {
             }
             WaitingFor::OptionalEffectChoice { player, .. } => {
                 seen.optional_offers.push(player);
-                r.act(GameAction::DecideOptionalEffect {
-                    accept: answers.accept_attach,
-                })
-                .expect("answer the attach");
+                let accept = match answers.attach {
+                    OptionalPolicy::Accept => true,
+                    OptionalPolicy::Decline => false,
+                    OptionalPolicy::Stop => return,
+                };
+                r.act(GameAction::DecideOptionalEffect { accept })
+                    .expect("answer the attach");
             }
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 seen.attach_choices.push((player, cards.clone()));
@@ -95,7 +99,7 @@ fn drive(r: &mut GameRunner, answers: Answers, seen: &mut Seen) {
             }
             WaitingFor::NamedChoice {
                 player,
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 ..
             } => {
                 seen.named_choices.push((player, "card name"));
@@ -304,7 +308,7 @@ fn only_the_attached_equipment_is_unattached() {
         request,
         victim,
         Answers {
-            accept_attach: true,
+            attach: OptionalPolicy::Accept,
             pick: Some(second),
         },
     );
@@ -384,7 +388,7 @@ fn selected_equipment_with_attach_time_choice_keeps_the_unattach_referent() {
         request,
         victim,
         Answers {
-            accept_attach: true,
+            attach: OptionalPolicy::Accept,
             pick: Some(blade),
         },
     );
@@ -438,7 +442,7 @@ fn selected_equipment_with_two_attach_time_choices_keeps_the_unattach_referent()
         request,
         victim,
         Answers {
-            accept_attach: true,
+            attach: OptionalPolicy::Accept,
             pick: Some(paper),
         },
     );
@@ -632,7 +636,16 @@ fn galadhrim_bow_untaps_the_creature_it_was_attached_to() {
 
 /// The same "unattach it" building block outside a delayed trigger: Tamiyo's
 /// Compleation names the enchanted permanent.
-fn compleation_on(host_is_equipment: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+/// Which permanent Tamiyo's Compleation enchants.
+#[derive(Clone, Copy)]
+enum CompleationHost {
+    /// The Equipment attached to the creature.
+    Equipment,
+    /// The creature wearing that Equipment.
+    Creature,
+}
+
+fn compleation_on(host: CompleationHost) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let shuko = shuko(&mut s, P1);
@@ -646,7 +659,10 @@ fn compleation_on(host_is_equipment: bool) -> (GameRunner, ObjectId, ObjectId, O
         .id();
     let mut r = s.build();
     attach_directly(&mut r, shuko, wearer);
-    let target = if host_is_equipment { shuko } else { wearer };
+    let target = match host {
+        CompleationHost::Equipment => shuko,
+        CompleationHost::Creature => wearer,
+    };
     r.cast(aura).target_object(target).commit();
     let mut seen = Seen::default();
     drive(&mut r, DECLINE, &mut seen);
@@ -663,7 +679,7 @@ fn compleation_on(host_is_equipment: bool) -> (GameRunner, ObjectId, ObjectId, O
 
 #[test]
 fn tamiyos_compleation_unattaches_an_enchanted_equipment() {
-    let (r, aura, shuko, _) = compleation_on(true);
+    let (r, aura, shuko, _) = compleation_on(CompleationHost::Equipment);
     assert_eq!(
         host_of(&r, shuko),
         None,
@@ -679,7 +695,7 @@ fn tamiyos_compleation_unattaches_an_enchanted_equipment() {
 
 #[test]
 fn tamiyos_compleation_leaves_a_creatures_equipment_alone() {
-    let (r, aura, shuko, wearer) = compleation_on(false);
+    let (r, aura, shuko, wearer) = compleation_on(CompleationHost::Creature);
     assert_eq!(host_of(&r, aura), Some(AttachTarget::Object(wearer)));
     assert_eq!(
         host_of(&r, shuko),

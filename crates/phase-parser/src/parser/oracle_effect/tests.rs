@@ -67512,20 +67512,26 @@ fn unexpected_request_delayed_unattach_names_the_attached_equipment() {
 /// admitted by the singular unattach arm.
 #[test]
 fn unattach_non_anaphor_operands_stay_unimplemented() {
-    for (name, text, fragment) in [
-        (
-            "Elbrus, the Binding Blade",
-            "When equipped creature deals combat damage to a player, unattach Elbrus, the \
-             Binding Blade, then transform it.",
-            "unattach ~",
-        ),
-        (
-            "Carry Away",
-            "Enchant Equipment\nWhen this Aura enters, unattach enchanted Equipment.",
-            "unattach enchanted Equipment",
-        ),
+    let elbrus = parse_oracle_text(
+        "Equipped creature gets +1/+0.\nWhen equipped creature deals combat damage to a \
+         player, unattach Elbrus, then transform it.\nEquip {1}",
+        "Elbrus, the Binding Blade",
+        &["Equip".to_string()],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    let carry_away = parse_oracle_text(
+        "Enchant Equipment\nWhen this Aura enters, unattach enchanted Equipment.\nYou \
+         control enchanted Equipment.",
+        "Carry Away",
+        &["Enchant".to_string()],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    for (name, parsed, fragment) in [
+        ("Elbrus, the Binding Blade", elbrus, "unattach ~"),
+        ("Carry Away", carry_away, "unattach enchanted Equipment"),
     ] {
-        let parsed = parse_oracle_text(text, name, &[], &["Artifact".to_string()], &[]);
         let dbg = format!("{parsed:#?}");
         assert!(
             dbg.contains("Unimplemented")
