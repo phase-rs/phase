@@ -528,6 +528,7 @@ fn finish_abandoned_replacement(
             parked_affected_object_id: boundary.affected_object_id(),
             pending_phase_drain_life_loser: None,
             action_event_start: events.len(),
+            drain_parked_batch: false,
         },
         events,
     )
@@ -676,6 +677,10 @@ struct ReplacementExecuteEpilogue {
     parked_affected_object_id: Option<ObjectId>,
     pending_phase_drain_life_loser: Option<PlayerId>,
     action_event_start: usize,
+    /// CR 800.4a + CR 616.1: whether the parked batch tail is drained here. A departure
+    /// cancels only the leaver's own paused member; the surviving players' tail stays on its
+    /// shared owner for the action's ordinary drain, exactly as before the departure.
+    drain_parked_batch: bool,
 }
 
 /// CR 616.1 + CR 608.2c: settle a delivered replacement or a whole staged batch
@@ -692,6 +697,7 @@ fn finish_replacement_execute_epilogue(
         parked_affected_object_id,
         pending_phase_drain_life_loser,
         action_event_start: replacement_action_event_start,
+        drain_parked_batch,
     } = epilogue;
     let mut waiting_for = WaitingFor::Priority {
         player: state.active_player,
@@ -873,7 +879,9 @@ fn finish_replacement_execute_epilogue(
     // arm above; drain the parked tail. The drain may re-park when the
     // next object surfaces its own prompt — in that case it sets
     // `state.waiting_for` for us to propagate.
-    if matches!(waiting_for, WaitingFor::Priority { .. }) && state.active_batch_delivery().is_some()
+    if drain_parked_batch
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+        && state.active_batch_delivery().is_some()
     {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1166,7 +1174,11 @@ fn finish_replacement_execute_epilogue(
         // this call site adds none.
         finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
 
-        super::engine::resume_pending_continuation_if_priority(state, events)?;
+        // CR 800.4a + CR 616.1: a departure leaves the surviving players' parked batch tail on
+        // its shared owner; the action's ordinary drain resumes it.
+        if drain_parked_batch || state.active_batch_delivery().is_none() {
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
+        }
         waiting_for = state.waiting_for.clone();
     }
 
@@ -1440,6 +1452,7 @@ fn handle_replacement_choice_inner(
                                         parked_affected_object_id,
                                         pending_phase_drain_life_loser,
                                         action_event_start: replacement_action_event_start,
+                                        drain_parked_batch: true,
                                     },
                                     events,
                                 )
@@ -2128,6 +2141,7 @@ fn handle_replacement_choice_inner(
                                         parked_affected_object_id,
                                         pending_phase_drain_life_loser,
                                         action_event_start: replacement_action_event_start,
+                                        drain_parked_batch: true,
                                     },
                                     events,
                                 )
@@ -2252,6 +2266,7 @@ fn handle_replacement_choice_inner(
                     parked_affected_object_id,
                     pending_phase_drain_life_loser,
                     action_event_start: replacement_action_event_start,
+                    drain_parked_batch: true,
                 },
                 events,
             )
@@ -2358,6 +2373,7 @@ fn handle_replacement_choice_inner(
                                     parked_affected_object_id,
                                     pending_phase_drain_life_loser,
                                     action_event_start: replacement_action_event_start,
+                                    drain_parked_batch: true,
                                 },
                                 events,
                             )
@@ -2406,6 +2422,7 @@ fn handle_replacement_choice_inner(
                                 parked_affected_object_id,
                                 pending_phase_drain_life_loser,
                                 action_event_start: replacement_action_event_start,
+                                drain_parked_batch: true,
                             },
                             events,
                         )

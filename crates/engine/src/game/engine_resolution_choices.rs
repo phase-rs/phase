@@ -7788,38 +7788,43 @@ pub(super) fn handle_resolution_choice(
                     // CR 608.2c: two or more chosen cards are one
                     // announced simultaneous ChangeZone population. The
                     // selection is published before the family entry can park.
-                    let staged_settled =
-                        if effect_kind == EffectKind::ChangeZone && chosen_ids.len() >= 2 {
-                            publish_effect_zone_choice_tracked_set(
-                                state,
-                                effect_kind,
-                                destination,
-                                &chosen_ids,
-                                library_position.clone(),
-                                true,
-                            );
-                            let ctx = effects::change_zone::ChangeZoneIterationCtx {
-                                source_id,
-                                controller: player,
-                                performed_by: player,
-                                // The request is the delivery authority; the
-                                // selected cards may span zones.
-                                origin: None,
-                                destination: dest_zone,
-                                enter_transformed,
-                                enters_under_player,
-                                duration: duration.clone(),
-                                track_exiled_by_source,
-                                face_down_in_exile,
-                                face_down_profile: face_down_profile.clone(),
-                                library_placement: None,
-                                library_shuffle,
-                                enter_attached_to: None,
-                                with_entry_effect: with_entry_effect.clone(),
-                            };
-                            let requests =
-                                effects::change_zone::change_zone_member_requests(&ctx, &members);
-                            let tail = crate::types::game_state::ChangeZoneBatchTail {
+                    let staged_settled = if effect_kind == EffectKind::ChangeZone
+                        && chosen_ids.len() >= 2
+                        && !effects::change_zone::population_reorders_the_library(
+                            state,
+                            chosen_ids.iter().copied(),
+                            dest_zone,
+                        ) {
+                        publish_effect_zone_choice_tracked_set(
+                            state,
+                            effect_kind,
+                            destination,
+                            &chosen_ids,
+                            library_position.clone(),
+                            true,
+                        );
+                        let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                            source_id,
+                            controller: player,
+                            performed_by: player,
+                            // The request is the delivery authority; the
+                            // selected cards may span zones.
+                            origin: None,
+                            destination: dest_zone,
+                            enter_transformed,
+                            enters_under_player,
+                            duration: duration.clone(),
+                            track_exiled_by_source,
+                            face_down_in_exile,
+                            face_down_profile: face_down_profile.clone(),
+                            library_placement: None,
+                            library_shuffle,
+                            enter_attached_to: None,
+                            with_entry_effect: with_entry_effect.clone(),
+                        };
+                        let requests =
+                            effects::change_zone::change_zone_member_requests(&ctx, &members);
+                        let tail = crate::types::game_state::ChangeZoneBatchTail {
                             group_id: logical_zone_change_group.logical_group_id,
                             effect_kind,
                             source_id,
@@ -7836,31 +7841,31 @@ pub(super) fn handle_resolution_choice(
                             // parked later instruction is read conservatively, as on the legacy resume.
                             entry_collector: effects::entry_occurrence_collector(state, None),
                         };
-                            match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
-                                state,
-                                requests,
-                                logical_zone_change_group,
-                                tail,
-                                ctx.origin,
-                                events,
-                            ) {
-                                crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => {
-                                    return Ok(action_result_outcome(
-                                        events,
-                                        state.waiting_for.clone(),
-                                    ));
-                                }
-                                crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled {
-                                    group,
-                                    members,
-                                } => {
-                                    logical_zone_change_group = group;
-                                    Some(members)
-                                }
+                        match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+                            state,
+                            requests,
+                            logical_zone_change_group,
+                            tail,
+                            ctx.origin,
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => {
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
                             }
-                        } else {
-                            None
-                        };
+                            crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled {
+                                group,
+                                members,
+                            } => {
+                                logical_zone_change_group = group;
+                                Some(members)
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let logical_group_event_start = events.len();
                     let legacy_members: &[crate::types::game_state::ChangeZoneMemberEntry] =
                         if staged_settled.is_some() {

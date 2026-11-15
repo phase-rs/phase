@@ -1701,7 +1701,13 @@ pub fn resolve(
         })
         .cloned()
         .collect();
-    if staged_members.len() >= 2 {
+    if staged_members.len() >= 2
+        && !population_reorders_the_library(
+            state,
+            staged_members.iter().map(|member| member.object_id),
+            dest_zone,
+        )
+    {
         for muzzled in members.iter().filter(|member| {
             !staged_members
                 .iter()
@@ -2396,6 +2402,24 @@ pub(crate) fn process_one_zone_move_with_terminal(
     );
 
     result
+}
+
+/// CR 701.20b + CR 701.20d: a population that puts a card already in the library at another
+/// library position reorders the library; it is not a zone change and consults no replacement.
+/// Such a population keeps the per-member delivery that settles the instruction's whole-library
+/// reorder (`library_reorder`), so it is not staged.
+pub(crate) fn population_reorders_the_library(
+    state: &GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) -> bool {
+    destination == Zone::Library
+        && members.into_iter().any(|id| {
+            state
+                .objects
+                .get(&id)
+                .is_some_and(|object| object.zone == Zone::Library)
+        })
 }
 
 /// CR 608.2c + CR 614.12: build the exact per-member requests for one staged
@@ -3674,14 +3698,15 @@ pub fn resolve_all(
     // CR 608.2c + CR 730.3a: multiple objects, or the physical components of
     // one merged permanent, need staged ownership through a component pause.
     // The early owner-arrangement branch above stays unchanged.
-    if matching.len() >= 2
+    if (matching.len() >= 2
         || matching.iter().any(|id| {
             state
                 .objects
                 .get(id)
                 .and_then(merged_components_of)
                 .is_some()
-        })
+        }))
+        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone)
     {
         let ctx = ChangeZoneIterationCtx {
             source_id: ability.source_id,
