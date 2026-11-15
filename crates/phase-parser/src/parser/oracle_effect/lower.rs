@@ -16724,9 +16724,9 @@ mod tests {
                 matches!(
                     e,
                     Effect::CreateDelayedTrigger {
-                        condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        condition: DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                             phase: Phase::End,
-                            ..
+                            turn: None,
                         },
                         effect,
                         ..

@@ -58463,8 +58463,7 @@ fn chain_most_recent_clause_is_cast_grant(clauses: &[ClauseIr]) -> bool {
 /// to bind to, so its consequent is kept unwrapped as a sequential instruction.
 /// CR 603.7a + CR 608.2c: whether the antecedent a temporal anaphor needs is
 /// established by the clauses parsed so far. "That turn's end step" names the
-/// extra turn an earlier clause of the same chain grants (Final Fortune,
-/// Alchemist's Gambit); it does not name "that player's next turn" in a
+/// extra turn an earlier clause of the same chain grants (Final Fortune); it does not name "that player's next turn" in a
 /// different chain (Oracle en-Vec), whose referent is not a granted turn.
 fn temporal_antecedent_is_proven(
     condition: &DelayedTriggerCondition,
