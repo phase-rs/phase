@@ -39,8 +39,7 @@ pub(crate) fn delayed_source_context(
 ) -> Option<TriggerSourceContext> {
     let mut source_context = ability.trigger_source.clone().or_else(|| {
         let source = state.objects.get(&ability.source_id)?;
-        let mut context =
-            crate::game::triggers::trigger_source_context_for_latch(state, source);
+        let mut context = crate::game::triggers::trigger_source_context_for_latch(state, source);
         // CR 603.7c: an activated ability's delayed child names the announced
         // source incarnation, not whatever the storage id holds now. A blink
         // between announcement and resolution leaves a successor that is a new
