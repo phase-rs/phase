@@ -15,13 +15,23 @@
 //! characteristics) under any spend the caster could direct. Every step is
 //! answered by the engine's own reducer and payment authorities; a step it can't
 //! certify refuses with its reason, so consumers fail closed.
+//!
+//! Work: the decision's half ([`PaymentSurplusDecision::prepare`]) is one
+//! direct reducer application (the finisher) plus one enumeration of the mana
+//! actions the payer is offered afterwards; each activation adds at most two
+//! direct applications. Those counts are direct applications, not total work:
+//! the enumeration runs a readiness simulation for every costed mana source the
+//! payer controls, so a caller certifying every activation of one decision
+//! prepares it once.
 
 use crate::ai_support::activates_mana_ability;
 use crate::ai_support::payment_continuation::{
     classify_payment_continuation, finalizes_in_one_step, PaymentContinuationRoot,
     PaymentContinuationState,
 };
-use crate::game::casting::{cast_payment_mana_spend_permission, mana_spent_source_snapshot};
+use crate::game::casting::{
+    activated_ability_definitions, cast_payment_mana_spend_permission, mana_spent_source_snapshot,
+};
 use crate::game::engine::apply_as_current_for_simulation;
 use crate::game::mana_payment::{
     has_unspent_mana_continuous_effects, shard_to_mana_type, ShardRequirement,
@@ -47,7 +57,8 @@ pub enum SurplusManaActivation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurplusNotCertified {
     /// The decision is not a spell's `ManaPayment` step owned by the payment
-    /// continuation oracle.
+    /// continuation oracle, or a [`PaymentSurplusDecision`] was prepared for
+    /// another decision.
     Carrier,
     /// CR 602.2b: an activated ability's payment; its noted or source-qualified
     /// mana is out of the certificate's scope.
@@ -83,21 +94,45 @@ pub enum SurplusNotCertified {
     FinisherDiverges,
 }
 
-/// Reducer applications spent by one certificate, for bound tests.
+/// Reducer work spent by the certificate, for bound tests.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SurplusCertificateCounters {
+    /// Direct reducer applications, each on a scratch copy of the state.
     pub applies: usize,
+    /// Enumerations of the payer's offered mana actions after the finisher.
+    /// Each one runs the readiness simulations of every costed mana source the
+    /// payer controls, so this — not `applies` — is what scales with the board.
+    pub offer_enumerations: usize,
+}
+
+/// One unit of the certificate's reducer work.
+#[derive(Debug, Clone, Copy)]
+enum Work {
+    Apply,
+    OfferEnumeration,
+}
+
+#[cfg(feature = "test-support")]
+impl SurplusCertificateCounters {
+    fn record(&mut self, work: Work) {
+        match work {
+            Work::Apply => self.applies += 1,
+            Work::OfferEnumeration => self.offer_enumerations += 1,
+        }
+    }
 }
 
 /// Certify whether `activation`, offered at the current spell payment step, is
-/// a surplus mana activation (see the module docs). At most three reducer
-/// applications, all on scratch copies of `state`.
+/// a surplus mana activation (see the module docs). A one-shot
+/// [`PaymentSurplusDecision::prepare`] + [`PaymentSurplusDecision::certify`]
+/// that skips the preparation when `activation` is not a mana activation. A
+/// caller certifying several activations of one decision prepares once instead.
 pub fn surplus_mana_activation(
     state: &GameState,
     activation: &GameAction,
 ) -> SurplusManaActivation {
-    certify(state, activation, &mut || {})
+    verdict(one_shot(state, activation, &mut |_| {}))
 }
 
 #[cfg(feature = "test-support")]
@@ -106,50 +141,184 @@ pub fn surplus_mana_activation_with_counters(
     activation: &GameAction,
     counters: &mut SurplusCertificateCounters,
 ) -> SurplusManaActivation {
-    certify(state, activation, &mut || counters.applies += 1)
+    verdict(one_shot(state, activation, &mut |work| {
+        counters.record(work)
+    }))
 }
 
-fn certify(
-    state: &GameState,
-    activation: &GameAction,
-    on_apply: &mut dyn FnMut(),
-) -> SurplusManaActivation {
-    match certificate(state, activation, on_apply) {
+fn verdict(certificate: Result<(), SurplusNotCertified>) -> SurplusManaActivation {
+    match certificate {
         Ok(()) => SurplusManaActivation::Surplus,
         Err(reason) => SurplusManaActivation::NotCertified(reason),
     }
 }
 
-fn certificate(
+fn one_shot(
     state: &GameState,
     activation: &GameAction,
-    on_apply: &mut dyn FnMut(),
+    on_work: &mut dyn FnMut(Work),
 ) -> Result<(), SurplusNotCertified> {
-    use SurplusNotCertified as Refused;
+    let (spell_id, payer) = carrier(state)?;
+    mana_activation(state, activation)?;
+    let prepared = prepare(state, spell_id, payer, on_work)?;
+    certify_prepared(state, &prepared, activation, on_work)
+}
 
-    // CR 601.2g: the spell's mana-payment step, with its root owned by the
-    // payment continuation oracle.
+/// The decision-level half of the certificate: the carrier, the finisher's
+/// state without any further activation (S0), and the mana actions the payer
+/// is offered in S0. It depends only on the payment decision, so a caller
+/// certifying every activation offered at that decision prepares it once —
+/// one reducer application and one offered-mana-action enumeration — and each
+/// [`Self::certify`] adds at most two direct applications.
+#[derive(Debug, Clone)]
+pub struct PaymentSurplusDecision {
+    binding: DecisionBinding,
+    prepared: Result<PreparedPayment, SurplusNotCertified>,
+}
+
+/// The finisher-side facts every activation of one decision is certified against.
+#[derive(Debug, Clone)]
+struct PreparedPayment {
+    spell_id: ObjectId,
+    payer: PlayerId,
+    /// S0: the state after the pass that finalizes the payment.
+    without: GameState,
+    /// The mana actions the payer is offered in S0.
+    offered: Vec<GameAction>,
+}
+
+/// The decision a preparation was made for: the reducer revision and the
+/// interaction it answers, the payment step, the spell being paid for, and
+/// every pool's units.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionBinding {
+    state_revision: u64,
+    interaction_generation: u64,
+    waiting_for: WaitingFor,
+    pending_spell: Option<ObjectId>,
+    pools: Vec<Vec<ManaPipId>>,
+}
+
+impl DecisionBinding {
+    fn capture(state: &GameState) -> Self {
+        Self {
+            state_revision: state.state_revision,
+            interaction_generation: state.interaction_generation,
+            waiting_for: state.waiting_for.clone(),
+            pending_spell: state.pending_cast.as_ref().map(|pending| pending.object_id),
+            pools: state
+                .players
+                .iter()
+                .map(|player| player.mana_pool.units().map(|unit| unit.pip_id).collect())
+                .collect(),
+        }
+    }
+}
+
+impl PaymentSurplusDecision {
+    /// Prepare `state`'s payment decision (see the type docs).
+    pub fn prepare(state: &GameState) -> Self {
+        Self::prepare_counting(state, &mut |_| {})
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn prepare_with_counters(
+        state: &GameState,
+        counters: &mut SurplusCertificateCounters,
+    ) -> Self {
+        Self::prepare_counting(state, &mut |work| counters.record(work))
+    }
+
+    fn prepare_counting(state: &GameState, on_work: &mut dyn FnMut(Work)) -> Self {
+        Self {
+            binding: DecisionBinding::capture(state),
+            prepared: carrier(state)
+                .and_then(|(spell_id, payer)| prepare(state, spell_id, payer, on_work)),
+        }
+    }
+
+    /// Whether this preparation was made for `state`'s decision.
+    pub fn prepared_for(&self, state: &GameState) -> bool {
+        self.binding == DecisionBinding::capture(state)
+    }
+
+    /// Certify `activation`, offered at the prepared decision. A `state` the
+    /// preparation wasn't made for ([`Self::prepared_for`]) certifies nothing.
+    pub fn certify(&self, state: &GameState, activation: &GameAction) -> SurplusManaActivation {
+        verdict(self.certify_counting(state, activation, &mut |_| {}))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn certify_with_counters(
+        &self,
+        state: &GameState,
+        activation: &GameAction,
+        counters: &mut SurplusCertificateCounters,
+    ) -> SurplusManaActivation {
+        verdict(self.certify_counting(state, activation, &mut |work| counters.record(work)))
+    }
+
+    fn certify_counting(
+        &self,
+        state: &GameState,
+        activation: &GameAction,
+        on_work: &mut dyn FnMut(Work),
+    ) -> Result<(), SurplusNotCertified> {
+        use SurplusNotCertified as Refused;
+        if !self.prepared_for(state) {
+            return Err(Refused::Carrier);
+        }
+        // The one-shot's refusal order: the carrier, then the action, then
+        // the decision's remaining steps.
+        if let Err(reason @ (Refused::Carrier | Refused::AbilityRoot)) = &self.prepared {
+            return Err(*reason);
+        }
+        mana_activation(state, activation)?;
+        let prepared = self.prepared.as_ref().map_err(|reason| *reason)?;
+        certify_prepared(state, prepared, activation, on_work)
+    }
+}
+
+/// CR 601.2g: the spell's mana-payment step, with its root owned by the
+/// payment continuation oracle.
+fn carrier(state: &GameState) -> Result<(ObjectId, PlayerId), SurplusNotCertified> {
+    use SurplusNotCertified as Refused;
     if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
         return Err(Refused::Carrier);
     }
-    let (spell_id, payer) = match classify_payment_continuation(state) {
+    match classify_payment_continuation(state) {
         PaymentContinuationState::Affiliated(PaymentContinuationRoot::Spell {
             object_id,
             payer,
             ..
-        }) => (object_id, payer),
+        }) => Ok((object_id, payer)),
         PaymentContinuationState::Affiliated(PaymentContinuationRoot::Activation { .. }) => {
-            return Err(Refused::AbilityRoot)
+            Err(Refused::AbilityRoot)
         }
         PaymentContinuationState::NotAffiliated
-        | PaymentContinuationState::UnsupportedAffiliated(_) => return Err(Refused::Carrier),
-    };
-    // CR 605.1a + CR 605.3a.
-    let Some(identity) =
-        activation_identity(activation).filter(|_| activates_mana_ability(state, activation))
-    else {
-        return Err(Refused::NotManaActivation);
-    };
+        | PaymentContinuationState::UnsupportedAffiliated(_) => Err(Refused::Carrier),
+    }
+}
+
+/// CR 605.1a + CR 605.3a: `activation` activates a mana ability.
+fn mana_activation(state: &GameState, activation: &GameAction) -> Result<(), SurplusNotCertified> {
+    if activation_source(activation).is_some() && activates_mana_ability(state, activation) {
+        Ok(())
+    } else {
+        Err(SurplusNotCertified::NotManaActivation)
+    }
+}
+
+/// The decision's steps: nothing reads unspent mana, no spend permission, the
+/// pass finalizes, and the payer then holds priority. One reducer application
+/// and one offered-mana-action enumeration.
+fn prepare(
+    state: &GameState,
+    spell_id: ObjectId,
+    payer: PlayerId,
+    on_work: &mut dyn FnMut(Work),
+) -> Result<PreparedPayment, SurplusNotCertified> {
+    use SurplusNotCertified as Refused;
     // CR 106.4: floating mana is inert only when nothing reads it.
     if has_unspent_mana_continuous_effects(state) {
         return Err(Refused::UnspentManaRead);
@@ -160,7 +329,7 @@ fn certificate(
     }
 
     // CR 601.2h–i: passing pays the total cost and finalizes the spell now.
-    on_apply();
+    on_work(Work::Apply);
     let without =
         finalizes_in_one_step(state, &GameAction::PassPriority).ok_or(Refused::NoFinisher)?;
     // CR 117.3c + CR 608.2g: the caster holds priority with the spell on the
@@ -170,12 +339,35 @@ fn certificate(
     {
         return Err(Refused::NoPriorityWindow);
     }
-    if !deferral_available(state, &without, payer, identity) {
+    on_work(Work::OfferEnumeration);
+    let offered = activatable_mana_actions_for_player(&without, payer);
+    Ok(PreparedPayment {
+        spell_id,
+        payer,
+        without,
+        offered,
+    })
+}
+
+/// The activation's steps against a prepared decision: deferral, the
+/// activation itself, saturation, and the finisher after it. At most two
+/// reducer applications.
+fn certify_prepared(
+    state: &GameState,
+    prepared: &PreparedPayment,
+    activation: &GameAction,
+    on_work: &mut dyn FnMut(Work),
+) -> Result<(), SurplusNotCertified> {
+    use SurplusNotCertified as Refused;
+    let PreparedPayment {
+        spell_id, payer, ..
+    } = *prepared;
+    if !deferral_available(state, prepared, activation) {
         return Err(Refused::DeferralUnavailable);
     }
 
     // The activation itself.
-    on_apply();
+    on_work(Work::Apply);
     let mut activated = state.clone();
     let deferred_before = activated.deferred_triggers.len();
     let result = apply_as_current_for_simulation(&mut activated, activation.clone())
@@ -203,10 +395,13 @@ fn certificate(
     }
 
     // The default finisher after the activation pays the same way.
-    on_apply();
+    on_work(Work::Apply);
     let with = finalizes_in_one_step(&activated, &GameAction::PassPriority)
         .ok_or(Refused::FinisherDiverges)?;
-    match (without.objects.get(&spell_id), with.objects.get(&spell_id)) {
+    match (
+        prepared.without.objects.get(&spell_id),
+        with.objects.get(&spell_id),
+    ) {
         (Some(without_spell), Some(with_spell))
             if without_spell.cast_payment_stamps_equivalent(with_spell) =>
         {
@@ -216,28 +411,12 @@ fn certificate(
     }
 }
 
-/// The source and ability a mana activation names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ActivationIdentity {
-    source: ObjectId,
-    ability_index: Option<usize>,
-}
-
-fn activation_identity(action: &GameAction) -> Option<ActivationIdentity> {
+/// The source object a mana action activates.
+fn activation_source(action: &GameAction) -> Option<ObjectId> {
     match action {
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index,
-            ..
-        } => Some(ActivationIdentity {
-            source: *source_id,
-            ability_index: Some(*ability_index),
-        }),
+        GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
         GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
-            Some(ActivationIdentity {
-                source: selection.source.object_id,
-                ability_index: selection.ability_index,
-            })
+            Some(selection.source.object_id)
         }
         _ => None,
     }
@@ -247,21 +426,78 @@ fn activation_identity(action: &GameAction) -> Option<ActivationIdentity> {
 /// ability of the same object (CR 400.7: same incarnation).
 fn deferral_available(
     state: &GameState,
-    without: &GameState,
-    payer: PlayerId,
-    identity: ActivationIdentity,
+    prepared: &PreparedPayment,
+    activation: &GameAction,
 ) -> bool {
-    let incarnation = |state: &GameState| {
-        state
-            .objects
-            .get(&identity.source)
-            .map(|object| object.incarnation)
+    let Some(source) = activation_source(activation) else {
+        return false;
     };
+    let incarnation =
+        |state: &GameState| state.objects.get(&source).map(|object| object.incarnation);
     incarnation(state).is_some()
-        && incarnation(state) == incarnation(without)
-        && activatable_mana_actions_for_player(without, payer)
+        && incarnation(state) == incarnation(&prepared.without)
+        && prepared
+            .offered
             .iter()
-            .any(|offered| activation_identity(offered) == Some(identity))
+            .any(|offered| same_activation(state, &prepared.without, activation, offered))
+}
+
+/// Whether `offered`, in `without`, activates the ability `activation` does in
+/// `state`. An index alone doesn't name an ability across states: a granted
+/// list is rebuilt in provider order (Manascape Refractor's lands), so when a
+/// provider leaves, the same index names a different ability. The definition
+/// at the index must be the same in both.
+fn same_activation(
+    state: &GameState,
+    without: &GameState,
+    activation: &GameAction,
+    offered: &GameAction,
+) -> bool {
+    let same_definition = |source: ObjectId, index: usize| {
+        let named = |state: &GameState| {
+            activated_ability_definitions(state, source)
+                .into_iter()
+                .find_map(|(at, ability)| (at == index).then_some(ability))
+        };
+        let before = named(state);
+        before.is_some() && before == named(without)
+    };
+    match (activation, offered) {
+        (
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+                ..
+            },
+            GameAction::ActivateAbility {
+                source_id: offered_source,
+                ability_index: offered_index,
+                ..
+            },
+        ) => {
+            source_id == offered_source
+                && ability_index == offered_index
+                && same_definition(*source_id, *ability_index)
+        }
+        (
+            GameAction::TapLandForMana { selection },
+            GameAction::TapLandForMana {
+                selection: offered_selection,
+            },
+        )
+        | (
+            GameAction::ActivateManaSource { selection },
+            GameAction::ActivateManaSource {
+                selection: offered_selection,
+            },
+        ) => {
+            selection == offered_selection
+                && selection
+                    .ability_index
+                    .is_none_or(|index| same_definition(selection.source.object_id, index))
+        }
+        _ => false,
+    }
 }
 
 /// The one unit `activated`'s pool holds that `state`'s pool didn't.
@@ -306,6 +542,12 @@ pub(crate) fn spend_equivalent(state: &GameState, a: &ManaUnit, b: &ManaUnit) ->
         (Some(a_snapshot), Some(b_snapshot)) => a_snapshot.lki == b_snapshot.lki,
         _ => false,
     }
+}
+
+/// [`spend_equivalent`], for printed-board reach guards.
+#[cfg(feature = "test-support")]
+pub fn units_spend_equivalent(state: &GameState, a: &ManaUnit, b: &ManaUnit) -> bool {
+    spend_equivalent(state, a, b)
 }
 
 /// Saturation: `activated`'s pool already holds, besides `new_unit`, as many

@@ -4544,6 +4544,7 @@ pub(crate) fn build_ai_context_with_session(
         session,
         player,
         deadline: engine::util::Deadline::none(),
+        payment_surplus: Default::default(),
     };
     // Compute opponent threat profile based on difficulty setting.
     ctx.opponent_threat = match config.search.threat_awareness {

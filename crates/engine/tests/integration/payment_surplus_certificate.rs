@@ -12,9 +12,11 @@
 //! Oracle text verbatim from Scryfall `cards/named`.
 
 use engine::ai_support::{
-    surplus_mana_activation, surplus_mana_activation_with_counters, SurplusCertificateCounters,
+    finalizes_in_one_step, surplus_mana_activation, surplus_mana_activation_with_counters,
+    units_spend_equivalent, PaymentSurplusDecision, SurplusCertificateCounters,
     SurplusManaActivation, SurplusNotCertified,
 };
+use engine::game::casting::activated_ability_definitions;
 use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -23,6 +25,7 @@ use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const TREASONOUS_OGRE: &str = "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.";
 const UNSUBSTANTIATE: &str = "Return target spell or creature to its owner's hand.";
@@ -190,7 +193,8 @@ fn pass_is_not_a_mana_activation() {
 
 /// The certificate's direct reducer work: one apply when the pass doesn't pay
 /// yet (the finisher check), three for a certified surplus (finisher,
-/// activation, finisher after the activation).
+/// activation, finisher after the activation) plus the one offered-mana-action
+/// enumeration after the finisher.
 #[test]
 fn certificate_direct_apply_counts() {
     let (mut runner, island, ogre) = unsubstantiate_board(|_| {});
@@ -198,7 +202,7 @@ fn certificate_direct_apply_counts() {
     act(&mut runner, tap_island);
     let mut first = SurplusCertificateCounters::default();
     surplus_mana_activation_with_counters(runner.state(), &ogre_activation(ogre), &mut first);
-    assert_eq!(first.applies, 1);
+    assert_eq!((first.applies, first.offer_enumerations), (1, 0));
 
     act(&mut runner, ogre_activation(ogre));
     let mut saturated = SurplusCertificateCounters::default();
@@ -210,11 +214,55 @@ fn certificate_direct_apply_counts() {
         ),
         Surplus
     );
-    assert_eq!(saturated.applies, 3);
+    assert_eq!((saturated.applies, saturated.offer_enumerations), (3, 1));
 
     let mut pass = SurplusCertificateCounters::default();
     surplus_mana_activation_with_counters(runner.state(), &GameAction::PassPriority, &mut pass);
-    assert_eq!(pass.applies, 0);
+    assert_eq!((pass.applies, pass.offer_enumerations), (0, 0));
+}
+
+/// A prepared decision does the finisher and the offered-mana-action
+/// enumeration once; each activation certified against it adds two direct
+/// applications and no enumeration. A preparation certifies nothing for a
+/// state it wasn't made for.
+#[test]
+fn prepared_decision_does_the_finisher_work_once() {
+    let mut second = None;
+    let (runner, ogre) = saturated_unsubstantiate(|sc| second = Some(add_ogre(sc, P0)));
+    let second = second.expect("reach: a second Ogre");
+    let state = runner.state();
+
+    let mut preparation = SurplusCertificateCounters::default();
+    let decision = PaymentSurplusDecision::prepare_with_counters(state, &mut preparation);
+    assert_eq!(
+        (preparation.applies, preparation.offer_enumerations),
+        (1, 1)
+    );
+    for source in [ogre, second] {
+        let mut per_activation = SurplusCertificateCounters::default();
+        assert_eq!(
+            decision.certify_with_counters(state, &ogre_activation(source), &mut per_activation),
+            Surplus,
+            "{source:?}"
+        );
+        assert_eq!(
+            (per_activation.applies, per_activation.offer_enumerations),
+            (2, 0)
+        );
+        assert_eq!(
+            decision.certify(state, &ogre_activation(source)),
+            surplus_mana_activation(state, &ogre_activation(source)),
+            "the prepared and one-shot certificates agree"
+        );
+    }
+
+    let mut later = GameRunner::from_state(state.clone());
+    act(&mut later, ogre_activation(second));
+    assert!(!decision.prepared_for(later.state()));
+    assert_eq!(
+        decision.certify(later.state(), &ogre_activation(ogre)),
+        NotCertified(SurplusNotCertified::Carrier)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,5 +1317,254 @@ fn ogre_red_is_not_equivalent_to_desert_red() {
     assert_eq!(
         certificate(&runner, &ogre_activation(ogre)),
         NotCertified(SurplusNotCertified::Unsaturated)
+    );
+}
+
+const HARROW: &str = "As an additional cost to cast this spell, sacrifice a land.\nSearch your library for up to two basic land cards, put them onto the battlefield, then shuffle.";
+
+/// The Q7 board's ids and the Ruins red ability's index on each Refractor.
+struct RefractorHarrow {
+    runner: GameRunner,
+    refractor_b: ObjectId,
+    ruins: ObjectId,
+    forest: ObjectId,
+    sacrificed: ObjectId,
+    ruins_red_index: usize,
+}
+
+/// The ability index on `refractor` whose definition is `land`'s ability
+/// `land_index` — discovered, not assumed.
+fn granted_index(
+    state: &GameState,
+    refractor: ObjectId,
+    land: ObjectId,
+    land_index: usize,
+) -> usize {
+    let wanted = &activated_ability_definitions(state, land)[land_index].1;
+    let matches: Vec<usize> = activated_ability_definitions(state, refractor)
+        .into_iter()
+        .filter(|(_, ability)| ability == wanted)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "reach: {refractor:?} has exactly one copy of {land:?}'s ability {land_index}"
+    );
+    matches[0]
+}
+
+/// Q7: Manascape Refractors A and B; the providers enter Ramunap Ruins →
+/// Island → Forest → Wastes. A makes two {R} with its copy of the Ruins
+/// ability (Twiddle untaps it between), Harrow is announced with `sacrificed`
+/// as its additional cost, the Forest pays {G}, and A's two reds are pinned.
+fn refractor_harrow_board(sacrifice_ruins: bool) -> RefractorHarrow {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let refractor_a = sc
+        .add_artifact_from_oracle(P0, "Manascape Refractor", MANASCAPE_REFRACTOR)
+        .id();
+    let refractor_b = sc
+        .add_artifact_from_oracle(P0, "Manascape Refractor", MANASCAPE_REFRACTOR)
+        .id();
+    let ruins = sc
+        .add_land_from_oracle(P0, "Ramunap Ruins", RAMUNAP_RUINS)
+        .with_subtypes(vec!["Desert"])
+        .id();
+    let island = sc.add_basic_land(P0, ManaColor::Blue);
+    let forest = sc.add_basic_land(P0, ManaColor::Green);
+    let wastes = add_wastes(&mut sc);
+    let twiddle = sc
+        .add_spell_to_hand_from_oracle(P0, "Twiddle", true, TWIDDLE)
+        .with_mana_cost(cost(vec![ManaCostShard::Blue], 0))
+        .id();
+    let harrow = sc
+        .add_spell_to_hand_from_oracle(P0, "Harrow", true, HARROW)
+        .with_mana_cost(cost(vec![ManaCostShard::Green], 2))
+        .id();
+    sc.add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .with_mana_cost(cost(vec![ManaCostShard::Red], 0));
+    sc.add_creature(P1, "Grizzly Bears", 2, 2);
+    let mut runner = sc.build();
+    runner.state_mut().objects.get_mut(&ruins).unwrap().tapped = true;
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    let ruins_red_index = granted_index(runner.state(), refractor_a, ruins, 1);
+    assert_eq!(
+        granted_index(runner.state(), refractor_b, ruins, 1),
+        ruins_red_index,
+        "reach: both Refractors list the providers in the same order"
+    );
+    let ruins_red = |refractor| GameAction::ActivateAbility {
+        source_id: refractor,
+        ability_index: ruins_red_index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    act(&mut runner, ruins_red(refractor_a));
+    cast_to_payment(
+        &mut runner,
+        twiddle,
+        Answers {
+            target: Some(TargetRef::Object(refractor_a)),
+            ..Answers::default()
+        },
+    );
+    produce(&mut runner, &[(island, None)]);
+    act(&mut runner, GameAction::PassPriority);
+    pass_until(&mut runner, |state| {
+        matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
+    });
+    act(
+        &mut runner,
+        GameAction::DecideOptionalEffect { accept: true },
+    );
+    act(&mut runner, GameAction::ChooseBranch { index: 1 });
+    assert!(
+        !runner.state().objects[&refractor_a].tapped,
+        "reach: Twiddle untapped Refractor A"
+    );
+    act(&mut runner, ruins_red(refractor_a));
+
+    let sacrificed = if sacrifice_ruins { ruins } else { wastes };
+    cast_to_payment(
+        &mut runner,
+        harrow,
+        Answers {
+            cost_objects: vec![sacrificed],
+            ..Answers::default()
+        },
+    );
+    produce(&mut runner, &[(forest, None)]);
+    let a_red: Vec<_> = runner.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.source_id == refractor_a && unit.color == ManaType::Red)
+        .collect();
+    assert_eq!(a_red.len(), 2, "reach: two {{R}} from Refractor A");
+    for unit in a_red {
+        act(
+            &mut runner,
+            GameAction::SpendPoolMana {
+                pip_id: unit.pip_id,
+            },
+        );
+    }
+    RefractorHarrow {
+        runner,
+        refractor_b,
+        ruins,
+        forest,
+        sacrificed,
+        ruins_red_index,
+    }
+}
+
+/// Q7: Harrow's additional cost sacrifices Ramunap Ruins as the payment
+/// finishes. Refractor B is the same object afterwards, but its granted
+/// abilities are rebuilt in provider order, so the index of its copy of the
+/// Ruins red ability now names the Forest's {G} ability: the activation the
+/// certificate would defer no longer exists (CR 605.3a).
+#[test]
+fn refractor_ability_index_renamed_by_the_finisher_refuses_deferral() {
+    let board = refractor_harrow_board(true);
+    let state = board.runner.state();
+    let b_red = GameAction::ActivateAbility {
+        source_id: board.refractor_b,
+        ability_index: board.ruins_red_index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    let mut activated = GameRunner::from_state(state.clone());
+    act(&mut activated, b_red.clone());
+    let pool = &activated.state().players[0].mana_pool;
+    let b_unit = pool
+        .units()
+        .find(|unit| unit.source_id == board.refractor_b)
+        .expect("reach: Refractor B adds a unit");
+    assert_eq!(b_unit.color, ManaType::Red, "reach: B's copy adds {{R}}");
+    assert!(
+        b_unit.restrictions.is_empty() && b_unit.grants.is_empty(),
+        "reach: the new red is rider-free"
+    );
+    let a_red: Vec<_> = pool
+        .units()
+        .filter(|unit| unit.pip_id != b_unit.pip_id && unit.color == ManaType::Red)
+        .collect();
+    assert_eq!(a_red.len(), 2, "reach: A's two reds are still pooled");
+    assert!(
+        a_red
+            .iter()
+            .all(|unit| units_spend_equivalent(activated.state(), unit, &b_unit)),
+        "reach: Refractor A's and B's reds are spend-equivalent in S'"
+    );
+
+    let without = finalizes_in_one_step(state, &GameAction::PassPriority)
+        .expect("reach: a pass finalizes Harrow");
+    assert_eq!(
+        without.objects[&board.refractor_b].incarnation,
+        state.objects[&board.refractor_b].incarnation,
+        "reach: Refractor B is the same object after the pass"
+    );
+    assert!(
+        without
+            .objects
+            .get(&board.ruins)
+            .is_none_or(|ruins| ruins.zone != Zone::Battlefield),
+        "reach: the Ruins is gone after the pass"
+    );
+    let named_after = activated_ability_definitions(&without, board.refractor_b)
+        .into_iter()
+        .find(|(index, _)| *index == board.ruins_red_index)
+        .map(|(_, ability)| ability)
+        .expect("reach: B still has an ability at the old index");
+    assert_ne!(
+        named_after,
+        activated_ability_definitions(state, board.ruins)[1].1,
+        "reach: B's old index no longer names the Ruins red ability"
+    );
+    assert_eq!(
+        named_after,
+        activated_ability_definitions(state, board.forest)[0].1,
+        "reach: B's old index now names the Forest's {{G}} ability"
+    );
+
+    assert_eq!(
+        certificate(&board.runner, &b_red),
+        NotCertified(SurplusNotCertified::DeferralUnavailable)
+    );
+}
+
+/// Q7 control: Harrow sacrifices the Wastes, the last provider, so the Ruins
+/// red ability keeps its index on Refractor B and B's extra red is a surplus.
+#[test]
+fn refractor_ability_index_kept_by_the_finisher_is_surplus() {
+    let board = refractor_harrow_board(false);
+    let state = board.runner.state();
+    let without = finalizes_in_one_step(state, &GameAction::PassPriority)
+        .expect("reach: a pass finalizes Harrow");
+    assert!(
+        without
+            .objects
+            .get(&board.sacrificed)
+            .is_none_or(|wastes| wastes.zone != Zone::Battlefield),
+        "reach: the Wastes is gone after the pass"
+    );
+    assert_eq!(
+        granted_index(&without, board.refractor_b, board.ruins, 1),
+        board.ruins_red_index,
+        "reach: B's index still names the Ruins red ability"
+    );
+    assert_eq!(
+        certificate(
+            &board.runner,
+            &GameAction::ActivateAbility {
+                source_id: board.refractor_b,
+                ability_index: board.ruins_red_index,
+                payment_mode: CastPaymentMode::Auto,
+            }
+        ),
+        Surplus
     );
 }

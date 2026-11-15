@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use engine::ai_support::PaymentSurplusDecision;
 use engine::game::DeckEntry;
+use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 use crate::deck_profile::ArchetypeMultipliers;
@@ -38,6 +40,57 @@ pub struct AiContext {
     /// deadline ticks down we fall back to cached-only lookups and a
     /// heuristic score.
     pub deadline: engine::util::Deadline,
+    /// The payment-step surplus certificate's decision-level preparation
+    /// (`SelfCostValuePolicy`'s payment arm), shared by every candidate of
+    /// the decision this context scores.
+    pub(crate) payment_surplus: PaymentSurplusMemo,
+}
+
+/// One root decision's [`PaymentSurplusDecision`]: the finisher and the
+/// offered-mana-action enumeration every activation offered at a payment step
+/// is certified against, prepared on first use. `PlannerServices` builds an
+/// `AiContext` per root decision; the preparation's own binding
+/// (`PaymentSurplusDecision::prepared_for`) re-prepares for any other state,
+/// so an entry is never read for a decision it wasn't made for. A clone starts
+/// empty.
+#[derive(Default)]
+pub(crate) struct PaymentSurplusMemo(Mutex<Option<Arc<PaymentSurplusDecision>>>);
+
+#[cfg(test)]
+thread_local! {
+    /// Test witness: payment-surplus preparations made on this thread.
+    pub(crate) static PAYMENT_SURPLUS_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl PaymentSurplusMemo {
+    /// `state`'s prepared payment decision.
+    pub(crate) fn decision(&self, state: &GameState) -> Arc<PaymentSurplusDecision> {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(decision) = slot
+            .as_ref()
+            .filter(|decision| decision.prepared_for(state))
+        {
+            return Arc::clone(decision);
+        }
+        #[cfg(test)]
+        PAYMENT_SURPLUS_PREPARATIONS.with(|count| count.set(count.get() + 1));
+        let decision = Arc::new(PaymentSurplusDecision::prepare(state));
+        *slot = Some(Arc::clone(&decision));
+        decision
+    }
+}
+
+impl Clone for PaymentSurplusMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for PaymentSurplusMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PaymentSurplusMemo")
+    }
 }
 
 static EMPTY_SYNERGY_GRAPH: std::sync::OnceLock<SynergyGraph> = std::sync::OnceLock::new();
@@ -94,6 +147,7 @@ impl AiContext {
             session,
             player,
             deadline: engine::util::Deadline::none(),
+            payment_surplus: PaymentSurplusMemo::default(),
         }
     }
 
@@ -108,6 +162,7 @@ impl AiContext {
             session: Arc::new(AiSession::empty()),
             player: PlayerId(0),
             deadline: engine::util::Deadline::none(),
+            payment_surplus: PaymentSurplusMemo::default(),
         }
     }
 

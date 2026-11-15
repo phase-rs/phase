@@ -85,9 +85,13 @@ pub use payment_continuation::{
 pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
-pub use payment_surplus::{surplus_mana_activation, SurplusManaActivation, SurplusNotCertified};
+pub use payment_surplus::{
+    surplus_mana_activation, PaymentSurplusDecision, SurplusManaActivation, SurplusNotCertified,
+};
 #[cfg(feature = "test-support")]
-pub use payment_surplus::{surplus_mana_activation_with_counters, SurplusCertificateCounters};
+pub use payment_surplus::{
+    surplus_mana_activation_with_counters, units_spend_equivalent, SurplusCertificateCounters,
+};
 pub use prospective_mana::{
     certify_fetch_then_cast, certify_pact_plan, controls_exact_fetchland, is_pact_payment_ability,
     is_pact_payment_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan,

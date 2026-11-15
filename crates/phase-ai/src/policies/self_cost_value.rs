@@ -81,7 +81,7 @@
 //! (CR 602.2b), and any spend permission (CR 609.4b) are not certified and stay
 //! neutral.
 
-use engine::ai_support::{surplus_mana_activation, SurplusManaActivation};
+use engine::ai_support::SurplusManaActivation;
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
@@ -284,9 +284,11 @@ impl TacticalPolicy for SelfCostValuePolicy {
 }
 
 /// The payment-step arm: a self-cost mana activation the engine certifies as
-/// surplus (`ai_support::surplus_mana_activation`) is rejected, provided the
+/// surplus (`ai_support::PaymentSurplusDecision`) is rejected, provided the
 /// decision's pass — the finisher the certificate relies on — is itself an
-/// admissible (finite) row under `registry`. Everything else is neutral.
+/// admissible (finite) row under `registry`. Everything else is neutral. The
+/// certificate's decision-level work (the finisher and the mana actions offered
+/// after it) is prepared once per decision on `AiContext::payment_surplus`.
 ///
 /// Each surplus activation is an independent softmax trial at every payment
 /// step, so this is the repeatable-candidate shape the module docs' law covers:
@@ -322,7 +324,8 @@ pub(crate) fn payment_surplus_verdict(
     if synergy_justifies_self_cost(&features, &ability) {
         return neutral("self_cost_synergy_justified");
     }
-    match surplus_mana_activation(ctx.state, &ctx.candidate.action) {
+    let decision = ctx.context.payment_surplus.decision(ctx.state);
+    match decision.certify(ctx.state, &ctx.candidate.action) {
         SurplusManaActivation::NotCertified(_) => neutral("self_cost_payment_surplus_na"),
         SurplusManaActivation::Surplus if !finisher_admissible(ctx, registry) => {
             neutral("self_cost_payment_surplus_na")
@@ -3794,6 +3797,51 @@ mod tests {
             &payment_surplus_verdict(&ctx, PolicyRegistry::shared()),
             "self_cost_payment_surplus_na",
         );
+    }
+
+    /// The arm prepares the certificate's decision-level work once per
+    /// decision: scoring every candidate of the decision, repeatedly, through
+    /// the production registry reuses one preparation, and the next decision
+    /// (after another Ogre activation) gets its own.
+    #[test]
+    fn payment_surplus_arm_prepares_once_per_decision() {
+        use crate::context::PAYMENT_SURPLUS_PREPARATIONS;
+
+        let (state, decision, candidate) = saturated_payment_decision();
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+        let ogre_score = |state: &GameState, decision: &AiDecisionContext| {
+            let mut ogre = f64::NAN;
+            for scored in &decision.candidates {
+                let score = PolicyRegistry::shared().score(&PolicyContext {
+                    state,
+                    decision,
+                    candidate: scored,
+                    ai_player: AI,
+                    config: &config,
+                    context: &context,
+                    cast_facts: None,
+                    search_depth: crate::policies::context::SearchDepth::Root,
+                });
+                if scored.action == candidate.action {
+                    ogre = score;
+                }
+            }
+            ogre
+        };
+
+        PAYMENT_SURPLUS_PREPARATIONS.with(|count| count.set(0));
+        for _ in 0..3 {
+            assert_eq!(ogre_score(&state, &decision), f64::NEG_INFINITY);
+        }
+        assert_eq!(PAYMENT_SURPLUS_PREPARATIONS.with(std::cell::Cell::get), 1);
+
+        let mut later = state.clone();
+        engine::game::engine::apply_as_current_for_simulation(&mut later, candidate.action.clone())
+            .expect("the Ogre activates again");
+        let later_decision = engine::ai_support::build_decision_context(&later);
+        assert_eq!(ogre_score(&later, &later_decision), f64::NEG_INFINITY);
+        assert_eq!(PAYMENT_SURPLUS_PREPARATIONS.with(std::cell::Cell::get), 2);
     }
     /// T7: a costed land's indexed mana ability (`TapLandForMana`, Fiery
     /// Islet) reaches the arm: the second Islet's pinned {R} is a surplus once
