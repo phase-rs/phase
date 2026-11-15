@@ -28,10 +28,9 @@ vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
-  isLlmDraftDisabled,
-  recordLlmDraftSubmission,
   reportLlmDraftOutcomes,
-  resetLlmDraftBreaker,
+  startLlmDraftRound,
+  type LlmDrafterStatus,
 } from "../draftLlm";
 import type { LlmProfile } from "../types";
 
@@ -60,6 +59,7 @@ function pickRequest(seat: number, fingerprint: string) {
     fingerprint,
     optionCount: 15,
     requiredPickCount: 1,
+    promptChars: 1000 + seat,
     request: REQUEST,
   };
 }
@@ -83,7 +83,6 @@ beforeEach(() => {
   llmMocks.executeLlmRequest.mockReset();
   leaseMocks.withDraftEngineOperation.mockReset();
   debugMocks.debugLog.mockReset();
-  resetLlmDraftBreaker();
   cancelLlmDraftRun();
   leaseHeld = false;
 });
@@ -299,155 +298,97 @@ describe("LLM drafters", () => {
     await expect(collectLlmDraftResponses(PROFILE, stillCurrent)).resolves.toEqual([]);
   });
 
-  // ── Per-profile failure breaker ──────────────────────────────────────────
+  // ── No session breaker ───────────────────────────────────────────────────
 
-  it("gives up on a profile after consecutive failed rounds and stops calling it", async () => {
+  /// A configured LLM drafter is asked on every pick it can make. Failed rounds
+  /// cost that pick its flavour (the engine bot drafts the seat), never the
+  /// provider's place in the rest of the draft.
+  it("keeps calling a provider after repeated failed rounds", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("provider down"));
 
-    for (let round = 0; round < 3; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-
-    const callsBefore = llmMocks.executeLlmRequest.mock.calls.length;
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    // No further latency is spent on a provider the session has given up on.
-    expect(llmMocks.executeLlmRequest.mock.calls.length).toBe(callsBefore);
-  });
-
-  it("resets the breaker when the engine actually uses a pick", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockRejectedValueOnce(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
-    await collectLlmDraftResponses(PROFILE, () => true);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: true }]);
-
-    llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, () => true);
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    // Two failures after a success is below the ceiling.
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// The finding: the transport returns HTTP error bodies so a vendor's
-  /// diagnostic survives, so "bytes arrived" said nothing about usability. A
-  /// round of 401s would have reset the breaker forever.
-  it("counts a round the engine refused as a failure, not a success", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockResolvedValue({
-      status: 401,
-      body: '{"error":{"message":"Incorrect API key provided"}}',
-    });
-
-    for (let round = 0; round < 3; round += 1) {
-      const responses = await collectLlmDraftResponses(PROFILE, () => true);
-      // Bytes came back, so the round reaches submit...
-      expect(responses).toHaveLength(1);
-      // ...and the engine refuses every seat, which is what counts.
-      recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-  });
-
-  it("counts a round as a success when any seat's pick was used", async () => {
-    resetLlmDraftBreaker();
-    recordLlmDraftSubmission(PROFILE.id, [
-      { seat: 1, used: false },
-      { seat: 2, used: true },
-    ]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// A cancelled or superseded round is not the provider's fault and must be
-  /// recorded neither way — charging it to the breaker would disable a healthy
-  /// profile for clicking quickly.
-  it("does not record a round that went stale mid-flight", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    let fresh = true;
-    llmMocks.executeLlmRequest.mockImplementation(async () => {
-      fresh = false;
-      return { status: 200, body: '{"choice":0}' };
-    });
-
-    for (let round = 0; round < 5; round += 1) {
-      fresh = true;
-      await collectLlmDraftResponses(PROFILE, () => fresh);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  it("does not record a round abandoned by an explicit cancel", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockImplementation(async () => {
-      cancelLlmDraftRun();
-      return { status: 200, body: '{"choice":0}' };
-    });
-
-    for (let round = 0; round < 5; round += 1) {
+    for (let round = 0; round < 6; round += 1) {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(6);
   });
 
-  /// A pod with no eligible seat is not a provider failure and must not count
-  /// toward giving up on the profile.
-  it("does not blame the profile when the engine offers no seats", async () => {
-    leaseReturning([]);
-
-    for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// The finding: a run the draft lifecycle cancelled rejects in the
-  /// request-building phase too, and charging that to the provider would let
-  /// abandoning three drafts disable a healthy profile.
-  it("does not charge the breaker for a preflight that failed after cancellation", async () => {
-    leaseMocks.withDraftEngineOperation.mockImplementation(async () => {
-      // Exactly what `beginLifecycle` does while a round is building.
-      cancelLlmDraftRun();
-      throw new Error("draft session replaced");
-    });
-
-    for (let round = 0; round < 5; round += 1) {
-      await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// A genuine build failure with the run still live IS the provider's problem
-  /// and still counts, so the guard above cannot mask a real fault.
-  it("still charges the breaker for a preflight failure on a live run", async () => {
-    leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
-
-    for (let round = 0; round < 3; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-  });
-
-  it("does not charge the breaker for a preflight failure on a stale pick", async () => {
+  it("keeps building requests after repeated preflight failures on a live run", async () => {
     leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
 
     for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => false);
+      await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(leaseMocks.withDraftEngineOperation).toHaveBeenCalledTimes(5);
+  });
+
+  describe("a pick round started when the pack opens", () => {
+    it("reports every seat picking, then each seat's own outcome as it settles", async () => {
+      leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
+      let releaseSeatTwo!: () => void;
+      const seatTwo = new Promise<void>((resolve) => {
+        releaseSeatTwo = resolve;
+      });
+      llmMocks.executeLlmRequest.mockImplementation(async (spec) => {
+        if (spec === REQUEST && llmMocks.executeLlmRequest.mock.calls.length === 1) {
+          throw new Error("provider down");
+        }
+        await seatTwo;
+        return { status: 200, body: '{"choice":0}' };
+      });
+      const published: (readonly LlmDrafterStatus[])[] = [];
+
+      const round = startLlmDraftRound(PROFILE, () => true, (statuses) => published.push(statuses));
+      expect(round.settled).toBe(false);
+      await vi.waitFor(() => expect(published.length).toBeGreaterThanOrEqual(2));
+
+      expect(published[0]).toEqual([
+        { seat: 1, state: "picking" },
+        { seat: 2, state: "picking" },
+      ]);
+      // Seat 1's call failed; seat 2 is still thinking.
+      expect(published[published.length - 1]).toEqual([
+        { seat: 1, state: "fallback" },
+        { seat: 2, state: "picking" },
+      ]);
+      expect(round.settled).toBe(false);
+
+      releaseSeatTwo();
+      await expect(round.responses).resolves.toEqual([
+        { seat: 2, fingerprint: "fp-2", provider: "Anthropic", status: 200, body: '{"choice":0}' },
+      ]);
+      expect(round.settled).toBe(true);
+      expect(published[published.length - 1]).toEqual([
+        { seat: 1, state: "fallback" },
+        { seat: 2, state: "ready" },
+      ]);
+      expect(round.promptChars.get(2)).toBe(1002);
+    });
+
+    it("publishes nothing once its pick step is no longer current", async () => {
+      leaseReturning([pickRequest(1, "fp-1")]);
+      llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+      const onStatus = vi.fn();
+
+      const round = startLlmDraftRound(PROFILE, () => false, onStatus);
+
+      await expect(round.responses).resolves.toEqual([]);
+      expect(onStatus).not.toHaveBeenCalled();
+    });
+
+    /// The last card of a pack is never put to a provider: the engine builds no
+    /// request for a forced pick, so the round asks nothing and shows nothing.
+    it("asks nothing and shows nothing when every pick is forced", async () => {
+      leaseReturning([]);
+      const onStatus = vi.fn();
+
+      const round = startLlmDraftRound(PROFILE, () => true, onStatus);
+
+      await expect(round.responses).resolves.toEqual([]);
+      expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+      expect(onStatus).not.toHaveBeenCalled();
+    });
   });
 });

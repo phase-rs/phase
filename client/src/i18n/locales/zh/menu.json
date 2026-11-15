@@ -1,0 +1,385 @@
+{
+  "backButton": {
+    "label": "返回"
+  },
+  "aiDifficulty": {
+    "label": "AI 难度",
+    "ariaLabel": "AI 难度：{{difficulty}}",
+    "levels": {
+      "VeryEasy": "非常简单",
+      "Easy": "简单",
+      "Medium": "中等",
+      "Hard": "困难",
+      "VeryHard": "非常困难",
+      "CEDH": "cEDH"
+    }
+  },
+  "bracketFilter": {
+    "label": "分级筛选"
+  },
+  "gamePresets": {
+    "heading": "快速开始"
+  },
+  "shell": {
+    "disclaimer": "phase.rs 是一个非商业粉丝项目，与威世智（Wizards of the Coast）无关联，也未获其认可。Magic: The Gathering 版权归 Wizards of the Coast LLC 所有。卡牌图像在运行时从 Scryfall 获取；卡牌数据来自 MTGJSON。本项目不内置任何受威世智版权保护的素材。"
+  },
+  "home": {
+    "resume": {
+      "title": "继续对局",
+      "description": "从最近保存的对局的当前回合与场面状态继续。"
+    },
+    "setup": {
+      "title": "与 AI 对战",
+      "titleSaved": "新建 AI 对局",
+      "description": "与 AI 对手进行单人对局——可选择赛制、套牌、原型和难度。"
+    },
+    "online": {
+      "title": "在线对战",
+      "description": "创建房间、通过代码加入，或重新连接多人对战。"
+    },
+    "draft": {
+      "title": "轮抽",
+      "description": "与 AI 快速轮抽、Cube 轮抽，或主持一桌轮抽。"
+    },
+    "decks": {
+      "title": "套牌",
+      "description": "打开已保存的套牌、切换当前牌表，并编辑构筑。"
+    },
+    "social": {
+      "sponsor": "赞助"
+    },
+    "preview": {
+      "cta": "试用预览版",
+      "tooltip": "体验最新预览版——最新卡牌与修复会在正式发布前先行上线。",
+      "backCta": "返回正式版",
+      "backTooltip": "返回当前正式版本。"
+    },
+    "coverage": {
+      "title": "打开覆盖率面板",
+      "ariaLabel": "打开卡牌覆盖率面板",
+      "heading": "卡牌覆盖率面板",
+      "viewDetails": "查看详情"
+    },
+    "preparingCards": "正在准备卡牌…",
+    "alpha": {
+      "label": "早期 Alpha",
+      "message": " ——可能出现卡牌错误和功能缺失。"
+    },
+    "savedMatchAvailable": "有已保存的对局",
+    "load": {
+      "title": "载入对局状态"
+    },
+    "exit": "退出",
+    "dashboard": {
+      "welcome": "欢迎回来",
+      "enter": "进入",
+      "continue": "从上次离开处继续",
+      "resumeDraft": "继续轮抽",
+      "draftPod": "轮抽牌桌",
+      "activeDeck": "当前套牌",
+      "noActiveDeck": "选择一副套牌开始",
+      "fromFeeds": "来自你的订阅源",
+      "feedsEmpty": "订阅源即可查看最新套牌",
+      "cards": "{{count}} 张牌",
+      "mode": {
+        "ai": "对战 AI",
+        "online": "在线",
+        "local": "本地",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "开源的万智牌规则引擎与游戏客户端",
+      "turn": "第 {{n}} 回合",
+      "yourTurn": "你的回合",
+      "opponentTurn": "对手的回合",
+      "yourLife": "你 {{life}}"
+    }
+  },
+  "loadState": {
+    "title": "载入对局状态",
+    "subtitle": "恢复导出或粘贴的状态，继续与 AI 对战。",
+    "tabPaste": "粘贴 JSON",
+    "tabFile": "从文件",
+    "pastePlaceholder": "粘贴 GameState JSON…",
+    "fileSupports": "支持从调试面板导出的 .json、.txt 和 .zip 文件",
+    "chooseFile": "选择文件",
+    "load": "载入"
+  },
+  "aiOpponent": {
+    "heading": "AI 对手",
+    "headingMulti": "AI 对手（{{count}}）",
+    "analyzingDecks": "正在分析套牌…",
+    "noLegalDecks": "此赛制没有可用的合法 AI 套牌。",
+    "catalogUnavailable": "AI 套牌目录不可用：{{error}}",
+    "randomPoolFilters": "随机牌池筛选",
+    "archetype": "原型",
+    "cardCoverage": "卡牌覆盖率",
+    "coverageThresholdHint": "排除引擎支持度低于此阈值的套牌",
+    "bracket": "分级",
+    "bracketHint": "随机 AI 会从这些分级中挑选。筛选时未标记的套牌会被排除。",
+    "bracketPoolEmpty": "没有套牌符合所选分级。随机 AI 将从所有合法套牌中抽取。",
+    "cedhPoolEmpty": "没有分级 5 的套牌可用。无法填满随机 AI 席位。",
+    "opponentLabel": "对手 {{number}}",
+    "deck": "套牌",
+    "difficulty": "难度",
+    "deckRandom": "随机",
+    "deckRandomCount": "随机（{{count}}）",
+    "cedhToggle": {
+      "label": "cEDH 模式",
+      "hint": "所有对手都使用 cEDH。每副套牌都必须是分级 5。",
+      "badge": "cEDH"
+    },
+    "source": {
+      "feed": "订阅源",
+      "user": "用户",
+      "precon": "预组"
+    },
+    "brain": "驱动",
+    "brainEngine": "引擎 AI",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机对手将从全部 {{total}} 套牌中选择。"
+  },
+  "randomPool": {
+    "titleHuman": "你的随机牌池",
+    "titleAi": "AI 随机牌池",
+    "hint": "取消勾选文件夹或套牌，将其从随机选择中移除。",
+    "count": "{{selected}} / {{total}}",
+    "emptyWarning": "已排除所有套牌，因此随机将从全部 {{total}} 套牌中选择。",
+    "reset": "重置",
+    "precons": "预组套牌",
+    "playable": "可用 {{playable}}",
+    "nonePlayable": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机将从全部 {{total}} 套牌中选择。"
+  },
+  "feedManager": {
+    "title": "管理订阅源",
+    "refreshing": "正在刷新…",
+    "refreshAll": "全部刷新",
+    "refresh": "刷新",
+    "subscribe": "订阅",
+    "unsubscribe": "取消订阅",
+    "lastRefreshed": "上次刷新：{{date}}",
+    "addCustomFeed": "添加自定义订阅源",
+    "add": "添加",
+    "offlineUnavailable": "离线时无法更新订阅源。",
+    "done": "完成"
+  },
+  "importDeck": {
+    "title": "导入套牌",
+    "tabPaste": "粘贴文本",
+    "tabUrl": "从网址",
+    "tabFile": "从文件",
+    "deckNamePlaceholder": "套牌名称",
+    "urlPlaceholder": "https://moxfield.com/decks/… 或 https://archidekt.com/decks/…",
+    "urlHint": "从 Moxfield 或 Archidekt 导入公开套牌。",
+    "import": "导入",
+    "importing": "正在导入…",
+    "importAsOathbreaker": "设为破誓人套牌",
+    "oathbreakerSetupTitle": "设置破誓人",
+    "oathbreakerSetupDescription": "从此牌表中选出破誓人和标志性咒语。",
+    "oathbreakerLabel": "破誓人",
+    "signatureSpellLabel": "标志性咒语",
+    "chooseOathbreaker": "选择破誓人",
+    "chooseSignatureSpell": "选择标志性咒语",
+    "confirmOathbreakerImport": "导入破誓人套牌",
+    "backToImport": "返回导入",
+    "errorInvalidUrl": "请输入有效的 Moxfield 或 Archidekt 套牌网址。",
+    "errorOffline": "离线时无法通过网址导入。请改用粘贴文本或从文件导入。",
+    "errorNetworkFailure": "无法连接套牌导入服务。请检查网络后重试。",
+    "errorGeneric": "导入套牌失败。",
+    "errorNoOathbreaker": "此牌表中没有符合条件的破誓人。",
+    "errorNoSignatureSpell": "此破誓人在该牌表中没有符合条件的标志性咒语。",
+    "errorNoCards": "未找到任何卡牌。请粘贴 MTGA 或 .dck 格式的套牌。",
+    "fileSupports": "支持 .dck、.dec、.txt 和 MTGA 格式",
+    "chooseFile": "选择文件",
+    "importedSuccessTitle": "套牌已导入",
+    "importedSuccessDescription": "“{{name}}”已添加到你的套牌。"
+  },
+  "precon": {
+    "savePrompt": "将预组套牌另存为：",
+    "overwriteConfirm": "“{{name}}”已存在。是否覆盖？",
+    "overwriteAllConfirm": "所选的 {{count}} 副套牌均已存在。是否覆盖？",
+    "overwriteSomeConfirm": "所选套牌中有 {{conflicts}}/{{total}} 副已存在。是否覆盖重复项？（取消将保留现有副本并导入其余套牌。）",
+    "importedSkipped_one": "已导入 {{count}} 副套牌；跳过 {{skipped}} 副已存在的。",
+    "importedSkipped_other": "已导入 {{count}} 副套牌；跳过 {{skipped}} 副已存在的。",
+    "title": "预组套牌",
+    "subtitle": "数据来自 MTGJSON AllDeckFiles——威世智出品的全部预组。",
+    "totalCount": "· 共 {{count}} 副",
+    "searchPlaceholder": "按名称、系列代码或类型搜索…",
+    "allTypes": "全部（{{count}}）",
+    "typeFilter": "套牌类型",
+    "loadingCatalog": "正在加载套牌目录…",
+    "loadFailed": "无法加载预组套牌目录。请检查网络后重试。",
+    "noMatch": "没有符合条件的套牌。",
+    "selectDeck": "选择 {{name}}",
+    "cardCount_one": "{{count}} 张牌",
+    "cardCount_other": "{{count}} 张牌",
+    "commanderSuffix": " · 指挥官",
+    "showingFirst": "仅显示前 {{count}} 副——请细化搜索以缩小范围。",
+    "selectAllVisible": "全选可见项",
+    "clearSelection": "清除（{{count}}）",
+    "importSelected": "导入所选的 {{count}} 副"
+  },
+  "deckTile": {
+    "feedBadge": "订阅源",
+    "edit": "编辑 {{name}}",
+    "delete": "删除",
+    "deleteTitle": "删除套牌",
+    "copy": "复制到我的套牌",
+    "copyTitle": "复制到我的套牌（解除订阅源跟踪）",
+    "cardCount_one": "{{count}} 张牌",
+    "cardCount_other": "{{count}} 张牌",
+    "preconBadge": "预组",
+    "unknown": "未知 {{count}}",
+    "unknownCardsTitle": "未知卡牌：\n{{cards}}",
+    "unsupportedTitle": "不支持（{{unique}} 种，共 {{copies}} 张）：\n{{cards}}",
+    "setIconAlt": "{{code}} 系列图标",
+    "actionsMenu": "套牌选项",
+    "star": "加星标",
+    "unstar": "取消星标",
+    "moveToFolder": "移动到文件夹",
+    "unfiled": "未归档",
+    "newFolder": "新建文件夹…"
+  },
+  "myDecks": {
+    "headingManage": "我的套牌",
+    "headingSelect": "选择套牌",
+    "tabDecks": "我的套牌",
+    "tabSubscriptions": "订阅",
+    "createNew": "新建",
+    "refreshing": "正在刷新…",
+    "refreshAll": "全部刷新",
+    "manageFeeds": "管理订阅源",
+    "searchPlaceholder": "搜索套牌…",
+    "formatLabel": "赛制",
+    "sourceFilterLabel": "套牌来源",
+    "sourceFilter": {
+      "all": "所有来源",
+      "user": "我的套牌",
+      "feed": "订阅源",
+      "precon": "预组"
+    },
+    "preconSetFilterLabel": "预组系列",
+    "preconSetFilterAll": "所有系列",
+    "preconSetSearchPlaceholder": "搜索系列…",
+    "preconSetNoMatches": "没有匹配的系列",
+    "browseAetherhub": "在 Aetherhub 浏览{{format}}套牌",
+    "showAllDecks": "显示所有套牌",
+    "showLegalOnly": "仅显示合法套牌",
+    "showAllDecksButton": "显示所有套牌",
+    "sortName": "名称",
+    "sortDateAdded": "添加日期",
+    "sortFormat": "赛制",
+    "ascending": "升序",
+    "descending": "降序",
+    "saveAsPrompt": "另存为：",
+    "banner": {
+      "showingAllFor": "显示以下赛制的全部已保存套牌：",
+      "showingLegalIn": "显示在以下赛制中合法的套牌：",
+      "deckCount": "· {{visible}}/{{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "用户套牌",
+      "fallbackVisibleDeck": "可见套牌",
+      "startingWorker": "正在启动兼容性检测线程…",
+      "loadingDatabase": "正在加载兼容性数据库…",
+      "checkingDeck": "正在检查 {{deck}}…",
+      "checkedDeck": "已检查 {{deck}}",
+      "checkingRandom": "正在检查随机套牌候选…",
+      "loadingCoverage": "正在加载 {{deck}} 的覆盖率…",
+      "checkingSelected": "正在检查所选套牌的兼容性…",
+      "evaluatingVisible": "正在评估可见套牌…",
+      "remaining": "剩余 {{count}} 副"
+    },
+    "compatibilityError": "兼容性检查不可用：{{error}}",
+    "empty": {
+      "title": "没有套牌符合此筛选条件。",
+      "selectHint": "导入一副兼容的套牌，或更改赛制以查看可用套牌。",
+      "manageHint": "选择其他筛选条件，或显示所有套牌以从完整收藏中挑选。"
+    },
+    "sectionMyDecks": "我的套牌",
+    "sectionStarterDecks": "新手套牌",
+    "sectionLegalPrecons": "合法预组",
+    "randomDeckTile": "随机套牌",
+    "randomDeckTileBusy": "正在选择…",
+    "importDeckTile": "导入套牌",
+    "preconstructedTile": "预组",
+    "browseAll": "浏览全部",
+    "loadMore": "加载更多",
+    "selectedDeck": "已选套牌",
+    "chooseDeckToContinue": "选择一副套牌以继续",
+    "filterAll": "全部",
+    "sectionStarred": "已加星标",
+    "sectionUnfiled": "未归档",
+    "collapseAll": "全部折叠",
+    "expandAll": "全部展开",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此你的随机套牌将从全部 {{total}} 套牌中选择。"
+  },
+  "subscriptions": {
+    "emptyTitle": "没有订阅源",
+    "emptyDescription": "订阅套牌源，获取会自动更新的精选套牌合集。",
+    "feedMeta_one": "· {{count}} 副套牌 · 更新于 {{date}}",
+    "feedMeta_other": "· {{count}} 副套牌 · 更新于 {{date}}",
+    "error": "错误：{{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "套牌",
+    "title": "套牌。",
+    "description": "打开已保存的牌表、导入新套牌，或继续在套牌构筑器中编辑。"
+  },
+  "loadGameState": {
+    "readFailed": "读取文件失败"
+  },
+  "nav": {
+    "label": "主导航",
+    "home": "主页",
+    "play": "对战",
+    "online": "在线",
+    "draft": "轮抽",
+    "decks": "套牌",
+    "tournament": "赛事",
+    "alpha": "Alpha",
+    "profile": "个人资料",
+    "settings": "设置",
+    "whatsNew": "最新动态"
+  },
+  "folder": {
+    "actionsMenu": "文件夹选项",
+    "rename": "重命名",
+    "delete": "删除",
+    "newFolder": "新建文件夹",
+    "newFolderPrompt": "文件夹名称：",
+    "createButton": "创建",
+    "renamePrompt": "重命名文件夹：",
+    "deleteConfirm": "删除文件夹“{{name}}”？其中的套牌将移至未归档。",
+    "emptyHint": "此文件夹为空。",
+    "unfiledEmptyHint": "没有未归档的套牌。"
+  },
+  "whatsNew": {
+    "title": "最新动态",
+    "empty": "暂无更新——请稍后再来。",
+    "loading": "正在加载更新…",
+    "failed": "无法加载更新。请检查网络后重试。",
+    "retry": "重试",
+    "discordLink": "在 Discord 上阅读",
+    "unread": "有新的更新",
+    "searchPlaceholder": "搜索更新…",
+    "noResults": "没有符合搜索条件的更新。",
+    "pageStatus": "第 {{current}} 页，共 {{total}} 页",
+    "prevPage": "上一页",
+    "nextPage": "下一页",
+    "showMore": "显示更多",
+    "showLess": "收起",
+    "tag": {
+      "new-cards": "新增卡牌",
+      "card-fixes": "卡牌修复",
+      "gameplay": "玩法",
+      "interface": "界面",
+      "localization": "本地化",
+      "ai": "AI",
+      "multiplayer": "多人对战"
+    }
+  },
+  "pileSource": {
+    "label": "牌堆",
+    "default": "默认牌堆"
+  }
+}

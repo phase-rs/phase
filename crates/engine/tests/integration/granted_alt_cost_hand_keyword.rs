@@ -265,9 +265,9 @@ fn aminatou_accepted_miracle_cast_pays_mv_minus_4() {
     // dropped the payment path would demand {6} and this cast would fail (or a
     // stale pool would remain).
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "granted miracle {{2}} must consume the whole {{2}} pool, got {:?}",
-        runner.state().players[0].mana_pool.mana
+        runner.state().players[0].mana_pool
     );
 }
 
@@ -592,9 +592,9 @@ fn aminatou_miracle_casts_at_latched_cost_after_source_removed() {
     // Revert-failing: paid exactly the LATCHED {2}, pool now empty. Unpatched code
     // never reaches here (guard/live-cost failure above).
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "latched miracle {{2}} must consume the whole pool, got {:?}",
-        runner.state().players[0].mana_pool.mana
+        runner.state().players[0].mana_pool
     );
 }
 

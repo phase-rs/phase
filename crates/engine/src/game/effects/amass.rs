@@ -13,7 +13,9 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
+use crate::types::proposed_event::{
+    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
+};
 use std::collections::HashSet;
 
 /// CR 701.47a: Amass [subtype] N.
@@ -42,7 +44,10 @@ pub fn resolve(
     // creature's controller (`TargetFilter::ParentTargetController`), which
     // can differ from `ability.controller` (Azog's controller). Mirrors
     // `Manifest.target` / `Discover.player`'s resolution path.
-    let controller = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(controller) = super::resolve_player_for_context_ref(state, ability, &player_filter)
+    else {
+        return Ok(());
+    };
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.
@@ -212,6 +217,7 @@ fn create_army_token(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id: ability.source_id,
@@ -224,6 +230,7 @@ fn create_army_token(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
 
@@ -393,6 +400,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 sacrifice_at: None,
                 source_id: ObjectId(0),

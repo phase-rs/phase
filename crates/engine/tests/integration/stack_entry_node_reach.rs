@@ -1069,22 +1069,14 @@ fn settle_prompts(runner: &mut GameRunner) {
     }
 }
 
-/// The trigger's `Counter` node, after the reach guards: it declares nothing
-/// and names the parent anaphor, whose fallback without an event is the source.
-fn counter_node(runner: &GameRunner, entry: ObjectId) -> Vec<TargetRef> {
+/// The trigger's `Counter` node naming `expected`, after the reach guards: it
+/// declares nothing.
+fn counter_node(runner: &GameRunner, entry: ObjectId, expected: &TargetFilter) -> Vec<TargetRef> {
     let nodes = reach(runner.state(), entry);
     let (_, own, acted) = nodes
         .iter()
-        .find(|(e, _, _)| {
-            matches!(
-                e,
-                Effect::Counter {
-                    target: TargetFilter::ParentTarget,
-                    ..
-                }
-            )
-        })
-        .expect("reach guard: the trigger counters its parent referent");
+        .find(|(e, _, _)| matches!(e, Effect::Counter { target, .. } if target == expected))
+        .unwrap_or_else(|| panic!("reach guard: the trigger counters {expected:?}"));
     assert!(own.is_empty(), "reach guard: the counter declares nothing");
     acted.clone()
 }
@@ -1092,7 +1084,10 @@ fn counter_node(runner: &GameRunner, entry: ObjectId) -> Vec<TargetRef> {
 #[test]
 fn chancellor_of_the_annex_counter_acts_on_the_spell_that_triggered_it() {
     let (mut runner, source, bear, entry) = opponent_cast_trigger(CHANCELLOR_OF_THE_ANNEX, false);
-    assert_eq!(counter_node(&runner, entry), vec![TargetRef::Object(bear)]);
+    assert_eq!(
+        counter_node(&runner, entry, &TargetFilter::ParentTarget),
+        vec![TargetRef::Object(bear)]
+    );
     runner.resolve_top();
     settle_prompts(&mut runner);
     let zone = |id| runner.state().objects.get(&id).map(|o| o.zone);
@@ -1106,7 +1101,7 @@ fn chancellor_of_the_annex_counter_acts_on_the_spell_that_triggered_it() {
 #[test]
 fn counterbalance_counter_below_its_reveal_acts_on_nothing() {
     let (mut runner, source, bear, entry) = opponent_cast_trigger(COUNTERBALANCE, true);
-    assert!(counter_node(&runner, entry).is_empty());
+    assert!(counter_node(&runner, entry, &TargetFilter::TriggeringSource).is_empty());
     runner.resolve_top();
     settle_prompts(&mut runner);
     let zone = |id| runner.state().objects.get(&id).map(|o| o.zone);
@@ -1558,6 +1553,7 @@ fn a_damage_trigger_reads_the_damaged_player_through_its_scoped_player() {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         }),
     );
     let on_stack = state.stack.back().expect("entry");
@@ -2287,7 +2283,7 @@ fn embersmith_damage_node_below_its_payment_acts_on_nothing() {
 const CLASH_OF_WILLS: &str = "Counter target spell unless its controller pays {X}.";
 
 #[test]
-fn clash_of_wills_with_x_zero_counters_nothing() {
+fn clash_of_wills_asks_for_zero_at_x_zero() {
     for x in [0, 1] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -2318,11 +2314,9 @@ fn clash_of_wills_with_x_zero_counters_nothing() {
         .expect("P0 passes");
         runner.cast(clash).x(x).target_object(bear_spell).commit();
         let entry = runner.state().stack.back().expect("Clash of Wills").id;
-        let expected = if x == 0 {
-            Vec::new()
-        } else {
-            vec![TargetRef::Object(bear_spell)]
-        };
+        // CR 118.12a + CR 118.5: a {0} unless cost is asked like any other, so
+        // the counter is pending against the Bear spell at X = 0 as at X = 1.
+        let expected = vec![TargetRef::Object(bear_spell)];
         assert_eq!(reach(runner.state(), entry)[0].2, expected, "X = {x}");
         runner.resolve_top();
         let asked = matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. });
@@ -2331,12 +2325,8 @@ fn clash_of_wills_with_x_zero_counters_nothing() {
                 asked,
                 runner.state().objects.get(&bear_spell).map(|o| o.zone)
             ),
-            if x == 0 {
-                (false, Some(Zone::Stack))
-            } else {
-                (true, Some(Zone::Stack))
-            },
-            "engine agreement, X = {x}: at X = 0 the spell stays unasked"
+            (true, Some(Zone::Stack)),
+            "engine agreement, X = {x}: the controller is asked"
         );
     }
 }
@@ -2738,6 +2728,7 @@ fn a_ward_counter_never_reports_the_targeting_abilitys_source_as_acted_on() {
                 target: TargetRef::Object(warded),
                 source_id: aimer,
                 source_controller: PlayerId(0),
+                targeter: None,
             }),
         );
         let acted_on = reach(&state, ward)[0].2.clone();
@@ -3340,6 +3331,7 @@ fn a_node_below_a_choice_published_for_a_scoped_player_acts_on_nothing() {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
         let entry = push_trigger(
             &mut state,

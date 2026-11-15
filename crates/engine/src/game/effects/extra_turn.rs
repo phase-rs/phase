@@ -1,7 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -25,17 +23,8 @@ pub fn resolve(
     };
 
     // CR 500.7: Resolve the target to a PlayerId.
-    let player = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => {
-            // Targeted variant: resolve from ability.targets
-            if let Some(TargetRef::Player(pid)) = ability.targets.first() {
-                *pid
-            } else {
-                // Fallback to controller if no target resolved
-                ability.controller
-            }
-        }
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
     };
 
     // CR 107.1b: a negative calculated effect result is treated as zero.
@@ -69,7 +58,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetRef};
+    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter, TargetRef};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::ExtraTurn;
     use crate::types::identifiers::ObjectId;
@@ -88,6 +77,7 @@ mod tests {
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -101,12 +91,17 @@ mod tests {
             source_id: ObjectId(1),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            delayed_origin: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Default::default(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
@@ -139,6 +134,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -150,12 +146,14 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         }
     }
 

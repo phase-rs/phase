@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { FORMAT_REGISTRY } from "../../../client/src/data/formatRegistry";
 import { defaultSeats, findFormat, FORMATS, MAX_SEATS, P2P_MAX_PEERS, seatCap } from "../formats";
+import { LFG_FORMAT_OPTION } from "../lfgInteractions";
 import { roomName } from "../lfgView";
 
 describe("FORMATS mirrors the client format registry", () => {
@@ -18,8 +19,13 @@ describe("FORMATS mirrors the client format registry", () => {
     expect(FORMATS).toEqual(projection);
   });
 
-  test("fits Discord's 25-choice cap", () => {
-    expect(FORMATS.length).toBeLessThanOrEqual(25);
+  test("the /lfg format option is served by autocomplete, not static choices", async () => {
+    expect(LFG_FORMAT_OPTION.autocomplete).toBe(true);
+    expect(LFG_FORMAT_OPTION.name).toBe("format");
+    expect("choices" in LFG_FORMAT_OPTION).toBe(false);
+    const register = await Bun.file(join(import.meta.dir, "../register.ts")).text();
+    expect(register).toMatch(/options:\s*\[\s*LFG_FORMAT_OPTION,/);
+    expect(register).not.toMatch(/\bFORMATS\b/);
   });
 
   test("P2P_MAX_PEERS equals HostSetup's", async () => {

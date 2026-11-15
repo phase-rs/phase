@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ParsedDeck } from "../deckParser";
+import { detectAndParseDeck, type ParsedDeck } from "../deckParser";
 
 const canonicalCardNamesMock = vi.hoisted(() => vi.fn());
 vi.mock("../../adapter/wasm-adapter", () => ({
@@ -107,6 +107,95 @@ describe("canonicalizeDeckNames", () => {
       { count: 1, name: "Not A Card" },
       { count: 1, name: "Revival // Revenge" },
     ]);
+  });
+
+  it("strips a set-only printing suffix only when the base name resolves", async () => {
+    const known = new Set([
+      "Ancient Tomb",
+      "Radagast of Rhosgobel",
+      "Hazmat Suit",
+      "Hazmat Suit (Used)",
+      "Imaginary Friends",
+      "Imaginary Friends (Plane)",
+      "Test Card",
+      "Test Card (abc)",
+      "Unearth",
+    ]);
+    const canonical: Record<string, string> = {
+      "Lim-Dul's Vault": "Lim-Dûl's Vault",
+    };
+    canonicalCardNamesMock.mockImplementation((names: string[]) =>
+      Promise.resolve(names.map((name) => canonical[name] ?? (known.has(name) ? name : null))),
+    );
+    const deck: ParsedDeck = {
+      main: [
+        { count: 1, name: "Ancient Tomb (ltc)" },
+        { count: 1, name: "Ancient Tomb (LTC)" },
+        { count: 1, name: "Hazmat Suit (Used)" },
+        { count: 1, name: "Imaginary Friends (Plane)" },
+        { count: 1, name: "Test Card (abc)" },
+        { count: 1, name: "Unearth (Theme)" },
+        { count: 1, name: "Lim-Dul's Vault (2xm)" },
+        { count: 1, name: "Not A Card (xyz)" },
+      ],
+      sideboard: [],
+      commander: ["Radagast of Rhosgobel (hob)"],
+    };
+
+    const result = await canonicalizeDeckNames(deck);
+
+    expect(result.main).toEqual([
+      { count: 2, name: "Ancient Tomb" },
+      { count: 1, name: "Hazmat Suit (Used)" },
+      { count: 1, name: "Imaginary Friends (Plane)" },
+      { count: 1, name: "Test Card (abc)" },
+      { count: 1, name: "Unearth (Theme)" },
+      { count: 1, name: "Lim-Dûl's Vault" },
+      { count: 1, name: "Not A Card (xyz)" },
+    ]);
+    expect(result.commander).toEqual(["Radagast of Rhosgobel"]);
+  });
+
+  it("merges a repaired set-only entry with the canonical card", async () => {
+    canonicalCardNamesMock.mockImplementation(
+      renameTo({ "Ancient Tomb": "Ancient Tomb" }),
+    );
+    const deck: ParsedDeck = {
+      main: [
+        { count: 1, name: "Ancient Tomb (ltc)" },
+        { count: 1, name: "Ancient Tomb" },
+      ],
+      sideboard: [],
+    };
+
+    const result = await canonicalizeDeckNames(deck);
+
+    expect(result.main).toEqual([{ count: 2, name: "Ancient Tomb" }]);
+  });
+
+  it("repairs set-only lines in a mixed Archidekt/MTGA import", async () => {
+    const known = new Set(["Ancient Tomb", "Radagast of Rhosgobel", "Forest"]);
+    canonicalCardNamesMock.mockImplementation((names: string[]) =>
+      Promise.resolve(names.map((name) => (known.has(name) ? name : null))),
+    );
+    const parsed = detectAndParseDeck(
+      "1x Ancient Tomb (ltc)\n"
+      + "1x Radagast of Rhosgobel (hob) [Commander{top}]\n"
+      + "27x Forest (hob) 193",
+    );
+    expect(parsed.main[0]).toEqual({ count: 1, name: "Ancient Tomb (ltc)" });
+
+    const result = await canonicalizeDeckNames(parsed);
+
+    expect(result.main).toEqual([
+      { count: 1, name: "Ancient Tomb" },
+      {
+        count: 27,
+        name: "Forest",
+        sourcePrinting: { setCode: "hob", collectorNumber: "193" },
+      },
+    ]);
+    expect(result.commander).toEqual(["Radagast of Rhosgobel"]);
   });
 
   it("returns the deck unchanged when the engine cannot answer", async () => {

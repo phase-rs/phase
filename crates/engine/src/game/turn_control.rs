@@ -62,10 +62,8 @@ pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> Scheduled
 /// latch no surviving window backs.
 ///
 /// Called from every site that ends a game: `elimination::end_game` (the
-/// terminal record), `match_flow::handle_game_over_transition` (every ending
-/// that parks `WaitingFor::GameOver` without routing through `end_game`), and
-/// `match_flow::apply_trusted_match_forfeit` (the one ending that reaches no
-/// observer, because it completes the match before parking the wait).
+/// terminal record) and `match_flow::apply_trusted_match_forfeit` (the match
+/// ending that does not go through it).
 pub(super) fn end_all_player_control(state: &mut GameState) {
     while !state.scheduled_turn_controls.is_empty() {
         release_control_at(state, 0);
@@ -220,7 +218,7 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     // CR 723.5 + CR 805.8: A turn controller makes decisions for the
     // controlled player; in shared team turns, controlling one affected player
     // controls that player's team.
-    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+    let controlled_seat = if super::topology::side_takes_shared_turn(state, state.active_player) {
         super::topology::team_members(state, state.active_player).contains(&semantic_player)
     } else {
         semantic_player == state.active_player

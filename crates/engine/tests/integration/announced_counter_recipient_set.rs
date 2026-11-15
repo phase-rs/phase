@@ -31,6 +31,7 @@ use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{TargetSelectionSlot, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1185,6 +1186,7 @@ fn drillworks_mole_declared_commander_gets_its_counter() {
         .act(GameAction::ActivateAbility {
             source_id: mole,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the Mole must be legal");
     // CR 601.2c + CR 115.6: the conjunct's own announced set makes the slot a
@@ -2661,5 +2663,344 @@ fn samite_alchemist_it_doesnt_untap_is_the_target() {
     assert!(
         !tce_recipients_where(&runner, grants_cant_untap).contains(&src),
         "the source gains nothing"
+    );
+}
+
+/// CR 118.12 + CR 701.3b: an accepted attach the creature refuses was not done,
+/// so "if you do" grants nothing.
+#[test]
+fn magitek_scythe_refused_attach_grants_nothing() {
+    for refuses in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut creature = scenario.add_creature(P0, "c2", 2, 2);
+        if refuses {
+            creature.with_static(StaticMode::Other("CantBeEquipped".to_string()));
+        }
+        let c2 = creature.id();
+        let scythe = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Magitek Scythe", MAGITEK_SCYTHE_ORACLE)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            })
+            .id();
+        scenario.with_mana_pool(P0, floating_mana(1, ManaType::Colorless));
+        let mut runner = scenario.build();
+        grant_priority(&mut runner, P0);
+        runner.cast(scythe).commit();
+        drive_board(
+            &mut runner,
+            &[TargetRef::Object(c2)],
+            true,
+            0,
+            "Magitek Scythe ETB",
+        );
+
+        assert_eq!(
+            live(&runner, scythe).attached_to.is_some(),
+            !refuses,
+            "refuses={refuses}"
+        );
+        assert_eq!(
+            has_keyword(live(&runner, c2), &Keyword::FirstStrike),
+            !refuses,
+            "refuses={refuses}"
+        );
+    }
+}
+
+const NOVEL_NUNCHAKU_ORACLE: &str = "When this Equipment enters, attach it to target creature you control. When you do, equipped creature fights up to one target creature an opponent controls. (Each deals damage equal to its power to the other.)\nEquipped creature gets +1/+1 and has trample.\nEquip {3}";
+
+struct NunchakuOutcome {
+    target_prompts: usize,
+    attach_resolutions: usize,
+    fights: usize,
+    attached: bool,
+    theirs_damage: u32,
+}
+
+/// The drive loop is capped: prove it stopped because resolution completed
+/// (empty stack at Priority), not because it ran out of iterations.
+fn assert_settled_at_priority(runner: &GameRunner) {
+    assert!(
+        runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Novel Nunchaku did not finish resolving: {:?} (stack depth {})",
+        runner.state().waiting_for,
+        runner.state().stack.len()
+    );
+}
+
+fn resolved_count(events: &[GameEvent], kind: EffectKind) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::EffectResolved { kind: k, .. } if *k == kind))
+        .count()
+}
+
+fn cast_novel_nunchaku(mine_refuses: bool) -> NunchakuOutcome {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut mine_builder = scenario.add_creature(P0, "mine", 3, 3);
+    if mine_refuses {
+        mine_builder.with_static(StaticMode::Other("CantBeEquipped".to_string()));
+    }
+    let mine = mine_builder.id();
+    let theirs = scenario.add_creature(P1, "theirs", 2, 5).id();
+    let nunchaku = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Novel Nunchaku", NOVEL_NUNCHAKU_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Colorless));
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    runner.cast(nunchaku).commit();
+    let wants = [TargetRef::Object(mine), TargetRef::Object(theirs)];
+    let mut target_prompts = 0;
+    let mut attach_resolutions = 0;
+    let mut fights = 0;
+    for _ in 0..60 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                target_prompts += 1;
+                let legal = current_slot_legal_targets(&runner);
+                // Any legal wanted target fills the slot: the mandatory Attach
+                // host is auto-selected when it is the only legal host, so the
+                // surviving prompt can be the fight slot (which wants `theirs`).
+                let pick = wants.iter().find(|want| legal.contains(*want)).cloned();
+                runner
+                    .act(GameAction::ChooseTarget { target: pick })
+                    .expect("target")
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority).expect("pass"),
+            other => panic!("unexpected {other:?}"),
+        };
+        fights += resolved_count(&result.events, EffectKind::Fight);
+        attach_resolutions += resolved_count(&result.events, EffectKind::Attach);
+    }
+    assert_settled_at_priority(&runner);
+    NunchakuOutcome {
+        target_prompts,
+        attach_resolutions,
+        fights,
+        attached: live(&runner, nunchaku).attached_to.is_some(),
+        theirs_damage: live(&runner, theirs).damage_marked,
+    }
+}
+
+/// CR 603.12 + CR 701.3b: "When you do" fires only if the attach was done.
+#[test]
+fn novel_nunchaku_refused_attach_has_no_reflexive_fight() {
+    let attached = cast_novel_nunchaku(false);
+    assert_eq!(attached.attach_resolutions, 1);
+    assert!(attached.attached);
+    assert_eq!(
+        attached.target_prompts, 1,
+        "the single legal Attach host is auto-selected; the fight slot prompts"
+    );
+    assert!(attached.fights > 0);
+    assert_eq!(attached.theirs_damage, 4);
+
+    // CR 701.3b: the host is a legal target but can't be equipped, so Attach
+    // resolves and the Equipment doesn't move; CR 603.12: the reflexive "when
+    // you do" trigger never fires, so there is no fight target and no fight.
+    let refused = cast_novel_nunchaku(true);
+    assert_eq!(
+        refused.attach_resolutions, 1,
+        "Attach resolves against the refusing host"
+    );
+    assert!(!refused.attached);
+    assert_eq!(
+        refused.target_prompts, 0,
+        "the host is auto-selected and no reflexive fight slot exists"
+    );
+    assert_eq!(refused.fights, 0);
+    assert_eq!(refused.theirs_damage, 0);
+
+    // CR 601.2c + CR 603.3d: with no "creature you control" the mandatory host
+    // has no legal target, so the enters trigger is removed before it is put on
+    // the stack; nothing attaches and the reflexive fight never exists.
+    let no_host = cast_novel_nunchaku_without_a_host();
+    assert_eq!(no_host.attach_resolutions, 0, "the trigger never resolves");
+    assert!(!no_host.attached);
+    assert_eq!(no_host.target_prompts, 0, "no host means no target prompt");
+    assert_eq!(no_host.fights, 0);
+}
+
+/// Cast Novel Nunchaku with no creature you control (the mandatory host has no
+/// legal target); the enters trigger is removed per CR 603.3d.
+fn cast_novel_nunchaku_without_a_host() -> NunchakuOutcome {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theirs = scenario.add_creature(P1, "theirs", 2, 5).id();
+    let nunchaku = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Novel Nunchaku", NOVEL_NUNCHAKU_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Colorless));
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    runner.cast(nunchaku).commit();
+    let mut attach_resolutions = 0;
+    let mut fights = 0;
+    for _ in 0..60 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority).expect("pass"),
+            other => panic!("unexpected {other:?}"),
+        };
+        fights += resolved_count(&result.events, EffectKind::Fight);
+        attach_resolutions += resolved_count(&result.events, EffectKind::Attach);
+    }
+    assert_settled_at_priority(&runner);
+    NunchakuOutcome {
+        target_prompts: 0,
+        attach_resolutions,
+        fights,
+        attached: live(&runner, nunchaku).attached_to.is_some(),
+        theirs_damage: live(&runner, theirs).damage_marked,
+    }
+}
+
+const TEST_SWORD_ORACLE: &str = "Equipped creature gets +1/+1.\nEquip {1}";
+
+/// Activates Equip onto a Bear, optionally flickering the Equipment while the
+/// ability is on the stack; returns what the Equipment is attached to.
+fn equip_bear(flicker: bool) -> Option<engine::game::game_object::AttachTarget> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let sword = scenario
+        .add_creature(P0, "Test Sword", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(TEST_SWORD_ORACLE)
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Colorless));
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: sword,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("equip");
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            })
+            .expect("target");
+    }
+    assert!(
+        !runner.state().stack.is_empty(),
+        "equip must be on the stack"
+    );
+    if flicker {
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), sword, Zone::Exile, &mut events);
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            sword,
+            Zone::Battlefield,
+            &mut events,
+        );
+    }
+    runner.advance_until_stack_empty();
+    live(&runner, sword).attached_to
+}
+
+/// CR 400.7: an Equipment that left and returned is a new object the equip ability can't attach.
+#[test]
+fn equip_does_not_attach_a_flickered_equipment() {
+    assert!(
+        equip_bear(false).is_some(),
+        "unflickered Equipment attaches"
+    );
+    assert_eq!(equip_bear(true), None);
+}
+
+const WINTER_SOLDIER_ORACLE: &str = "Vigilance, menace\nWinter Soldier gets +2/+0 for each Equipment attached to him.\n{3}{W}{B}: Return this card from your graveyard to the battlefield with a finality counter on him. Then you may attach an Equipment you control to him. (If a creature with a finality counter on it would die, exile it instead.)";
+
+/// CR 400.7j: an activated ability that returns its own source can attach to the returned object.
+#[test]
+fn self_returning_activated_ability_attaches_equipment_to_returned_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sword = scenario
+        .add_creature(P0, "Test Sword", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(TEST_SWORD_ORACLE)
+        .id();
+    let soldier = scenario
+        .add_creature_to_graveyard(P0, "Winter Soldier, Icy Assassin", 2, 2)
+        .from_oracle_text(WINTER_SOLDIER_ORACLE)
+        .id();
+    let mut pool = floating_mana(4, ManaType::White);
+    pool.extend(floating_mana(1, ManaType::Black));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: soldier,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate");
+    let mut accepted_attach = false;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                accepted_attach = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept attach");
+            }
+            WaitingFor::EffectZoneChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards: vec![sword] })
+                    .expect("pick Equipment");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected {}", waiting_label(&other)),
+        }
+    }
+    assert!(accepted_attach, "the optional attach was offered");
+    assert_eq!(live(&runner, soldier).zone, Zone::Battlefield);
+    assert_eq!(counters(&runner, soldier, CounterType::Finality), 1);
+    assert_eq!(
+        live(&runner, sword).attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(soldier))
     );
 }

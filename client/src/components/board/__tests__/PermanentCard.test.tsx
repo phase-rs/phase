@@ -119,6 +119,10 @@ function makeState(): GameState {
   });
 }
 
+function affordanceHighlightClass(container: HTMLElement): string | undefined {
+  return container.querySelector('[data-card-affordance-highlight="true"]')?.className;
+}
+
 function renderPermanent(
   validTargetObjectIds = new Set<number>(),
   selectableSacrificeObjectIds = new Set<number>(),
@@ -126,6 +130,7 @@ function renderPermanent(
   activatableObjectIds = new Set<number>(),
   undoableTapObjectIds = new Set<number>(),
   manaTappableObjectIds = new Set<number>(),
+  combat: { committedAttackerIds?: Set<number>; incomingAttackerCounts?: Map<number, number> } = {},
 ) {
   return render(
     <BoardInteractionContext.Provider
@@ -133,8 +138,8 @@ function renderPermanent(
         activatableObjectIds,
         blockableAttackerIds: new Set(),
         boardChoiceObjectIds,
-        committedAttackerIds: new Set(),
-        incomingAttackerCounts: new Map(),
+        committedAttackerIds: combat.committedAttackerIds ?? new Set(),
+        incomingAttackerCounts: combat.incomingAttackerCounts ?? new Map(),
         manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds: new Set(),
@@ -302,7 +307,7 @@ describe("PermanentCard", () => {
       tapRotation: "classic",
     });
     vi.mocked(dispatchAction).mockClear();
-    vi.mocked(dispatchInteraction).mockResolvedValue();
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {
@@ -447,6 +452,166 @@ describe("PermanentCard", () => {
 
     expect(screen.queryByText("Copy")).not.toBeInTheDocument();
     expect(screen.queryByText("Token")).not.toBeInTheDocument();
+  });
+
+  it("identifies a valid target by its outline alone, without a Target label", () => {
+    const { container } = renderPermanent(new Set([1]));
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.queryByText("Target")).not.toBeInTheDocument();
+  });
+
+  it("renders neither a target outline nor a Target label on a non-target", () => {
+    const { container } = renderPermanent();
+
+    expect(affordanceHighlightClass(container)).toBeUndefined();
+    expect(screen.queryByText("Target")).not.toBeInTheDocument();
+  });
+
+  it("keeps the token badge on a card-art token copy while it is a valid target", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Card";
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(new Set([1]));
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.getByTitle("Token copy of a real card")).toHaveTextContent("Token");
+  });
+
+  it("keeps the copy badge on a nontoken copy while it is a valid target", () => {
+    const gameState = makeState();
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(new Set([1]));
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.getByTitle("Nontoken permanent copying another card")).toHaveTextContent("Copy");
+  });
+
+  it("shows neither provenance badge on a face-down valid target classified as copied (CR 708.2)", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(new Set([1]));
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
+  });
+
+  it("does not badge a generic token that is a valid target", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Token";
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(new Set([1]));
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("keeps the token badge on an attacked token copy that is a valid target", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Card";
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(
+      new Set([1]),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { incomingAttackerCounts: new Map([[1, 1]]) },
+    );
+
+    expect(affordanceHighlightClass(container)).toContain("ring-lime-300");
+    expect(screen.getByTitle("Attacked by 1 creature")).toBeInTheDocument();
+    expect(screen.getByTitle("Token copy of a real card")).toHaveTextContent("Token");
+  });
+
+  it("outlines a committed attacker that is a valid target in lime", () => {
+    const { container } = renderPermanent(
+      new Set([1]),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { committedAttackerIds: new Set([1]) },
+    );
+
+    const highlight = affordanceHighlightClass(container);
+    expect(highlight).toContain("ring-lime-300");
+    expect(highlight).not.toContain("ring-teal-300");
+  });
+
+  it("keeps the attack ring on a committed attacker that is not a valid target", () => {
+    const { container } = renderPermanent(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { committedAttackerIds: new Set([1]) },
+    );
+
+    const highlight = affordanceHighlightClass(container);
+    expect(highlight).toContain("ring-teal-300");
+    expect(highlight).not.toContain("ring-lime-300");
+  });
+
+  it("outlines an attacked planeswalker that is a valid target in lime", () => {
+    const gameState = makeState();
+    Object.assign(gameState.objects[1], {
+      name: "Test Planeswalker",
+      card_types: { supertypes: [], core_types: ["Planeswalker"], subtypes: [] },
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+    });
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent(
+      new Set([1]),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { incomingAttackerCounts: new Map([[1, 1]]) },
+    );
+
+    const highlight = affordanceHighlightClass(container);
+    expect(highlight).toContain("ring-lime-300");
+    expect(highlight).not.toContain("ring-red-500");
+    expect(screen.getByTitle("Attacked by 1 creature")).toBeInTheDocument();
+  });
+
+  it("keeps the under-attack ring on an attacked permanent that is not a valid target", () => {
+    const { container } = renderPermanent(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { incomingAttackerCounts: new Map([[1, 1]]) },
+    );
+
+    const highlight = affordanceHighlightClass(container);
+    expect(highlight).toContain("ring-red-500");
+    expect(highlight).not.toContain("ring-lime-300");
   });
 
   it("renders only the engine-classified battlefield keyword badges", () => {
@@ -692,6 +857,66 @@ describe("PermanentCard", () => {
       useUiStore.setState({ selectedObjectId: 1 });
     });
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  // A multi-pick decision (e.g. "Tap X untapped artifacts") publishes no
+  // one-step fan pick, so `attachmentsActionable` is false — yet the attached
+  // candidate must stay reachable in place rather than collapse behind "+N" —
+  // whether it hangs directly on the host or is nested under a later
+  // attachment (the engine's membership is the whole subtree).
+  it("expands multiple attachments while one in the subtree is a candidate of a board choice without a fan pick", () => {
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [5],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    gameState.objects[5] = makeObject({
+      id: 5,
+      card_id: 500,
+      attached_to: { type: "Object", data: 4 },
+      attachments: [],
+      name: "Nested Aura",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Aura"] },
+      color: [],
+      base_color: [],
+    });
+    gameState.battlefield = [1, 2, 3, 4, 5];
+    // Membership only: the multi-pick decision publishes no fan pick.
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: membershipOnly([2, 3, 4, 5]),
+    });
+
+    // Reach guard: with no candidate the stack stays collapsed.
+    const collapsed = renderPermanent();
+    expect(collapsed.container.querySelector('[data-object-id="4"]')).toBeNull();
+    expect(collapsed.container.textContent).toContain("+1");
+    collapsed.unmount();
+
+    const direct = renderPermanent(new Set(), new Set(), new Set([4]));
+    expect(direct.container.querySelector('[data-object-id="4"]')).not.toBeNull();
+    expect(direct.container.textContent).not.toContain("+1");
+    direct.unmount();
+
+    const nested = renderPermanent(new Set(), new Set(), new Set([5]));
+    expect(nested.container.querySelector('[data-object-id="5"]')).not.toBeNull();
+    expect(nested.container.textContent).not.toContain("+1");
   });
 
   it("opens the attachment fan from the collapsed-count button without selecting the host", () => {
@@ -1629,6 +1854,45 @@ describe("PermanentCard", () => {
     const permanent = container.querySelector('[data-object-id="1"]') as HTMLElement;
 
     fireEvent.click(permanent);
+
+    expect(staleBlockerHandler).not.toHaveBeenCalled();
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 1 } },
+    });
+  });
+
+  it("outlines a valid target in lime over a stale blocker assignment", () => {
+    // A stale `combatMode` can linger into TargetSelection (see the test above);
+    // the target outline must still win over the leftover blocker ring.
+    const gameState: GameState = {
+      ...makeState(),
+      waiting_for: buildTargetSelectionWaitingFor({
+        data: {
+          player: 0,
+          pending_cast: buildPendingCast({ object_id: 99 }),
+          target_slots: [],
+          selection: buildTargetSelectionProgress({
+            current_legal_targets: [{ Object: 1 }],
+          }),
+        },
+      }),
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    const staleBlockerHandler = vi.fn();
+    useUiStore.setState({
+      combatMode: "blockers",
+      blockerAssignments: new Map([[1, new Set([99])]]),
+      combatClickHandler: staleBlockerHandler,
+    });
+
+    const { container } = renderPermanent(new Set([1]));
+
+    const highlight = affordanceHighlightClass(container);
+    expect(highlight).toContain("ring-lime-300");
+    expect(highlight).not.toContain("ring-orange-500");
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
 
     expect(staleBlockerHandler).not.toHaveBeenCalled();
     expect(dispatchAction).toHaveBeenCalledWith({

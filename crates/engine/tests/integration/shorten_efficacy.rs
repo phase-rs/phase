@@ -160,6 +160,7 @@ fn legal_ability_indices(state: &GameState, player: PlayerId, source: ObjectId) 
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == source => Some(*ability_index),
             _ => None,
         })
@@ -259,6 +260,7 @@ fn v1b_a_confined_fetchland_accepts_instead_of_buying_a_vacuous_window() {
         actions.contains(&GameAction::ActivateAbility {
             source_id: terramorphic,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto
         }),
         "REACH-GUARD 1: the fetchland's ability must be enumerated, otherwise this row \
          degenerates to the empty-board stage-1 path; got {actions:?}"
@@ -536,7 +538,8 @@ fn gunzip_dump(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Decode AS `PersistedGameState` — the production chokepoint the server's
@@ -790,7 +793,7 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
         .map(|a| match a {
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } => {
                 let o = state.objects.get(source_id);
                 format!(
@@ -826,8 +829,8 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
 ///
 /// **V5 — bounded offers are NOT exempt.** MEASURED on this board: the offer
 /// mints at beat 21 carrying `predicted_winner: None` and a FINITE
-/// `IterationCount::Fixed` count equal to the schema's own ceiling. It is the
-/// BOUNDED class, not the `UntilLethal` class the synthetic rows use, and
+/// `IterationCount::Fixed` count. It is the BOUNDED class, not the
+/// `UntilLethal` class the synthetic rows use, and
 /// `predicted_winner: None` additionally proves arm (A) cannot be what produces
 /// the `Accept` below — only arm (B) can. Re-introducing an `UntilLethal`-only
 /// gate makes this row return `Shorten` and fail.
@@ -871,12 +874,12 @@ fn v1_live_path_fetchland_seat_accepts_on_the_real_4p_board() {
         "V5: the BOUNDED class mints no crown — so arm (A) is structurally unable to produce \
          the Accept below, and only arm (B) can (offer beat {beat})"
     );
-    assert_eq!(
-        schema.iteration_count,
-        IterationCount::Fixed(schema.max_iterations),
+    assert!(
+        matches!(schema.iteration_count, IterationCount::Fixed(_)),
         "V5: a FINITE count is the point — stage 2 takes the identical rule for it and for \
-         the UntilLethal class. The bounded producer mints the count FROM its own ceiling, so \
-         this re-derives the class instead of pinning whatever the ceiling happens to be"
+         the UntilLethal class. The VARIANT is the class; the value is the producer's own \
+         suggestion and is deliberately not re-derived here. got {:?}",
+        schema.iteration_count
     );
 
     // ── the row: P2, whose only action is its own fetchland ──
@@ -1000,8 +1003,8 @@ fn v1_positive_control_interactive_seat_still_shortens_on_the_real_4p_board() {
 /// The previously-tracked `dina_conqueror_4p` board is the same matchup at a
 /// beat where NO seat holds any meaningful priority action. MEASURED: the offer
 /// mints at beat 19 with `predicted_winner: None`, a FINITE
-/// `IterationCount::Fixed` count equal to the schema's own ceiling,
-/// and all three polled seats (P1, P2, P3) enumerate exactly
+/// `IterationCount::Fixed` count, and all three polled seats (P1, P2, P3)
+/// enumerate exactly
 /// `["PassPriority"]` — length one, NOT empty; it is
 /// `has_meaningful_priority_action` returning false that produces the Accept,
 /// not an empty action vector.
@@ -1026,10 +1029,11 @@ fn v1_control_quiet_board_is_unchanged_and_cannot_discriminate() {
         unreachable!()
     };
     assert_eq!(predicted_winner, None, "bounded class (offer beat {beat})");
-    assert_eq!(
-        schema.iteration_count,
-        IterationCount::Fixed(schema.max_iterations),
-        "the bounded producer mints its count FROM its own ceiling"
+    assert!(
+        matches!(schema.iteration_count, IterationCount::Fixed(_)),
+        "the bounded producer publishes a FINITE count; its VALUE is that producer's own \
+         suggestion and is not this control's subject. got {:?}",
+        schema.iteration_count
     );
 
     for seat in [P1, P2, P3] {
@@ -1291,6 +1295,7 @@ fn v9a_stage_two_folds_over_every_action_stage_one_counted() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let (probe, flat) = engine::ai_support::shortcut_probe(runner.state(), P2);
@@ -1359,6 +1364,7 @@ fn v9b_a_sacrifice_for_mana_seat_still_gets_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let flat = probe_actions(runner.state(), P2);
@@ -1918,6 +1924,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: petal,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     assert!(
@@ -2043,6 +2050,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
             .contains(&GameAction::ActivateAbility {
                 source_id: sol_ring,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             }),
         "REACH-GUARD: the Sol Ring must reach the sweep stage 2 filters, or the negatives \
          below pass because nothing was ever there to re-admit — which is not the \

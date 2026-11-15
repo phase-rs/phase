@@ -13,8 +13,8 @@ use engine::types::actions::GameAction;
 use engine::types::casting_costs::{ActivationCostLock, ActivationCostLockPoint};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, CostResume, ManaChoice, PersistedGameState,
-    PersistedRestoreFinalization, WaitingFor,
+    AbilityActivationRecord, ActivationTargetFact, CostResume, GameState, ManaChoice,
+    PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -398,6 +398,7 @@ fn an_unaffordable_target_reverses_the_whole_activation_to_priority() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("offered: the Bear is affordable");
@@ -425,6 +426,7 @@ fn an_unaffordable_target_reverses_the_whole_activation_to_priority() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("a fresh activation");
@@ -466,24 +468,15 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
     mana(&mut s, P0, 1);
     let mut r = s.build();
     r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
-    let card_id = r.state().objects[&src].card_id;
-    r.state_mut().last_loop_action_sequence = vec![engine::types::game_state::LoopActionContext {
-        card_id,
-        controller: P0,
-        action: engine::types::game_state::LoopAction::Activate {
-            source_id: src,
-            ability_index: 0,
-        },
-        convoke: None,
-        pins: Vec::new(),
-    }];
     tap_land_for_mana(&mut r, land);
     let before = state_without_revision(&r);
+    let trace_before = trace_entries(r.state());
     act(
         &mut r,
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("offered: the Bear is affordable");
@@ -494,8 +487,31 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
         .expect("a reversal is a result");
     assert!(!result.disposition.is_applied());
     assert_same_state(&before, &state_without_revision(&r), "after the reversal");
+    assert_eq!(
+        trace_entries(r.state()),
+        trace_before,
+        "the window's trace is as it was"
+    );
     act(&mut r, GameAction::UntapLandForMana { object_id: land })
         .expect("the mana-undo window survived the reversal");
+}
+
+/// The window's recorded plays and answers.
+fn trace_entries(state: &GameState) -> Option<Vec<engine::game::TraceEntry>> {
+    engine::game::play_trace_view(state).map(|view| view.entries)
+}
+
+/// How many plays of `source`'s abilities the window's trace records (CR 602.2a).
+fn activation_plays(state: &GameState, source: ObjectId) -> usize {
+    use engine::game::{EntryKind, PlayLocus};
+    trace_entries(state).map_or(0, |entries| {
+        entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, EntryKind::Play { locus: PlayLocus::Activate(id, _), .. } if id == source)
+            })
+            .count()
+    })
 }
 
 /// H1-4: a reversed activation spends nothing, including Hojo's once-per-turn
@@ -524,6 +540,7 @@ fn a_reversed_activation_leaves_the_once_per_turn_discount_unspent() {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("offered through Hojo's discount")
@@ -576,23 +593,16 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
     let mut r = s.build();
     r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
     tap_land_for_mana(&mut r, land);
-    // The manual land tap opened this controller's loop period; an accepted
-    // activation appends one step to it.
-    let period = r.state().last_loop_action_sequence.len();
 
     act(
         &mut r,
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("Hojo makes {3} cost {1}");
-    assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period,
-        "not accepted before its cost locks"
-    );
     assert!(
         r.state().lands_tapped_for_mana.contains_key(&P0),
         "the window stays open until the lock"
@@ -605,20 +615,16 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
     )
     .expect("targets settle, and the lock runs");
     assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period + 1,
-        "accepted exactly once, at the settlement lock"
+        activation_plays(r.state(), src),
+        1,
+        "the activation is one play"
     );
     assert!(
         !r.state().lands_tapped_for_mana.contains_key(&P0),
         "accepting closed the mana-undo window"
     );
     finish(&mut r, &[]);
-    assert_eq!(
-        r.state().last_loop_action_sequence.len(),
-        period + 1,
-        "and not again"
-    );
+    assert_eq!(activation_plays(r.state(), src), 1, "and not again");
 }
 
 /// HIGH 2's election twin: the settlement election accepts nothing at its
@@ -650,20 +656,17 @@ fn a_settlement_election_accepts_the_activation_once_on_its_resume() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
     select_own_and_reach_the_election(&mut r, own);
-    assert!(
-        r.state().last_loop_action_sequence.is_empty(),
-        "the settlement prompt accepted nothing"
-    );
     elect_total(&mut r, 1).expect("the election resumes");
     finish(&mut r, &[]);
     assert_eq!(
-        r.state().last_loop_action_sequence.len(),
+        activation_plays(r.state(), src),
         1,
-        "accepted once, on resume"
+        "the elected activation is one play"
     );
 }
 
@@ -692,6 +695,7 @@ fn settlement_election_board() -> (GameRunner, ObjectId, ObjectId) {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation starts");
@@ -793,13 +797,41 @@ fn a_settlement_election_survives_a_restore_and_never_re_announces() {
             | WaitingFor::TargetSelection { .. }
     )));
     assert_eq!(before - pool(&restored, P0), 1, "the elected total");
-    let entry = restored.state().stack.back().expect("placed");
+    let state = restored.state();
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.kind,
+                engine::types::game_state::StackEntryKind::ActivatedAbility { .. }
+            )
+        })
+        .expect("placed");
     assert_eq!(entry.source_id, src);
     let engine::types::game_state::StackEntryKind::ActivatedAbility { ability, .. } = &entry.kind
     else {
         panic!("an activated ability");
     };
     assert_eq!(ability.targets, vec![object(own)], "the original target");
+    // CR 603.2 + CR 602.2b: Professor Hojo's target trigger fired when the
+    // target was declared, before the election paused the activation, and the
+    // carrier holding it survived the restore.
+    let hojo_triggers = state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                engine::types::game_state::StackEntryKind::TriggeredAbility { source_id, .. }
+                    if state.objects[source_id].name == "Professor Hojo"
+            )
+        })
+        .count();
+    assert_eq!(
+        hojo_triggers, 1,
+        "Hojo's target trigger is on the stack once"
+    );
 }
 
 /// A costlier elected total that turns out unpayable reverses the activation
@@ -823,6 +855,7 @@ fn an_unpayable_elected_total_at_settlement_reverses_the_activation() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the {0} default makes it affordable with no mana");
@@ -943,6 +976,7 @@ fn a_modal_activations_open_carrier_survives_a_restore_at_mode_choice() {
             GameAction::ActivateAbility {
                 source_id: breya,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Breya activates");
@@ -1002,6 +1036,7 @@ fn a_deferred_modal_activation_whose_chosen_mode_has_no_target_locks_at_mode_cho
         GameAction::ActivateAbility {
             source_id: breya,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1049,7 +1084,26 @@ fn a_frozen_v78_mode_choice_keeps_its_announcement_fold() {
         "v78 folded the {{1}}-less at announcement"
     );
 
-    let mut runner = restore_json(json);
+    // CR 611.2e: the frozen capture predates the onset record and holds Breya's printed
+    // onset-admitting ability nodes, so the production admission refuses its bytes as-is.
+    assert!(
+        value["state"]
+            .get(engine::types::game_state::ABILITY_ONSET_RECORD_FIELD)
+            .is_none(),
+        "reach guard: the frozen capture carries no onset record"
+    );
+    let refusal = serde_json::from_str::<PersistedGameState>(json)
+        .expect_err("a pre-onset capture holding onset-admitting nodes is refused")
+        .to_string();
+    assert!(
+        refusal.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+        "{refusal}"
+    );
+
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    let mut runner = restore_json(&engine::types::game_state::record_captured_onsets_json(
+        json,
+    ));
     let find = |runner: &GameRunner, name: &str| {
         runner
             .state()
@@ -1162,6 +1216,7 @@ fn after_loyalty_paid(loyalty: Option<(&str, usize)>) -> usize {
             GameAction::ActivateAbility {
                 source_id: walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("loyalty activation");
@@ -1223,6 +1278,7 @@ fn after_loyalty_paid(loyalty: Option<(&str, usize)>) -> usize {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1290,6 +1346,7 @@ fn consumption_reads_the_entry_just_placed_not_an_older_one_beneath_it() {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -1351,6 +1408,7 @@ fn a_fresh_target_gated_activation_settles_an_open_carrier() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1380,6 +1438,7 @@ fn a_carrierless_target_gated_activation_is_refused_at_settlement() {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -1397,6 +1456,7 @@ fn a_carrierless_target_gated_activation_is_refused_at_settlement() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1430,6 +1490,7 @@ fn a_deferred_lock_records_target_settlement_as_its_point() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1558,6 +1619,7 @@ fn at_cost_prompt(cost: &str, pool: usize, fodder_counters: u32) -> (GameRunner,
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation starts");
@@ -1659,6 +1721,7 @@ fn a_settled_mana_payment_reaches_the_mana_resume_guard() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1667,6 +1730,28 @@ fn a_settled_mana_payment_reaches_the_mana_resume_guard() {
             GameRunner::from_state(r.state().clone()),
             GameAction::SelectTargets {
                 targets: vec![object(bear)],
+            },
+        )
+    });
+}
+
+/// The counter-cost tail shared by both selected counter handlers and the
+/// deferred-removal resume. It is reached only past the handler's own entry
+/// guard in the same action, or from the resume of an activation that already
+/// passed it, so no live `Open` carrier reaches the tail first: G2 only, with
+/// G1 held by the census's structural check that the tail calls the guard.
+#[test]
+fn a_selected_counter_cost_reaches_the_counter_cost_tail_guard() {
+    guard_reach(ActivationCostGuardSite::CounterCostTail, &|| {
+        let (r, fodder) = at_cost_prompt(
+            "{1}, Remove a +1/+1 counter from a creature you control",
+            1,
+            1,
+        );
+        (
+            r,
+            GameAction::SelectCards {
+                cards: vec![fodder],
             },
         )
     });
@@ -1733,6 +1818,7 @@ fn start(board: &mut RouteBoard) -> WaitingFor {
         GameAction::ActivateAbility {
             source_id: board.src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation starts")
@@ -1882,7 +1968,6 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
     b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
     let bear = b.bear.unwrap();
     start(&mut b);
-    assert!(b.runner.state().last_loop_action_sequence.is_empty());
     act(
         &mut b.runner,
         GameAction::SelectTargets {
@@ -1897,10 +1982,6 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
         ),
         "reach guard: the division prompt"
     );
-    assert!(
-        b.runner.state().last_loop_action_sequence.is_empty(),
-        "the division comes before the lock: nothing accepted yet"
-    );
     act(
         &mut b.runner,
         GameAction::DistributeAmong {
@@ -1909,9 +1990,9 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
     )
     .expect("the split");
     assert_eq!(
-        b.runner.state().last_loop_action_sequence.len(),
+        activation_plays(b.runner.state(), b.src),
         1,
-        "accepted exactly once, at the settlement lock after the split"
+        "the divided activation is one play after the split"
     );
     assert_route(&mut b, "R9 divided, accepted", 4);
 }
@@ -1978,6 +2059,7 @@ fn target_mana_value_rider_paid(target_mana_value: u32) -> usize {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");
@@ -2052,6 +2134,7 @@ fn a_self_rider_condition_the_engine_cannot_price_with_targets_is_refused() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -2091,6 +2174,7 @@ fn a_modal_x_activation_whose_chosen_mode_has_no_target_still_locks_its_cost() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");
@@ -2215,6 +2299,7 @@ fn a_rider_reads_the_target_of_a_later_chosen_mode() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");
@@ -2279,6 +2364,7 @@ fn a_rider_count_reads_the_target_of_a_later_chosen_mode() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("offered through the best-case bound");
@@ -2333,6 +2419,7 @@ fn activate_on(
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");
@@ -2622,6 +2709,7 @@ fn an_opponents_activation_targeting_your_creature_does_not_consume_it() {
         GameAction::ActivateAbility {
             source_id: theirs_src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("P1 activates");
@@ -2683,6 +2771,7 @@ fn a_target_that_changes_controller_after_placement_still_qualified() {
         GameAction::ActivateAbility {
             source_id: steal,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("P1 steals");
@@ -2829,6 +2918,7 @@ fn a_target_or_payment_prompt_projects_no_activation_record() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation");
@@ -2887,6 +2977,7 @@ fn an_activation_that_lost_its_draft_is_reversed_not_recorded() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation");
@@ -2961,6 +3052,7 @@ fn mana_abilities_are_not_journaled_manual_or_automatic() {
         GameAction::ActivateAbility {
             source_id: prism,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("mana ability");
@@ -2991,6 +3083,7 @@ fn mana_abilities_are_not_journaled_manual_or_automatic() {
         GameAction::ActivateAbility {
             source_id: lifestone,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation");
@@ -3022,6 +3115,7 @@ fn an_activation_on_the_stack_projects_no_activation_record() {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activation");
@@ -3133,6 +3227,7 @@ fn target_mana_value_raise_paid(target_mana_value: u32) -> (bool, usize) {
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");
@@ -3223,6 +3318,7 @@ fn a_rider_count_filtered_by_the_targets_controller_is_never_priced_without_it()
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -3241,6 +3337,7 @@ fn a_rider_count_filtered_by_the_targets_controller_is_never_priced_without_it()
         GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("the activation starts");

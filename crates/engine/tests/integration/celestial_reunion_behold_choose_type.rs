@@ -601,3 +601,58 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
         ref other => panic!("expected CostTypeChoice in opponent view, got {other:?}"),
     }
 }
+
+/// CR 118.3 + CR 601.2h: one Elf can't be beheld twice to pay "behold two"; the
+/// refused selection pays nothing and the two different Elves pay.
+#[test]
+fn behold_two_refuses_one_creature_selected_twice() {
+    let mut s = setup();
+    let card_id = s.runner.state().objects[&s.spell].card_id;
+    s.runner
+        .act(GameAction::CastSpell {
+            object_id: s.spell,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("casting Celestial Reunion must be accepted");
+    for _ in 0..10 {
+        match s.runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                s.runner.act(GameAction::ChooseX { value: 3 }).expect("X=3");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                s.runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("pay the behold cost");
+            }
+            WaitingFor::CostTypeChoice { .. } => {
+                s.runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Elf".to_string(),
+                    })
+                    .expect("choose Elf");
+            }
+            WaitingFor::PayCost { .. } => break,
+            other => panic!("unexpected prompt before the behold payment: {other:?}"),
+        }
+    }
+    let prompt = s.runner.state().waiting_for.clone();
+    assert!(
+        matches!(prompt, WaitingFor::PayCost { .. }),
+        "reach guard: the behold prompt, got {prompt:?}"
+    );
+    let elf = s.behold_elves[0];
+    s.runner
+        .act(GameAction::SelectCards {
+            cards: vec![elf, elf],
+        })
+        .expect_err("one Elf can't pay for two");
+    assert_eq!(s.runner.state().waiting_for, prompt);
+    s.runner
+        .act(GameAction::SelectCards {
+            cards: s.behold_elves.clone(),
+        })
+        .expect("two different Elves pay the cost");
+    assert_ne!(s.runner.state().waiting_for, prompt);
+}

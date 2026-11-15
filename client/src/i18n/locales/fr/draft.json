@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
+    "pickEnhancements": {
+      "label": "Utiliser l'IA intégrée avec améliorations des choix de draft",
+      "hint": "Les bots suivent un guide écrit d'ordre de choix pour les formats qui en ont un (actuellement Mirrodin, Darksteel et Fifth Dawn). S'applique à partir de la difficulté moyenne."
+    },
     "difficultyLevels": {
       "VeryEasy": "Très facile",
       "Easy": "Facile",
@@ -132,6 +136,12 @@
     "packOrder": "Ordre des boosters",
     "candidateSets": "Extensions candidates",
     "clearPacks": "Vider",
+    "randomSet": "Extension aléatoire",
+    "randomSetHint": "Remplir tous les boosters avec une extension choisie au hasard",
+    "randomPacks": "Boosters aléatoires",
+    "randomPacksHint": "Attribuer à chaque booster sa propre extension choisie au hasard",
+    "randomCandidates": "Extensions aléatoires",
+    "randomCandidatesHint": "Choisir au hasard des extensions candidates distinctes",
     "emptyPacks_one": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} booster par défaut — répétez une extension ou mélangez-en plusieurs.",
     "emptyPacks_other": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} boosters par défaut — répétez une extension ou mélangez-en plusieurs pour drafter un bloc.",
     "emptyPacksFixed_one": "Le scellé ouvre exactement {{count}} booster. Choisissez une extension pour celui-ci.",
@@ -156,6 +166,7 @@
     "startSealed": "Lancer le scellé"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmer le choix",
     "selected": "Sélection",
     "draftEffects": "Effets de draft :",
@@ -556,9 +567,11 @@
     "tournamentEliminationDesc": "Les joueurs sont éliminés après une défaite de match jusqu'à ce qu'il ne reste qu'un vainqueur.",
     "podPolicy": "Règle du pod",
     "policyCompetitive": "Compétitif",
-    "policyCompetitiveDesc": "Choix chronométrés, sélections automatiques en cas de dépassement de temps et avancement automatique des manches.",
+    "policyCompetitiveDesc": "Choix chronométrés, sélections automatiques en cas de dépassement de temps et avancement automatique des manches. Les decks soumis sont définitifs ; vous ne pouvez utiliser la réserve qu'entre les parties d'un match.",
+    "policyCompetitiveNoRoundsDesc": "Choix chronométrés et sélections automatiques en cas de dépassement de temps.",
     "policyCasual": "Décontracté",
-    "policyCasualDesc": "Choix non chronométrés, avancement manuel des manches et contrôles de l'hôte pour résoudre les problèmes.",
+    "policyCasualDesc": "Choix non chronométrés, avancement manuel des manches, contrôles de l'hôte pour résoudre les problèmes et modifications du deck entre les manches.",
+    "policyCasualNoRoundsDesc": "Choix non chronométrés et contrôles de l'hôte pour résoudre les problèmes.",
     "podSize": "Taille du pod",
     "podSizeDesc": "{{count}} sièges au total. Les sièges vides peuvent être remplis par des bots depuis le salon avant le début du draft.",
     "playerCount": "{{count}} joueurs",
@@ -604,11 +617,21 @@
     "roundComplete": "Manche terminée",
     "waitingNextRound": "En attente que l'hôte démarre la manche suivante...",
     "nextRoundShortly": "La manche suivante commence bientôt...",
+    "editDeck": "Modifier le deck",
+    "backToStandings": "Retour au classement",
+    "editDeckHint": "Pod décontracté : vous pouvez modifier votre deck avant le début de la manche suivante.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Soumettre ce deck ?",
+    "confirm": "Confirmer la soumission",
+    "competitive": "Ce pod est compétitif : le deck soumis est définitif pour toutes les manches. Vous pouvez toujours utiliser la réserve entre les parties d'un match Bo3.",
+    "casual": "Vous pourrez encore modifier votre deck entre les manches.",
+    "final": "Le deck soumis est définitif."
   },
   "betweenGames": {
     "game": "Partie {{number}}",
@@ -643,6 +666,7 @@
     "kicked": "Vous avez été exclu du pod",
     "hostLeft": "L'hôte a quitté le draft",
     "connection": "Erreur de connexion",
+    "incompatible": "Ce draft n’est pas compatible avec votre version du protocole.",
     "retry": "Réessayer la connexion"
   },
   "winston": {
@@ -735,5 +759,13 @@
     "slotTraditional": "Draft traditionnel",
     "slotCommanderDraft": "Draft Commander",
     "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Drafteurs IA",
+    "picking": "Choisit",
+    "ready": "A choisi",
+    "fallback": "Choix du moteur",
+    "waiting": "En attente du choix de tous les joueurs…",
+    "seatStatus": "{{seat}} : {{status}}"
   }
 }

@@ -15,9 +15,18 @@ pub enum LlmProvider {
     Anthropic,
     Gemini,
     DeepSeek,
+    /// OpenRouter's unified gateway. Speaks the OpenAI chat-completions
+    /// contract at a fixed root, with vendor-prefixed model ids
+    /// (`openai/gpt-5`, `anthropic/claude-sonnet-4.5`, ...).
+    OpenRouter,
     /// Any third-party endpoint implementing OpenAI's `/chat/completions`
-    /// contract (Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, ...).
+    /// contract (Ollama, LM Studio, vLLM, Together, Groq, ...).
     OpenAiCompatible,
+    /// TypeSafe's Jev, a System One model that answers typed questions rather
+    /// than generating text. Reached through a phase-server relay
+    /// (`POST {base}/jev/systemone`): TypeSafe's API refuses browser CORS, so
+    /// the key travels in the relay envelope and never in a header.
+    Jev,
 }
 
 /// The HTTP contract a provider speaks. Several vendors share one protocol;
@@ -25,13 +34,17 @@ pub enum LlmProvider {
 /// so an OpenAI-compatible vendor needs no parser of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireProtocol {
-    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, and every
+    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, OpenRouter, and every
     /// OpenAI-compatible endpoint.
     OpenAiChat,
     /// `POST {base}/messages` — Anthropic.
     AnthropicMessages,
     /// `POST {base}/models/{model}:generateContent` — Google Gemini.
     GeminiGenerateContent,
+    /// `POST {base}/jev/systemone` — the phase-server relay to TypeSafe's
+    /// System One API. The decision is posed as one typed Choice question over
+    /// the engine-issued options.
+    SystemOneRelay,
 }
 
 /// Every label [`LlmProvider::from_label`] maps to a real provider rather than
@@ -43,7 +56,9 @@ pub const ACCEPTED_PROVIDER_LABELS: &[&str] = &[
     "Anthropic",
     "Gemini",
     "DeepSeek",
+    "OpenRouter",
     "OpenAiCompatible",
+    "Jev",
 ];
 
 impl LlmProvider {
@@ -66,6 +81,8 @@ impl LlmProvider {
             "anthropic" | "claude" => LlmProvider::Anthropic,
             "gemini" | "google" | "googleai" => LlmProvider::Gemini,
             "deepseek" => LlmProvider::DeepSeek,
+            "openrouter" => LlmProvider::OpenRouter,
+            "jev" | "typesafe" | "systemone" => LlmProvider::Jev,
             _ => LlmProvider::OpenAiCompatible,
         }
     }
@@ -77,7 +94,9 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic",
             LlmProvider::Gemini => "Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAiCompatible",
+            LlmProvider::Jev => "Jev",
         }
     }
 
@@ -88,17 +107,21 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic (Claude)",
             LlmProvider::Gemini => "Google Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAI-compatible endpoint",
+            LlmProvider::Jev => "Jev (TypeSafe)",
         }
     }
 
     pub const fn wire(self) -> WireProtocol {
         match self {
-            LlmProvider::OpenAi | LlmProvider::DeepSeek | LlmProvider::OpenAiCompatible => {
-                WireProtocol::OpenAiChat
-            }
+            LlmProvider::OpenAi
+            | LlmProvider::DeepSeek
+            | LlmProvider::OpenRouter
+            | LlmProvider::OpenAiCompatible => WireProtocol::OpenAiChat,
             LlmProvider::Anthropic => WireProtocol::AnthropicMessages,
             LlmProvider::Gemini => WireProtocol::GeminiGenerateContent,
+            LlmProvider::Jev => WireProtocol::SystemOneRelay,
         }
     }
 
@@ -110,7 +133,10 @@ impl LlmProvider {
             LlmProvider::Anthropic => Some("https://api.anthropic.com/v1"),
             LlmProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta"),
             LlmProvider::DeepSeek => Some("https://api.deepseek.com/v1"),
-            LlmProvider::OpenAiCompatible => None,
+            LlmProvider::OpenRouter => Some("https://openrouter.ai/api/v1"),
+            // The relay is a phase-server, which the display layer knows (the
+            // multiplayer server the player is connected to), not a vendor.
+            LlmProvider::OpenAiCompatible | LlmProvider::Jev => None,
         }
     }
 
@@ -164,10 +190,15 @@ impl LlmEndpointConfig {
             .filter(|url| !url.is_empty())
             .or(self.provider.default_base_url())
             .ok_or_else(|| LlmError::Configuration {
-                detail: format!(
-                    "{} has no default endpoint; enter the base URL of your server",
-                    self.provider.display_name()
-                ),
+                detail: match self.provider {
+                    LlmProvider::Jev => "Jev is reached through a phase server relay; connect \
+                                         to a multiplayer server or enter the server's URL"
+                        .to_string(),
+                    _ => format!(
+                        "{} has no default endpoint; enter the base URL of your server",
+                        self.provider.display_name()
+                    ),
+                },
             })?;
         Ok(normalize_base_url(self.provider.wire(), raw))
     }
@@ -312,6 +343,7 @@ fn normalize_base_url(wire: WireProtocol, raw: &str) -> String {
         WireProtocol::OpenAiChat => strip_suffix_path(trimmed, "/chat/completions"),
         WireProtocol::AnthropicMessages => strip_suffix_path(trimmed, "/messages"),
         WireProtocol::GeminiGenerateContent => strip_gemini_call_path(trimmed),
+        WireProtocol::SystemOneRelay => strip_suffix_path(trimmed, "/jev/systemone"),
     }
 }
 
@@ -350,6 +382,27 @@ pub struct HttpRequestSpec {
     pub method: &'static str,
     pub headers: Vec<HttpHeader>,
     pub body: String,
+    /// What the transport does with a 3xx answer. Part of the engine-owned
+    /// contract because only the engine knows where the credential sits.
+    pub redirect: RedirectPolicy,
+}
+
+/// A request's redirect policy, spelled exactly as `fetch`'s `RequestRedirect`
+/// so the transport passes it through unchanged.
+///
+/// Fetch strips exactly one credential-bearing header on a cross-origin redirect:
+/// `Authorization`. A key in any other header (`x-api-key`, `x-goog-api-key`) or
+/// in the BODY is replayed to whatever origin `Location` names (the spec keeps a
+/// 307/308 body verbatim). A request whose credential is anywhere but
+/// `Authorization` must therefore refuse to follow a redirect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedirectPolicy {
+    /// Follow redirects (fetch's default). Only for a request whose sole
+    /// credential is the `Authorization` header, which fetch strips cross-origin.
+    Follow,
+    /// Fail the request on any redirect; nothing is re-sent anywhere.
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -380,6 +433,19 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_resolves_to_its_own_provider_and_default_root() {
+        for label in ["OpenRouter", "openrouter", "open_router", "Open-Router"] {
+            assert_eq!(LlmProvider::from_label(label), LlmProvider::OpenRouter);
+        }
+        assert_eq!(LlmProvider::OpenRouter.wire(), WireProtocol::OpenAiChat);
+        assert_eq!(
+            LlmProvider::OpenRouter.default_base_url(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert!(LlmProvider::OpenRouter.requires_api_key());
+    }
+
+    #[test]
     fn every_variant_appears_in_the_accepted_labels() {
         // Wildcard-free so a new variant fails to compile here rather than
         // silently escaping the accepted-label list.
@@ -388,14 +454,18 @@ mod tests {
             LlmProvider::Anthropic,
             LlmProvider::Gemini,
             LlmProvider::DeepSeek,
+            LlmProvider::OpenRouter,
             LlmProvider::OpenAiCompatible,
+            LlmProvider::Jev,
         ] {
             let label = match provider {
                 LlmProvider::OpenAi => "OpenAi",
                 LlmProvider::Anthropic => "Anthropic",
                 LlmProvider::Gemini => "Gemini",
                 LlmProvider::DeepSeek => "DeepSeek",
+                LlmProvider::OpenRouter => "OpenRouter",
                 LlmProvider::OpenAiCompatible => "OpenAiCompatible",
+                LlmProvider::Jev => "Jev",
             };
             assert!(ACCEPTED_PROVIDER_LABELS.contains(&label));
             assert_eq!(LlmProvider::from_label(label), provider);
@@ -614,6 +684,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
         assert!(matches!(
             crate::wire::build_chat_request(&config, &prompt),
@@ -723,6 +794,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
         for url in ["http:example.com/v1", "http:/example.com/v1"] {
             let config = LlmEndpointConfig {
@@ -801,6 +873,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
 
         for (provider, endpoint, expected_host) in [

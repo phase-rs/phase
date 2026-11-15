@@ -1,13 +1,14 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActivationResidual, GameState, PendingCast, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots_labelled, cap_distribution_target_slots,
-    random_select_targets_for_ability, record_modal_mode_choices, selected_mode_labels,
-    target_constraints_from_modal, validate_modal_indices,
+    assign_selected_slots_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_chained_resolved, build_target_slots_labelled,
+    cap_distribution_target_slots, live_modal_history_source, random_select_targets_for_ability,
+    record_modal_mode_choices, selected_mode_labels, target_constraints_from_modal,
+    validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
@@ -29,6 +30,7 @@ pub(super) fn handle_ability_mode_choice(
         ability_index,
         ability_cost,
         activation_cost_snapshot,
+        activation_payment_mode,
         unavailable_modes,
     } = waiting_for
     else {
@@ -50,7 +52,25 @@ pub(super) fn handle_ability_mode_choice(
         (false, _) => None,
     };
 
-    record_modal_mode_choices(state, source_id, &modal, &indices);
+    // CR 603.3c + CR 700.2b: a modal triggered ability answered with zero modes
+    // ("choose up to one" / "choose any number") is removed from the stack. It
+    // is never finalized as a no-op entry, and no mode usage is recorded.
+    if activated_ability_index.is_none() && indices.is_empty() {
+        let produced = remove_modal_trigger_with_no_mode(state, player, events);
+        return Ok(triggers::finish_trigger_construction_action(
+            state, events, produced,
+        ));
+    }
+
+    // CR 400.7 + CR 700.2: record against the same incarnation the prompt's
+    // `unavailable_modes` was computed from — the live source for an activated
+    // ability (CR 602.2b), the trigger's captured source for a triggered one
+    // (CR 603.10a).
+    let history_source = match activated_ability_index {
+        Some(_) => live_modal_history_source(state, source_id),
+        None => pending_trigger_modal_history_source(state)?,
+    };
+    record_modal_mode_choices(state, history_source, &modal, &indices);
 
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
@@ -66,6 +86,8 @@ pub(super) fn handle_ability_mode_choice(
                 ability_index,
                 ability_cost,
                 activation_cost_snapshot,
+                payment_mode: activation_payment_mode,
+                phyrexian_intent: None,
                 modal,
                 mode_abilities,
                 indices,
@@ -98,6 +120,32 @@ pub(super) fn handle_ability_mode_choice(
     Ok(waiting_for)
 }
 
+/// CR 400.7 + CR 603.10a: the modal history key of the trigger whose modes are
+/// being chosen. Its absence means the mode prompt has no trigger behind it.
+fn pending_trigger_modal_history_source(
+    state: &GameState,
+) -> Result<ObjectIncarnationRef, EngineError> {
+    state
+        .pending_trigger
+        .as_ref()
+        .map(|trigger| trigger.modal_history_source(state))
+        .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))
+}
+
+/// CR 603.3c + CR 700.2b: "If no mode is chosen, the ability is removed from
+/// the stack." Drops the push-first in-construction entry through the single
+/// mid-construction removal authority, then announces any sibling triggers
+/// deferred behind it (CR 603.3b), exactly as a completed construction does.
+fn remove_modal_trigger_with_no_mode(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    super::engine::drop_mid_construction_pending_trigger(state);
+    triggers::drain_deferred_triggers_after_trigger_construction(state, events)
+        .unwrap_or(WaitingFor::Priority { player })
+}
+
 struct ActivatedModeChoice {
     player: crate::types::player::PlayerId,
     source_id: ObjectId,
@@ -106,6 +154,12 @@ struct ActivatedModeChoice {
     ability_cost: Option<crate::types::ability::AbilityCost>,
     /// CR 601.2f + CR 602.2b: the activation's cost-modifier carrier.
     activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+    /// CR 602.2b + CR 601.2g-h: the activation's payment mode.
+    payment_mode: crate::types::game_state::CastPaymentMode,
+    /// CR 118.13a + CR 601.2b: a manual activation's Phyrexian announcement,
+    /// made after its modes; `None` until then, and for every activation that
+    /// makes none. Every root built from here carries it.
+    phyrexian_intent: Option<crate::types::game_state::ActivationPhyrexianIntent>,
     modal: crate::types::ability::ModalChoice,
     /// CR 700.2: the card's mode definitions and the chosen indices, carried so
     /// per-slot mode labels can be built at the SAME post-flush point as slots
@@ -117,20 +171,9 @@ struct ActivatedModeChoice {
 
 fn handle_activated_mode_choice(
     state: &mut GameState,
-    choice: ActivatedModeChoice,
+    mut choice: ActivatedModeChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let ActivatedModeChoice {
-        player,
-        source_id,
-        mut resolved,
-        ability_index,
-        ability_cost,
-        activation_cost_snapshot,
-        modal,
-        mode_abilities,
-        indices,
-    } = choice;
     // CR 602.2 + CR 601.2c (capture A, modal): the chosen modes' chain is built
     // here, after the announcement returned for the mode choice, so its journal
     // facts are captured now, before any cost is paid. Target settlement adds
@@ -138,7 +181,187 @@ fn handle_activated_mode_choice(
     // activating; no game action can intervene while `AbilityModeChoice` is
     // pending, so this is still the announcement layout (CR 602.2a: provenance
     // too).
-    casting::record_activation_announcement(state, player, source_id, ability_index, &mut resolved);
+    casting::record_activation_announcement(
+        state,
+        choice.player,
+        choice.source_id,
+        choice.ability_index,
+        &mut choice.resolved,
+    );
+
+    // CR 601.2b + CR 700.2a + CR 118.13a: a manually paid modal activation
+    // announces how it will pay its printed Phyrexian symbols after its modes,
+    // before its targets and the lock that waited for them; nothing is paid. A
+    // mana {X} is announced first, on its own root, after `ChooseX`.
+    let awaits_announcement = choice.phyrexian_intent.is_none()
+        && choice.ability_cost.as_ref().is_some_and(|cost| {
+            casting_costs::extract_x_mana_cost(cost).is_none()
+                && !casting::manual_native_phyrexian_domain(choice.payment_mode, cost).is_empty()
+        })
+        && choice
+            .activation_cost_snapshot
+            .as_deref()
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot.lock,
+                    crate::types::casting_costs::ActivationCostLock::Open { .. }
+                )
+            });
+    if awaits_announcement {
+        let target_constraints = target_constraints_from_modal(&choice.modal);
+        let mode_distribute = choice.indices.iter().find_map(|&i| {
+            choice
+                .mode_abilities
+                .get(i)
+                .and_then(|m| m.distribute.clone())
+        });
+        let whole_cost = choice
+            .ability_cost
+            .clone()
+            .expect("an announcement is only awaited for a present cost");
+        let mut root = PendingCast::for_activation(
+            choice.source_id,
+            choice.resolved,
+            ManaCost::NoCost,
+            choice.ability_index,
+            choice.activation_cost_snapshot,
+            choice.payment_mode,
+        );
+        root.activation_cost = choice.ability_cost;
+        root.target_constraints = target_constraints;
+        root.distribute = mode_distribute;
+        let mut chosen_modes = choice.indices;
+        chosen_modes.sort_unstable();
+        root.chosen_modes = chosen_modes;
+        return Ok(casting::native_phyrexian_announcement_prompt(
+            state,
+            choice.player,
+            root,
+            &whole_cost,
+        ));
+    }
+    route_activated_modes(state, choice, events)
+}
+
+/// CR 601.2b + CR 700.2a + CR 118.13a: a modal manual activation whose printed
+/// Phyrexian symbols were just announced after its modes, on its proposal root:
+/// its `Announcement` lock runs now -- raising the reduction-order election when
+/// two orders lock different totals, after a dry run of the continuation proves
+/// the activation legal -- and it continues to its targets and payment. A lock
+/// deferred to target settlement runs there instead.
+pub(super) fn continue_modal_activation_after_announcement(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    mut root: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let announcement_lock = root
+        .activation_cost_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| {
+            matches!(
+                snapshot.lock,
+                crate::types::casting_costs::ActivationCostLock::Open {
+                    point: crate::types::casting_costs::ActivationCostLockPoint::Announcement,
+                }
+            )
+        });
+    if !announcement_lock {
+        return continue_modal_activation_after_lock(state, player, root, events);
+    }
+    let Some(outcomes) =
+        casting::lock_proposed_activation_at_announcement(state, player, &mut root)?
+    else {
+        return continue_modal_activation_after_lock(state, player, root, events);
+    };
+    // CR 602.2 + CR 602.2b -> CR 601.2: only a LEGAL activation may raise the
+    // election. Dry-run the continuation under the default (cheapest) order on
+    // an owned clone, discarded with everything it did.
+    let mut dry_run = root.clone();
+    if let Some(snapshot) = dry_run.activation_cost_snapshot.as_deref_mut() {
+        snapshot.lock = crate::types::casting_costs::ActivationCostLock::Locked {
+            point: crate::types::casting_costs::ActivationCostLockPoint::Announcement,
+            order: None,
+        };
+    }
+    casting::write_back_announcement_lock(state, player, &mut dry_run)?;
+    let mut probe = state.clone();
+    continue_modal_activation_after_lock(&mut probe, player, dry_run, &mut Vec::new())?;
+    let reductions = root
+        .activation_cost_snapshot
+        .as_deref()
+        .map(|snapshot| snapshot.reductions.clone())
+        .unwrap_or_default();
+    Ok(WaitingFor::OrderCostReductions {
+        player,
+        reductions,
+        hybrid_symbols: Vec::new(),
+        outcomes,
+        pending_cast: Box::new(root),
+    })
+}
+
+/// CR 602.2b + CR 700.2a: continue a modal activation past its chosen modes on
+/// its own root -- whose modes, chain and Phyrexian announcement are bound and
+/// whose cost is locked (or deferred to target settlement) -- to its targets and
+/// payment, exactly as the mode choice itself continues. The modes are never
+/// announced again.
+pub(super) fn continue_modal_activation_after_lock(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    root: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ability_index = root.activation_ability_index.ok_or_else(|| {
+        EngineError::InvalidAction("a modal activation needs its ability index".to_string())
+    })?;
+    let definition = casting::activation_ability_definition(state, root.object_id, ability_index)
+        .ok_or_else(|| {
+        EngineError::InvalidAction("the activated ability is gone".to_string())
+    })?;
+    let modal = definition.modal.clone().ok_or_else(|| {
+        EngineError::InvalidAction("a modal continuation needs a modal ability".to_string())
+    })?;
+    route_activated_modes(
+        state,
+        ActivatedModeChoice {
+            player,
+            source_id: root.object_id,
+            resolved: *root.ability,
+            ability_index,
+            ability_cost: root.activation_cost,
+            activation_cost_snapshot: root.activation_cost_snapshot,
+            payment_mode: root.payment_mode,
+            phyrexian_intent: root.activation_phyrexian_intent,
+            modal,
+            mode_abilities: definition.mode_abilities.clone(),
+            indices: root.chosen_modes,
+        },
+        events,
+    )
+}
+
+/// CR 602.2b + CR 601.2b-c + CR 700.2: route a modal activation, its modes
+/// chosen and announced, to its X announcement, its targets or straight to its
+/// payment boundary.
+fn route_activated_modes(
+    state: &mut GameState,
+    choice: ActivatedModeChoice,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ActivatedModeChoice {
+        player,
+        source_id,
+        resolved,
+        ability_index,
+        ability_cost,
+        activation_cost_snapshot,
+        payment_mode,
+        phyrexian_intent,
+        modal,
+        mode_abilities,
+        indices,
+    } = choice;
 
     let target_constraints = target_constraints_from_modal(&modal);
 
@@ -163,7 +386,9 @@ fn handle_activated_mode_choice(
                 mana_cost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
+            pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
             pending_x.target_constraints = target_constraints;
             pending_x.distribute = mode_distribute.clone();
@@ -190,7 +415,9 @@ fn handle_activated_mode_choice(
                 mana_cost.unwrap_or(ManaCost::NoCost),
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
+            pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
             pending_x.target_constraints = target_constraints;
             pending_x.distribute = mode_distribute.clone();
@@ -245,7 +472,7 @@ fn handle_activated_mode_choice(
 
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             // CR 602.2b + CR 601.2c: automatic target assignment is still a
             // declaration before activation costs are paid.
             casting::emit_targeting_events(
@@ -253,6 +480,9 @@ fn handle_activated_mode_choice(
                 &super::ability_utils::declared_targets_in_chain(&resolved),
                 source_id,
                 player,
+                Some(crate::types::events::Targeter::Ability(
+                    crate::types::ability::StackAbilityKind::Activated,
+                )),
                 events,
             );
             let mut pending = PendingCast::for_activation(
@@ -261,7 +491,9 @@ fn handle_activated_mode_choice(
                 ManaCost::NoCost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
+            pending.activation_phyrexian_intent = phyrexian_intent.clone();
             pending.activation_cost = ability_cost.clone();
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
@@ -276,7 +508,9 @@ fn handle_activated_mode_choice(
                 ManaCost::NoCost,
                 ability_index,
                 activation_cost_snapshot.clone(),
+                payment_mode,
             );
+            pending.activation_phyrexian_intent = phyrexian_intent.clone();
             pending.activation_cost = ability_cost;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
@@ -295,7 +529,9 @@ fn handle_activated_mode_choice(
             ManaCost::NoCost,
             ability_index,
             activation_cost_snapshot.clone(),
+            payment_mode,
         );
+        pending.activation_phyrexian_intent = phyrexian_intent.clone();
         pending.activation_cost = ability_cost;
         pending.target_constraints = target_constraints;
         pending.distribute = mode_distribute;
@@ -335,8 +571,9 @@ struct TriggeredModeChoice {
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
 /// stack entry is already pushed and tracked by `state.pending_trigger_entry`.
 ///
-/// Returns `Ok(None)` when no mode can be chosen (CR 603.3c) so the caller drops
-/// the trigger exactly as the all-modes-unavailable branch does.
+/// Returns `Ok(None)` when no mode is chosen, whether none can be or an "up to"
+/// draw chose zero (CR 603.3c); the caller drops the pushed entry through
+/// `drop_mid_construction_pending_trigger`.
 pub(super) fn resolve_random_modal_trigger(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -346,24 +583,24 @@ pub(super) fn resolve_random_modal_trigger(
     unavailable_modes: &[usize],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 603.3c + CR 700.2b: no mode can be chosen, or an "up to" draw chose
+    // none. Either way the ability is removed from the stack; the caller drops
+    // the pushed entry through `drop_mid_construction_pending_trigger`.
     let Some(indices) =
         super::ability_utils::random_select_modal_indices(state, &modal, unavailable_modes)
+            .filter(|indices| !indices.is_empty())
     else {
-        // CR 603.3c: No legal mode — drop the trigger. The interactive branches
-        // already removed the in-flight stack entry before this point, so just
-        // clear the cursor here.
-        super::stack::pop_uncommitted_pending_trigger_entry(
-            state,
-            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-        );
-        state.pending_trigger = None;
-        state.pending_trigger_firing = None;
         return Ok(None);
     };
 
     // CR 700.2: Track per-turn/per-game mode usage exactly as the interactive
     // path does, then build the chained resolved ability for the drawn modes.
-    record_modal_mode_choices(state, source_id, &modal, &indices);
+    record_modal_mode_choices(
+        state,
+        pending_trigger_modal_history_source(state)?,
+        &modal,
+        &indices,
+    );
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
@@ -383,6 +620,77 @@ pub(super) fn resolve_random_modal_trigger(
     Ok(Some(waiting_for))
 }
 
+/// CR 603.3c: choosing a modal trigger's modes is part of putting that one
+/// ability on the stack, so the chosen modes keep every stamp the trigger
+/// received when it triggered and was pushed.
+fn carry_trigger_provenance(
+    pending: &crate::types::ability::ResolvedAbility,
+    chosen: &mut crate::types::ability::ResolvedAbility,
+) {
+    if let Some(source) = &pending.trigger_source {
+        chosen.set_trigger_source_recursive(source.clone());
+    }
+    if pending.source_incarnation.is_some() {
+        chosen.set_source_incarnation_recursive(pending.source_incarnation);
+    }
+    if let Some(player) = pending.original_controller {
+        chosen.set_original_controller_recursive(player);
+    }
+    if let Some(definition_ref) = &pending.trigger_definition_ref {
+        chosen.set_trigger_definition_ref_recursive(definition_ref.clone());
+    }
+    if let Some(origin) = &pending.may_trigger_origin {
+        chosen.set_may_trigger_origin_recursive(origin.clone());
+    }
+    if let Some(player) = pending.scoped_player {
+        chosen.set_scoped_player_recursive(player);
+    }
+    if let Some(x) = pending.chosen_x {
+        chosen.set_chosen_x_recursive(x);
+    }
+    if let Some(snapshot) = &pending.cost_paid_object {
+        chosen.set_cost_paid_object_recursive(snapshot.clone());
+    }
+    if chosen.unless_pay.is_none() {
+        chosen.unless_pay.clone_from(&pending.unless_pay);
+    }
+    let context = &pending.context;
+    if context.source_transformation_count.is_some() {
+        chosen.set_source_transformation_count_recursive(context.source_transformation_count);
+    }
+    if context.source_ability_provenance.is_some() {
+        chosen.set_source_ability_provenance_recursive(context.source_ability_provenance);
+    }
+    if let Some(event) = &context.creation_lookback_event {
+        chosen.set_creation_lookback_event_recursive(event);
+    }
+    for &event in &context.duration_events {
+        chosen.record_duration_event_recursive(event);
+    }
+    // The trigger build stamps the source's cast facts on the root only.
+    chosen.context.cast_from_zone = chosen.context.cast_from_zone.or(context.cast_from_zone);
+    if !context.kickers_paid.is_empty() {
+        chosen
+            .context
+            .kickers_paid
+            .clone_from(&context.kickers_paid);
+    }
+    if !context.additional_cost_payments.is_empty() {
+        chosen
+            .context
+            .additional_cost_payments
+            .clone_from(&context.additional_cost_payments);
+    }
+    chosen.context.additional_cost_payment_count = context.additional_cost_payment_count;
+    chosen.context.additional_cost_paid |= context.additional_cost_paid;
+    chosen.bind_force_block_source_recursive(pending.source_incarnation.map(|incarnation| {
+        crate::types::identifiers::ObjectIncarnationRef {
+            object_id: pending.source_id,
+            incarnation,
+        }
+    }));
+}
+
 fn handle_triggered_mode_choice(
     state: &mut GameState,
     choice: TriggeredModeChoice,
@@ -391,7 +699,7 @@ fn handle_triggered_mode_choice(
     let TriggeredModeChoice {
         player,
         source_id,
-        resolved,
+        mut resolved,
         modal,
         mode_abilities,
         indices,
@@ -401,6 +709,13 @@ fn handle_triggered_mode_choice(
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+    // The stack entry holds the push-time stamps the pending carrier lacks.
+    let pending = state
+        .pending_trigger_entry
+        .and_then(|id| state.stack.iter().rev().find(|entry| entry.id == id))
+        .and_then(|entry| entry.ability())
+        .unwrap_or(trigger.ability.as_ref());
+    carry_trigger_provenance(pending, &mut resolved);
     // CR 603.2 + CR 109.4: Re-establish the trigger event context for
     // the duration of mode-target computation. The modal was paused for mode
     // choice (`trigger_dispatch`) AFTER restoring the context to its pre-dispatch
@@ -439,6 +754,9 @@ fn handle_triggered_mode_choice(
     };
     let target_constraints = target_constraints_from_modal(&modal);
 
+    // CR 603.3c + CR 603.3d: the chosen modes declare only the targets chosen
+    // for them.
+    resolved.start_target_record_recursive();
     trigger.ability = Box::new(resolved);
     trigger.target_constraints = target_constraints.clone();
     trigger.modal = None;
@@ -494,7 +812,7 @@ fn handle_triggered_mode_choice(
             // optimized, which is why the mechanical `(*b).clone()` rewrite was
             // reverted at this call site.
             let mut resolved = trigger.ability.clone();
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
             // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
             // already drains the deferred-trigger queue and surfaces the next
             // WaitingFor if a sibling trigger needs input; use that result

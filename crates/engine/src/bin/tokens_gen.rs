@@ -3,8 +3,8 @@
 //! Usage:
 //!     cargo run --bin tokens-gen -- \
 //!         --input data/mtgjson/sets \
-//!         --overlay crates/engine/data/known-tokens.overlay.toml \
-//!         --output crates/engine/data/known-tokens.toml
+//!         --overlay crates/phase-ast/data/known-tokens.overlay.toml \
+//!         --output crates/phase-ast/data/known-tokens.toml
 //!
 //! `--overlay` names the hand-authored catalog rows this tool merges but never
 //! rewrites — MTGJSON has no source for them yet. A missing, malformed or
@@ -36,8 +36,8 @@ struct SourceCardIndex {
 
 fn main() -> ExitCode {
     let mut input = PathBuf::from("data/mtgjson/sets");
-    let mut overlay = PathBuf::from("crates/engine/data/known-tokens.overlay.toml");
-    let mut output = PathBuf::from("crates/engine/data/known-tokens.toml");
+    let mut overlay = PathBuf::from("crates/phase-ast/data/known-tokens.overlay.toml");
+    let mut output = PathBuf::from("crates/phase-ast/data/known-tokens.toml");
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

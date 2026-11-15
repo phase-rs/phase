@@ -100,7 +100,7 @@ pub fn resolve(
             ability.context.chain_root_targets.clone(),
         );
         if resolved.targets.is_empty() {
-            resolved.targets.push(TargetRef::Object(source_id));
+            resolved.push_target(TargetRef::Object(source_id));
         }
         state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
     } else {
@@ -159,7 +159,7 @@ fn run_on_decline_now(
     let mut resolved =
         build_resolved_from_def_with_chain_root(def, source_id, controller, chain_root_targets);
     if resolved.targets.is_empty() {
-        resolved.targets.push(TargetRef::Object(source_id));
+        resolved.push_target(TargetRef::Object(source_id));
     }
     let _ = super::resolve_ability_chain(state, &resolved, events, 0);
 }
@@ -437,13 +437,8 @@ mod tests {
         );
     }
 
-    /// The eligible set is drawn from the CONTROLLER'S HAND, and only then filtered — the seam
-    /// the block-(3) `execute` firewall relief
-    /// (`analysis::resource::reveal_from_hand_execute_provably_excludes_class`) rests its
-    /// universe argument on: a growing-class member that is a battlefield object (CR 110.1) can
-    /// never be in the eligible set, WHATEVER the filter says, because the pool is a hand.
-    /// Widening it to `state.objects` would make the relief unsound while every filter-level
-    /// test stayed green, so the pool is pinned here, at its own seam.
+    /// The eligible set is drawn from the CONTROLLER'S HAND, and only then filtered: a battlefield
+    /// object (CR 110.1) can never be in it, WHATEVER the filter says, because the pool is a hand.
     ///
     /// The three decoys discriminate: each MATCHES the filter (asserted below, so the row cannot
     /// pass because they were filtered out) and each is excluded by the POOL alone. The controller

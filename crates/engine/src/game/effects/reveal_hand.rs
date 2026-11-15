@@ -1,37 +1,17 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
-    TargetRef,
+    reveal_hand_parks_card_choice, Effect, EffectError, EffectKind, ParentTargetMissingReason,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
 };
-
-/// CR 608.2d + CR 701.20a: whether a hand reveal with this card filter and
-/// optionality parks a post-reveal card choice (`WaitingFor::RevealChoice`).
-pub(crate) fn reveal_hand_parks_card_choice(
-    card_filter: &TargetFilter,
-    choice_optional: bool,
-) -> bool {
-    choice_optional || !matches!(card_filter, TargetFilter::None)
-}
-
-/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
-/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
-/// chosen-object boundary and the parser's per-player reveal-choice rule; the
-/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
-pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
-    )
-}
 
 /// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
 /// player's hand, then optionally let the caster choose a card.
@@ -76,12 +56,28 @@ pub fn resolve(
     // Find the target player from resolved targets. Targeted RevealHand
     // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
     // fast path unchanged (zero regression).
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            _ => None,
+    let declared_player = if target.names_one_player()
+        || super::declared_player_slot_is_empty(state, ability, &target)
+    {
+        match super::resolve_player_for_context_ref(state, ability, &target) {
+            Some(player) => Some(player),
+            None => {
+                if reveal_hand_parks_card_choice(&card_filter, choice_optional) {
+                    state.last_parent_target_missing_reason =
+                        Some(ParentTargetMissingReason::RevealHandChoice);
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let target_player = declared_player
+        .or_else(|| {
+            ability.targets.iter().find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
         })
         // CR 608.2c + CR 109.4 + CR 108.3: a possessive-shift subject ("target
         // spell's/creature's controller|owner reveals their hand" — Denied!,
@@ -131,7 +127,7 @@ pub fn resolve(
 
     let mut hand = full_hand;
     if random {
-        hand.shuffle(&mut state.rng);
+        hand.shuffle(state.rng.draw(RandomDraw::Outcome));
     }
     // CR 701.20a: If a count is specified, reveal only that many cards.
     if let Some(count_expr) = &count {

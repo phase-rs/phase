@@ -24,6 +24,12 @@
 //!     ("a creature card in your graveyard") keeps that zone — the two legs of
 //!     the reference pool.
 //!   - CR 111.1: the "nontoken" head.
+//!   - CR 708.2a: a face-down permanent has "no text, no name, no subtypes, and
+//!     no mana cost" — the nameless-object case of the equality test this card
+//!     negates.
+//!   - CR 701.40a: manifest turns the top card of a library face down and puts
+//!     it onto the battlefield, so the manifest rows below drive a real
+//!     face-down entrant through the cast pipeline.
 use std::collections::HashSet;
 
 use engine::game::effects::token::apply_create_token_after_replacement;
@@ -39,6 +45,7 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::{
@@ -49,8 +56,10 @@ use engine::types::zones::Zone;
 /// Verbatim Oracle text (confirmed against the Scryfall API this session).
 const GUARDIAN_PROJECT_ORACLE: &str = "Whenever a nontoken creature you control enters, if it doesn't have the same name as another creature you control or a creature card in your graveyard, draw a card.";
 
-/// Put Guardian Project onto the battlefield under P0 and return the runner.
-fn setup() -> (GameRunner, ObjectId) {
+/// Put Guardian Project onto the battlefield under P0, let `prepare` extend the
+/// scenario (a manifest sorcery, library cards to manifest), and return the
+/// runner.
+fn setup_with(prepare: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let project_id = {
@@ -64,9 +73,17 @@ fn setup() -> (GameRunner, ObjectId) {
         scenario.add_card_to_library_top(P0, "Plains");
         scenario.add_card_to_library_top(P1, "Plains");
     }
+    // `prepare` runs last so any library card it adds lands on top and is the
+    // one manifest takes.
+    prepare(&mut scenario);
     let mut runner = scenario.build();
     reindex_object_triggers(runner.state_mut(), project_id);
     (runner, project_id)
+}
+
+/// Put Guardian Project onto the battlefield under P0 and return the runner.
+fn setup() -> (GameRunner, ObjectId) {
+    setup_with(|_| {})
 }
 
 /// Create a creature directly in `zone` without firing any trigger.
@@ -185,6 +202,7 @@ fn creature_token_spec(controller: PlayerId) -> TokenSpec {
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller,
@@ -206,6 +224,7 @@ fn create_token_and_count_draws(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     match replace_event(runner.state_mut(), proposed, &mut events) {
@@ -443,5 +462,158 @@ fn reentered_incarnation_counts_as_another_creature() {
         "CR 400.7 + CR 603.4: at the resolution recheck the returned permanent is \
          ANOTHER creature you control sharing the entrant's name, so the \
          intervening-if is false and no card is drawn"
+    );
+}
+
+/// The object id of the unique card named `name` in P0's hand.
+fn p0_hand_card_named(runner: &GameRunner, name: &str) -> ObjectId {
+    let state = runner.state();
+    state.players[P0.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| state.objects[id].name == name)
+        .unwrap_or_else(|| panic!("P0's hand has no card named {name}"))
+}
+
+/// The face-down permanents currently on the battlefield.
+fn face_down_permanents(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.face_down)
+        .map(|object| object.id)
+        .collect()
+}
+
+/// Stage a 0-cost "Manifest the top card of your library." sorcery (CR 701.40a)
+/// in P0's hand. The spell's name must not contain "Manifest": Oracle parsing
+/// normalizes the card's own name to `~`, which would turn the verb into an
+/// unrecognized clause head.
+fn stage_manifest(scenario: &mut GameScenario, name: &str) {
+    scenario
+        .add_spell_to_hand(P0, name, false)
+        .from_oracle_text("Manifest the top card of your library.")
+        .with_mana_cost(ManaCost::generic(0));
+}
+
+/// CR 201.2a + CR 708.2a + CR 701.40a: a manifested permanent enters with NO
+/// name, and a nameless object doesn't have the same name as any other object —
+/// so the CR 603.4 intervening-if holds and Guardian Project draws.
+///
+/// Fails on revert: the pre-fix `DoesNotShare` arm also required the compared
+/// object's name set to be non-empty, which a face-down permanent can never
+/// satisfy, so a nameless entrant drew nothing.
+#[test]
+fn face_down_entrant_draws_a_card() {
+    let (mut runner, project) = setup_with(|scenario| {
+        stage_manifest(scenario, "Face-Down Maker");
+        // Hidden-name insurance: the manifested card's real name matches a
+        // creature already on the battlefield, so a regression that compares the
+        // permanent's underlying card name instead of its (empty) face-down name
+        // turns the expected draw into a refusal.
+        scenario.add_card_to_library_top(P0, "Grizzly Bears");
+    });
+    place_creature(&mut runner, P0, "Grizzly Bears", Zone::Battlefield, false);
+    let spell = p0_hand_card_named(&runner, "Face-Down Maker");
+
+    let outcome = runner.cast(spell).resolve();
+    runner.advance_until_stack_empty();
+
+    let face_down = face_down_permanents(&runner);
+    assert_eq!(
+        face_down.len(),
+        1,
+        "reach guard: the manifest sorcery must leave exactly one face-down \
+         permanent on the battlefield, got {face_down:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&face_down[0]].name,
+        "",
+        "CR 708.2a: the manifested permanent has no name"
+    );
+    assert!(
+        runner.state().stack.is_empty() && !guardian_project_trigger_is_pending(&runner, project),
+        "reach guard: the cast and its Guardian Project trigger must have fully \
+         resolved so the draw below is attributable to the entrant"
+    );
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        1,
+        "CR 201.2a: a nameless entrant shares no name with any other creature, \
+         so Guardian Project must draw"
+    );
+}
+
+/// CR 201.2a + CR 708.2a: a SECOND manifested permanent enters while another
+/// nameless face-down creature is already on the battlefield. Two nameless
+/// objects do not share a name, so the entrant draws again.
+#[test]
+fn second_face_down_entrant_still_draws() {
+    let (mut runner, _project) = setup_with(|scenario| {
+        stage_manifest(scenario, "Face-Down Maker One");
+        stage_manifest(scenario, "Face-Down Maker Two");
+        // Hidden-name insurance for the first manifest; Guardian Project's draw
+        // takes the second Grizzly Bears, so the second manifest is a Plains.
+        scenario.add_card_to_library_top(P0, "Grizzly Bears");
+        scenario.add_card_to_library_top(P0, "Grizzly Bears");
+    });
+    place_creature(&mut runner, P0, "Grizzly Bears", Zone::Battlefield, false);
+    let first = p0_hand_card_named(&runner, "Face-Down Maker One");
+    let second = p0_hand_card_named(&runner, "Face-Down Maker Two");
+
+    let first_outcome = runner.cast(first).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        first_outcome.hand_drawn(P0),
+        1,
+        "reach guard: the first nameless entrant draws"
+    );
+
+    let second_outcome = runner.cast(second).resolve();
+    runner.advance_until_stack_empty();
+    let face_down = face_down_permanents(&runner);
+    assert_eq!(
+        face_down.len(),
+        2,
+        "reach guard: two manifested permanents, got {face_down:?}"
+    );
+    assert_eq!(
+        second_outcome.hand_drawn(P0),
+        1,
+        "CR 201.2a: a nameless entrant shares no name with the nameless \
+         face-down creature already on the battlefield, so it still draws"
+    );
+}
+
+/// A nameless face-down creature already on the battlefield does not block a
+/// NAMED entrant: the entrant's name set is non-empty and shares with nothing,
+/// so the intervening-if still holds.
+#[test]
+fn named_entrant_with_face_down_creature_on_board_still_draws() {
+    let (mut runner, project) = setup_with(|scenario| {
+        stage_manifest(scenario, "Face-Down Maker");
+        // Hidden-name insurance: the face-down permanent's real card carries the
+        // same name as the entrant.
+        scenario.add_card_to_library_top(P0, "Runeclaw Bear");
+    });
+    let spell = p0_hand_card_named(&runner, "Face-Down Maker");
+    runner.cast(spell).resolve();
+    runner.advance_until_stack_empty();
+    let face_down = face_down_permanents(&runner);
+    assert_eq!(
+        face_down.len(),
+        1,
+        "reach guard: exactly one face-down permanent on the battlefield, got \
+         {face_down:?}"
+    );
+
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Runeclaw Bear", false, P0, true);
+    assert_eq!(
+        drawn, 1,
+        "a nameless face-down creature shares no name with the named entrant, so \
+         Guardian Project still draws"
     );
 }

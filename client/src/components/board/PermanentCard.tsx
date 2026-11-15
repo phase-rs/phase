@@ -496,7 +496,7 @@ export const PermanentCard = memo(function PermanentCard({
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName, ownerPrinting } = cardImageLookup(obj);
   // The battlefield TILE of a face-down permanent always shows the cause
   // marker / card back, exactly as the physical card lies in paper — for the
   // controller too: the engine blanks a face-down permanent's live name and
@@ -518,7 +518,23 @@ export const PermanentCard = memo(function PermanentCard({
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
-  const attachmentsExpanded = obj.attachments.length <= 1 || isSelected || attachmentsActionable;
+  // A multi-pick decision ("Tap X untapped artifacts", "sacrifice two", crew)
+  // publishes no one-step fan pick — one pick is not its whole answer — so
+  // `attachmentsActionable` stays false while an attachment is still a
+  // candidate the player toggles in place. Keep the peek stack expanded for
+  // it. Like `attachmentsActionable`, this reads the engine's whole-subtree
+  // membership, so a candidate nested under a later attachment is reachable
+  // too; the candidate sets are the engine-provided board affordances the
+  // attachment's own click branches already read.
+  const attachmentsChoosable =
+    attachmentView?.cards.some(
+      (card) =>
+        boardChoiceObjectIds.has(card.objectId)
+        || selectableManaCostCreatureIds.has(card.objectId)
+        || validTargetObjectIds.has(card.objectId),
+    ) ?? false;
+  const attachmentsExpanded =
+    obj.attachments.length <= 1 || isSelected || attachmentsActionable || attachmentsChoosable;
   const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
@@ -546,11 +562,17 @@ export const PermanentCard = memo(function PermanentCard({
   const isUnderAttack = incomingAttackerCount > 0;
 
   // Glow ring styles.
-  // Priority tiers: (1) action I'm taking — attacking / blocking, (2) passive
-  // imposed state — under attack, (3) affordances offered — mana cost selection,
-  // valid target, activatable, tap undo, (4) idle selection.
+  // Priority tiers: (0) a candidate of the current target/choice prompt — the
+  // lime outline is the only target signal (no label), so it outranks combat
+  // rings; combat keeps its arrow/slide and ⚔ badge, (1) action I'm taking —
+  // attacking / blocking, (2) passive imposed state — under attack,
+  // (3) affordances offered — mana cost selection, activatable, tap undo,
+  // (4) idle selection.
   let glowClass = "";
-  if (isAttacking) {
+  if (isValidTarget) {
+    glowClass =
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
+  } else if (isAttacking) {
     glowClass =
       "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
@@ -569,9 +591,6 @@ export const PermanentCard = memo(function PermanentCard({
   } else if (isSelectableForManaCost) {
     glowClass =
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
-  } else if (isValidTarget) {
-    glowClass =
-      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -917,7 +936,7 @@ export const PermanentCard = memo(function PermanentCard({
       ) : (
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} />
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (
@@ -1105,30 +1124,22 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {isValidTarget && (
-        <div
-          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
-        >
-          {t("permanent.target")}
-        </div>
-      )}
-
       {isSelectableForBoardChoice && boardChoice && (
         // Selected cards get a checkmark + solid, white-ringed badge; eligible-
         // but-unselected cards get the same opaque label, so the current
         // selection is unambiguous and the badge reads as a toggle.
         <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
+          className={`pointer-events-none absolute ${isUnderAttack ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
         >
           {isSelectedForBoardChoice ? `✓ ${t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}` : t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
         </div>
       )}
 
       {/* CR 707.2: provenance badge for card-art token copies and nontoken
-          permanents under copy effects. Hidden while the card is a valid target
-          (the lime "Target" tag owns the corner during targeting) and shifted
-          down under attack to clear the ⚔ badge. */}
-      {(isTokenCopy || isNontokenCopy) && !isValidTarget && (
+          permanents under copy effects. Stays visible while the card is a valid
+          target — the lime outline marks the candidate — and shifts down under
+          attack to clear the ⚔ badge. */}
+      {(isTokenCopy || isNontokenCopy) && (
         <div
           className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
           title={t(isTokenCopy ? "permanent.tokenTooltip" : "permanent.copyTooltip")}
@@ -1277,7 +1288,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName, ownerPrinting } = cardImageLookup(obj);
   const useArtCrop = battlefieldCardDisplay === "art_crop";
 
   return (
@@ -1292,7 +1303,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} faceDownCause={obj.face_down_cause} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} faceDownCause={obj.face_down_cause} />
       )}
     </div>
   );

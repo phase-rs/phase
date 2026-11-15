@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type { AbilityBlockKind } from "../adapter/types";
 
 /**
@@ -22,9 +23,9 @@ import type { AbilityBlockKind } from "../adapter/types";
  * `costNotPayableNow` key it never renders, and the picker is not broken
  * because it has three prohibition keys it never renders.
  */
-export const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
+export const ABILITY_BLOCK_REASON_KEY = {
   CantBeActivated: "abilityBlock.cantBeActivated",
   CantActivateDuring: "abilityBlock.cantActivateDuring",
   Prohibited: "abilityBlock.prohibited",
   CostNotPayableNow: "abilityBlock.costNotPayableNow",
-};
+} as const satisfies Record<AbilityBlockKind, ParseKeys<"game">>;

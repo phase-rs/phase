@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TriggerMode::ChangesController carries a side (ControlChangeSide: Loses | Gains) and serializes as {\"ChangesController\":{\"side\":...}} in GameState trigger and delayed-trigger definitions and card data; a previous full-game or P2P peer cannot decode the struct-variant form. Legacy unit \"ChangesController\" payloads still decode as side Loses. Adds Risky Move's gain-side trigger (CR 603.10, CR 603.10d, CR 603.3a)."
+}

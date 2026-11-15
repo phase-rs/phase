@@ -4,12 +4,17 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
 use engine::game::quantity::resolve_quantity;
+#[cfg(test)]
+use engine::game::scenario::GameScenario;
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 #[cfg(test)]
@@ -55,7 +60,7 @@ use super::registry::{
 };
 use super::removal_lethality;
 use super::self_cost::count_death_triggers_on_board;
-use super::strategy_helpers::can_pay_ward_cost;
+use super::strategy_helpers::{can_pay_ward_cost, ward_cost_against_ai};
 use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -232,10 +237,13 @@ fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
             let ReplacementMode::MayCost { cost, decline } = &replacement.mode else {
                 return false;
             };
+            // CR 601.2a: the cost is paid as the cast spell enters from the
+            // stack, so it is priced as a spell being cast: a graveyard spell
+            // can't pay it from the graveyard it was cast from.
             decline
                 .as_deref()
                 .is_some_and(decline_moves_self_to_graveyard)
-                && !cost.is_payable(ctx.state, ctx.ai_player, source.id)
+                && !cost.is_payable_for_spell(ctx.state, ctx.ai_player, source.id)
         })
 }
 
@@ -270,6 +278,7 @@ fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a Ability
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => ctx
             .state
             .objects
@@ -378,16 +387,25 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // `wasted_cast_penalty` whenever the AI happens to control no creature.
     // That covers a whole class, not one card: every printed fetchland's
     // search-and-put chain, and reanimation-shaped puts alike.
-    let mut has_beneficial_creature_target = effects.iter().any(|effect| {
-        !matches!(
-            effect,
-            Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-        ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
-            && targets_creatures(effect)
-    });
+    //
+    // CR 608.2c + CR 111.1: a created-token placement (`PutCounter { LastCreated }`
+    // whose nearest preceding publisher in the same chain is a `Token`) is the second member of that category.
+    // Its recipient is the token this same resolution creates, so it does not
+    // need a creature of ours; this check reads the walk without those
+    // placements. Every other check below keeps the full `effects`.
+    let mut has_beneficial_creature_target = ctx
+        .effects_without_created_token_placements()
+        .into_iter()
+        .any(|effect| {
+            !matches!(
+                effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+                && targets_creatures(effect)
+        });
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
@@ -644,7 +662,15 @@ fn etb_trigger_has_valid_targets(
         // Shroud/Hexproof/Protection.
         let mut node = Some(execute.as_ref());
         while let Some(def) = node {
-            if let Some(filter) = extract_target_filter(&def.effect) {
+            // CR 115.1: a `TargetOnly` node declares the target a later
+            // instruction acts on ("choose target face-up exiled card. Its
+            // owner shuffles it into their library", Riftsweeper); the bound
+            // move after it declares nothing of its own.
+            let declared = match def.effect.as_ref() {
+                Effect::TargetOnly { target } => Some(target),
+                effect => extract_target_filter(effect),
+            };
+            if let Some(filter) = declared {
                 if !find_legal_targets(ctx.state, filter, ctx.ai_player, source_id).is_empty() {
                     return true;
                 }
@@ -713,12 +739,9 @@ fn harmful_effect_has_opponent_creature_target(ctx: &PolicyContext<'_>, effect: 
 /// Bounce) stay useful, since `lethal_to_creature` returns `None` for them.
 fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&Effect]) -> bool {
     if let Some(object) = ctx.state.objects.get(&id) {
-        for keyword in &object.keywords {
-            if let Keyword::Ward(ward) = keyword {
-                if !can_pay_ward_cost(ctx, ward, object) {
-                    return false;
-                }
-                break;
+        if let Some(ward) = ward_cost_against_ai(ctx, object) {
+            if !can_pay_ward_cost(ctx, ward, object) {
+                return false;
             }
         }
     }
@@ -1504,93 +1527,89 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     // is hard-rejected upstream by `tactical_gate` (CR 702.21a — the spell would just be
     // countered), so this judgment layer never double-scores that case.
     if !beneficial {
-        for keyword in &object.keywords {
-            if let Keyword::Ward(ward_cost) = keyword {
-                if !can_pay_ward_cost(ctx, ward_cost, object) {
-                    break;
+        if let Some(ward_cost) =
+            ward_cost_against_ai(ctx, object).filter(|ward| can_pay_ward_cost(ctx, ward, object))
+        {
+            let severity = match ward_cost {
+                WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                WardCost::PayLifeEqualToPower => {
+                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                 }
-                let severity = match ward_cost {
-                    WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                    WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                    WardCost::PayLifeEqualToPower => {
-                        (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                    }
-                    WardCost::DiscardCard => 1.5,
-                    WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                    WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                    // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
-                    // player counters has an explicit, kind-specific
-                    // valuation — no wildcard fallback, so a future
-                    // supported counter kind forces a deliberate
-                    // decision here. A lethal poison payment never
-                    // reaches this scoring at all — `can_pay_ward_cost`
-                    // above already rejects it (reframed as "can't
-                    // rationally pay"), so the Poison arm only ever sees
-                    // sub-lethal, ordinary-severity payments.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Poison,
-                        count,
-                    } => *count as f64 * 3.0,
-                    // CR 728.1: each rad counter mills a card and, if that
-                    // card is nonland, costs 1 life. Real cost, not
-                    // harmless — approximated as PayLife's per-life
-                    // severity (amount/3.0) scaled by ~0.6 (typical
-                    // nonland fraction of a deck), i.e. ~0.2 per counter.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Rad,
-                        count,
-                    } => (*count as f64 * 0.2).min(2.0),
-                    // Experience/ticket counters carry no loss-condition
-                    // or resource-drain risk — purely beneficial or
-                    // neutral to receive.
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Experience,
-                        ..
-                    } => 0.0,
-                    WardCost::GetPlayerCounters {
-                        counter_kind: engine::types::player::PlayerCounterKind::Ticket,
-                        ..
-                    } => 0.0,
-                    // CR 702.21a: Compound costs sum severity of components.
-                    // A Compound containing a lethal poison sub-cost is
-                    // also already rejected upstream by `can_pay_ward_cost`
-                    // (which requires every sub-cost payable), so this
-                    // fold only ever sees payable compounds.
-                    WardCost::Compound(costs) => costs
-                        .iter()
-                        .map(|c| match c {
-                            WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                            WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                            WardCost::PayLifeEqualToPower => {
-                                (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                            }
-                            WardCost::DiscardCard => 1.5,
-                            WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                            WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Poison,
-                                count,
-                            } => *count as f64 * 3.0,
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Rad,
-                                count,
-                            } => (*count as f64 * 0.2).min(2.0),
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Experience,
-                                ..
-                            } => 0.0,
-                            WardCost::GetPlayerCounters {
-                                counter_kind: engine::types::player::PlayerCounterKind::Ticket,
-                                ..
-                            } => 0.0,
-                            WardCost::Compound(_) => 2.0,
-                        })
-                        .sum::<f64>()
-                        .min(4.0),
-                };
-                score += ctx.penalties().ward_cost_penalty_base * severity;
-                break;
-            }
+                WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
+                // player counters has an explicit, kind-specific
+                // valuation — no wildcard fallback, so a future
+                // supported counter kind forces a deliberate
+                // decision here. A lethal poison payment never
+                // reaches this scoring at all — `can_pay_ward_cost`
+                // above already rejects it (reframed as "can't
+                // rationally pay"), so the Poison arm only ever sees
+                // sub-lethal, ordinary-severity payments.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count,
+                } => *count as f64 * 3.0,
+                // CR 728.1: each rad counter mills a card and, if that
+                // card is nonland, costs 1 life. Real cost, not
+                // harmless — approximated as PayLife's per-life
+                // severity (amount/3.0) scaled by ~0.6 (typical
+                // nonland fraction of a deck), i.e. ~0.2 per counter.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                    count,
+                } => (*count as f64 * 0.2).min(2.0),
+                // Experience/ticket counters carry no loss-condition
+                // or resource-drain risk — purely beneficial or
+                // neutral to receive.
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                    ..
+                } => 0.0,
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                    ..
+                } => 0.0,
+                // CR 702.21a: Compound costs sum severity of components.
+                // A Compound containing a lethal poison sub-cost is
+                // also already rejected upstream by `can_pay_ward_cost`
+                // (which requires every sub-cost payable), so this
+                // fold only ever sees payable compounds.
+                WardCost::Compound(costs) => costs
+                    .iter()
+                    .map(|c| match c {
+                        WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                        WardCost::PayLifeEqualToPower => {
+                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                        }
+                        WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                        WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                            count,
+                        } => *count as f64 * 3.0,
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                            count,
+                        } => (*count as f64 * 0.2).min(2.0),
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                            ..
+                        } => 0.0,
+                        WardCost::GetPlayerCounters {
+                            counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                            ..
+                        } => 0.0,
+                        WardCost::Compound(_) => 2.0,
+                    })
+                    .sum::<f64>()
+                    .min(4.0),
+            };
+            score += ctx.penalties().ward_cost_penalty_base * severity;
         }
     }
 
@@ -1652,7 +1671,8 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
                     && obj.card_types.core_types.contains(&CoreType::Creature)
                     && !obj.card_types.core_types.contains(&CoreType::Land)
                     && !combat::has_summoning_sickness(obj)
-                    && obj.abilities.iter().any(mana_abilities::is_mana_ability)
+                    // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
+                    && obj.abilities.iter().any(mana_abilities::is_mana_source_ability)
             })
         })
         .count();
@@ -2477,6 +2497,8 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(creature_card),
@@ -2888,6 +2910,8 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -5966,6 +5990,8 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -6260,8 +6286,13 @@ mod tests {
         ));
         let session = AiSession::arc_from_game(&state);
         let mut rng = SmallRng::seed_from_u64(42);
-        let selection =
-            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let selection = choose_action_with_session_diagnostic(
+            &state,
+            &config,
+            &mut rng,
+            &session,
+            &AiDecisionContract::issue(&state, PlayerId(0)),
+        );
         let receipt = selection
             .receipt
             .expect("the public chooser must retain its ranked target receipt");
@@ -6639,6 +6670,8 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -6741,6 +6774,119 @@ mod tests {
         );
     }
 
+    /// P0 casts a real Murder with Gev, Scaled Scorch ("Ward—Pay 2 life.") and
+    /// Grizzly Bears on the battlefield; returns `AntiSelfHarmPolicy`'s score
+    /// for targeting Gev as printed and with its ward stripped.
+    fn murder_gev_scores(
+        format: Option<FormatConfig>,
+        gev_controller: PlayerId,
+        bears_controller: PlayerId,
+    ) -> (f64, f64) {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = match format {
+            Some(format) => GameScenario::new_with_format(format, 4, 7),
+            None => GameScenario::new(),
+        };
+        scenario.at_phase(Phase::PreCombatMain);
+        let gev =
+            scenario.add_real_card(gev_controller, "Gev, Scaled Scorch", Zone::Battlefield, db);
+        scenario.add_real_card(bears_controller, "Grizzly Bears", Zone::Battlefield, db);
+        let murder = scenario.add_real_card(PlayerId(0), "Murder", Zone::Hand, db);
+        let mana = |color| ManaUnit::new(color, ObjectId(0), false, vec![]);
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                mana(ManaType::Black),
+                mana(ManaType::Black),
+                mana(ManaType::Colorless),
+            ],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+        }
+        let card_id = runner.state().objects[&murder].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: murder,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let warded = runner.state().clone();
+        assert!(matches!(
+            warded.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let mut stripped = warded.clone();
+        let stripped_gev = stripped.objects.get_mut(&gev).unwrap();
+        let ward_count = stripped_gev.keywords.len();
+        stripped_gev
+            .keywords
+            .retain(|keyword| !matches!(keyword, Keyword::Ward(_)));
+        assert_eq!(stripped_gev.keywords.len() + 1, ward_count);
+
+        let config = AiConfig::default();
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(gev)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let score = |state: &GameState| {
+            let decision = AiDecisionContext {
+                waiting_for: state.waiting_for.clone(),
+                candidates: engine::ai_support::candidate_actions(state),
+            };
+            let ctx = PolicyContext {
+                state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &crate::context::AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            assert!(!is_spell_beneficial(&ctx));
+            AntiSelfHarmPolicy.score(&ctx)
+        };
+        (score(&warded), score(&stripped))
+    }
+
+    /// CR 702.21a: the AI's own spell never triggers its own ward, so the ward
+    /// adds no penalty to targeting its own creature.
+    #[test]
+    fn own_ward_adds_no_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(None, PlayerId(0), PlayerId(0));
+        assert_eq!(warded, stripped);
+    }
+
+    /// CR 702.21a + CR 102.3: a 2HG teammate's ward does not trigger for the
+    /// AI's spell, so it adds no penalty.
+    #[test]
+    fn teammate_ward_adds_no_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(
+            Some(FormatConfig::two_headed_giant()),
+            PlayerId(1),
+            PlayerId(2),
+        );
+        assert_eq!(warded, stripped);
+    }
+
+    /// CR 702.21a: an opponent's payable ward is still priced.
+    #[test]
+    fn opponent_ward_still_adds_target_penalty() {
+        let (warded, stripped) = murder_gev_scores(None, PlayerId(1), PlayerId(1));
+        assert!(warded < stripped, "{warded} vs {stripped}");
+    }
+
     #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
@@ -6750,6 +6896,8 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -7473,6 +7621,8 @@ mod tests {
         let decline = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -7548,6 +7698,89 @@ mod tests {
 
         assert!(matches!(
             pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    /// SYNTHETIC fixture, derived from Mox Diamond ("If this artifact would
+    /// enter, you may discard a land card instead. If you do, put this
+    /// artifact onto the battlefield. If you don't, put it into its owner's
+    /// graveyard."). It keeps that replacement shape but substitutes "collect
+    /// evidence `amount`" for the discard and gives the spell mana value 3 in
+    /// P0's graveyard, plus `others` more mana value 3 graveyard cards. The
+    /// substitution exists only to discriminate the payability role this
+    /// caller uses (a spell being cast can't be its own evidence); it is not a
+    /// printed-card support claim.
+    fn graveyard_evidence_may_cost_spell(
+        state: &mut GameState,
+        amount: u32,
+        others: usize,
+    ) -> ObjectId {
+        let template = mox_diamond_like_spell(state);
+        let mut replacements = state.objects[&template].replacement_definitions.clone();
+        let ReplacementMode::MayCost { cost, .. } = &mut replacements[0].mode else {
+            unreachable!("mox_diamond_like_spell carries a MayCost replacement");
+        };
+        *cost = AbilityCost::CollectEvidence { amount };
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Graveyard Evidence Spell".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = engine::types::mana::ManaCost::generic(3);
+        obj.replacement_definitions = replacements;
+        for i in 0..others {
+            let card = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                format!("Evidence {i}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&card).unwrap().mana_cost =
+                engine::types::mana::ManaCost::generic(3);
+        }
+        id
+    }
+
+    /// CR 601.2a + CR 701.59b: the cost is paid as the cast spell enters from
+    /// the stack, so it can't count its own mana value toward the evidence;
+    /// one other mana value 3 card isn't enough.
+    #[test]
+    fn rejects_graveyard_cast_whose_etb_evidence_counts_only_itself() {
+        let mut state = make_state();
+        let spell_id = graveyard_evidence_may_cost_spell(&mut state, 6, 1);
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+    }
+
+    /// Positive control: two other mana value 3 cards pay evidence 6. Reach
+    /// guard on the same board: evidence 10 exceeds every mana value there
+    /// (9, the spell included), and is rejected for this exact reason, so the
+    /// Score verdict comes from the may-cost being evaluated and paid.
+    #[test]
+    fn allows_graveyard_cast_whose_etb_evidence_is_payable_without_itself() {
+        let mut payable = make_state();
+        let spell_id = graveyard_evidence_may_cost_spell(&mut payable, 6, 2);
+        let mut unpayable = make_state();
+        let unpayable_id = graveyard_evidence_may_cost_spell(&mut unpayable, 10, 2);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&unpayable, unpayable_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&payable, spell_id),
             PolicyVerdict::Score { .. }
         ));
     }
@@ -7766,10 +7999,12 @@ mod tests {
         obj.abilities = Arc::new(vec![AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
                 owner_library: false,
+                library_shuffle: Default::default(),
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: engine::types::zones::EtbTapState::Unspecified,
@@ -8726,9 +8961,16 @@ mod tests {
     /// A `controller: You` filter can never match an opponent's permanent, so
     /// "no opponent matched" is vacuously true and the mode would be penalised
     /// unconditionally. Orzhov Charm's self-bounce mode IS aimed at our own
-    /// board by design (re-buy an ETB, dodge removal). REVERT-FAILING: without
-    /// the `filter_can_reach_an_opponent` guard this scores the wasted-cast
-    /// penalty even with an opposing creature sitting on the battlefield.
+    /// board by design (re-buy an ETB, dodge removal).
+    ///
+    /// The attached-set parse shape means this row now covers the shape (the
+    /// head announces the self-scoped filter) rather than the
+    /// `filter_can_reach_an_opponent` guard: `TargetOnly` is Contextual for the
+    /// mode scan, so the guard's pre-existing `Effect::Bounce` coverage is
+    /// pinned by `pre_cast_allows_explicit_self_bounce_patterns`. Teaching the
+    /// policy the attached-set shape is a follow-up, deliberately not part of
+    /// this PR after the review found that recognizing it here regressed
+    /// self-bounce activations.
     #[test]
     fn self_scoped_harmful_mode_is_not_penalised() {
         let mut state = make_state();
@@ -8737,8 +8979,15 @@ mod tests {
 
         let modes = parsed_abilities("Orzhov Charm", ORZHOV_CHARM_ORACLE, &[], &["Instant"]);
         assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
-        let Effect::Bounce { target, .. } = &*modes[0].effect else {
-            panic!("mode 1 must still parse as a Bounce: {:?}", modes[0].effect);
+        // The attached-set bounce family lowers as a `TargetOnly` head (the
+        // announced creature) plus a mass child returning the host and its
+        // attachments together. The head still carries the self-scoped filter
+        // this fixture is about.
+        let Effect::TargetOnly { target } = &*modes[0].effect else {
+            panic!(
+                "mode 1 must still announce its self-scoped target: {:?}",
+                modes[0].effect
+            );
         };
         assert!(
             matches!(
@@ -8814,5 +9063,274 @@ mod tests {
             0.0,
             "the battlefield scan must not run in lookahead"
         );
+    }
+
+    // ─── created-token placements (CR 608.2c + CR 111.1) ─────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, last_created_placement, self_etb_trigger,
+        token_effect, x_quantity,
+    };
+    use engine::types::ability::{ConjureCard, ConjureSource};
+
+    fn object_in_hand(
+        state: &mut GameState,
+        name: &str,
+        core_type: CoreType,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(core_type);
+        obj.abilities = Arc::new(abilities);
+        id
+    }
+
+    fn p1p1_on_last_created() -> Effect {
+        last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })
+    }
+
+    fn conjure_walker() -> Effect {
+        Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: "Hangarback Walker".to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination: Zone::Battlefield,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        }
+    }
+
+    /// The counters go on the token the same resolution creates, so a cast
+    /// with no creature of ours is not a wasted beneficial-creature cast:
+    /// Fractal Summoning's spell shape, a creature card whose activated ability
+    /// is the created-token ability (Berta, cast), and Match the Odds's route
+    /// shape. Opponent creatures are present so the board is not empty.
+    #[test]
+    fn created_token_placement_needs_no_creature_of_ours() {
+        let shapes = [
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Creature,
+                imperative_token_then_placement(
+                    AbilityKind::Activated,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::SequentialSibling,
+                    (1, 1),
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::Opponent),
+                            ),
+                        },
+                    },
+                ),
+            ),
+        ];
+        for (core_type, ability) in shapes {
+            let mut state = make_state();
+            add_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+            let id = object_in_hand(&mut state, "Token Maker", core_type, vec![ability]);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0, "{core_type:?}");
+        }
+    }
+
+    /// Hostiles that do not pair keep the no-own-creature penalty: a `Token`
+    /// in one ability and the placement in another, a placement after a
+    /// Conjure, and a placement in the "otherwise" leg of a root `Token`.
+    #[test]
+    fn unpaired_last_created_placements_keep_the_penalty() {
+        let mut otherwise = AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![]));
+        otherwise.condition = Some(AbilityCondition::IsYourTurn);
+        otherwise.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            p1p1_on_last_created(),
+        )));
+        let hostiles = [
+            vec![
+                AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
+                AbilityDefinition::new(AbilityKind::Spell, p1p1_on_last_created()),
+            ],
+            vec![effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![conjure_walker(), p1p1_on_last_created()],
+            )],
+            vec![otherwise],
+        ];
+        for abilities in hostiles {
+            let mut state = make_state();
+            let id = object_in_hand(&mut state, "Hostile", CoreType::Sorcery, abilities);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(
+                score <= -8.0,
+                "expected the wasted-cast penalty, got {score}"
+            );
+        }
+    }
+
+    /// Reach guard: a +1/+1 placement on a creature we control is still a
+    /// beneficial creature-targeting spell with no recipient.
+    #[test]
+    fn placement_on_our_creature_with_none_is_still_penalised() {
+        let mut state = make_state();
+        let id = object_in_hand(
+            &mut state,
+            "Grow",
+            CoreType::Sorcery,
+            vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+            )],
+        );
+        let score = pre_cast_score_for_spell(&state, id);
+        assert!(
+            score <= -8.0,
+            "expected the wasted-cast penalty, got {score}"
+        );
+    }
+
+    fn etb_creature(state: &mut GameState, execute: AbilityDefinition) -> ObjectId {
+        let id = object_in_hand(state, "ETB Creature", CoreType::Creature, Vec::new());
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .trigger_definitions
+            .push(self_etb_trigger(execute));
+        id
+    }
+
+    /// CR 115.10a: an ETB that creates a token and puts counters on it targets
+    /// nothing, so an empty board is no ETB whiff (Manifestation Sage and The
+    /// Bus Runner shapes).
+    #[test]
+    fn created_token_etb_is_not_an_etb_whiff() {
+        let sage = imperative_token_then_placement(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: engine::types::ability::PlayerScope::Controller,
+                },
+            },
+        );
+        let bus_runner = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::SequentialSibling,
+            vec![
+                token_effect(4, 4, vec![]),
+                last_created_placement(
+                    CounterType::Generic("hour".to_string()),
+                    QuantityExpr::Fixed { value: 8 },
+                ),
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
+                },
+            ],
+        );
+        for execute in [sage, bus_runner] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0);
+        }
+    }
+
+    /// CR 115.1: Riftsweeper's printed ETB ("choose target face-up exiled card.
+    /// Its owner shuffles it into their library.") declares its target on a
+    /// `TargetOnly` node. With a face-up exiled card to choose there is no ETB
+    /// whiff; with an empty exile zone the whiff stays.
+    #[test]
+    fn riftsweeper_etb_whiffs_only_without_an_exiled_card() {
+        let execute = engine::parser::oracle_effect::parse_effect_chain(
+            "Choose target face-up exiled card. Its owner shuffles it into their library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::TargetOnly { .. }),
+            "reach guard: the root only declares the target"
+        );
+
+        let mut empty = make_state();
+        let id = etb_creature(&mut empty, execute.clone());
+        let score = pre_cast_score_for_spell(&empty, id);
+        assert!(score <= -8.0, "expected the ETB whiff, got {score}");
+
+        let mut with_card = make_state();
+        let id = etb_creature(&mut with_card, execute);
+        engine::game::zones::create_object(
+            &mut with_card,
+            engine::types::identifiers::CardId(9801),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        assert_eq!(pre_cast_score_for_spell(&with_card, id), 0.0);
+    }
+
+    /// Reach guards on the ETB whiff: a targeted +1/+1 ETB with no creature
+    /// whiffs, and a placement after a Conjure keeps today's whiff
+    /// (conservative default).
+    #[test]
+    fn targeted_and_conjure_etbs_keep_the_etb_whiff() {
+        let targeted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        let conjure = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![conjure_walker(), p1p1_on_last_created()],
+        );
+        for execute in [targeted, conjure] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(score <= -8.0, "expected the ETB whiff, got {score}");
+        }
     }
 }

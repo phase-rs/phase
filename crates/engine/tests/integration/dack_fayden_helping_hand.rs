@@ -146,6 +146,16 @@ impl DackBoard {
 /// `players` players (P0 vs the rest); Dack in P0's hand at {0}; P0's library
 /// staged from `library_top_first`.
 fn dack_board(players: u8, library_top_first: &[MusterCard]) -> DackBoard {
+    dack_board_with(players, library_top_first, |_| ()).0
+}
+
+/// [`dack_board`] plus whatever `extras` stages on the scenario before it is
+/// built (other permanents, cards in hand); returns `extras`' result.
+fn dack_board_with<T>(
+    players: u8,
+    library_top_first: &[MusterCard],
+    extras: impl FnOnce(&mut GameScenario) -> T,
+) -> (DackBoard, T) {
     let mut scenario = if players == 2 {
         GameScenario::new()
     } else {
@@ -160,13 +170,17 @@ fn dack_board(players: u8, library_top_first: &[MusterCard]) -> DackBoard {
         .from_oracle_text(DACK)
         .id();
     let library = stage_muster_library(&mut scenario, P0, library_top_first);
+    let staged = extras(&mut scenario);
     let mut runner = scenario.build();
     finish_muster_library(&mut runner, P0, library_top_first, &library);
-    DackBoard {
-        runner,
-        dack,
-        library,
-    }
+    (
+        DackBoard {
+            runner,
+            dack,
+            library,
+        },
+        staged,
+    )
 }
 
 /// A pending `NamedChoice` prompt.
@@ -303,6 +317,7 @@ fn control_changes(events: &[GameEvent]) -> Vec<(ObjectId, PlayerId, PlayerId)> 
                 object_id,
                 old_controller,
                 new_controller,
+                ..
             } => Some((*object_id, *old_controller, *new_controller)),
             _ => None,
         })
@@ -450,6 +465,7 @@ fn dack_parses_to_the_assignment_handoff_chain() {
             },
             persist: false,
             selection: TargetSelectionMode::Chosen,
+            chooser: engine::types::ability::ControllerRef::You,
         }
     );
     assert!(

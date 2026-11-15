@@ -808,9 +808,12 @@ fn real_card_for_each_clauses_over_unadmitted_producers_keep_their_parse() {
         &["Saddle"],
         &["Creature"],
     );
+    // The trailing "for each of those creatures" is a quantity, not a leading
+    // iteration prefix: the counter-placing head keeps its mass form, and the
+    // life-gain clause is not claimed by the population iteration.
     assert!(any_node(&felidar, |d| matches!(
         &*d.effect,
-        Effect::GainLife { .. }
+        Effect::PutCounterAll { .. }
     )));
     assert!(
         no_tracked_repeat(&felidar),

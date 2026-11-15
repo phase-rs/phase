@@ -520,7 +520,7 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
 #[test]
 fn natural_balance_two_scoped_seats_journal_one_may_source_under_two_independent_keys() {
     use engine::analysis::decision_template::{
-        DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
+        ChoicePoint, DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
     };
     use engine::types::game_state::{LoopDetectionMode, YieldTarget};
 
@@ -569,14 +569,17 @@ fn natural_balance_two_scoped_seats_journal_one_may_source_under_two_independent
 
     // ── the shared slot, captured at the prompt beats rather than reconstructed ──
     // The CR 400.7 source half is still hand-rolled (`object_decision_source` is
-    // `pub(crate)`), but the CR 603.5 sub-index now routes through the engine's own
-    // `DecisionSlot::may`, so this key cannot drift from the publisher's.
+    // `pub(crate)`), but the CR 603.5 choice point now routes through the engine's own
+    // `DecisionSlot::first`, so this key cannot drift from the publisher's.
     let decision_source = |state: &GameState, id: ObjectId| {
-        DecisionSlot::may(YieldTarget::ThisObject {
-            source_id: id,
-            incarnation: Some(state.objects[&id].incarnation),
-            trigger_description: None,
-        })
+        DecisionSlot::first(
+            YieldTarget::ThisObject {
+                source_id: id,
+                incarnation: Some(state.objects[&id].incarnation),
+                trigger_description: None,
+            },
+            ChoicePoint::MayGate,
+        )
     };
 
     let outcome = runner.cast(natural_balance).resolve();

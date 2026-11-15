@@ -65,7 +65,22 @@ pub fn resolve(
     // object keeps its printed `abilities`/`trigger_definitions`, so the source
     // remains readable at resolution — GATE #1, proven by the runtime test).
     let donor_id = match donor_filter {
-        TargetFilter::SelfRef => ability.source_id,
+        // CR 400.7: Symbiote's cost exiles it before the incarnation is
+        // captured, so the exiled card is still the current source here. A
+        // donor that left and returned since is a new object with nothing to
+        // donate (CR 609.3): complete as a no-op, with the same completion
+        // event a live donor emits, so the rest of the chain runs unchanged.
+        TargetFilter::SelfRef => match ability.self_ref_binding(state) {
+            Some(donor_id) => donor_id,
+            None => {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            }
+        },
         _ => ability
             .targets
             .iter()
@@ -94,18 +109,19 @@ pub fn resolve(
     // error — it resolves cleanly with no continuous effect registered.
     if !modifications.is_empty() {
         match &recipient {
-            // Quicksilver Elemental: the recipient is the source itself.
+            // Quicksilver Elemental: the recipient is the source itself — while
+            // it is still the object that activated (CR 400.7).
             TargetFilter::SelfRef => {
-                state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration,
-                    TargetFilter::SpecificObject {
-                        id: ability.source_id,
-                    },
-                    modifications,
-                    None,
-                );
+                if let Some(recipient_id) = ability.self_ref_binding(state) {
+                    state.add_transient_continuous_effect(
+                        ability.source_id,
+                        ability.controller,
+                        duration,
+                        TargetFilter::SpecificObject { id: recipient_id },
+                        modifications,
+                        None,
+                    );
+                }
             }
             // Symbiote Spider-Man: the recipient is "It" — the object targeted by
             // the parent PutCounter (`ParentTarget`), inherited into

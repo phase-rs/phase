@@ -34,9 +34,9 @@
 //! global one is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant in `zones.rs`
 //! and panics before any assertion here.
 //!
-//! **Filter trap:** `cargo test --test integration <bare_fn_name> -- --exact` runs ZERO tests and
+//! **Filter trap:** `cargo test --test integration_5 <bare_fn_name> -- --exact` runs ZERO tests and
 //! exits `0`. The module path is mandatory:
-//! `cargo test -p phase-engine --test integration token_zone_change_index::<fn> -- --exact`.
+//! `cargo test -p phase-engine --test integration_5 token_zone_change_index::<fn> -- --exact`.
 //! Always check the `N passed` count — a vacuous filter reports `ok. 0 passed`.
 //!
 //! MEASURED at this tip: `second_same_turn_token_batch_still_triggers`,
@@ -119,6 +119,7 @@ fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -604,6 +605,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -985,6 +987,7 @@ fn drive_embalm_copy(
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -1471,7 +1474,12 @@ fn declined_copy_replacement_records_the_token_entry_without_parking_it() {
     // The Embalm token entered under its OWN identity, once per ledger. It is a 0/0 Shapeshifter
     // copy of Vizier with no copy target chosen, so CR 704.5f puts it into the graveyard right
     // after — the ENTRY still happened and is still recorded, which is the point.
-    let entry = runner.state().battlefield_entries_this_turn.to_vec();
+    let entry = runner
+        .state()
+        .battlefield_entries_this_turn
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         entry.len(),
         1,
@@ -1948,6 +1956,7 @@ fn copy_token_effect(additional_modifications: Vec<ContinuousModification>) -> E
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: Vec::new(),
@@ -2521,6 +2530,7 @@ fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: 
         owner: TargetFilter::Controller,
         attach_to,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
@@ -2899,4 +2909,37 @@ fn t8_counter_paused_copy_alone_into_an_empty_ledger_fires_once() {
 fn t8_incubate_resume_alone_into_an_empty_ledger_fires_once() {
     let (_runner, run) = drive_s2(false);
     assert_single_entry_control(&run);
+}
+
+/// The batched-trigger set a real token entry fills is shared, not copied, by a state copy.
+#[test]
+fn mister_fantastic_batched_trigger_set_is_shared_across_state_copies() {
+    use engine::game::perf_counters::take_cost_snapshot;
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Mister Fantastic, Reed Richards", Zone::Battlefield, db);
+    let swarm = scenario.add_real_card(P0, "Sprout Swarm", Zone::Hand, db);
+    for _ in 0..2 {
+        scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.cast(swarm).resolve();
+    let state = runner.state();
+    assert!(
+        !state.batched_zone_change_trigger_fired.is_empty(),
+        "reach: the Saproling's entry fired Mister Fantastic's batched trigger"
+    );
+
+    let before = take_cost_snapshot();
+    let _copy = state.clone();
+    let copied = take_cost_snapshot().since(before);
+    assert_eq!(copied.state_copies, 1, "reach: one state copy was taken");
+    assert_eq!(
+        copied.history_map_entries_unshared, 0,
+        "a state copy shares the batched-trigger set"
+    );
 }

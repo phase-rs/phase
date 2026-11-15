@@ -1055,6 +1055,8 @@ fn siege_entering_untransformed_still_chooses_protector() {
 
     let resolved = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -1091,18 +1093,20 @@ fn siege_entering_untransformed_still_chooses_protector() {
         other => panic!("expected NamedChoice for the protector, got {other:?}"),
     };
 
-    {
-        let obj = &runner.state().objects[&battle];
-        assert_eq!(obj.zone, Zone::Battlefield);
-        assert!(!obj.transformed);
-        assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(6));
-    }
+    // CR 614.12a: the protector is chosen before the Siege enters.
+    assert_eq!(runner.state().objects[&battle].zone, Zone::Exile);
 
     runner
         .act(GameAction::ChooseOption {
             choice: options[0].clone(),
         })
         .expect("answer the protector choice");
+    {
+        let obj = &runner.state().objects[&battle];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(!obj.transformed);
+        assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(6));
+    }
     assert_eq!(runner.state().objects[&battle].protector(), Some(P1));
 }
 

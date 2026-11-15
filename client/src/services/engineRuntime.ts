@@ -2,97 +2,29 @@ import type {
   DeckCopyLimit,
   FormatConfig,
   GameFormat,
+  MatchType,
   SideboardPolicy,
   TokenCharacteristics,
   TokenImageRef,
   TokenPtProvenance,
 } from "../adapter/types";
+import { getSharedAdapter } from "../adapter/wasm-adapter";
 import {
   buildLocalSearchCard,
   loadScryfallData,
   type ScryfallCard,
 } from "./scryfall";
 
-type EngineModule = typeof import("@wasm/engine");
-
-let engineModulePromise: Promise<EngineModule> | null = null;
-let wasmInitPromise: Promise<void> | null = null;
-let cardDbPromise: Promise<number> | null = null;
-
 /**
- * A browser's module map retains failed dynamic imports for the document
- * lifetime. Retrying this requires a page reload, unlike WASM initialization
- * and card-data loading failures.
+ * The UI's engine queries outside a game. Every call runs on the shared
+ * adapter's engine (the worker, or its main-thread fallback when no worker could
+ * start); this module never loads `@wasm/engine` itself, because a second
+ * engine instance in the tab is enough to exhaust iOS Safari's memory.
  */
-export class EngineModuleReloadRequiredError extends Error {
-  readonly cause: unknown;
-
-  constructor(cause: unknown) {
-    super("The engine module failed to load; reload the page to retry.");
-    this.name = "EngineModuleReloadRequiredError";
-    this.cause = cause;
-  }
-}
-
-async function loadEngineModule(): Promise<EngineModule> {
-  if (!engineModulePromise) {
-    engineModulePromise = import("@wasm/engine").catch((cause: unknown) => {
-      throw new EngineModuleReloadRequiredError(cause);
-    });
-  }
-  return engineModulePromise;
-}
-
-export async function ensureWasmInit(): Promise<void> {
-  if (!wasmInitPromise) {
-    const pending = (async () => {
-      const engine = await loadEngineModule();
-      if (__ENGINE_WASM_URL__) {
-        await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
-      } else {
-        await engine.default();
-      }
-    })();
-    wasmInitPromise = pending;
-    void pending.catch((error: unknown) => {
-      if (!(error instanceof EngineModuleReloadRequiredError) && wasmInitPromise === pending) {
-        wasmInitPromise = null;
-      }
-    });
-  }
-  return wasmInitPromise;
-}
-
-export async function ensureCardDatabase(): Promise<number> {
-  if (!cardDbPromise) {
-    const pending = (async () => {
-      await ensureWasmInit();
-      const engine = await loadEngineModule();
-      const resp = await fetch(__CARD_DATA_URL__);
-      if (!resp.ok) {
-        throw new Error(`Failed to load card-data.json (${resp.status})`);
-      }
-      const text = await resp.text();
-      const loaded = await engine.load_card_database(text);
-      if (loaded <= 0) {
-        throw new Error("Failed to load card-data.json (no cards loaded)");
-      }
-      return loaded;
-    })();
-    cardDbPromise = pending;
-    void pending.catch((error: unknown) => {
-      if (!(error instanceof EngineModuleReloadRequiredError) && cardDbPromise === pending) {
-        cardDbPromise = null;
-      }
-    });
-  }
-  return cardDbPromise;
-}
+const engine = () => getSharedAdapter();
 
 export async function getCardFaceData(cardName: string) {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.get_card_face_data(cardName);
+  return engine().getCardFaceData(cardName);
 }
 
 /** A localized card face from a per-language content-i18n sidecar. Fields are
@@ -128,12 +60,6 @@ export async function ensureCardLocale(lang: string): Promise<Map<string, Locali
     cardLocalePromises.set(lang, promise);
   }
   return promise;
-}
-
-export async function getCardParseDetails(cardName: string) {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.get_card_parse_details(cardName);
 }
 
 /**
@@ -178,11 +104,9 @@ interface EngineCardSearchResults {
 export async function searchCards(
   query: CardSearchQuery,
 ): Promise<{ cards: ScryfallCard[]; total: number }> {
-  await ensureCardDatabase();
   // Hydration of artwork/type line needs the image map resolved.
   await loadScryfallData();
-  const engine = await loadEngineModule();
-  const { results, total } = engine.search_cards_js({
+  const { results, total } = (await engine().query("searchCards", {
     text: query.text ?? "",
     colors: query.colors ?? [],
     type_line: query.type ?? "",
@@ -190,7 +114,7 @@ export async function searchCards(
     sets: query.sets ?? [],
     legal_format: query.legalFormat ?? null,
     limit: query.limit ?? null,
-  }) as EngineCardSearchResults;
+  })) as EngineCardSearchResults;
 
   const cards = results.map((result) =>
     buildLocalSearchCard({
@@ -204,22 +128,10 @@ export async function searchCards(
   return { cards, total };
 }
 
-export async function getCardRulings(cardName: string): Promise<CardRuling[]> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return (engine.get_card_rulings(cardName) as CardRuling[]) ?? [];
-}
-
 /** An official WotC ruling: date + body text. Mirrors the Rust `Ruling` struct. */
 export interface CardRuling {
   date: string;
   text: string;
-}
-
-export async function evaluateDeckCompatibilityJs(request: unknown) {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.evaluate_deck_compatibility_js(request);
 }
 
 /** Archetype classification from phase-ai. The engine is the single authority —
@@ -235,26 +147,33 @@ export interface DeckProfileResult {
 
 /** Classify a deck's archetype from a flat list of card names. */
 export async function classifyDeck(cardNames: string[]): Promise<DeckProfileResult> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.classify_deck_js(cardNames) as DeckProfileResult;
+  return (await engine().query("classifyDeck", cardNames)) as DeckProfileResult;
 }
 
 /// CR 903.3: Whether the named card can be a commander
 /// (legendary creature, legendary background, or "can be your commander").
 export async function isCardCommanderEligible(name: string): Promise<boolean> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.is_card_commander_eligible(name);
+  return engine().query("isCardCommanderEligible", name);
 }
 
 export async function isCardCommanderEligibleForFormat(
   name: string,
   format: GameFormat,
 ): Promise<boolean> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.isCardCommanderEligibleForFormat(name, format);
+  return engine().query("isCardCommanderEligibleForFormat", name, format);
+}
+
+/** The engine's longest match structure for `format`; Bo3 must never be offered above it. */
+export async function bestOfThreeCeilingForFormat(format: GameFormat): Promise<MatchType> {
+  return (await engine().query("bestOfThreeCeilingForFormat", format)) as MatchType;
+}
+
+/** Who supplies a format's deck; mirrors the engine's `DeckSupply` wire strings. */
+export type DeckSupply = "PlayerBuilt" | "EngineFixed" | "HostPile";
+
+/** The engine's answer to who supplies `format`'s deck. */
+export async function deckSupplyForFormat(format: GameFormat): Promise<DeckSupply> {
+  return (await engine().query("deckSupplyForFormat", format)) as DeckSupply;
 }
 
 /**
@@ -277,13 +196,12 @@ export async function commanderPartnerCandidates(
   candidates: string[],
   draftSetCodes: readonly string[],
 ): Promise<string[]> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.commanderPartnerCandidates(
+  return (await engine().query(
+    "commanderPartnerCandidates",
     firstCommander,
     candidates,
     [...draftSetCodes],
-  ) as string[];
+  )) as string[];
 }
 
 export type SignatureSpellSelectionPolicy =
@@ -294,16 +212,12 @@ export type SignatureSpellSelectionPolicy =
 export async function signatureSpellSelectionPolicy(
   request: unknown,
 ): Promise<SignatureSpellSelectionPolicy> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.signatureSpellSelectionPolicy(request) as SignatureSpellSelectionPolicy;
+  return (await engine().query("signatureSpellSelectionPolicy", request)) as SignatureSpellSelectionPolicy;
 }
 
 /** Returns the engine-approved Commander-family companion candidates. */
 export async function companionCandidates(request: unknown): Promise<string[]> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.companionCandidates(request) as string[];
+  return (await engine().query("companionCandidates", request)) as string[];
 }
 
 /**
@@ -318,23 +232,11 @@ export async function companionCandidates(request: unknown): Promise<string[]> {
 export type { DeckCopyLimit, SideboardPolicy } from "../adapter/types";
 
 /**
- * Query the engine for a card's deck-construction copy-limit override. Returns
- * `null` when the format-default limit applies. The frontend must not infer
- * this from Oracle text — the engine owns the rule.
- */
-export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.deckCopyLimit(name) as DeckCopyLimit | null;
-}
-
-/**
  * CR 100.2a / CR 903.5b: How many copies of a card a deck built under
  * `formatConfig` may hold across main deck, sideboard, and command zone
  * combined (CR 100.4a).
  *
- * Unlike `deckCopyLimit` (which reports only a card's printed override), this
- * is the resolved ceiling — the engine has already applied the basic-land
+ * This is the resolved ceiling — the engine has already applied the basic-land
  * exemption, the printed override, and the format default. Compare a combined
  * count against it directly; never re-derive four-of / singleton client-side.
  *
@@ -345,9 +247,7 @@ export async function maxDeckCopies(
   name: string,
   formatConfig: FormatConfig,
 ): Promise<DeckCopyLimit> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return engine.maxDeckCopies(name, formatConfig) as DeckCopyLimit;
+  return (await engine().query("maxDeckCopies", name, formatConfig)) as DeckCopyLimit;
 }
 
 /**
@@ -359,9 +259,7 @@ export async function maxDeckCopies(
 export async function sideboardPolicyForFormat(
   formatConfig: FormatConfig,
 ): Promise<SideboardPolicy> {
-  await ensureWasmInit();
-  const engine = await loadEngineModule();
-  return engine.sideboardPolicyForFormat(formatConfig) as SideboardPolicy;
+  return (await engine().query("sideboardPolicyForFormat", formatConfig)) as SideboardPolicy;
 }
 
 /**
@@ -418,8 +316,6 @@ let tokenPresetsCache: TokenPreset[] | null = null;
 
 export async function listTokenPresets(): Promise<TokenPreset[]> {
   if (tokenPresetsCache !== null) return tokenPresetsCache;
-  await ensureWasmInit();
-  const engine = await loadEngineModule();
-  tokenPresetsCache = engine.list_token_presets_js() as TokenPreset[];
+  tokenPresetsCache = (await engine().query("listTokenPresets")) as TokenPreset[];
   return tokenPresetsCache;
 }

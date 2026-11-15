@@ -15,6 +15,8 @@
  * implying any change to the game-level wire format.
  */
 
+import { DRAFT_PROTOCOL_VERSION } from "../generated/protocol-versions";
+import { classifyDraft27Compatibility } from "../adapter/draft-compatibility";
 import type {
   DraftPlayerView,
   DraftRarityGroupKind,
@@ -47,7 +49,8 @@ import type {
 /**
  * Draft protocol version. Bumped when message shapes change incompatibly.
  *
- * Bumps to date:
+ * Record incompatible changes: `node scripts/protocol-versions.mjs bump draft --reason "description"`.
+ * Historical introductions:
  *   1 — initial P2P draft tournament protocol
  *   2 — add timer sync, match start, round advance messages (Phase 57)
  *   3 — add Bo3 sideboard and game-level result messages (Phase 58)
@@ -225,7 +228,7 @@ import type {
  *       TypeScript mirrors are REQUIRED rather than optional, for that same
  *       reason — a client never constructs one of these views.
  */
-export const DRAFT_PROTOCOL_VERSION = 30 as const;
+export { DRAFT_PROTOCOL_VERSION };
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -304,12 +307,11 @@ export interface DraftMatchDeckPayload {
 export interface CommanderSeatDecks {
   hostDeck: DraftDeckPayload;
   /**
-   * Every LIVE human seat's own deck, including `localSeat`.
+   * Seats provisionally live at preparation, including `localSeat`.
    *
    * `localSeat`'s entry is the SAME OBJECT as `hostDeck`, never a second
-   * synthesis of it. That is what lets the sender address every recipient from
-   * this one list without re-reading the draft session — the exactly-once
-   * export invariant would otherwise force a second `exportDraftSession()`.
+   * synthesis. `P2PDraftHost.sendCommanderLaunches` uses both arrays to finalize
+   * recipients and engine seats without exporting or synthesizing decks again.
    */
   liveSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
   engineSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
@@ -1760,6 +1762,10 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
     if (typeof acknowledgement.view !== "object" || acknowledgement.view === null) {
       throw new Error("Invalid draft deck acknowledgement");
     }
+    // A view the compatibility check refuses passes through unnormalized, so
+    // it reaches the guest's typed refusal instead of failing as a decode
+    // error; the guest refuses it before using any of its fields.
+    if (!classifyDraft27Compatibility(acknowledgement.view).ok) return acknowledgement as DraftP2PMessage;
     return {
       ...acknowledgement,
       view: normalizeDraftPlayerView(acknowledgement.view),
@@ -1807,6 +1813,10 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    // A view the compatibility check refuses passes through unnormalized, so
+    // it reaches the guest's typed refusal instead of failing as a decode
+    // error; the guest refuses it before using any of its fields.
+    if (!classifyDraft27Compatibility(viewMessage.view).ok) return viewMessage as DraftP2PMessage;
     const workspaceState = msg.type === "draft_welcome" || msg.type === "draft_reconnect_ack"
       ? requireWorkspaceState(raw as Record<string, unknown>, true)
       : undefined;

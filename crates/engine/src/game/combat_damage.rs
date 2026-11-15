@@ -1,19 +1,22 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
-    apply_damage_after_replacement, pre_replacement_damage_gate, DamageContext, DamageResult,
+    apply_damage_after_replacement, emit_damage_dealt_and_record, pre_replacement_damage_gate,
+    DamageContext, DamageResult,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
 use crate::game::turns;
-use crate::types::ability::{ShieldKind, TargetRef};
+use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState, PendingCombatLifelink,
-    PendingLifelinkGain, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState, PendingCombatLeg,
+    PendingCombatLifelink, PendingCombatPhaseCRemnant, PendingLifelinkGain, PerPlayerCombatDamage,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -117,9 +120,11 @@ pub fn resolve_combat_damage(
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     // CR 510.2 + CR 616.1: a parked batch still owns this turn-based action and
-    // its damage is ALREADY dealt (the batch is one event and must never be
-    // replayed). Placed AHEAD of `state.combat.as_ref()?` so no combat teardown
-    // can strand the record behind that `?`.
+    // must never be replayed (the batch is one event). For a lifelink-gain
+    // pause its damage is ALREADY dealt; for a Phase C leg pause the remnant
+    // resume completes the unapplied legs. Placed AHEAD of
+    // `state.combat.as_ref()?` so no combat teardown can strand the record
+    // behind that `?`.
     if state.pending_combat_lifelink.is_some() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
@@ -359,6 +364,29 @@ pub(crate) fn resume_pending_combat_lifelink(
         .extend_from_slice(&events[action_event_start..]);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
+    // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause completes
+    // its Phase C tail before the lifelink drain runs. The paused leg's loss
+    // fully settled (the funnel only resumes here once the batch drain retires
+    // with no re-park). A re-pause re-parks with the batch so far, mirroring
+    // the lifelink arm below.
+    if let Some(remnant) = record.phase_c_remnant.take() {
+        match complete_combat_phase_c_remnant(state, remnant, &mut record) {
+            RemnantOutcome::Complete => {}
+            RemnantOutcome::Repaused { remnant } => {
+                record.phase_c_remnant = Some(remnant);
+                let waiting_for = state.waiting_for.clone();
+                let batch = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                events.extend_from_slice(&batch[owed_from..]);
+                claim_combat_lifelink_batch_events_for_ordinary_collection(
+                    state,
+                    events,
+                    action_event_start,
+                );
+                return Some(waiting_for);
+            }
+        }
+    }
     match drain_combat_lifelink(state, record) {
         CombatDamageBatch::Paused {
             events: batch,
@@ -410,20 +438,7 @@ fn claim_combat_lifelink_batch_events_for_ordinary_collection(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    let occurrences = (event_start..events.len())
-        .map(|index| triggers::ConsumedTriggerEventOccurrence {
-            event: events[index].clone(),
-            occurrence: triggers::trigger_event_occurrence(events, index),
-            scope: triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
-        })
-        .collect();
-    triggers::resolve_and_apply_trigger_collection(
-        state,
-        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
-            occurrences,
-        },
-    )
-    .expect("combat lifelink ordinary trigger claim must have a live journal cause");
+    triggers::claim_events_for_ordinary_collection(state, events, event_start);
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.
@@ -444,6 +459,9 @@ fn combat_first_strike_participants(
     state: &GameState,
     combat: &CombatState,
 ) -> std::collections::HashSet<ObjectId> {
+    // CR 510.4: the trigger is "at least one attacking or blocking creature"
+    // with first or double strike; a blocking creature whose attackers all left
+    // combat is still a blocking creature (CR 509.1g), so every key counts.
     combat
         .attackers
         .iter()
@@ -478,6 +496,10 @@ fn deals_in_substep(
 /// creatures do not participate in the regular substep, while double-strike
 /// creatures do. This is the shared query for consumers that must reason about
 /// the next damage event without duplicating combat-substep selection.
+///
+/// CR 510.1d: a blocking creature none of whose attackers remain in combat is
+/// still a blocking creature but assigns no combat damage, so it does not
+/// participate.
 pub fn participates_in_pending_combat_damage_substep(
     state: &GameState,
     object_id: ObjectId,
@@ -490,7 +512,10 @@ pub fn participates_in_pending_combat_damage_substep(
             .attackers
             .iter()
             .any(|attacker| attacker.object_id == object_id)
-            && !combat.blocker_to_attacker.contains_key(&object_id))
+            && !combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| !attackers.is_empty()))
     {
         return false;
     }
@@ -866,7 +891,7 @@ fn collect_damage_assignments(
 
             // CR 702.19c: Compute PW loyalty threshold for trample-over-PW spillover
             let (pw_loyalty, pw_controller) = if trample == Some(TrampleKind::OverPlaneswalkers) {
-                compute_pw_loyalty_threshold(state, &attacker_info.attack_target)
+                compute_pw_loyalty_threshold(state, attacker_info)
             } else {
                 (None, None)
             };
@@ -944,6 +969,12 @@ fn collect_damage_assignments(
             Some(ids) => ids,
             None => continue,
         };
+        // CR 510.1d: a blocking creature that isn't currently blocking any
+        // creature (its attackers were removed from combat, CR 506.4) assigns no
+        // combat damage. No resume-skip key is recorded; re-entry skips it here.
+        if attacker_ids.is_empty() {
+            continue;
+        }
         let obj = match state.objects.get(&blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
@@ -1091,16 +1122,21 @@ pub(crate) fn needs_interactive_assignment(
 
 /// CR 702.19c: Compute effective PW loyalty threshold for trample-over-PW,
 /// accounting for pending damage from other attackers in the same step.
-fn compute_pw_loyalty_threshold(
+pub(crate) fn compute_pw_loyalty_threshold(
     state: &GameState,
-    attack_target: &AttackTarget,
+    attacker_info: &crate::game::combat::AttackerInfo,
 ) -> (Option<u32>, Option<PlayerId>) {
-    if let AttackTarget::Planeswalker(pw_id) = attack_target {
+    if let AttackTarget::Planeswalker(pw_id) = attacker_info.attack_target {
+        // CR 506.4c + CR 702.19e: an ended relation has no current loyalty
+        // threshold; only the original defender remains eligible for spillover.
+        if crate::game::combat::active_attack_target(state, attacker_info).is_none() {
+            return (None, Some(attacker_info.defending_player));
+        }
         // CR 306.8: PW loyalty is tracked via the `loyalty` field (authoritative),
         // synced with counters on damage application. Read the field directly.
         let base_loyalty = state
             .objects
-            .get(pw_id)
+            .get(&pw_id)
             .and_then(|obj| obj.loyalty)
             .unwrap_or(0);
         // CR 702.19c: Account for pending damage from other attackers this step
@@ -1110,13 +1146,13 @@ fn compute_pw_loyalty_threshold(
             .map(|c| {
                 c.pending_damage
                     .iter()
-                    .filter(|(_, da)| da.target == DamageTarget::Object(*pw_id))
+                    .filter(|(_, da)| da.target == DamageTarget::Object(pw_id))
                     .map(|(_, da)| da.amount)
                     .sum()
             })
             .unwrap_or(0);
         let effective = base_loyalty.saturating_sub(pending_to_pw);
-        let controller = state.objects.get(pw_id).map(|obj| obj.controller);
+        let controller = state.objects.get(&pw_id).map(|obj| obj.controller);
         (Some(effective), controller)
     } else {
         (None, None)
@@ -1134,7 +1170,7 @@ fn assign_trample_over_pw_excess(
     if excess == 0 {
         return result;
     }
-    let (pw_loyalty, _) = compute_pw_loyalty_threshold(state, &attacker_info.attack_target);
+    let (pw_loyalty, pw_controller) = compute_pw_loyalty_threshold(state, attacker_info);
     let effective_loyalty = pw_loyalty.unwrap_or(0);
     let to_pw = excess.min(effective_loyalty);
     let to_controller = excess.saturating_sub(to_pw);
@@ -1150,7 +1186,7 @@ fn assign_trample_over_pw_excess(
     }
     if to_controller > 0 {
         result.push(DamageAssignment {
-            target: DamageTarget::Player(attacker_info.defending_player),
+            target: DamageTarget::Player(pw_controller.unwrap_or(attacker_info.defending_player)),
             amount: to_controller,
         });
     }
@@ -1511,7 +1547,11 @@ struct BatchEntry<'a> {
 ///   gates) WITHOUT applying any damage yet.
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
-///   event but aggregates each `Prevention::All` shield's prevented amount.
+///   event but aggregates continuous all-damage and one-shot prevention riders.
+///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
+///   `DamagePrevented` events per portion. `Prevention { All }` with
+///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+///   path and emits its aggregate event at the rider boundary.
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -1528,11 +1568,14 @@ struct BatchEntry<'a> {
 pub(crate) enum CombatDamageBatch {
     /// Every assignment applied, every lifelink gain completed, and Phase D fired.
     Complete(Vec<GameEvent>),
-    /// CR 616.1: a lifelink life-gain event met two or more co-applicable
-    /// replacement effects and the gaining player must choose which applies
-    /// first. All damage is already dealt. The unfinished tail is parked in
-    /// `state.pending_combat_lifelink`; `state.pending_replacement` holds the
-    /// paused source's own `LifeGain` and is the resume's authority.
+    /// CR 616.1: the batch met a replacement choice it cannot make itself —
+    /// either a lifelink life-gain event with two or more co-applicable
+    /// replacements, or a leg whose life loss paused (Horde damage→mill
+    /// redirect, loss replacements). For a gain pause all damage is already
+    /// dealt; for a leg pause the unapplied tail rides the record's Phase C
+    /// remnant. Either way the unfinished tail is parked in
+    /// `state.pending_combat_lifelink`, and `state.pending_replacement` holds
+    /// the paused event and is the resume's authority.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -1551,6 +1594,264 @@ impl CombatDamageBatch {
     }
 }
 
+/// CR 510.2: Phase C accumulators — the lifelink sums and combat bookkeeping
+/// folded per applied leg. Owned so a leg pause can park them in the Phase C
+/// remnant and the resume can continue exactly where the batch parked.
+struct PhaseCAccumulators {
+    lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+    combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    source_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+/// CR 510.2 + CR 616.1: outcome of running Phase C legs.
+enum PhaseCRunOutcome {
+    Complete,
+    /// Leg `index` paused on its life-loss replacements (a combat-flagged
+    /// stash is parked). The leg's lifelink share and bookkeeping are already
+    /// folded into the accumulators; legs after `index` never applied.
+    PausedOnLoss {
+        index: usize,
+    },
+}
+
+/// CR 510.2 + CR 616.1: outcome of completing a parked Phase C tail.
+enum RemnantOutcome {
+    Complete,
+    Repaused { remnant: PendingCombatPhaseCRemnant },
+}
+
+/// CR 119.3 + CR 702.15b + CR 510.2 + CR 704.6c: fold one leg's
+/// post-replacement amount into the lifelink sums and the combat bookkeeping.
+/// Amounts are order-free, so a paused leg folds EAGERLY at park time (from
+/// its stash) and the resume never re-folds it — only its `DamageDealt`
+/// event + CR 120.1 record wait for the loss to settle (sync order).
+fn fold_combat_leg_amount(
+    state: &mut GameState,
+    leg: &PendingCombatLeg,
+    actual_amount: u32,
+    accums: &mut PhaseCAccumulators,
+) {
+    // CR 119.3 + CR 702.15b: accumulate this source's lifelink over the batch
+    // (damage to any recipient — creature, planeswalker, or player — feeds the
+    // same life gain). Keyed by source so two different lifelink sources stay
+    // separate events while one source hitting many targets is summed.
+    if let Some(controller) = leg.lifelink_controller {
+        if actual_amount > 0 {
+            let source_id = leg.ctx.source_id;
+            if let Some((_, _, total)) = accums
+                .lifelink_by_source
+                .iter_mut()
+                .find(|(id, _, _)| *id == source_id)
+            {
+                *total += actual_amount;
+            } else {
+                accums
+                    .lifelink_by_source
+                    .push((source_id, controller, actual_amount));
+            }
+        }
+    }
+
+    // Combat-only bookkeeping (not part of the shared damage pipeline):
+    if let TargetRef::Player(player_id) = &leg.target {
+        let source_id = leg.ctx.source_id;
+        // CR 510.2: Track per-source amounts for this step. Each source
+        // appears at most once per player per step; dedup guards any edge
+        // where the same source is re-applied (e.g. split-damage riders).
+        if let Some(incarnation) = leg.ctx.source_incarnation {
+            let source =
+                crate::types::identifiers::ObjectIncarnationRef::of(source_id, incarnation);
+            if !accums.source_incarnations.contains(&source) {
+                accums.source_incarnations.push(source);
+            }
+        }
+        if let Some((_, sources, total)) = accums
+            .combat_damage_to_players
+            .iter_mut()
+            .find(|(damaged_player, _, _)| *damaged_player == *player_id)
+        {
+            if let Some((_, amt)) = sources.iter_mut().find(|(id, _)| *id == source_id) {
+                *amt += actual_amount;
+            } else {
+                sources.push((source_id, actual_amount));
+            }
+            *total += actual_amount;
+        } else {
+            accums.combat_damage_to_players.push((
+                *player_id,
+                vec![(source_id, actual_amount)],
+                actual_amount,
+            ));
+        }
+
+        // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
+        if leg.source_is_commander && actual_amount > 0 {
+            if let Some(entry) = state
+                .commander_damage
+                .iter_mut()
+                .find(|e| e.player == *player_id && e.commander == source_id)
+            {
+                entry.damage += actual_amount;
+            } else {
+                state
+                    .commander_damage
+                    .push(crate::types::game_state::CommanderDamageEntry {
+                        player: *player_id,
+                        commander: source_id,
+                        damage: actual_amount,
+                    });
+            }
+        }
+    }
+}
+
+/// CR 510.2 + CR 120.3 + CR 616.1: apply Phase C legs in batch order —
+/// shared by the fresh batch and the remnant resume. A leg whose life loss
+/// pauses (a combat-flagged stash that was absent before this leg) folds
+/// eagerly and parks the tail; a leg paused on poison-counter ordering
+/// (infect/toxic stash nothing) keeps the legacy drop, and `None` survivors
+/// apply as 0 with bookkeeping, exactly as the never-paused path would.
+fn run_phase_c_legs(
+    state: &mut GameState,
+    legs: &[PendingCombatLeg],
+    accums: &mut PhaseCAccumulators,
+    events: &mut Vec<GameEvent>,
+) -> PhaseCRunOutcome {
+    for (index, leg) in legs.iter().enumerate() {
+        let actual_amount = match leg.survivor.clone() {
+            // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
+            // re-running the replacement pipeline.
+            Some(survivor_event) => {
+                // Snapshot BEFORE applying: the loss branch is the only
+                // combat path that stashes, so a combat-flagged stash that
+                // appears here identifies THIS leg's loss pause.
+                let had_stash = state.pending_damage_post_loss.is_some();
+                let ctx = DamageContext::from(leg.ctx);
+                match apply_damage_after_replacement(state, &ctx, survivor_event, true, events) {
+                    DamageResult::Applied(amt) => amt,
+                    DamageResult::NeedsChoice => {
+                        let mut loss_pause_amount = None;
+                        if !had_stash {
+                            if let Some(stashed) = state.pending_damage_post_loss.as_ref() {
+                                if stashed.is_combat {
+                                    loss_pause_amount = Some(stashed.actual_amount);
+                                }
+                            }
+                        }
+                        if let Some(amt) = loss_pause_amount {
+                            fold_combat_leg_amount(state, leg, amt, accums);
+                            return PhaseCRunOutcome::PausedOnLoss { index };
+                        }
+                        // CR 510.2 (legacy): poison-counter ordering pauses
+                        // (infect/toxic) carry no post-loss stash, so the
+                        // deferred portion is dropped (mirrors the legacy
+                        // `apply_damage_to_target` combat behavior).
+                        0
+                    }
+                }
+            }
+            // Fully prevented or skipped — no damage applied.
+            None => 0,
+        };
+        fold_combat_leg_amount(state, leg, actual_amount, accums);
+    }
+    PhaseCRunOutcome::Complete
+}
+
+/// CR 510.2: the per-player aggregate, built in exactly the order it has
+/// always been emitted and carried to the drain so a pause cannot reorder it
+/// ahead of a resumed gain.
+fn build_combat_damage_to_players_aggregate(
+    combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    source_incarnations: &[ObjectIncarnationRef],
+) -> Vec<GameEvent> {
+    combat_damage_to_players
+        .into_iter()
+        .map(|(player_id, source_amounts, total_damage)| {
+            // CR 400.7: the incarnations of this player's sources.
+            let source_incarnations = source_incarnations
+                .iter()
+                .filter(|source| source_amounts.iter().any(|(id, _)| *id == source.object_id))
+                .copied()
+                .collect();
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id,
+                source_amounts,
+                total_damage,
+                source_incarnations,
+            }
+        })
+        .collect()
+}
+
+/// CR 510.2 + CR 616.1: complete a parked Phase C tail — consume the paused
+/// leg's combat stash into its deferred `DamageDealt` event + CR 120.1
+/// record, apply the remaining legs, then build the aggregate and the
+/// per-source lifelink gains onto the record. Only called once the paused
+/// loss fully settles (the funnel resumes combat solely after the batch drain
+/// retires with no re-park).
+fn complete_combat_phase_c_remnant(
+    state: &mut GameState,
+    remnant: PendingCombatPhaseCRemnant,
+    record: &mut PendingCombatLifelink,
+) -> RemnantOutcome {
+    // The paused leg's lifelink share and bookkeeping folded eagerly at park
+    // time; only its event + record were deferred (sync order: after the loss
+    // settles). A missing stash is unreachable — the funnel skips combat
+    // stashes, so nothing else consumes it — but continuing with the remaining
+    // legs (rather than panicking) keeps a corrupt save resumable.
+    if let Some(stashed) = state
+        .pending_damage_post_loss
+        .take_if(|stashed| stashed.is_combat)
+    {
+        emit_damage_dealt_and_record(
+            state,
+            stashed.source_id,
+            stashed.source_incarnation,
+            stashed.controller,
+            &TargetRef::Player(stashed.target),
+            stashed.actual_amount,
+            stashed.actual_amount,
+            0,
+            true,
+            &mut record.batch_events,
+        );
+    }
+    let PendingCombatPhaseCRemnant {
+        remaining,
+        lifelink_by_source,
+        combat_damage_to_players,
+        source_incarnations,
+    } = remnant;
+    let mut accums = PhaseCAccumulators {
+        lifelink_by_source,
+        combat_damage_to_players,
+        source_incarnations,
+    };
+    match run_phase_c_legs(state, &remaining, &mut accums, &mut record.batch_events) {
+        PhaseCRunOutcome::Complete => {
+            record.damage_to_players = build_combat_damage_to_players_aggregate(
+                accums.combat_damage_to_players,
+                &accums.source_incarnations,
+            );
+            record.remaining = accums
+                .lifelink_by_source
+                .into_iter()
+                .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
+                .collect();
+            RemnantOutcome::Complete
+        }
+        PhaseCRunOutcome::PausedOnLoss { index } => RemnantOutcome::Repaused {
+            remnant: PendingCombatPhaseCRemnant {
+                remaining: remaining[index + 1..].to_vec(),
+                lifelink_by_source: accums.lifelink_by_source,
+                combat_damage_to_players: accums.combat_damage_to_players,
+                source_incarnations: accums.source_incarnations,
+            },
+        },
+    }
+}
+
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
@@ -1564,14 +1865,6 @@ pub(crate) fn apply_combat_damage(
     // double-strike attacker must be caught at the first, not only the second. See
     // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
     let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-    // CR 510.2: accumulates per-player, per-source damage for this step only.
-    // `(player, [(source_id, amount)], step_total)`.
-    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
-    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
-    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
-    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
-    // per source after the batch so "whenever you gain life" triggers once.
-    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -1635,123 +1928,15 @@ pub(crate) fn apply_combat_damage(
     let (survivors, prevention_tally) =
         replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
 
-    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
-    debug_assert_eq!(
-        entries.len(),
-        survivors.len(),
-        "batch survivor count must align with collected entries"
-    );
-    for (entry, survivor) in entries.iter().zip(survivors) {
-        let actual_amount = match survivor {
-            // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
-            // re-running the replacement pipeline.
-            Some(survivor_event) => match apply_damage_after_replacement(
-                state,
-                &entry.ctx,
-                survivor_event,
-                true,
-                &mut events,
-            ) {
-                DamageResult::Applied(amt) => amt,
-                // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
-                // player gets priority between combat damage being assigned and
-                // dealt — combat cannot pause, so the deferred portion is dropped
-                // (mirrors the legacy `apply_damage_to_target` combat behavior).
-                DamageResult::NeedsChoice => 0,
-            },
-            // Fully prevented or skipped — no damage applied.
-            None => 0,
-        };
-
-        // CR 119.3 + CR 702.15b: accumulate this source's lifelink over the batch
-        // (damage to any recipient — creature, planeswalker, or player — feeds the
-        // same life gain). Keyed by source so two different lifelink sources stay
-        // separate events while one source hitting many targets is summed.
-        if let Some(controller) = entry.lifelink_controller {
-            if actual_amount > 0 {
-                let source_id = entry.ctx.source_id;
-                if let Some((_, _, total)) = lifelink_by_source
-                    .iter_mut()
-                    .find(|(id, _, _)| *id == source_id)
-                {
-                    *total += actual_amount;
-                } else {
-                    lifelink_by_source.push((source_id, controller, actual_amount));
-                }
-            }
-        }
-
-        // Combat-only bookkeeping (not part of the shared damage pipeline):
-        if let DamageTarget::Player(player_id) = &entry.assignment.target {
-            let source_id = entry.ctx.source_id;
-            // CR 510.2: Track per-source amounts for this step. Each source
-            // appears at most once per player per step; dedup guards any edge
-            // where the same source is re-applied (e.g. split-damage riders).
-            if let Some((_, sources, total)) = combat_damage_to_players
-                .iter_mut()
-                .find(|(damaged_player, _, _)| *damaged_player == *player_id)
-            {
-                if let Some((_, amt)) = sources.iter_mut().find(|(id, _)| *id == source_id) {
-                    *amt += actual_amount;
-                } else {
-                    sources.push((source_id, actual_amount));
-                }
-                *total += actual_amount;
-            } else {
-                combat_damage_to_players.push((
-                    *player_id,
-                    vec![(source_id, actual_amount)],
-                    actual_amount,
-                ));
-            }
-
-            // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
-            if entry.source_is_commander && actual_amount > 0 {
-                if let Some(entry) = state
-                    .commander_damage
-                    .iter_mut()
-                    .find(|e| e.player == *player_id && e.commander == source_id)
-                {
-                    entry.damage += actual_amount;
-                } else {
-                    state
-                        .commander_damage
-                        .push(crate::types::game_state::CommanderDamageEntry {
-                            player: *player_id,
-                            commander: source_id,
-                            damage: actual_amount,
-                        });
-                }
-            }
-        }
-    }
-
-    // CR 510.2: the per-player aggregate, built here in exactly the order it has
-    // always been emitted and carried to the drain so a pause cannot reorder it
-    // ahead of a resumed gain.
-    let damage_to_players: Vec<GameEvent> = combat_damage_to_players
-        .into_iter()
-        .map(
-            |(player_id, source_amounts, total_damage)| GameEvent::CombatDamageDealtToPlayer {
-                player_id,
-                source_amounts,
-                total_damage,
-            },
-        )
-        .collect();
-
-    // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
-    // event. The whole tail — gains, the per-player aggregate, Phase D's
-    // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
-    // the order it has always been emitted, so a CR 616.1 pause can suspend it
-    // without reordering it.
     // Deterministic order: the tally arrives as a `HashMap`, but it is stored in
     // `PendingCombatLifelink` (which is `Serialize`/`Deserialize`, so a parked
     // batch must round-trip byte-identically) and Phase D fires one CR 615.5
     // rider per entry IN THIS ORDER. A `HashMap`'s arbitrary iteration order
     // would let the same batch serialize — and emit its rider events —
     // differently across saves and AI clones. The ids are not `Ord`, so sort on
-    // their inner integers, exactly as `blocker_ids` is sorted above.
+    // their inner integers, exactly as `blocker_ids` is sorted above. Sorted
+    // here (rather than after Phase C) so a leg pause parks the same order the
+    // drain would have seen; Phase C never touches the tally.
     let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
         prevention_tally.into_iter().collect();
     prevention_tally.sort_by_key(|(key, _)| match key {
@@ -1765,10 +1950,79 @@ pub(crate) fn apply_combat_damage(
         } => (3, source.0, *index, controller.0),
     });
 
+    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
+    // Owned legs (rather than the borrowed entries) so a leg pause parks the
+    // unapplied tail in the remnant and the resume shares the same runner.
+    debug_assert_eq!(
+        entries.len(),
+        survivors.len(),
+        "batch survivor count must align with collected entries"
+    );
+    let legs: Vec<PendingCombatLeg> = entries
+        .iter()
+        .zip(survivors)
+        .map(|(entry, survivor)| PendingCombatLeg {
+            ctx: DamageContextSnapshot::from(&entry.ctx),
+            source_is_commander: entry.source_is_commander,
+            target: match &entry.assignment.target {
+                DamageTarget::Object(id) => TargetRef::Object(*id),
+                DamageTarget::Player(id) => TargetRef::Player(*id),
+            },
+            lifelink_controller: entry.lifelink_controller,
+            survivor,
+        })
+        .collect();
+    let mut accums = PhaseCAccumulators {
+        lifelink_by_source: Vec::new(),
+        combat_damage_to_players: Vec::new(),
+        source_incarnations: Vec::new(),
+    };
+    if let PhaseCRunOutcome::PausedOnLoss { index } =
+        run_phase_c_legs(state, &legs, &mut accums, &mut events)
+    {
+        // CR 510.2 + CR 616.1: a leg's life loss paused — park the unapplied
+        // tail (the paused leg's post-loss work rides its combat stash) and
+        // surface the prompt WITHOUT completing the sub-step, so the turn
+        // framework never advances over an open choice.
+        let batch_events = events.clone();
+        state.pending_combat_lifelink = Some(Box::new(PendingCombatLifelink {
+            remaining: std::collections::VecDeque::new(),
+            batch_events: events,
+            damage_to_players: Vec::new(),
+            prevention_tally,
+            lives_before,
+            sub_step,
+            phase_c_remnant: Some(PendingCombatPhaseCRemnant {
+                remaining: legs[index + 1..].to_vec(),
+                lifelink_by_source: accums.lifelink_by_source,
+                combat_damage_to_players: accums.combat_damage_to_players,
+                source_incarnations: accums.source_incarnations,
+            }),
+        }));
+        return CombatDamageBatch::Paused {
+            events: batch_events,
+            waiting_for: Box::new(state.waiting_for.clone()),
+        };
+    }
+
+    // CR 510.2: the per-player aggregate, built here in exactly the order it has
+    // always been emitted and carried to the drain so a pause cannot reorder it
+    // ahead of a resumed gain.
+    let damage_to_players = build_combat_damage_to_players_aggregate(
+        accums.combat_damage_to_players,
+        &accums.source_incarnations,
+    );
+
+    // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
+    // event. The whole tail — gains, the per-player aggregate, Phase D's
+    // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
+    // the order it has always been emitted, so a CR 616.1 pause can suspend it
+    // without reordering it.
     drain_combat_lifelink(
         state,
         PendingCombatLifelink {
-            remaining: lifelink_by_source
+            remaining: accums
+                .lifelink_by_source
                 .into_iter()
                 .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
                 .collect(),
@@ -1777,6 +2031,7 @@ pub(crate) fn apply_combat_damage(
             prevention_tally,
             lives_before,
             sub_step,
+            phase_c_remnant: None,
         },
     )
 }
@@ -1872,13 +2127,15 @@ fn drain_combat_lifelink(
 }
 
 /// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
-/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
-/// aggregate prevented amount.
+/// continuous all-damage or one-shot prevention shield's runtime rider once with
+/// the aggregate prevented amount.
 ///
-/// Each `DamagePrevented` event for the batch is emitted here (the per-source
-/// applier suppressed them so the rider sees one un-fragmented amount). The
-/// aggregate prevented amount is stamped into `last_effect_count` immediately
-/// before the single rider call so the rider's `QuantityRef::EventContextAmount`
+/// Continuous shields, including `Prevention { All }` with `consume_on_apply`
+/// (Impulsive Maneuvers' lose branch), emit their aggregate `DamagePrevented` here.
+/// `ShieldKind::PreventionOneShot` (Awe Strike) already emitted real
+/// source/recipient events per portion; only its rider amount is aggregated.
+/// The total is stamped into `last_effect_count`
+/// immediately before the rider call so its `QuantityRef::EventContextAmount`
 /// (e.g. Inkshield's "for each 1 damage prevented this way") resolves against
 /// the whole batch total.
 fn fire_combat_prevention_riders(
@@ -1916,19 +2173,22 @@ fn fire_combat_prevention_riders(
             continue;
         };
 
-        // CR 615.13: The `DamagePrevented` event for the whole batch — informational
-        // (no trigger consumes it yet). Target derived from the shield's player scope.
-        let prevented_target = match &repl_def.damage_target_filter {
-            Some(crate::types::ability::DamageTargetFilter::Player {
-                player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
-            }) => TargetRef::Player(*player),
-            _ => TargetRef::Object(rid.source),
-        };
-        events.push(GameEvent::DamagePrevented {
-            source_id: rid.source,
-            target: prevented_target,
-            amount: total_prevented as u32,
-        });
+        // CR 615.13 + CR 615.5: Only ShieldKind::PreventionOneShot retains real
+        // source/recipient provenance in the per-portion applier; aggregate its
+        // rider here without a duplicate floating-shield sentinel-source event.
+        if repl_def.shield_kind != crate::types::ability::ShieldKind::PreventionOneShot {
+            let prevented_target = match &repl_def.damage_target_filter {
+                Some(crate::types::ability::DamageTargetFilter::Player {
+                    player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
+                }) => TargetRef::Player(*player),
+                _ => TargetRef::Object(rid.source),
+            };
+            events.push(GameEvent::DamagePrevented {
+                source_id: rid.source,
+                target: prevented_target,
+                amount: total_prevented as u32,
+            });
+        }
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
         // damage prevented this way, create a token"). Stamp the aggregate
@@ -1945,7 +2205,7 @@ fn fire_combat_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let Some(runtime) = repl_def.runtime_execute.clone() else {
+        let Some(runtime) = state.replacement_rider(repl_def).cloned() else {
             continue;
         };
         state.last_effect_count = Some(total_prevented);
@@ -1955,7 +2215,7 @@ fn fire_combat_prevention_riders(
         // that by construction, where the old code had to remember to clear a
         // parallel field.
         state.install_ready_continuation(
-            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
         if let Some(source) = event_source {
             if let Some(drain) = state
@@ -2447,6 +2707,142 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
     }
 
+    /// Marks `blocker` as a blocking creature with no attacker assigned (its
+    /// attackers were removed from combat, CR 509.1g).
+    fn add_orphaned_blocker(state: &mut GameState, blocker: ObjectId) {
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .blocker_to_attacker
+            .insert(blocker, vec![]);
+    }
+
+    fn combat_damage_sources(events: &[GameEvent]) -> Vec<ObjectId> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    is_combat: true,
+                    ..
+                } => Some(*source_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 510.1d: a blocking creature that isn't blocking any creature assigns
+    /// no combat damage — and the damage step does not panic on its empty
+    /// attacker list. Hostile rows: first strike, double strike, power 0, and a
+    /// normal blocker of another attacker beside it. Fails on revert of the
+    /// empty-list guard (index panic on `attacker_ids[0]`).
+    #[test]
+    fn orphaned_blocker_assigns_no_combat_damage() {
+        for keyword in [
+            None,
+            Some(Keyword::FirstStrike),
+            Some(Keyword::DoubleStrike),
+        ] {
+            for orphan_power in [3, 0] {
+                let mut state = setup();
+                let unblocked = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+                let blocked = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+                let blocker = create_creature(&mut state, PlayerId(1), "Wall", 1, 4);
+                let orphan = create_creature(&mut state, PlayerId(1), "Orphan", orphan_power, 4);
+                if let Some(keyword) = &keyword {
+                    state
+                        .objects
+                        .get_mut(&orphan)
+                        .unwrap()
+                        .keywords
+                        .push(keyword.clone());
+                }
+                setup_combat(
+                    &mut state,
+                    vec![unblocked, blocked],
+                    vec![(blocked, vec![blocker])],
+                );
+                add_orphaned_blocker(&mut state, orphan);
+
+                let mut events = Vec::new();
+                resolve_combat_damage(&mut state, &mut events);
+
+                let row = format!("{keyword:?} power {orphan_power}");
+                assert_eq!(
+                    state.players[1].life, 18,
+                    "{row}: reach guard: the unblocked attacker's damage was dealt"
+                );
+                assert_eq!(
+                    state.objects[&blocked].damage_marked, 1,
+                    "{row}: the normal blocker still deals its damage"
+                );
+                assert!(
+                    !combat_damage_sources(&events).contains(&orphan),
+                    "{row}: CR 510.1d: the orphaned blocker deals no combat damage"
+                );
+                assert!(
+                    state
+                        .combat
+                        .as_ref()
+                        .is_none_or(|combat| !combat.damage_assignments.contains_key(&orphan)),
+                    "{row}: the orphan records no damage assignment"
+                );
+            }
+        }
+    }
+
+    /// CR 510.4: an orphaned blocking creature is still a blocking creature, so
+    /// its first strike opens the first-strike damage step; without first
+    /// strike it does not.
+    #[test]
+    fn orphaned_first_striker_still_opens_first_strike_step() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Orphan", 1, 1);
+        setup_combat(&mut state, vec![attacker], vec![]);
+        add_orphaned_blocker(&mut state, orphan);
+        let combat = state.combat.clone().unwrap();
+        assert!(
+            !combat_first_strike_participants(&state, &combat).contains(&orphan),
+            "paired: an orphan without first strike is excluded"
+        );
+
+        state
+            .objects
+            .get_mut(&orphan)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        assert!(combat_first_strike_participants(&state, &combat).contains(&orphan));
+    }
+
+    /// CR 510.1d: `participates_in_pending_combat_damage_substep` is false for
+    /// a blocking creature with no attacker assigned, true once it blocks one.
+    /// Fails on revert of the non-empty-assignment guard.
+    #[test]
+    fn orphan_does_not_participate_in_pending_damage_substep() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let orphan = create_creature(&mut state, PlayerId(1), "Orphan", 3, 3);
+        setup_combat(&mut state, vec![attacker], vec![]);
+        add_orphaned_blocker(&mut state, orphan);
+        assert!(!participates_in_pending_combat_damage_substep(
+            &state, orphan
+        ));
+
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .blocker_to_attacker
+            .insert(orphan, vec![attacker]);
+        assert!(
+            participates_in_pending_combat_damage_substep(&state, orphan),
+            "reach guard: the same creature blocking an attacker participates"
+        );
+    }
+
     // VALIDATION repro for Discord #766/#767: a creature buffed by a transient
     // +1/+1 (Thoughtweft Lieutenant's ETB pump, Blossoming Defense, etc.) must
     // have lethal combat damage measured against its MODIFIED toughness, not its
@@ -2484,6 +2880,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
             });
@@ -4001,6 +4398,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 4);
 
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4022,6 +4424,107 @@ mod tests {
         assert_eq!(state.players[1].life, 20, "Player life should be unchanged");
     }
 
+    /// CR 510.1b + CR 506.4c + CR 702.19e: every automatic delegation
+    /// uses the same ended relation, including the original-defender exception.
+    #[test]
+    fn ended_relation_automatic_and_as_though_unblocked_routes_agree() {
+        for blocked in [false, true] {
+            for over_pw in [false, true] {
+                for ended in [false, true] {
+                    let mut state = setup();
+                    let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+                    let pw = create_planeswalker(&mut state, PlayerId(1), "Walker", 10);
+                    let target = AttackTarget::Planeswalker(pw);
+                    let pin = crate::game::combat::bind_attack_target(&state, target).unwrap();
+                    let mut info = AttackerInfo::new(attacker, target, PlayerId(1));
+                    info.blocked = blocked;
+                    if over_pw {
+                        state
+                            .objects
+                            .get_mut(&attacker)
+                            .unwrap()
+                            .keywords
+                            .push(Keyword::TrampleOverPlaneswalkers);
+                    } else if blocked {
+                        state
+                            .objects
+                            .get_mut(&attacker)
+                            .unwrap()
+                            .keywords
+                            .push(Keyword::Trample);
+                    }
+                    state.combat = Some(CombatState {
+                        attackers: vec![info.clone()],
+                        attacked_permanents: std::iter::once((attacker, pin)).collect(),
+                        ..Default::default()
+                    });
+                    assert_eq!(
+                        info.resolve_damage_target(&state, over_pw),
+                        Some(DamageTarget::Object(pw))
+                    );
+                    if ended {
+                        crate::game::effects::remove_from_combat::remove_object_from_combat(
+                            &mut state, pw,
+                        );
+                    }
+                    let trample = if over_pw {
+                        Some(TrampleKind::OverPlaneswalkers)
+                    } else if blocked {
+                        Some(TrampleKind::Standard)
+                    } else {
+                        None
+                    };
+                    let as_unblocked = assign_damage_as_though_unblocked(&state, &info, 2, trample);
+                    assert_eq!(
+                        as_unblocked,
+                        if !ended {
+                            vec![DamageAssignment {
+                                target: DamageTarget::Object(pw),
+                                amount: 2,
+                            }]
+                        } else if over_pw {
+                            vec![DamageAssignment {
+                                target: DamageTarget::Player(PlayerId(1)),
+                                amount: 2,
+                            }]
+                        } else {
+                            vec![]
+                        }
+                    );
+                    let mut events = Vec::new();
+                    assert!(resolve_combat_damage(&mut state, &mut events).is_none());
+                    assert_eq!(state.objects[&pw].loyalty, Some(if ended { 10 } else { 8 }));
+                    assert_eq!(
+                        (state.players[0].life, state.players[1].life),
+                        (20, if ended && over_pw { 18 } else { 20 })
+                    );
+                    let damage: Vec<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::DamageDealt {
+                                source_id,
+                                target,
+                                amount,
+                                ..
+                            } if *source_id == attacker => Some((target.clone(), *amount)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        damage,
+                        if !ended {
+                            vec![(TargetRef::Object(pw), 2)]
+                        } else if over_pw {
+                            vec![(TargetRef::Player(PlayerId(1)), 2)]
+                        } else {
+                            vec![]
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     // CR 702.19f: Regular trample excess goes to the PW, not the defending player.
     #[test]
     fn trample_excess_goes_to_planeswalker_not_player() {
@@ -4040,6 +4543,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 6);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4087,6 +4595,11 @@ mod tests {
 
         // Set up combat with attacker targeting the PW
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(attacker, pw_attack_target, PlayerId(1))],
             ..Default::default()
         });
@@ -4128,6 +4641,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4178,6 +4696,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4227,6 +4750,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Doomed PW", 4);
 
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4325,6 +4853,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4381,6 +4914,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4458,6 +4996,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

@@ -1,5 +1,5 @@
 use crate::types::ability::{ResolvedAbility, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
 };
@@ -39,6 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
         &assigned_targets,
         trigger.source_id,
         trigger.controller,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Triggered,
+        )),
         events,
     );
 
@@ -84,6 +87,7 @@ pub(super) fn finalize_trigger_target_selection(
                         total,
                         targets: dist_targets,
                         unit,
+                        scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                     };
                 }
             }
@@ -420,11 +424,34 @@ pub(super) fn handle_multi_target_selection(
     }
 
     let mut ability = pending_ability;
-    ability.targets = selected.iter().map(|&id| TargetRef::Object(id)).collect();
+    ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
 
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+    let events_before = events.len();
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    // CR 608.2c + CR 118.12: "if a player does" reads the instruction, not the
+    // acceptance. An accepted instruction that resolved without doing anything
+    // retracts the mark its accept parked on the printed tail. A replacement
+    // choice has not finished the instruction, so it is not judged yet.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !effects::mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+    {
+        if let Some(acceptor) = ability.context.accepting_player {
+            state
+                .player_actions_this_way
+                .remove(&(acceptor, PlayerActionKind::AcceptedOptionalEffect));
+            if let Some(frame) = state
+                .active_ability_continuation_frame_mut()
+                .filter(|frame| frame.pending.chain.context.accepting_player == Some(acceptor))
+            {
+                frame
+                    .pending
+                    .chain
+                    .set_optional_effect_performed_recursive(false);
+            }
+        }
+    }
     resume_pending_continuation_if_priority(state, events)?;
 
     Ok(state.waiting_for.clone())

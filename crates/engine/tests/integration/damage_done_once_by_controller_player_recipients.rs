@@ -219,6 +219,7 @@ fn francisco_explores_once_for_each_noncombat_player_damage_recipient() {
         .act(GameAction::ActivateAbility {
             source_id: crew,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Lightning-Rig Crew activation should be legal");
     drive_until_source_triggers_are_stacked(&mut runner, francisco, 3);
@@ -273,6 +274,7 @@ fn the_thing_keeps_only_hero_damage_in_its_stored_event_context() {
                 player_id,
                 source_amounts,
                 total_damage,
+                ..
             }),
         ..
     } = &entry.kind

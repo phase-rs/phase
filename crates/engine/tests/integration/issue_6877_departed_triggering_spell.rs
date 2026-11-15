@@ -13,6 +13,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{CastingPermission, ResolutionCastCleanup, TargetRef};
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{
     CastPaymentMode, GameState, StackEntryKind, SyntheticTriggerProvenance, WaitingFor,
 };
@@ -21,8 +22,6 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 use super::cast_this_way_gate_8721::{offered_card, settle_attack_trigger, to_declare_attackers};
 use super::rules::AttackTarget;
@@ -128,7 +127,7 @@ fn commit_cast(runner: &mut GameRunner, spell: ObjectId, target: Option<TargetRe
 }
 
 fn reseed(runner: &mut GameRunner, seed: u64) {
-    runner.state_mut().rng = ChaCha20Rng::seed_from_u64(seed);
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
 }
 
 fn saw_coin(events: &[GameEvent], won: bool) -> bool {
@@ -1249,9 +1248,8 @@ fn departed_paid_cast_record_redacts_cleanup_authority_for_every_viewer() {
         );
     }
 
-    // `drive` stops as soon as ANY stack entry leaves the stack — Ogre's own
-    // delayed "when you cast that spell" pump trigger resolves first here,
-    // so Hesitation's counter trigger needs a further `drive` call.
+    // `drive` stops as soon as ANY stack entry leaves the stack, so keep
+    // driving until Hesitation's counter trigger has resolved.
     order_triggers(&mut runner, None);
     let mut counter_events = drive(&mut runner, &Drive::new());
     for _ in 0..8 {
@@ -1272,6 +1270,20 @@ fn departed_paid_cast_record_redacts_cleanup_authority_for_every_viewer() {
         runner.state().objects[&bolt].zone,
         Zone::Exile,
         "reach guard: Ogre's own rider exiles a countered offered spell instead of the graveyard"
+    );
+    // CR 603.3b: Ogre's delayed pump trigger (P0, the active player) and
+    // Hesitation (P1) trigger on the same cast and are put on the stack in one
+    // APNAP batch, so the pump can still be on the stack here. Settle it so the
+    // projections below are taken with an empty stack.
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        drive(&mut runner, &Drive::new());
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: every trigger of the cast has resolved"
     );
 
     // Positive reach guard: the UNPROJECTED authoritative record does carry

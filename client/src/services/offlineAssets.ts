@@ -1,7 +1,5 @@
-import {
-  EngineModuleReloadRequiredError,
-  ensureCardDatabase,
-} from "./engineRuntime.ts";
+import { EngineModuleReloadRequiredError } from "../adapter/types.ts";
+import { getSharedAdapter } from "../adapter/wasm-adapter.ts";
 import { loadScryfallData } from "./scryfall.ts";
 import { loadPreconDeckMap } from "../hooks/useDecks.ts";
 import { buildDeckCatalog } from "./deckCatalog.ts";
@@ -15,7 +13,7 @@ export type OfflineAssetCapability =
   | { readonly status: "not-ready" };
 
 export type EngineOfflineAssetCapability =
-  | { readonly status: "ready"; readonly cardCount: number }
+  | { readonly status: "ready" }
   | { readonly status: "not-ready" }
   | { readonly status: "reload-required" };
 
@@ -66,7 +64,7 @@ function deckLibraryCapability(
  */
 export async function prepareOfflineAssets(): Promise<OfflineAssetsReadiness> {
   const [engineResult, scryfallResult, preconResult, deckLibraryResult] = await Promise.allSettled([
-    ensureCardDatabase(),
+    getSharedAdapter().warmCardDatabase(),
     loadScryfallData(),
     loadPreconDeckMap(),
     prepareDeckLibraryForOffline(),
@@ -74,8 +72,8 @@ export async function prepareOfflineAssets(): Promise<OfflineAssetsReadiness> {
   const catalogResult = await Promise.allSettled([buildDeckCatalog()]);
   const catalog = catalogResult[0];
 
-  const engine: EngineOfflineAssetCapability = engineResult.status === "fulfilled" && engineResult.value > 0
-    ? { status: "ready", cardCount: engineResult.value }
+  const engine: EngineOfflineAssetCapability = engineResult.status === "fulfilled"
+    ? { status: "ready" }
     : engineResult.status === "rejected" && engineResult.reason instanceof EngineModuleReloadRequiredError
       ? { status: "reload-required" }
       : { status: "not-ready" };

@@ -22,7 +22,7 @@
 //!   * Clause-3 ORIGIN: "those cards" must be scanned from the GRAVEYARD (where
 //!     the choose left them), not the impulse-default exile. A wrong origin
 //!     leaves the chosen creatures in the graveyard (no reanimation).
-//!   * Tracked-set EXTEND-vs-FRESH (CR 608.2c + CR 603.7): clause 1 mills cards
+//!   * Tracked-set EXTEND-vs-FRESH (CR 608.2c): clause 1 mills cards
 //!     (publishing a "Milled" tracked set). The FIRST per-player pick must START
 //!     a FRESH chosen-card set, NOT extend the milled set — otherwise the milled
 //!     creatures reanimate alongside the chosen ones ("those cards" = the chosen
@@ -308,7 +308,7 @@ fn breach_reanimates_only_chosen_cards_under_caster_as_phyrexian() {
         );
     }
 
-    // CR 608.2c + CR 603.7: the milled-vs-chosen discriminator. The milled
+    // CR 608.2c: the milled-vs-chosen discriminator. The milled
     // creatures must NOT have been swept up by "those cards" — they stay in
     // their graveyards.
     assert_eq!(

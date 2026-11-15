@@ -230,6 +230,8 @@ fn erratic_mutation_replacement_pause_preserves_mana_value_referent() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: engine::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -420,7 +422,7 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             },
             target: TargetFilter::TrackedSet {

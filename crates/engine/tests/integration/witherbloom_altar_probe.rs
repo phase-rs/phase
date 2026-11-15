@@ -56,7 +56,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load through the REAL production restore chokepoint, exactly as the sibling Sprout tests do.
@@ -316,7 +317,7 @@ fn run(arm: &GateArm) -> Vec<String> {
             "{what}: the loop's controller must be the proposer, got {proposer:?}"
         ));
     }
-    if certificate.win_kind != WinKind::Advantage {
+    if certificate.win_kind != Some(WinKind::Advantage) {
         wrong.push(format!(
             "{what}: an unbounded mill an empty library neither stops (CR 701.17b) nor ends \
              the game on (CR 121.4) is an ADVANTAGE loop, not a win the collapse can deliver; \

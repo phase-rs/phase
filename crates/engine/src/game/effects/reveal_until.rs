@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -117,7 +118,10 @@ fn resolve_reveal(
     // → controller of the parent ability's targeted object (Polymorph, Proteus Staff,
     // Transmogrify); other player-resolving filters → player extracted from
     // `ability.targets` (e.g., Telemin Performance "target opponent reveals...").
-    let revealing_player = resolve_revealing_player(state, ability, player_filter);
+    let Some(revealing_player) = resolve_revealing_player(state, ability, player_filter) else {
+        super::publish_reveal_result(state, Vec::new());
+        return Ok(());
+    };
 
     let player = state
         .players
@@ -126,7 +130,7 @@ fn resolve_reveal(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
-    let library: Vec<ObjectId> = player.library.iter().copied().collect();
+    let library: Vec<ObjectId> = state.library_of(player.id).iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
     let mut hit_cards: Vec<ObjectId> = Vec::new();
 
@@ -231,7 +235,11 @@ fn resolve_reveal(
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    super::publish_tracked_set(state, all_revealed.clone());
+    if all_revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
+    } else {
+        super::publish_tracked_set(state, all_revealed.clone());
+    }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
@@ -320,6 +328,9 @@ fn resolve_reveal(
                         source_id: Some(ability.source_id),
                         rest_cards: Vec::new(),
                         rest_destination: pile_destination,
+                        // The printed clause named this pile's zone, so it is a
+                        // routed remainder rather than a silent one.
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                         rest_order,
                         rest_split_top_count: None,
                         clear_markers,
@@ -456,6 +467,7 @@ fn resolve_reveal(
                         kept_delivery: Default::default(),
                         continuation_targets: Vec::new(),
                         rest_delivery: Default::default(),
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     },
                 );
                 return Ok(());
@@ -523,6 +535,7 @@ fn resolve_reveal(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 },
             );
             return Ok(());
@@ -635,6 +648,7 @@ fn resolve_choose_any_number(
     // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
     // disposition has no cards to act on; resolve cleanly with no interaction.
     if revealed.is_empty() {
+        super::publish_fresh_tracked_set(state, Vec::new());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
@@ -657,6 +671,7 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         rest_order,
         rest_split_top_count: None,
         source_id: Some(ability.source_id),
@@ -685,21 +700,27 @@ fn resolve_revealing_player(
     state: &GameState,
     ability: &ResolvedAbility,
     player_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     match player_filter {
-        TargetFilter::Controller => ability.controller,
-        TargetFilter::ParentTargetController => {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
-                .unwrap_or(ability.controller)
+                .unwrap_or(ability.controller),
+        ),
+        filter if filter.names_one_player() => {
+            super::resolve_player_for_context_ref(state, ability, player_filter)
         }
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-            })
-            .unwrap_or(ability.controller),
+        _ if super::declared_player_slot_is_empty(state, ability, player_filter) => None,
+        _ => Some(
+            ability
+                .targets
+                .iter()
+                .find_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                })
+                .unwrap_or(ability.controller),
+        ),
     }
 }
 
@@ -773,7 +794,7 @@ fn library_bottom_requests_in_random_order(
     cards: &[ObjectId],
 ) -> Vec<ZoneMoveRequest> {
     let mut shuffled = cards.to_vec();
-    shuffled.shuffle(&mut state.rng);
+    shuffled.shuffle(state.rng.draw(RandomDraw::Placement));
 
     shuffled
         .into_iter()
@@ -821,6 +842,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -1394,6 +1417,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,

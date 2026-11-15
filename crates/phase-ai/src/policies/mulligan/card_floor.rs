@@ -130,6 +130,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan,
+            declared: Vec::new(),
         };
         state
     }
@@ -308,6 +309,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         match evaluate(&state, 3) {
@@ -332,17 +334,20 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(0),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
                 },
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(1),
                     mulligan_count: 4,
                     phase: MulliganDecisionPhase::Declare,
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         add_zero_cost_action(&mut state);
 

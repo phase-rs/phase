@@ -336,6 +336,7 @@ fn legacy_willie_planeswalker_only_restriction_snapshots_selected_player() {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         }],
     );
     for _ in 0..24 {
@@ -524,6 +525,7 @@ fn willie_damaged_opponent_announces_the_optional_draw() {
                 amount: 1,
                 is_combat: true,
                 excess: 0,
+                source_incarnation: None,
             }],
         );
 
@@ -611,6 +613,7 @@ fn willie_damaged_opponent_announces_the_optional_draw() {
                 amount: 1,
                 is_combat: true,
                 excess: 0,
+                source_incarnation: None,
             }],
         );
 

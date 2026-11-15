@@ -10,12 +10,11 @@ use crate::game::functioning_abilities::active_replacements;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
-    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -56,6 +55,8 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
     let Some(root) = entry.ability() else {
         return Vec::new();
     };
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_entry_reach();
     let resolves_first: Vec<ObjectId> = state
         .stack
         .iter()
@@ -96,7 +97,7 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
 /// controller), a required target that has not been chosen
 /// (`stack::has_missing_required_stack_targets`), or a CR 608.2b declared
 /// target that is no longer legal.
-fn resolution_board(
+pub(crate) fn resolution_board(
     state: &GameState,
     entry: &StackEntry,
     root: &ResolvedAbility,
@@ -252,23 +253,23 @@ impl Walk<'_> {
             node,
             acted_on: own,
         });
-        let children = [
-            (node.sub_ability.as_deref(), prepared.sub_ability.as_deref()),
-            (
-                node.else_ability.as_deref(),
-                prepared.else_ability.as_deref(),
-            ),
-        ];
-        for (index, (child, prepared_child)) in children.into_iter().enumerate() {
-            debug_assert_eq!(
-                child.is_some(),
+        for (edge, child) in node.child_links() {
+            let prepared_child = prepared
+                .child_links()
+                .find_map(|(prepared_edge, child)| (prepared_edge == edge).then_some(child));
+            debug_assert!(
                 prepared_child.is_some(),
-                "the resolution rewrites keep the chain's shape"
+                "resolution rewrites keep the chain's shape"
             );
-            let (Some(child), Some(prepared_child)) = (child, prepared_child) else {
+            let Some(prepared_child) = prepared_child else {
                 continue;
             };
-            if index == 0 && instead.is_some() {
+            let sequential = match edge {
+                crate::types::game_state::ChainStep::SubAbility => true,
+                crate::types::game_state::ChainStep::ElseAbility
+                | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => false,
+            };
+            if sequential && instead.is_some() {
                 // What runs in this node's place when the swap happened. The
                 // nodes below it are not answered.
                 reaches.push(NodeReach {
@@ -278,10 +279,9 @@ impl Walk<'_> {
                 push_unanswered_below(child, reaches);
                 continue;
             }
-            // An `else_ability` runs when this node's condition is false or its
-            // "you may" is declined, and neither is answered.
+            // Neither an ordinary else nor an unselected coin outcome is answered.
             let handed = board
-                .filter(|_| index == 0)
+                .filter(|_| sequential)
                 .zip(written.clone())
                 .zip(handed_child(&performed, prepared_child));
             let Some(((child_board, written), child_bound)) = handed else {
@@ -325,20 +325,6 @@ impl Walk<'_> {
     fn runs(&self, board: &GameState, ability: &ResolvedAbility, before: &Before) -> Runs {
         if let Some(condition) = &ability.condition {
             if self.condition_holds(board, condition, ability, before) != Some(true) {
-                return Runs::No;
-            }
-        }
-        // The chain resolver treats an unless cost of {0} as paid, so a counter
-        // with one counters nothing and the rest of the entry does not run.
-        // Where no player would be asked, it counters; that answer is nothing
-        // here too.
-        if let Some(unless_pay) = &ability.unless_pay {
-            if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(
-                    super::resolved_unless_cost(board, ability, &unless_pay.cost),
-                    AbilityCost::Mana { cost } if cost == ManaCost::zero()
-                )
-            {
                 return Runs::No;
             }
         }
@@ -410,10 +396,7 @@ impl Walk<'_> {
 
 /// `node`'s subtree below it, every node answering nothing.
 fn push_unanswered_below<'a>(node: &'a ResolvedAbility, reaches: &mut Vec<NodeReach<'a>>) {
-    for child in [node.sub_ability.as_deref(), node.else_ability.as_deref()]
-        .into_iter()
-        .flatten()
-    {
+    for (_, child) in node.child_links() {
         reaches.push(NodeReach {
             node: child,
             acted_on: Vec::new(),
@@ -439,15 +422,9 @@ fn resolves_once_as_bound(bound: &ResolvedAbility) -> bool {
 /// CR 608.2c: a node that replaces its parent's effect when its condition
 /// holds.
 fn is_instead_override(node: &ResolvedAbility) -> bool {
-    matches!(
-        node.condition,
-        Some(
-            AbilityCondition::AdditionalCostPaidInstead
-                | AbilityCondition::CastVariantPaidInstead { .. }
-                | AbilityCondition::TargetHasKeywordInstead { .. }
-                | AbilityCondition::ConditionInstead { .. }
-        )
-    )
+    node.condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_instead_override)
 }
 
 /// A condition that reads only what the entry's context recorded when it was
@@ -514,12 +491,15 @@ fn instruction_writes(
         // CR 701.25a: surveil moves cards from its player's library to their
         // graveyard, where no replacement effect may apply to that move.
         Effect::Surveil { target, .. } => {
-            let player = super::resolve_player_for_context_ref(board, ability, target);
+            // CR 608.2b: a declared player whose target was illegal is not affected.
+            let Some(player) = super::resolve_player_for_context_ref(board, ability, target) else {
+                return Some(Written::default());
+            };
             let moves: Vec<ProposedEvent> = board
                 .players
                 .iter()
                 .filter(|candidate| candidate.id == player)
-                .flat_map(|player| player.library.iter())
+                .flat_map(|candidate| board.library_of(candidate.id).iter())
                 .map(|id| {
                     ProposedEvent::zone_change(
                         *id,
@@ -650,18 +630,18 @@ fn handed_child<'c>(
         return Some(Cow::Borrowed(child));
     }
     // CR 608.2c: the ordinary descent hands an undeclared child
-    // `inherited_parent_targets`; a descent that waits on a player's choice
+    // `inherited_parent_occurrences`; a descent that waits on a player's choice
     // first hands it the parent's targets where `should_propagate_parent_targets`
     // holds. Answer only where the two agree.
-    let inherited = super::inherited_parent_targets(parent, child);
+    let inherited = super::inherited_parent_occurrences(parent, child);
     let after_a_choice = if super::should_propagate_parent_targets(parent, child) {
-        parent.targets.clone()
+        parent.target_occurrences()
     } else {
         Vec::new()
     };
     (inherited == after_a_choice).then(|| {
         let mut handed = child.clone();
-        handed.targets = inherited;
+        handed.replace_target_occurrences(inherited);
         Cow::Owned(handed)
     })
 }
@@ -689,7 +669,7 @@ fn names_resolution_product(effect: &Effect) -> bool {
             super::filter_references_tracked_set(filter)
                 || crate::game::filter::filter_contains_last_created(filter)
                 || crate::game::filter::filter_contains_last_zone_changed(filter)
-                || crate::game::filter::filter_contains(filter, &|inner| {
+                || crate::types::ability::filter_contains(filter, &|inner| {
                     matches!(inner, TargetFilter::LastRevealed)
                 })
         })
@@ -791,7 +771,13 @@ fn proposed_events(
             })
             .chain(moves(&[Zone::Graveyard]))
             .collect(),
-        Effect::ChangeZone { destination, .. } => moves(&[*destination]),
+        // CR 608.2c: a scalar move and the selected-object library move are
+        // classified by the one authority the AI's removal readers share.
+        Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. } => {
+            super::bound_object_move_destination(&bound.effect)
+                .map(|destination| moves(&[destination]))
+                .unwrap_or_default()
+        }
         Effect::Bounce { destination, .. } => moves(&[destination.unwrap_or(Zone::Hand)]),
         Effect::Counter { .. } => moves(&[Zone::Graveyard, Zone::Exile, Zone::Hand, Zone::Library]),
         Effect::DiscardCard { .. } => objects
@@ -927,7 +913,7 @@ fn node_acted_on(
         {
             Vec::new()
         }
-        // CR 610.3b: an object whose "until" event already happened does not
+        // CR 610.3a / CR 610.3b: an object whose "until" event already happened does not
         // move.
         Effect::ChangeZone { .. }
             if bound
@@ -940,8 +926,18 @@ fn node_acted_on(
             let filter = targeting::resolve_tracked_set_sentinel(state, target.clone());
             let ids = super::resolved_effect_object_ids(state, bound, &filter);
             objects(crate::game::merge::expand_returned_merge_components(
-                state, ids, &filter,
+                state, bound, ids, &filter,
             ))
+        }
+        // CR 608.2b + CR 608.2c: "the owner of target permanent shuffles it into
+        // their library" (Chaos Warp) moves the declared selection its resolver
+        // binds; an illegal or stale target is not part of it.
+        Effect::ChangeZoneAll { .. } => {
+            super::change_zone::selected_owner_move_objects(state, bound)
+                .ok()
+                .flatten()
+                .map(objects)
+                .unwrap_or_default()
         }
         Effect::SetTapState {
             scope: EffectScope::Single,
@@ -967,12 +963,16 @@ fn node_acted_on(
                 )))
                 .collect()
         }
-        Effect::LoseLife { target, .. } => vec![TargetRef::Player(
-            super::life::resolve_life_loss_target(state, bound, target.as_ref()),
-        )],
-        Effect::Mill { target, .. } => vec![TargetRef::Player(
-            super::resolve_player_for_context_ref(state, bound, target),
-        )],
+        Effect::LoseLife { target, .. } => {
+            super::life::resolve_life_loss_target(state, bound, target.as_ref())
+                .into_iter()
+                .map(TargetRef::Player)
+                .collect()
+        }
+        Effect::Mill { target, .. } => super::resolve_player_for_context_ref(state, bound, target)
+            .into_iter()
+            .map(TargetRef::Player)
+            .collect(),
         // These resolvers bind inline rather than through a function shared
         // here: a node that declared targets is answered with them, and one
         // that would inherit its parent's is answered with nothing.
@@ -980,5 +980,51 @@ fn node_acted_on(
             declared.live_object_targets(state)
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 701.25a + CR 400.1: a surveil by the non-canonical seat moves the
+    /// shared pile, so a replacement that applies to a pile card's move counts.
+    #[test]
+    fn surveil_moves_come_from_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let p1 = PlayerId(1);
+        create_object(&mut state, CardId(1), p1, "Island".into(), Zone::Library);
+        let rest = create_object(&mut state, CardId(2), p1, "Rest".into(), Zone::Battlefield);
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Rest",
+        )
+        .expect("a graveyard-entry replacement parses");
+        state
+            .objects
+            .get_mut(&rest)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+        let surveil = ResolvedAbility::new(
+            Effect::Surveil {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            p1,
+        );
+
+        let written = instruction_writes(&state, &surveil, &[], &Written::default());
+
+        assert!(
+            written.is_none(),
+            "the replacement applies to the pile card's move"
+        );
     }
 }

@@ -300,6 +300,7 @@ fn control_changes(events: &[GameEvent]) -> Vec<(ObjectId, PlayerId, PlayerId)> 
                 object_id,
                 old_controller,
                 new_controller,
+                ..
             } => Some((*object_id, *old_controller, *new_controller)),
             _ => None,
         })
@@ -584,6 +585,7 @@ fn bucknards_everfull_purse_passes_to_the_right_through_the_restructured_authori
         .act(GameAction::ActivateAbility {
             source_id: purse,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the Purse's ability activates")
         .events;

@@ -2,10 +2,10 @@
 //! deck.
 //!
 //! Parser AST verification — VERIFIED against engine source:
-//! - `Effect::Draw { count, target }` at `crates/engine/src/types/ability.rs:10108`
+//! - `Effect::Draw { count, target }` at `crates/phase-ast/src/types/ability.rs`
 //!   — the card-draw enablers (scoped to `TargetFilter::Controller`, i.e. "you
 //!   draw").
-//! - `TriggerMode::Drawn` at `crates/engine/src/types/triggers.rs:319`
+//! - `TriggerMode::Drawn` at `crates/phase-ast/src/types/triggers.rs`
 //!   (CR 121.1: a card was drawn) — the payoffs.
 //! - `TriggerDefinition.valid_target` (`Option<TargetFilter>`) at `ability.rs`
 //!   — used to keep only YOUR-draw engines (`None`/`Controller`), excluding the

@@ -161,43 +161,76 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
     })
 }
 
-/// CR 903.4: Compute the combined color identity of `player`'s commander(s).
+/// CR 903.4 + CR 903.4a + CR 903.4f + CR 702.124c: The combined color identity of
+/// `player`'s commander(s), or `None` when the player has no commander.
 ///
-/// Color identity is the union of every commander's color (indicator/CDA)
-/// plus every color symbol in its mana cost (derived via
-/// `derive_colors_from_mana_cost`). Rules-text mana symbols are not yet
-/// parsed into structured data.
+/// `None` (CR 903.4f: the quality is undefined) is distinct from `Some(vec![])`
+/// (a colorless commander: a defined identity containing no colors). Partner
+/// commanders combine (CR 702.124c).
 ///
-/// Returns an empty vector if the player has no commander. Callers must
-/// interpret that per CR 903.4f: "If an ability refers to the colors or
-/// number of colors in a commander's color identity, that quality is
-/// undefined if that player doesn't have a commander."
-pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
+/// Source of truth, in order:
+/// 1. The registered deck pool's `current_commander` faces (CR 903.4a: identity
+///    is established for the card as the game began, and includes back faces per
+///    CR 903.4d). A registered colorless commander is authoritative: its empty
+///    union is returned as `Some(vec![])` rather than falling through.
+/// 2. When no pool with a non-empty `current_commander` is registered for `player`
+///    (scenarios, tests, and every seat of a game without commanders), the printed
+///    `base_color` and `base_mana_cost` of `is_commander` objects owned by `player`.
+///
+/// Limitation of the fallback: it approximates identity from the current face's
+/// printed color and mana cost. It does not read mana symbols in rules text
+/// (CR 903.4 "mana cost or rules text"), nor the other face of a transformed
+/// double-faced commander (CR 903.4d), and a face-down commander reads as
+/// colorless. Real commander games take path 1.
+pub fn defined_commander_color_identity(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<Vec<ManaColor>> {
     let mut identity: Vec<ManaColor> = Vec::new();
-    if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
+    if let Some(pool) = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == player && !pool.current_commander.is_empty())
+    {
         for entry in pool.current_commander.iter() {
             for color in card_face_color_identity(&entry.card) {
                 push_identity_color(&mut identity, color);
             }
         }
-        if !identity.is_empty() {
-            return identity;
-        }
+        return Some(identity);
     }
 
+    let mut has_commander = false;
     for obj in state
         .objects
         .values()
         .filter(|obj| obj.is_commander && obj.owner == player)
     {
-        for &c in &obj.color {
+        has_commander = true;
+        // CR 903.4a: identity is established before the game and is not changed by
+        // color-changing effects (CR 613.1e, layer 5) or copy effects (CR 613.1a,
+        // layer 1) applied to the commander object, so read the printed
+        // characteristics, never the layer-modified `color` / `mana_cost`.
+        for &c in &obj.base_color {
             push_identity_color(&mut identity, c);
         }
-        for c in super::printed_cards::derive_colors_from_mana_cost(&obj.mana_cost) {
+        for c in super::printed_cards::derive_colors_from_mana_cost(&obj.base_mana_cost) {
             push_identity_color(&mut identity, c);
         }
     }
-    identity
+    has_commander.then_some(identity)
+}
+
+/// CR 903.4: Compute the combined color identity of `player`'s commander(s).
+///
+/// Returns an empty vector both if the player has no commander and if their
+/// commander is colorless; callers that must tell these apart use
+/// [`defined_commander_color_identity`]. Callers must interpret the no-commander
+/// case per CR 903.4f: "If an ability refers to the colors or number of colors
+/// in a commander's color identity, that quality is undefined if that player
+/// doesn't have a commander."
+pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
+    defined_commander_color_identity(state, player).unwrap_or_default()
 }
 
 fn card_face_color_identity(face: &CardFace) -> Vec<ManaColor> {
@@ -233,8 +266,10 @@ fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
 /// CR 205.3m: creature types are the subtypes shared by creatures and kindreds,
 /// so only commanders that are creatures contribute. Reads
 /// `deck_pools.current_commander` first (pre-game registration), falling back to
-/// live `is_commander && owner == player` objects — the same precedence as
-/// [`commander_color_identity`]. Partner commanders merge their type sets.
+/// live `is_commander && owner == player` objects when the pool yields no
+/// creature types (unlike [`defined_commander_color_identity`], where a registered
+/// commander's identity is authoritative even when it is colorless). Partner
+/// commanders merge their type sets.
 /// Subtypes are deduplicated case-insensitively, preserving first-seen casing.
 ///
 /// Returns an empty vector when the player has no commander (CR 903.3: a card
@@ -243,8 +278,10 @@ fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
 /// set as "no type shared" — the spend simply doesn't qualify.
 //
 // TODO(strict): CR 702.73a — a Changeling commander is every creature type and
-// should match any creature subtype. Mirrors the color-identity helper's scope:
-// printed/effective subtypes only, no CDA expansion, until that is generalized.
+// should match any creature subtype. Reads the registered printed subtypes, or the
+// commander object's current (layer-modified) subtypes in the object fallback (no
+// pool, or a pool whose commanders yield no creature types); no CDA expansion,
+// until that is generalized.
 pub fn commander_creature_types(state: &GameState, player: PlayerId) -> Vec<String> {
     let mut types: Vec<String> = Vec::new();
 
@@ -844,19 +881,24 @@ mod tests {
 
     #[test]
     fn commander_color_identity_unions_color_and_mana_cost() {
-        // CR 903.4: Identity = commander color + mana-cost colors. A two-color
-        // commander with a mono-color mana cost reports exactly those colors.
+        // CR 903.4: Identity = commander color + mana-cost colors. A blue commander
+        // whose printed mana cost has a red symbol reports exactly {U, R}: the red
+        // comes only from `base_mana_cost` (the fallback reads printed
+        // characteristics, CR 903.4a), so dropping that loop fails this test.
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(
             &mut state,
             PlayerId(0),
             "Niv-Mizzet",
-            vec![ManaColor::Blue, ManaColor::Red],
+            vec![ManaColor::Blue],
         );
-        state.objects.get_mut(&cmd_id).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
+        let printed_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
             generic: 1,
         };
+        let cmd = state.objects.get_mut(&cmd_id).unwrap();
+        cmd.mana_cost = printed_cost.clone();
+        cmd.base_mana_cost = printed_cost;
 
         let identity = commander_color_identity(&state, PlayerId(0));
         assert_eq!(identity.len(), 2);
@@ -920,6 +962,153 @@ mod tests {
         assert_eq!(identity.len(), 2);
         assert!(identity.contains(&ManaColor::White));
         assert!(identity.contains(&ManaColor::Black));
+    }
+
+    /// A registered pool commander with an explicit identity, no live object.
+    fn register_pool_commander(
+        state: &mut GameState,
+        player: PlayerId,
+        color_identity: Vec<ManaColor>,
+    ) {
+        state.deck_pools.push(PlayerDeckPool {
+            player,
+            current_commander: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    color_identity,
+                    ..CardFace::default()
+                },
+                count: 1,
+            }]),
+            ..PlayerDeckPool::default()
+        });
+    }
+
+    #[test]
+    fn defined_identity_is_none_without_commander() {
+        // CR 903.4f: no commander -> the identity quality is undefined.
+        let state = setup_commander_game();
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+    }
+
+    #[test]
+    fn defined_identity_is_none_with_an_empty_registered_pool() {
+        // CR 903.4f: production registers a `PlayerDeckPool` for every seat (see
+        // deck_loading), so in a game without commanders the pool exists but its
+        // `current_commander` is empty. That is "no commander" (undefined), never
+        // a colorless commander (a defined, empty identity): dropping the
+        // non-empty-pool guard would make this `Some(vec![])`.
+        let mut state = setup_commander_game();
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            ..PlayerDeckPool::default()
+        });
+        assert!(state.deck_pools[0].current_commander.is_empty());
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+    }
+
+    #[test]
+    fn defined_identity_is_some_empty_for_colorless_commander_object() {
+        // CR 903.4: a colorless commander has a defined identity with no colors,
+        // distinct from "no commander" (CR 903.4f).
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+        // The legacy accessor still flattens both cases to an empty vector.
+        assert!(commander_color_identity(&state, PlayerId(0)).is_empty());
+    }
+
+    #[test]
+    fn defined_identity_ignores_other_players_commanders() {
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(1),
+            "Opponent",
+            vec![ManaColor::Green],
+        );
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(1)),
+            Some(vec![ManaColor::Green])
+        );
+    }
+
+    #[test]
+    fn registered_colorless_commander_ignores_current_object_color() {
+        // CR 903.4a: a painted (layer-modified) color on a registered colorless
+        // commander's object never leaks into its identity. The pool branch itself is
+        // discriminated by registered_colorless_commander_without_object_is_defined_empty.
+        let mut state = setup_commander_game();
+        register_pool_commander(&mut state, PlayerId(0), vec![]);
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        state.objects.get_mut(&cmd_id).unwrap().color = vec![ManaColor::Black];
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn registered_colorless_commander_without_object_is_defined_empty() {
+        // CR 903.4a + CR 903.4f: with only the pool registered (no live commander
+        // object to fall back on), a colorless commander is Some(empty), not None.
+        // This discriminates the pool branch from the object fallback.
+        let mut state = setup_commander_game();
+        register_pool_commander(&mut state, PlayerId(0), vec![]);
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn defined_identity_merges_partners() {
+        // CR 702.124c: partner commanders combine their identities.
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Partner A",
+            vec![ManaColor::White],
+        );
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Partner B",
+            vec![ManaColor::Black],
+        );
+
+        let identity = defined_commander_color_identity(&state, PlayerId(0)).unwrap();
+        assert_eq!(identity.len(), 2);
+        assert!(identity.contains(&ManaColor::White));
+        assert!(identity.contains(&ManaColor::Black));
+    }
+
+    #[test]
+    fn poolless_commander_identity_reads_printed_not_layered_color() {
+        // CR 903.4a + CR 613.1e: a layer-5 color change (or a changed mana cost)
+        // on the commander object does not change its color identity.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        let obj = state.objects.get_mut(&cmd_id).unwrap();
+        obj.base_color = vec![];
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.color = vec![ManaColor::Blue];
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_characteristics_initialized = true;
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
     }
 
     #[test]

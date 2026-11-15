@@ -33,6 +33,7 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::game::zones::{create_object, move_to_zone};
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -323,9 +324,9 @@ fn applied_geometry_it_exactly_six_no_double_seed() {
 }
 
 /// No-regression control for the "the creature" EXCLUSION. Longstalk Brawl's
-/// "Put a +1/+1 counter on THE CREATURE you control" binds the CHOSEN target
-/// (`ParentTarget` here in isolation; `ParentTargetSlot { 0 }` in the full-card
-/// parse), NOT the gift-created Fish token. "the creature" is deliberately kept
+/// "Put a +1/+1 counter on THE CREATURE you control" binds the CHOSEN
+/// you-control target (`ParentTargetSlot { 0 }` in the full-card parse, which
+/// declares both target slots), NOT the gift-created Fish token. "the creature" is deliberately kept
 /// OUT of the helper `alt` because it legitimately names a chosen target and is
 /// ambiguous — keeping it out is a forward-looking correctness measure. Measured
 /// caveat: it is not currently load-bearing (adding "the creature" flips ZERO
@@ -334,29 +335,33 @@ fn applied_geometry_it_exactly_six_no_double_seed() {
 /// the counter lands on the chosen creature, not the decoy `LastCreated` token.
 #[test]
 fn longstalk_brawl_the_creature_binds_chosen_target_not_token() {
-    let def = parse_def(LONGSTALK_BRAWL);
+    // The full-card parse strips the Gift keyword line and declares both
+    // "Choose target ..." slots, so the counter's anaphor resolves against them.
+    let parsed = parse_oracle_text(
+        LONGSTALK_BRAWL,
+        "Longstalk Brawl",
+        &["Gift".to_string()],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("longstalk brawl parses a spell ability");
 
-    // Parse-level boundary proof: the real card's counter still binds the chosen
-    // slot, not the created token.
-    let put = find_put_counter(&def).expect("longstalk brawl parses a PutCounter");
+    // Parse-level boundary proof: the real card's counter binds the chosen
+    // you-control slot, not the created token.
+    let put = find_put_counter(def).expect("longstalk brawl parses a PutCounter");
     let Effect::PutCounter { target, .. } = put else {
         unreachable!("find_put_counter returns a PutCounter effect")
     };
-    // "the creature" is EXCLUDED from the anaphor set, so the counter keeps a
-    // CHOSEN-TARGET binding (`ParentTarget` in isolation; the full-card parse
-    // seeds the slot registry and yields `ParentTargetSlot { 0 }`) and does NOT
-    // become `LastCreated`. Reds if Longstalk's counter were ever parsed to the
-    // created token.
-    assert!(
-        !matches!(target, TargetFilter::LastCreated),
-        "'the creature you control' must NOT bind the created token (got {target:?})"
-    );
-    assert!(
-        matches!(
-            target,
-            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-        ),
-        "'the creature you control' binds the chosen target, not the token (got {target:?})"
+    // CR 601.2c + CR 608.2c: "the creature you control" names the first
+    // declared slot ("target creature you control"); it is EXCLUDED from the
+    // created-token anaphor set, so it never becomes `LastCreated`.
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTargetSlot { index: 0 },
+        "'the creature you control' binds the chosen you-control slot"
     );
 
     // Resolved-delta proof: resolve the REAL parsed PutCounter over a chosen

@@ -29,7 +29,11 @@ pub fn resolve(
             // context-ref filters resolve via state slots, not controller.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, ability.controller),
+        _ => (1, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal is not scried.
+    let Some(scry_player) = scry_player else {
+        return Ok(());
     };
 
     let proposed = ProposedEvent::Scry {
@@ -179,7 +183,7 @@ fn apply_scry_after_replacement_without_draw(
         });
     };
 
-    let count = (instructed as usize).min(player.library.len());
+    let count = (instructed as usize).min(state.library_of(player.id).len());
     if count == 0 {
         // CR 701.22b: an instruction to scry 0 is no scry event. CR 701.22d: an
         // instruction of 1 or more with an empty library still completes a
@@ -200,8 +204,8 @@ fn apply_scry_after_replacement_without_draw(
         });
     }
 
-    let cards: Vec<_> = player
-        .library
+    let cards: Vec<_> = state
+        .library_of(player.id)
         .iter()
         .take(count)
         .copied()

@@ -3,7 +3,10 @@ import { useTranslation } from "react-i18next";
 
 import type { PendingTriggerSummary } from "../../adapter/types.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { useLocalizedCardContent } from "../../hooks/useLocalizedCardContent.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { renderDescription } from "../../utils/description.ts";
+import { CardTextReference } from "../card/CardTextReference.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
@@ -85,16 +88,7 @@ export function TriggerOrderModal() {
                 {...hoverProps(trigger.source_id)}
                 className="flex items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3"
               >
-                <div className="flex-1 text-left">
-                  <div className="font-semibold text-white">
-                    {trigger.source_name || t("triggerOrder.triggerFallback", { number: engineIndex + 1 })}
-                  </div>
-                  {trigger.description && (
-                    <div className="text-sm text-white/70">
-                      <RichLabel text={trigger.description} size="xs" />
-                    </div>
-                  )}
-                </div>
+                <TriggerSummary trigger={trigger} number={engineIndex + 1} />
                 <div className="flex flex-col gap-1">
                   <button
                     type="button"
@@ -124,5 +118,23 @@ export function TriggerOrderModal() {
         </div>
       </div>
     </DialogShell>
+  );
+}
+
+function TriggerSummary({ trigger, number }: { trigger: PendingTriggerSummary; number: number }) {
+  const { t } = useTranslation("game");
+  const localized = useLocalizedCardContent(trigger.source_name);
+  const name = localized?.name || trigger.source_name;
+  return (
+    <div className="min-w-0 flex-1 text-left">
+      <div className="font-semibold text-white">{name || t("triggerOrder.triggerFallback", { number })}</div>
+      {trigger.description && (
+        <div className="mt-1 text-sm text-white/70">
+          {localized?.oracle_text && <div className="mb-1 text-xs text-slate-400">{t("cardTextReference.originalAbility")}</div>}
+          <RichLabel text={renderDescription(trigger.description, trigger.source_name)} size="xs" />
+        </div>
+      )}
+      <CardTextReference text={localized?.oracle_text} />
+    </div>
   );
 }

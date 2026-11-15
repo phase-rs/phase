@@ -18,9 +18,9 @@ state machine — MUST be implemented through the
 is not satisfied by reading the skill and editing by hand.
 
 The skill orchestrates the full pipeline — plan → review-plan → implement →
-review-engine-impl → commit — each step in a fresh agent context. A review loop
-closes after two consecutive rounds without behavior findings; the skill's run
-limits bound the rest by finding class and your budget. This is how the repo keeps
+review-engine-impl → commit — each step in a fresh agent context. Pipeline review
+closure and correction handling follow the skill's Steps 2 and 6; its run limits
+bound the remaining rounds by finding class and your budget. This is how the repo keeps
 ad-hoc edits from shipping plausible-but-wrong ASTs, special-cased logic that
 breaks the next card, and unverified CR annotations.
 
@@ -31,7 +31,12 @@ pipeline or a narrow inline edit). The last action before pushing is a
 acknowledged. Two checks lead that review and are non-negotiable: (1) the change
 sits at the architecturally correct seam, and (2) the change at that seam is the
 most idiomatic one the codebase allows. A PR that opens without a
-feedback-addressed final review does not meet the bar.
+feedback-addressed final review does not meet the bar. The one exception is
+the pipeline's decline path
+([AI-CONTRIBUTOR.md §5](docs/AI-CONTRIBUTOR.md#5-validate-the-review-actually-happened-and-was-addressed)):
+a LOW or `text` finding left open under it is listed as unresolved, the PR
+claims no clean review for it, and the PR is not approved until its fix is
+verified.
 
 **Narrow exceptions you may edit directly:** non-engine code (frontend,
 transport layers, scripts, docs, CI) and truly mechanical engine edits with no

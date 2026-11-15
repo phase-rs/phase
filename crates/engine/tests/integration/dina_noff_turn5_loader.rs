@@ -40,7 +40,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the dump's `["gameState"]` through the REAL production restore chokepoint
@@ -146,8 +147,13 @@ fn c0_a_second_rehydrate_is_a_no_op_so_the_wasm_restore_may_repeat_it() {
     // the values the two streams actually produce.
     for draw in 0..5 {
         assert_eq!(
-            twice.rng.next_u32(),
-            once.rng.next_u32(),
+            twice
+                .rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u32(),
+            once.rng
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u32(),
             "double-rehydrated stream diverged at draw {draw}",
         );
     }

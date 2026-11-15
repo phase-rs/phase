@@ -115,7 +115,7 @@ fn chord_x3_convoke_tap_then_cancel_untaps_creature() {
         "spell must return to hand after cancel"
     );
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "convoke payment markers must be cleared on cancel"
     );
     assert!(

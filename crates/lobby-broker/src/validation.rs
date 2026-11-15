@@ -880,6 +880,160 @@ mod tests {
         assert!(err.contains("scheme_deck[0]"));
     }
 
+    // -- Printings sidecar (P2-V4) -------------------------------------------
+
+    /// The wire text of `msg` with `data.deck.printings` replaced by `printings`.
+    fn frame_with_printings(msg: &M, printings: serde_json::Value) -> String {
+        let mut frame = serde_json::to_value(msg).expect("lobby frame serializes");
+        frame["data"]["deck"]["printings"] = printings;
+        frame.to_string()
+    }
+
+    /// The sidecar of a parsed create/join frame.
+    fn parsed_printings(
+        parsed: crate::protocol::ParsedFrame,
+    ) -> (M, Vec<engine::types::card_printing::DeckPrinting>) {
+        let crate::protocol::ParsedFrame::Message(msg) = parsed else {
+            panic!("expected a parsed message, got {parsed:?}");
+        };
+        let printings = match &*msg {
+            M::CreateGameWithSettings { deck, .. } | M::JoinGameWithPassword { deck, .. } => {
+                deck.printings.clone()
+            }
+            other => panic!("not a deck-carrying frame: {other:?}"),
+        };
+        (*msg, printings)
+    }
+
+    /// Both deck-carrying frames, as the Worker receives them.
+    fn deck_carrying_frames() -> [(&'static str, M); 2] {
+        [
+            ("create", create_with("Alice", None)),
+            ("join", join_with("Bob")),
+        ]
+    }
+
+    #[test]
+    fn frame_refuses_a_sidecar_over_the_entry_cap_even_when_every_element_is_malformed() {
+        use crate::protocol::{parse_lobby_client_message, ParsedFrame};
+        for (label, msg) in deck_carrying_frames() {
+            let over = serde_json::json!(vec![0; 2049]);
+            let ParsedFrame::Malformed(reason) =
+                parse_lobby_client_message(&frame_with_printings(&msg, over))
+            else {
+                panic!("{label}: expected a malformed frame");
+            };
+            assert!(
+                reason.contains("printings must contain at most 2048 entries"),
+                "{label}: {reason}"
+            );
+
+            // Boundary and reach guard: 2048 malformed elements are all dropped and the
+            // deck is admitted, so the refusal above is the cap and not a frame error.
+            let at_cap = serde_json::json!(vec![0; 2048]);
+            let (_, printings) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, at_cap),
+            ));
+            assert!(printings.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn guard_refuses_an_oversized_sidecar_string_naming_the_field() {
+        use crate::protocol::parse_lobby_client_message;
+        for (label, msg) in deck_carrying_frames() {
+            let long_code = "s".repeat(33);
+            let printings = serde_json::json!([{
+                "section": "main_deck",
+                "name": "Plains",
+                "count": 1,
+                "printing": { "set_code": long_code, "collector_number": "1" },
+            }]);
+            // Reach guard: the frame parses, so the refusal below is the guard's.
+            let (parsed, _) = parsed_printings(parse_lobby_client_message(&frame_with_printings(
+                &msg, printings,
+            )));
+            let err = guard_inbound(&parsed).unwrap_err();
+            assert!(
+                err.contains("deck.printings[0].printing.set_code"),
+                "{label}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_with_invalid_annotations_is_admitted_and_only_malformed_elements_dropped() {
+        use crate::protocol::parse_lobby_client_message;
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        let printing = |set_code: &str, collector_number: &str| CardPrinting {
+            set_code: set_code.to_string(),
+            collector_number: collector_number.to_string(),
+        };
+        let e1 = serde_json::json!({"section":"main_deck","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e2 = serde_json::json!({"section":"mystery_zone","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e3 = serde_json::json!(0);
+        let e4 = serde_json::json!({"section":"main_deck","name":"Plains","count":"one",
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e5 = serde_json::json!({"section":"main_deck","name":"","count":1,
+            "printing":{"set_code":"","collector_number":""}});
+        let e6 = serde_json::json!({"section":"main_deck","name":"Bad\nName","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e7 = serde_json::json!({"section":"main_deck","name":"No Such Card Anywhere","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e8 = serde_json::json!({"section":"main_deck","name":"Plains","count":0,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let expected = vec![
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::Unknown,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: String::new(),
+                count: 1,
+                printing: printing("", ""),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Bad\nName".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "No Such Card Anywhere".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 0,
+                printing: printing("M21", "1"),
+            },
+        ];
+        for (label, msg) in deck_carrying_frames() {
+            let printings = serde_json::json!([e1, e2, e3, e4, e5, e6, e7, e8]);
+            let (parsed, kept) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, printings),
+            ));
+            // The decoder ran: the two structurally malformed elements are gone and the
+            // well-typed unusable ones survive, in input order.
+            assert_eq!(kept, expected, "{label}");
+            assert_eq!(guard_inbound(&parsed), Ok(()), "{label}");
+        }
+    }
+
     // -- Tournament organizer ----------------------------------------------
 
     use crate::tournament::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, TournamentRole};

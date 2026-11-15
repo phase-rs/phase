@@ -44,11 +44,11 @@ export function useShiftHeld(explicitEnabled?: boolean): void {
     };
     const onBlur = () => useUiStore.getState().setShiftHeld(false);
 
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       enabledRegistrationCount = Math.max(0, enabledRegistrationCount - 1);

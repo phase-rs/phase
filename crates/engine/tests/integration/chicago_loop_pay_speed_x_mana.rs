@@ -98,6 +98,7 @@ fn chicago_loop_pay_speed_x_produces_x_mana_and_pays_x_speed() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted");
 
@@ -145,7 +146,7 @@ fn chicago_loop_pay_speed_x_produces_x_mana_and_pays_x_speed() {
         "speed reduced by 2 (2 → 0)"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         2,
         "exactly 2 mana produced"
     );
@@ -159,6 +160,7 @@ fn chicago_loop_pay_speed_zero_when_no_speed() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted");
 
@@ -183,7 +185,7 @@ fn chicago_loop_pay_speed_zero_when_no_speed() {
     // X=0 → AnyCombination count 0 → no color prompt; activation completes with
     // 0 mana produced and 0 speed paid (no panic).
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "X=0 produces no mana"
     );
@@ -201,6 +203,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate 1");
     runner
@@ -213,7 +216,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         })
         .expect("1 color");
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         1,
         "first activation: 1 mana"
     );
@@ -224,6 +227,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate 2");
     runner
@@ -236,7 +240,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         })
         .expect("3 colors");
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         4,
         "second activation adds 3 more (1 + 3 = 4 total)"
     );

@@ -24,6 +24,15 @@ When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree
 
 A scout fact pack may accompany the plan, the same one the planner received. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: check 3's `rg` of existing instances and check 9's construction/consumption enumeration are yours to run in full.
 
+## Review the change
+
+This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
+
+- A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
+- Aim probes at the change's own claims. Do not hunt for pre-existing defects.
+
 ## Required Checks
 
 0. **Probe the plan, don't just read it**
@@ -55,12 +64,14 @@ A scout fact pack may accompany the plan, the same one the planner received. Tre
 
 1. **Class vs card**
    - Identify how many cards or patterns the plan covers.
+   - Re-run the recorded command from engine-planner [Step 0.5](../engine-planner/SKILL.md#step-05-enumerate-the-class-and-read-every-ruling) with its output redirected to a scratch file, never over the saved `class.json`, and compare `jq -cS . <scratch file> | shasum -a 256` with the recorded hash, which covers the card list and every ruling, not only the count. Reject a plan without that step's record, or whose hash does not reproduce at the recorded MTGJSON version; when the local version differs, report the difference instead. Check the reason given for each `add`, `drop` and unselected `keyword_missing` card. A design that a ruling in the record contradicts is a `behavior` finding. A hash mismatch where the recorded MTGJSON version or `jq --version` differs from yours is reported with both versions and investigated before any rejection.
    - Reject one-card plans unless the card is only the validating consumer of a reusable building block.
 
 2. **Building-block reuse**
    - Confirm the plan consulted relevant existing modules from the CLAUDE.md building-block table.
    - Reject duplicated logic already covered by `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, or nearby helpers.
    - Require justification for every new helper.
+   - Apply `review-engine-impl`'s [seam lens](../review-engine-impl/SKILL.md#universal-lenses) (Universal Lens 1, "Grep for the rule, not the symbol") to the owning function the plan names for each behavior. A plan that places a behavior beside the authority that check finds is a `behavior` finding.
 
 3. **Trace verification**
    - The plan must name an analogous existing feature and list the file path trace followed end to end.
@@ -88,6 +99,12 @@ A scout fact pack may accompany the plan, the same one the planner received. Tre
 7. **CR verification**
    - Every referenced CR number must be verified against `docs/MagicCompRules.txt`.
    - If CR comments are added or changed, the plan must say how they will be verified.
+
+7a. **Real cards**
+   - Apply [real cards](../engine-implementer/SKILL.md#real-cards) to every justification in the plan (Pattern Coverage, Reference Readings, Verification Matrix rows, any design rationale) and to every planned test.
+   - Reject a justification whose authority is a test name, a synthetic card or an abstract shape instead of a printed card's verbatim Oracle text and the CR.
+   - Reject a planned synthetic test card unless the plan states that no printed card exhibits the shape and names the nearest printed card. If no printed card exhibits the shape, require the plan's assessment of whether the behavior is needed, and reject the behavior when it is not.
+   - Tag the finding `behavior`, or `text` when it supplies the named card's verbatim Oracle text and CR as the replacement.
 
 8. **Skill checklist adherence**
    - Identify applicable skills, such as `$add-engine-effect`, `$oracle-parser`, `$add-keyword`, `$add-trigger`, `$add-static-ability`, `$add-replacement-effect`, `$add-interactive-effect`, or `$casting-stack-conditions`.
@@ -131,16 +148,16 @@ Ordinary mode is everything above. Three additional modes activate when the call
 Review the decomposition, not per-phase detail. Checklist:
 
 - **Seam green-tree safety** — every phase boundary leaves the tree compiling and tests green (strict-failure tags are the sanctioned way to hold coverage waiting between phases).
-- **Each phase independently reviewable and shippable against its charter entry** — this does not mean every phase carries a full end-to-end test: a phase verification plan written `DEFERRED(phase n)` with a named landing phase is accepted; a deferred verification with no named landing phase is rejected.
+- **Each phase independently reviewable and shippable against its charter entry** — this does not mean every phase carries a full end-to-end test: a discriminating test the deferral list writes `DEFERRED(phase n)` with a named landing phase is accepted; a deferral with no named landing phase is rejected.
 - **Deferral lists complete and phase-attributed** — everything the full task needs that a phase omits names the phase that lands it.
 - **Linear ordering respects dependencies** — infrastructure before consumer.
 - **Recursive gate check** — no individual phase itself trips the T1∧T2 conjunction defined in `/engine-implementer`.
-- **Premise verification present** — charter mode preserves engine-planner Step 0.
+- **Premise verification present** — charter mode preserves engine-planner Step 0, and its class attribution carries the Step 0.5 record.
 - **Scope entries are a rule, not an inventory** — literal paths or directories, no globs (T2 directory expansion and the orchestrator's `SCOPE_PATHS` materialization consume concrete paths, as does `/implement-task`'s snapshot pathspec machinery). A missing compiler-forced site, shared registration file, or comment-only file is **not** a finding — the scope rule admits those at materialization. A missing path of any other class is.
-- **No code-state assertions** — a sentence stating how the code behaves today ("no offer mints one", "the gate records this outcome") is a finding of class *premise*. If no phase decision rests on it, the repair is a review-only revision and the finding supplies the replacement sentence — the claim the phase must establish and the measurement that buys it — for the orchestrator to apply as check-and-replace and then hand back for a fresh charter-mode round; a premise finding without replacement text is a decision revision. If a phase boundary, ordering, or unit count — or any other frozen decision: a goal, an acceptance row, a seam, a deferral attribution — rests on it, it is a design finding, and the reviewer measures the assertion before reporting — a probe, not a reading.
-- **Post-revision rounds check the edit, not just the text** — a charter-mode round spawned after a review-only revision additionally verifies each admitted `SCOPE_PATHS` addition against its stated standing class and evidence (the compiler error names the path; the registration site exists; the change is comment-only), each replaced claim against its measurement, and that no decision moved. An addition whose evidence does not establish its class, or a claim whose measurement does not buy it, is a design finding.
+- **No code-state assertions** — a sentence stating how the code behaves today ("no offer mints one", "the gate records this outcome") is a finding of class *premise*. If no phase decision rests on it, the repair is a correction: delete the sentence, since the phase plan names and measures the claim. If a phase boundary, ordering, or unit count — or any other frozen decision: a goal, an architecture decision, a seam, a deferral attribution — rests on it, it is a design finding, and the reviewer measures the assertion before reporting — a probe, not a reading.
+- **Architecture only** — acceptance rows and claims a phase must establish belong to the phase plan; in the charter they are a correction (delete them). Each phase names its addenda file. A re-charter round also reads the addenda that led to it.
 
-Corrections — a figure, a citation, wording — are returned for the orchestrator to apply, not to the planner, and a round whose findings are all corrections is a clean round. A premise finding carrying its replacement sentence is a review-only revision: the orchestrator applies it and a fresh charter-mode round follows; the charter does not freeze on that round. Checks that do not apply to a charter: 6 (nom compliance), 9 (verification matrix), 11 (scope matrix), and check 3's full end-to-end trace requirement — those apply later, to each phase plan under phase-plan mode. A charter's feasibility exit (a report that no green-tree seam exists) is reviewed on its named evidence: every candidate split point named, each shown to leave the tree non-compiling or tests red.
+Corrections — a figure, a citation, wording — are returned for the orchestrator to apply, not to the planner, and a round whose findings are all corrections is a clean round. Checks that do not apply to a charter: 6 (nom compliance), 9 (verification matrix), 11 (scope matrix), and check 3's full end-to-end trace requirement — those apply later, to each phase plan under phase-plan mode. A charter's feasibility exit (a report that no green-tree seam exists) is reviewed on its named evidence: every candidate split point named, each shown to leave the tree non-compiling or tests red.
 
 ### Phase-plan mode (spawn inputs: charter + phase index + that phase's deferral allowlist)
 
@@ -162,7 +179,7 @@ Return every gap to the caller. Standalone, require a revised full plan and re-r
 
 Lead with blockers and material gaps. For each issue, include evidence and the required revision. If the plan is clean, say that no blocking gaps were found and name any residual assumptions.
 
-Tag every blocking finding `behavior`, `text` or `machinery` as the orchestrator's [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `behavior`. In charter mode, classify as decision revision, review-only revision or correction instead.
+Tag every blocking finding `behavior`, `text` or `machinery` as the orchestrator's [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `behavior`. In charter mode, classify as decision finding or correction instead.
 
 - A `text` finding quotes the old text at its coordinate and gives the replacement.
 - A finding that names a pattern gives the predicate, the command, and every matching site with its disposition. That list is the fix's scope; a sample leaves the rest of the class live.

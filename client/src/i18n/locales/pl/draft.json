@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "pickEnhancements": {
+      "label": "Użyj wbudowanej SI z ulepszeniami wyborów w draftcie",
+      "hint": "Boty stosują pisemny przewodnik kolejności wyborów w formatach, które go mają (obecnie Mirrodin, Darksteel i Fifth Dawn). Działa od średniego poziomu trudności."
+    },
     "difficultyLevels": {
       "VeryEasy": "Bardzo łatwy",
       "Easy": "Łatwy",
@@ -132,6 +136,12 @@
     "packOrder": "Kolejność boosterów",
     "candidateSets": "Dodatki kandydujące",
     "clearPacks": "Wyczyść",
+    "randomSet": "Losowy dodatek",
+    "randomSetHint": "Wypełnij wszystkie boostery jednym losowo wybranym dodatkiem",
+    "randomPacks": "Losowe boostery",
+    "randomPacksHint": "Przydziel każdemu boosterowi osobny, losowo wybrany dodatek",
+    "randomCandidates": "Losowe dodatki",
+    "randomCandidatesHint": "Wybierz losowo różne dodatki kandydujące",
     "emptyPacks_one": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} booster — powtórz dodatek lub połącz kilka.",
     "emptyPacks_other": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} boostery — powtórz dodatek lub połącz kilka, aby draftować blok.",
     "emptyPacksFixed_one": "Sealed otwiera dokładnie {{count}} booster. Wybierz dla niego dodatek.",
@@ -156,6 +166,7 @@
     "startSealed": "Rozpocznij sealed"
   },
   "pack": {
+    "label": "Booster draftu",
     "confirmPick": "Potwierdź wybór",
     "selected": "Wybrano",
     "draftEffects": "Efekty draftu:",
@@ -556,9 +567,11 @@
     "tournamentEliminationDesc": "Gracze odpadają po przegranym meczu, aż pozostanie jeden zwycięzca.",
     "podPolicy": "Zasady grupy",
     "policyCompetitive": "Wyczynowe",
-    "policyCompetitiveDesc": "Wybory na czas, automatyczne wybory po upływie czasu i automatyczne przechodzenie do kolejnych rund.",
+    "policyCompetitiveDesc": "Wybory na czas, automatyczne wybory po upływie czasu i automatyczne przechodzenie do kolejnych rund. Zatwierdzone talie są ostateczne; karty boczne możesz wymieniać tylko między grami meczu.",
+    "policyCompetitiveNoRoundsDesc": "Wybory na czas i automatyczne wybory po upływie czasu.",
     "policyCasual": "Swobodne",
-    "policyCasualDesc": "Wybory bez limitu czasu, ręczne przechodzenie do kolejnych rund i narzędzia gospodarza do rozwiązywania problemów.",
+    "policyCasualDesc": "Wybory bez limitu czasu, ręczne przechodzenie do kolejnych rund, narzędzia gospodarza do rozwiązywania problemów i zmiany talii między rundami.",
+    "policyCasualNoRoundsDesc": "Wybory bez limitu czasu i narzędzia gospodarza do rozwiązywania problemów.",
     "podSize": "Rozmiar grupy",
     "podSizeDesc": "Łącznie {{count}} miejsc. Puste miejsca można wypełnić botami z poczekalni przed rozpoczęciem draftu.",
     "playerCount": "{{count}} graczy",
@@ -604,11 +617,21 @@
     "roundComplete": "Runda zakończona",
     "waitingNextRound": "Oczekiwanie, aż gospodarz rozpocznie następną rundę...",
     "nextRoundShortly": "Następna runda rozpocznie się wkrótce...",
+    "editDeck": "Edytuj talię",
+    "backToStandings": "Wróć do klasyfikacji",
+    "editDeckHint": "Pod swobodny: możesz zmienić talię przed rozpoczęciem następnej rundy.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Zatwierdzić tę talię?",
+    "confirm": "Potwierdź zatwierdzenie",
+    "competitive": "To jest pod wyczynowy: zatwierdzona talia jest ostateczna na wszystkie rundy. Między grami meczu Bo3 nadal możesz wymieniać karty boczne.",
+    "casual": "Między rundami nadal możesz zmieniać swoją talię.",
+    "final": "Zatwierdzona talia jest ostateczna."
   },
   "betweenGames": {
     "game": "Gra {{number}}",
@@ -643,6 +666,7 @@
     "kicked": "Zostałeś wyrzucony z grupy",
     "hostLeft": "Gospodarz opuścił draft",
     "connection": "Błąd połączenia",
+    "incompatible": "Ten draft nie jest zgodny z twoją wersją protokołu.",
     "retry": "Spróbuj połączyć ponownie"
   },
   "winston": {
@@ -735,5 +759,13 @@
     "slotTraditional": "Draft tradycyjny",
     "slotCommanderDraft": "Draft Commander",
     "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Draftujący AI",
+    "picking": "Wybiera",
+    "ready": "Wybrano",
+    "fallback": "Wybór silnika",
+    "waiting": "Czekanie, aż wszyscy gracze wybiorą…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

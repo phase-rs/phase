@@ -163,6 +163,9 @@ vi.mock("../../hooks/usePlayerId", () => ({
   usePerspectivePlayerId: () => 0,
   useCanActForWaitingState: () => true,
   waitingPlayer: () => null,
+  // The mounted priority-attention controller reads the local seat for the
+  // authorized-submitter check.
+  getPlayerId: () => 0,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({
@@ -386,6 +389,25 @@ describe("GamePage — draft-match teardown on Back to Draft", () => {
     expect(leaveSpy).not.toHaveBeenCalled();
     // The pod tournament is still standing — the next round can be paired.
     expect(useMultiplayerDraftStore.getState().matchPairing).not.toBeNull();
+  });
+});
+
+describe("GamePage — game-over life summary", () => {
+  afterEach(() => {
+    MotionGlobalConfig.skipAnimations = false;
+    cleanup();
+  });
+
+  it("shows the engine's unbounded life as ∞ and the opponent's finite total", async () => {
+    MotionGlobalConfig.skipAnimations = true;
+    const gameState = gameStateFactory.withPlayers({ id: 0, life: 92 }, { id: 1, life: 20 }).build();
+    storeOverrides.gameState = { ...gameState, derived: { life_magnitude: { 0: "Unbounded" } } };
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+    mockMultiplayerState.activePlayerId = 0;
+
+    renderGameOver();
+
+    expect(await screen.findByText(/You:/)).toHaveTextContent("You: ∞ / Opponent: 20");
   });
 });
 

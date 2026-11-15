@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "najwyższa liczba",
     "lowestNumber": "najniższa liczba",
-    "chosenNumber": "wybrana liczba"
+    "chosenNumber": "wybrana liczba",
+    "energyPaidOrLostThisTurn": "energia zapłacona lub utracona w tej turze"
   },
   "scryOutcome": {
     "title": "Wróżenie zakończone",
@@ -86,6 +87,7 @@
     "sandboxTools": "Narzędzia piaskownicy",
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
     "openSandboxTools": "Otwórz narzędzia piaskownicy",
+    "clickMode": "Tryb kliknięcia",
     "clickModeButton": "Przycisk trybu kliknięcia",
     "shown": "Widoczny",
     "hidden": "Ukryty",
@@ -179,6 +181,7 @@
       "exportedTo": "Wyeksportowano do {{path}}.",
       "exportRequested": "Zażądano eksportu: {{filename}}.",
       "exportFailed": "Nie można wyeksportować stanu gry.",
+      "exportFailedDetail": "Nie można wyeksportować stanu gry. {{detail}}",
       "replayExported": "Powtórka zapisana jako {{filename}}.",
       "replayExportUnavailable": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",
       "replayExportFailed": "Nie udało się wyeksportować powtórki."
@@ -254,6 +257,10 @@
         "title": "Zaawansowany panel debugowania",
         "body": "Otwórz zaawansowany panel debugowania. Większość graczy powinna najpierw zacząć od Narzędzi naprawczych."
       },
+      "toggleClickMode": {
+        "title": "Przełącz tryb kliknięcia",
+        "body": "W grach z narzędziami piaskownicy włącza lub wyłącza tryb kliknięcia. Gdy jest włączony, kliknięcie karty otwiera jej menu debugowania (strefy, S/W, znaczniki, słowa kluczowe) zamiast jej zagrania."
+      },
       "reportOrExportState": {
         "title": "Zgłoś lub wyeksportuj stan",
         "body": "Jeśli karta zachowuje się nieprawidłowo, wyeksportuj bieżący stan gry, aby można było odtworzyć dokładną pozycję na polu bitwy."
@@ -285,7 +292,9 @@
     "loading": "Ładowanie..."
   },
   "turnBanner": {
-    "turn": "Tura {{number}}"
+    "turn": "Tura {{number}}",
+    "yourTurn": "Twoja tura",
+    "opponentTurn": "Tura: {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Rzut o pierwszego gracza",
@@ -294,16 +303,13 @@
     "skip": "Dotknij, aby pominąć",
     "continue": "Dotknij, aby kontynuować",
     "you": "Ty",
-    "youPlayFirst": "Zaczynasz",
-    "playerPlaysFirst": "{{name}} zaczyna",
+    "youWonRoll": "Wygrywasz rzut",
+    "playerWonRoll": "{{name}} wygrywa rzut",
     "heads": "Orzeł",
     "tails": "Reszka",
     "coinFlip": "Rzut monetą",
     "wonCoinFlip": "{{name}} wygrywa rzut monetą",
     "lostCoinFlip": "{{name}} przegrywa rzut monetą",
-    "turnOrder": "Kolejność tur",
-    "turnOrderItem": "Tura {{turn}}: {{name}}",
-    "youTakeTurn": "Rozgrywasz turę {{turn}}",
     "ignoredDie": "Zignorowany"
   },
   "chrome": {
@@ -324,6 +330,11 @@
     "heading": "Coś poszło nie tak",
     "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
     "reload": "Załaduj ponownie"
+  },
+  "stateCodec": {
+    "actionInterrupted": "Przesyłanie stanu zostało przerwane podczas akcji",
+    "submissionNotSent": "Trwa przywracanie przesyłania stanu; ta akcja nie została wysłana.",
+    "reconnectSubmissionNotSent": "Trwa przywracanie połączenia; ta akcja nie została wysłana."
   },
   "actionError": {
     "title": "{{action}} nie powiodła się",

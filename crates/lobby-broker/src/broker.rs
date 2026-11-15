@@ -70,6 +70,10 @@ pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
 /// why reaching the cap evicts rather than refuses.
 pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 
+/// First lobby version whose clients write today's format-config rules; never
+/// derived from `LOBBY_PROTOCOL_VERSION`.
+const MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES: u32 = 23;
+
 /// The client's self-reported identity from `ClientHello`. `build_commit` is
 /// the join-compatibility gate; `client_version` is the display-only string
 /// stamped into a registered entry's `host_version`.
@@ -77,6 +81,10 @@ pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 pub struct ClientHelloInfo {
     pub client_version: String,
     pub build_commit: String,
+    /// The lobby version the hello declared. `default`: a connection attachment
+    /// written before this field must still decode.
+    #[serde(default)]
+    pub lobby_protocol_version: Option<u32>,
 }
 
 /// Per-connection broker state — the lobby subset of the shell's per-socket
@@ -507,6 +515,37 @@ impl Broker {
             .map(crate::protocol::TournamentView::from)
     }
 
+    /// The heartbeat timestamp echo, independent of listing presence refresh.
+    /// Both broker dispatch and shells with a separate refresh task use this
+    /// constructor, so answering a heartbeat never needs a fabricated connection.
+    #[must_use]
+    pub fn heartbeat_reply(timestamp: u64) -> LobbyServerMessage {
+        LobbyServerMessage::Pong { timestamp }
+    }
+    /// The reply to a frame that needs no broker state and has no side effects,
+    /// or `None` when the frame must go through [`Broker::handle`].
+    ///
+    /// Takes no `self`, so a shell can answer without taking the lock that
+    /// guards the broker. Today that is a `Ping` from a connection that does
+    /// not host a listing: a host's frame must also refresh its listing's
+    /// liveness clock (see the prelude of [`Broker::handle`]), which needs the
+    /// broker, so a hosting connection always yields `None`. The reply is a
+    /// point reply to the sender, hence a bare [`LobbyServerMessage`] rather
+    /// than an [`Outbound`] list. [`Broker::handle`] answers through this same
+    /// function, so the reply has exactly one definition.
+    #[must_use]
+    pub fn stateless_reply(
+        conn: &ConnState,
+        msg: &LobbyClientMessage,
+    ) -> Option<LobbyServerMessage> {
+        match msg {
+            LobbyClientMessage::Ping { timestamp } if conn.host_game.is_none() => {
+                Some(Self::heartbeat_reply(*timestamp))
+            }
+            _ => None,
+        }
+    }
+
     /// Single entry for client frames. Returns the ordered side effects the
     /// shell must perform. The error helper keeps the many reject paths terse.
     pub fn handle(
@@ -515,6 +554,12 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Frames answerable without broker state (an unhosted Ping) never
+        // reach the liveness refresh, the guard or the dispatch below: none of
+        // them has anything to do for such a frame.
+        if let Some(reply) = Self::stateless_reply(conn, &msg) {
+            return vec![Outbound::ToSelf(reply)];
+        }
         // Any frame from the socket that owns the current listing is proof its
         // host is alive, so it refreshes the listing's liveness clock. Scoped
         // by identity, so a stale stamp cannot extend a reclaimer's listing;
@@ -540,7 +585,7 @@ impl Broker {
                 client_version,
                 build_commit,
                 protocol_version: _,
-                lobby_protocol_version: _,
+                lobby_protocol_version,
             } => {
                 // The handshake gate (protocol-version check, first-frame
                 // enforcement) stays in the shell; by the time a ClientHello
@@ -550,6 +595,7 @@ impl Broker {
                 conn.client_hello = Some(ClientHelloInfo {
                     client_version,
                     build_commit,
+                    lobby_protocol_version,
                 });
                 vec![]
             }
@@ -603,22 +649,40 @@ impl Broker {
                 start_when_full: _,
                 ranked,
                 requested_code,
-            } => self.handle_create_game(
-                conn,
-                display_name,
-                public,
-                password,
-                timer_seconds,
-                requested_player_count,
-                match_config,
-                format_config,
-                room_name,
-                host_peer_id,
-                draft_metadata,
-                ranked,
-                requested_code,
-                env,
-            ),
+            } => {
+                // A pre-change client's config is relayed as its engine wrote it; a current
+                // client sends only what today's validator admits.
+                let declares_current = conn
+                    .client_hello
+                    .as_ref()
+                    .and_then(|hello| hello.lobby_protocol_version)
+                    .is_some_and(|version| {
+                        version >= MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES
+                    });
+                if declares_current {
+                    if let Some(config) = &format_config {
+                        if let Err(reason) = config.check_strict_admission() {
+                            return vec![settle_rejection(request_id, &reason)];
+                        }
+                    }
+                }
+                self.handle_create_game(
+                    conn,
+                    display_name,
+                    public,
+                    password,
+                    timer_seconds,
+                    requested_player_count,
+                    match_config,
+                    format_config,
+                    room_name,
+                    host_peer_id,
+                    draft_metadata,
+                    ranked,
+                    requested_code,
+                    env,
+                )
+            }
 
             LobbyClientMessage::JoinGameWithPassword {
                 game_code,
@@ -644,8 +708,10 @@ impl Broker {
                 env,
             ),
 
+            // Reached only by a hosting connection (an unhosted Ping is
+            // answered by `stateless_reply` above), after its liveness refresh.
             LobbyClientMessage::Ping { timestamp } => {
-                vec![Outbound::ToSelf(LobbyServerMessage::Pong { timestamp })]
+                vec![Outbound::ToSelf(Self::heartbeat_reply(timestamp))]
             }
 
             LobbyClientMessage::UpdateLobbyMetadata {
@@ -2576,6 +2642,203 @@ mod tests {
         );
     }
 
+    fn hello_declaring(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        lobby_protocol_version: Option<u32>,
+    ) {
+        broker.handle(
+            conn,
+            LobbyClientMessage::ClientHello {
+                client_version: "0.1.0".into(),
+                build_commit: "abc".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version,
+            },
+            env,
+        );
+    }
+
+    /// A two-seat settings-create frame as the client sends it, with `edit`
+    /// applied to its serialized `format_config`.
+    fn create_frame(
+        config: engine::types::format::FormatConfig,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> String {
+        let mut frame = serde_json::to_value(LobbyClientMessage::CreateGameWithSettings {
+            deck: test_deck(),
+            display_name: "Host".into(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            format_config: Some(config),
+            room_name: None,
+            host_peer_id: Some("peer-1".into()),
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: None,
+        })
+        .unwrap();
+        edit(&mut frame["data"]["format_config"]);
+        frame.to_string()
+    }
+
+    fn parsed(frame: &str) -> LobbyClientMessage {
+        match crate::protocol::parse_lobby_client_message(frame) {
+            crate::protocol::ParsedFrame::Message(msg) => *msg,
+            other => panic!("expected a parsed message, got {other:?}"),
+        }
+    }
+
+    /// A Custom config under `Enabled { threshold, Standard }`.
+    fn custom_command_zone(
+        commander_damage_threshold: Option<u8>,
+    ) -> engine::types::format::FormatConfig {
+        use engine::types::custom_format::{
+            old_school_93_94, CommandZoneMode, CommanderEligibilityRule,
+        };
+        let mut rules = old_school_93_94().rules;
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold,
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        };
+        engine::types::format::FormatConfig::for_custom_rules(&rules)
+    }
+
+    fn legacy_threshold(config: &mut serde_json::Value) {
+        config["commander_damage_threshold"] = 21.into();
+    }
+
+    fn peer_format_config(out: &[Outbound]) -> engine::types::format::FormatConfig {
+        match out {
+            [Outbound::ToSelf(LobbyServerMessage::PeerInfo {
+                format_config: Some(config),
+                ..
+            })] => config.clone(),
+            other => panic!("expected PeerInfo with a format config, got {other:?}"),
+        }
+    }
+
+    /// CR 903.12h: a pre-change client's Brawl config carries CR 704.6c's 21. The
+    /// lobby keeps what that client's engine wrote, through a snapshot restore, and
+    /// relays it to the same build.
+    #[test]
+    fn legacy_client_registers_a_relayed_brawl_room() {
+        use engine::types::format::FormatConfig;
+        type Row = (FormatConfig, fn(&mut serde_json::Value), fn(&FormatConfig));
+        let rows: [Row; 4] = [
+            (FormatConfig::brawl(), legacy_threshold, |relayed| {
+                assert_eq!(relayed.commander_damage_threshold, Some(21));
+            }),
+            (
+                FormatConfig::historic_brawl(),
+                legacy_threshold,
+                |relayed| {
+                    assert_eq!(relayed.commander_damage_threshold, Some(21));
+                },
+            ),
+            (
+                custom_command_zone(None),
+                |config| config["uses_commander"] = false.into(),
+                |relayed| assert!(!relayed.uses_commander),
+            ),
+            (
+                FormatConfig::brawl(),
+                |_| {},
+                |relayed| {
+                    assert_eq!(relayed.commander_damage_threshold, None);
+                },
+            ),
+        ];
+        for (config, edit, check) in rows {
+            let format = config.format;
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut host = ConnState::default();
+            hello_declaring(
+                &mut host,
+                &mut broker,
+                &env,
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1),
+            );
+            let out = broker.handle(&mut host, parsed(&create_frame(config, edit)), &env);
+            let code = game_code_of(&out);
+
+            let snapshot = serde_json::to_string(&broker).unwrap();
+            let mut broker: Broker = serde_json::from_str(&snapshot).expect("snapshot restores");
+            assert_eq!(snapshot_codes(&mut broker, &env, "abc"), vec![code.clone()]);
+
+            let mut guest = ConnState::default();
+            hello(&mut guest, &mut broker, &env);
+            let relayed = peer_format_config(&join(&mut guest, &mut broker, &env, &code));
+            assert_eq!(relayed.format, format);
+            check(&relayed);
+        }
+    }
+
+    /// The relaxed decode admits only what an earlier engine could have written.
+    #[test]
+    fn lobby_decode_still_refuses_configs_no_engine_wrote() {
+        let zero = create_frame(engine::types::format::FormatConfig::brawl(), |config| {
+            config["commander_damage_threshold"] = 0.into();
+        });
+        let forged = create_frame(custom_command_zone(Some(21)), |config| {
+            config["uses_commander"] = false.into();
+        });
+        for frame in [zero, forged] {
+            assert!(
+                matches!(
+                    crate::protocol::parse_lobby_client_message(&frame),
+                    crate::protocol::ParsedFrame::Malformed(_)
+                ),
+                "{frame}"
+            );
+        }
+        parsed(&create_frame(custom_command_zone(Some(21)), |_| {}));
+    }
+
+    /// A client declaring the current lobby version sends only what today's
+    /// validator admits; earlier or undeclared versions keep the relay.
+    #[test]
+    fn current_client_legacy_brawl_room_is_refused() {
+        use engine::types::format::FormatConfig;
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let frame = create_frame(config.clone(), legacy_threshold);
+
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut host = ConnState::default();
+            hello_declaring(
+                &mut host,
+                &mut broker,
+                &env,
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES),
+            );
+            let out = broker.handle(&mut host, parsed(&frame), &env);
+            let (message, _) = only_error(&out);
+            assert!(message.contains("commander_damage_threshold"), "{message}");
+            assert!(broker.lobby.public_games().is_empty());
+            assert!(host.host_game.is_none());
+
+            let current = create_frame(config, |_| {});
+            game_code_of(&broker.handle(&mut host, parsed(&current), &env));
+
+            for declared in [
+                Some(MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1),
+                None,
+            ] {
+                let mut broker = Broker::new();
+                let mut host = ConnState::default();
+                hello_declaring(&mut host, &mut broker, &env, declared);
+                game_code_of(&broker.handle(&mut host, parsed(&frame), &env));
+            }
+        }
+    }
+
     #[test]
     fn re_registration_emits_removed_before_added() {
         let env = FakeEnv::new();
@@ -3474,6 +3737,49 @@ mod tests {
         assert_eq!(
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 7 })]
+        );
+    }
+
+    #[test]
+    fn stateless_reply_answers_an_unhosted_ping_and_nothing_else() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        // A connection that hosts no listing is answered without the broker.
+        let guest = ConnState::default();
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::Ping { timestamp: 9 }),
+            Some(LobbyServerMessage::Pong { timestamp: 9 })
+        );
+        // The reply is the one `handle` produces for the same frame.
+        let mut guest_conn = ConnState::default();
+        assert_eq!(
+            broker.handle(
+                &mut guest_conn,
+                LobbyClientMessage::Ping { timestamp: 9 },
+                &env
+            ),
+            [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 9 })]
+        );
+
+        // A hosting connection's Ping must reach `handle` to refresh liveness.
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        create(&mut host, &mut broker, &env);
+        assert!(host.host_game.is_some());
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::Ping { timestamp: 9 }),
+            None
+        );
+
+        // Any other frame needs the broker, hosting or not.
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::SubscribeLobby),
+            None
+        );
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::SubscribeLobby),
+            None
         );
     }
 

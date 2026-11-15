@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ResolvedTokenCreationCommand gains entry_choices (entrant as-enters answers, CR 614.12a); an old peer parses but silently drops a non-empty latch, and a replayed copy of a payment creature with no latch is 0/0 and dies to CR 704.5f"
+}

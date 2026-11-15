@@ -11,11 +11,12 @@ import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multipla
 import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { ManualManaToggle } from "../board/ManualManaToggle.tsx";
+import { SandboxLifeCorrection } from "../board/SandboxLifeCorrection.tsx";
 import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, PoisonCounterBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
@@ -109,7 +110,7 @@ export function PlayerHud() {
               />
             ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
@@ -149,6 +150,7 @@ export function PlayerHud() {
           (chip gap, short-chip gutter) tappable through to fanned hand cards. */}
       <div className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto">
         <ManualManaToggle />
+        <SandboxLifeCorrection />
         <UndoButton />
       </div>
     </div>

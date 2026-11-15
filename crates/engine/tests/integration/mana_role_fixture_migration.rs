@@ -8,11 +8,13 @@
 //! `TargetFilter`, so regeneration from the parser, which knows the role by
 //! construction, is the correct migration.
 //!
-//! Carpet of Flowers currently fails closed on its unparsed intervening-if.
-//! Preserve that explicit gap alongside the nonempty positive role canaries.
+//! Carpet of Flowers carries its CR 603.4 "added mana with this ability" guard
+//! and the count-source role its "target opponent" fills.
 
-use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
-use engine::types::ability::{AbilityDefinition, Effect, ManaTargetRole};
+use engine::types::ability::{
+    AbilityDefinition, ControllerRef, Effect, ManaTargetRole, TargetFilter, TriggerCondition,
+    TypedFilter,
+};
 
 use crate::support::shared_card_db;
 
@@ -90,31 +92,52 @@ fn jeskas_will_stays_a_count_source_and_belbe_stays_a_recipient() {
     );
 }
 
+/// Every `Effect::Unimplemented` in a definition's resolution chain.
+fn unimplemented_effects_in(def: &AbilityDefinition) -> usize {
+    let own = usize::from(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+    let chained: usize = def
+        .sub_ability
+        .as_deref()
+        .into_iter()
+        .chain(def.else_ability.as_deref())
+        .map(unimplemented_effects_in)
+        .sum();
+    own + chained
+}
+
 #[test]
-fn carpet_of_flowers_unparsed_intervening_if_stays_explicitly_unsupported() {
+fn carpet_of_flowers_fixture_carries_its_guard_and_count_source_role() {
     let Some(db) = shared_card_db() else {
         eprintln!("card fixture unavailable; skipping");
         return;
     };
+    // Reach guard: Carpet's face is present in the fixture.
     let face = db
         .get_face_by_name("Carpet of Flowers")
         .expect("Carpet of Flowers must be present in the fixture");
     assert_eq!(face.triggers.len(), 1);
-    let execute = face.triggers[0]
+    let trigger = &face.triggers[0];
+    // CR 603.4 + CR 607.1c: the intervening-if gates both triggering and
+    // resolution, and is about this ability's own history.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::AddedManaWithThisAbilityThisTurn),
+        })
+    );
+    let execute = trigger
         .execute
         .as_deref()
-        .expect("Carpet's trigger must retain its explicit execution gap");
-    let Effect::Unimplemented { name, description } = execute.effect.as_ref() else {
-        panic!(
-            "Carpet must retain its conditional gap: {:?}",
-            execute.effect
-        );
-    };
-    // CR 603.4: the intervening-if must gate both triggering and resolution.
-    assert_eq!(name, ClauseGapKind::Condition.unimplemented_name());
-    let description = description
-        .as_deref()
-        .expect("Carpet's conditional gap must retain its actual intervening-if guard");
-    assert!(description.starts_with("if you haven't added mana with this ability this turn,"));
-    assert!(roles_for("Carpet of Flowers").is_empty());
+        .expect("Carpet's trigger must carry its mana effect");
+    assert_eq!(unimplemented_effects_in(execute), 0);
+    // CR 115.1d + CR 106.4: "target opponent" is read by the count; the mana
+    // goes to Carpet's controller.
+    assert_eq!(
+        roles_for("Carpet of Flowers"),
+        vec![ManaTargetRole::CountSource {
+            count_source: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ),
+        }]
+    );
 }

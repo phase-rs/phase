@@ -74,6 +74,7 @@ fn repeated_choice_def(distinctness: PlayerChoiceDistinctness) -> AbilityDefinit
             },
             persist: false,
             selection: TargetSelectionMode::Chosen,
+            chooser: engine::types::ability::ControllerRef::You,
         },
     );
     def.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
