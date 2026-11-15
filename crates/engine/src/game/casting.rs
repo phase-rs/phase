@@ -13028,17 +13028,27 @@ pub(super) fn reserved_payment_state(
         let Some(obj) = scratch.objects.get_mut(&id) else {
             continue;
         };
-        let bar = StaticDefinition::new(StaticMode::CantPayCost {
-            who: crate::types::statics::ProhibitionScope::AllPlayers,
-            cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
-                filter: TargetFilter::SelfRef,
-            },
-        });
-        obj.static_definitions.push(bar.clone());
-        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(bar);
         if reserved_use == ReservedUse::Untapped {
             obj.tapped = true;
         }
+        // CR 613.1f + CR 613.7: the bar is granted in layer 6 with the newest
+        // timestamp, so an earlier ability-removing effect (Humility) can't
+        // strip it while a later grant's self-sacrifice mana ability survives.
+        scratch.add_transient_continuous_effect(
+            id,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::CantPayCost {
+                    who: crate::types::statics::ProhibitionScope::AllPlayers,
+                    cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
+                        filter: TargetFilter::SelfRef,
+                    },
+                })),
+            }],
+            None,
+        );
     }
     if !reserved.objects.is_empty() {
         scratch.layers_dirty.mark_full();
@@ -13062,11 +13072,6 @@ pub(super) fn reserved_mana_payable(
 /// CR 601.2g-h: one assignment of the reservation search: whether `cost` can be
 /// paid by the castability authority (Auto, else the manual route) with
 /// `reserved` held. With objects held, a paused Auto preview isn't counted.
-///
-/// Found, not fixed (fenced): an ability-removal effect can remove a held
-/// object's injected prohibition while a later-timestamped grant leaves it a
-/// self-sacrifice mana ability (Humility, then Rain of Filth). The scratch then
-/// can't hold that object apart, so the assignment isn't counted.
 pub(super) fn reserved_assignment_payable(
     state: &GameState,
     player: PlayerId,
@@ -13075,27 +13080,17 @@ pub(super) fn reserved_assignment_payable(
     reserved: &PaymentReservation<'_>,
 ) -> bool {
     let scratch = reserved_payment_state(state, player, reserved);
-    let probe_state = scratch.as_ref().unwrap_or(state);
-    let unheld = reserved.objects.iter().any(|&(id, _)| {
-        !super::static_abilities::player_cant_sacrifice_as_cost(probe_state, player, id)
-            && super::mana_sources::object_has_activatable_self_sacrifice_mana(
-                probe_state,
-                player,
-                id,
-            )
-    });
-    !unheld
-        && can_feasibly_pay_mana_cost_with_options(
-            probe_state,
-            player,
-            Some(object_id),
-            cost,
-            if reserved.objects.is_empty() {
-                PausedManaPayment::Resumable
-            } else {
-                PausedManaPayment::Unresumable
-            },
-        )
+    can_feasibly_pay_mana_cost_with_options(
+        scratch.as_ref().unwrap_or(state),
+        player,
+        Some(object_id),
+        cost,
+        if reserved.objects.is_empty() {
+            PausedManaPayment::Resumable
+        } else {
+            PausedManaPayment::Unresumable
+        },
+    )
 }
 
 /// CR 601.2f + CR 118.9d: how a mana base is priced. `variant` and

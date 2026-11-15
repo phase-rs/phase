@@ -1717,9 +1717,9 @@ pub enum ReservationVerdict {
     /// The probe budget ran out first. Offered, as base offered it; the real
     /// payment decides (Found, not fixed).
     Exhausted,
-    /// A mana ability the payer controls consumes another object, which the
-    /// capacity estimate can't hold apart. Offered; the real payment decides
-    /// (Found, not fixed).
+    /// A mana ability the payer can activate now consumes another object, which
+    /// the capacity estimate can't hold apart. Offered; the real payment
+    /// decides (Found, not fixed).
     ConsumerFuelled,
 }
 
@@ -1745,7 +1745,7 @@ fn reserved_alternative_verdict(
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
     let reach = super::mana_sources::player_mana_ability_reach(state, player);
-    if reach.other_objects == super::mana_sources::OtherObjectUse::Consumes {
+    if super::mana_sources::player_has_activatable_consuming_mana_ability(state, player) {
         return ReservationVerdict::ConsumerFuelled;
     }
     let totals = super::casting::cast_mana_totals(

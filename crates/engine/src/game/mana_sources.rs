@@ -1450,14 +1450,7 @@ pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> 
             ability.kind == AbilityKind::Activated && mana_abilities::is_mana_ability(ability)
         });
     for ability in abilities {
-        let consumes = cost_has_component(&ability.cost, |c| match c {
-            AbilityCost::Sacrifice(cost) => cost.target != TargetFilter::SelfRef,
-            AbilityCost::Exile { filter, .. } | AbilityCost::ReturnToHand { filter, .. } => {
-                !matches!(filter, Some(TargetFilter::SelfRef))
-            }
-            _ => false,
-        });
-        let other_objects = if consumes {
+        let other_objects = if cost_consumes_other_object(&ability.cost) {
             OtherObjectUse::Consumes
         } else if cost_has_component(&ability.cost, |c| {
             matches!(c, AbilityCost::TapCreatures { .. })
@@ -1477,22 +1470,36 @@ pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> 
     }
     reach
 }
-/// CR 605.3a + CR 701.21a: whether `object_id` has a mana ability `player` can
-/// activate now that pays by sacrificing that object itself (Gold; a granted
-/// "Sacrifice this land: Add {B}.").
-pub(crate) fn object_has_activatable_self_sacrifice_mana(
+
+/// CR 118.3: whether paying this cost sacrifices, exiles or returns an object
+/// other than the ability's source.
+fn cost_consumes_other_object(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| match c {
+        AbilityCost::Sacrifice(cost) => cost.target != TargetFilter::SelfRef,
+        AbilityCost::Exile { filter, .. } | AbilityCost::ReturnToHand { filter, .. } => {
+            !matches!(filter, Some(TargetFilter::SelfRef))
+        }
+        _ => false,
+    })
+}
+
+/// CR 605.3a + CR 118.3: whether `player` can activate a mana ability now whose
+/// cost consumes another object (Ashnod's Altar; an untapped Priest of
+/// Yawgmoth). A tapped Priest's {T} can't be paid, so it isn't counted.
+pub(crate) fn player_has_activatable_consuming_mana_ability(
     state: &GameState,
     player: PlayerId,
-    object_id: ObjectId,
 ) -> bool {
-    let Some(object) = state.objects.get(&object_id) else {
-        return false;
-    };
     activatable_mana_source_selections(state, player)
         .iter()
-        .filter(|selection| selection.source.object_id == object_id)
-        .filter_map(|selection| object.abilities.get(selection.ability_index?))
-        .any(|ability| has_unambiguous_self_sacrifice_component(&ability.cost))
+        .any(|selection| {
+            state
+                .objects
+                .get(&selection.source.object_id)
+                .zip(selection.ability_index)
+                .and_then(|(object, index)| object.abilities.get(index))
+                .is_some_and(|ability| cost_consumes_other_object(&ability.cost))
+        })
 }
 
 /// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.

@@ -2078,9 +2078,23 @@ fn composite_alternative_affordable_only_with_a_defiler_completes() {
     assert_eq!(pool(&runner), 0);
 }
 
+/// Whether P0 also controls a tapped Priest of Yawgmoth, a consuming mana
+/// ability that can't activate now (it attacked last combat).
+#[derive(Clone, Copy)]
+enum SparePriest {
+    Absent,
+    Tapped,
+}
+
+const PRIEST_OF_YAWGMOTH: &str =
+    "{T}, Sacrifice an artifact: Add an amount of {B} equal to the sacrificed artifact's mana value.";
+
 /// Zahid with Defiler of Dreams, Sol Ring ("{T}: Add {C}{C}.") and a Plains,
 /// an empty pool and, when `spare` is set, an untapped Ornithopter.
-fn zahid_with_sol_ring(spare: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+fn zahid_with_sol_ring(
+    spare: bool,
+    priest: SparePriest,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
     add_defiler_of_dreams(&mut scenario);
@@ -2094,54 +2108,90 @@ fn zahid_with_sol_ring(spare: bool) -> (GameRunner, ObjectId, ObjectId, Option<O
             .as_artifact_creature()
             .id()
     });
+    let priest = match priest {
+        SparePriest::Absent => None,
+        SparePriest::Tapped => Some(
+            scenario
+                .add_creature_from_oracle(P0, "Priest of Yawgmoth", 1, 2, PRIEST_OF_YAWGMOTH)
+                .id(),
+        ),
+    };
     let zahid = scenario
         .add_creature_to_hand_from_oracle(P0, "Zahid, Djinn of the Lamp", 5, 6, ZAHID)
         .with_mana_cost(cost(4, &[ManaCostShard::Blue, ManaCostShard::Blue]))
         .with_color(vec![ManaColor::Blue])
         .id();
-    (scenario.build(), zahid, ring, ornithopter)
+    let mut runner = scenario.build();
+    if let Some(priest) = priest {
+        runner.state_mut().objects.get_mut(&priest).unwrap().tapped = true;
+        let consumes_another = runner.state().objects[&priest].abilities.iter().any(|a| {
+            matches!(&a.cost, Some(engine::types::ability::AbilityCost::Composite { costs })
+                if costs.iter().any(|c| matches!(c,
+                    engine::types::ability::AbilityCost::Sacrifice(s) if s.target != TargetFilter::SelfRef)))
+        });
+        assert!(
+            consumes_another,
+            "reach: the Priest sacrifices another artifact for mana"
+        );
+        let selections =
+            engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0);
+        assert!(
+            selections.iter().all(|s| s.source.object_id != priest),
+            "reach: the tapped Priest can't activate"
+        );
+    }
+    (runner, zahid, ring, ornithopter)
 }
 
 /// CR 118.3 + CR 601.2h: Zahid's {3} (with the Defiler) needs Sol Ring's mana,
-/// and its tap leg needs an untapped artifact; the Ring can't pay both.
+/// and its tap leg needs an untapped artifact; the Ring can't pay both. A
+/// tapped Priest of Yawgmoth can't make mana, so it doesn't change that.
 #[test]
 fn composite_alternative_cant_tap_its_mana_artifact_twice() {
-    let (mut runner, zahid, ring, _) = zahid_with_sol_ring(false);
-    assert!(!offered(&runner, zahid), "the cast is not a legal action");
+    for priest in [SparePriest::Absent, SparePriest::Tapped] {
+        let (mut runner, zahid, ring, _) = zahid_with_sol_ring(false, priest);
+        assert_eq!(
+            engine::game::oracle_alternative_reservation_verdict(runner.state(), P0, zahid),
+            Some(engine::game::ReservationVerdict::Rejected)
+        );
+        assert!(!offered(&runner, zahid), "the cast is not a legal action");
 
-    let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+        let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
 
-    assert!(trail.refused, "the cast is refused: {:?}", trail.prompts);
-    assert_eq!(zone(&runner, zahid), Zone::Hand);
-    assert!(!runner.state().objects[&ring].tapped);
-    assert_eq!(life(&runner), 20);
+        assert!(trail.refused, "the cast is refused: {:?}", trail.prompts);
+        assert_eq!(zone(&runner, zahid), Zone::Hand);
+        assert!(!runner.state().objects[&ring].tapped);
+        assert_eq!(life(&runner), 20);
+    }
 }
 
 /// Control: with a spare Ornithopter for the tap leg, the Ring and the Plains
 /// pay the {3}.
 #[test]
 fn composite_alternative_taps_a_spare_artifact() {
-    let (mut runner, zahid, ring, ornithopter) = zahid_with_sol_ring(true);
-    let ornithopter = ornithopter.unwrap();
-    assert!(offered(&runner, zahid), "the cast is a legal action");
+    for priest in [SparePriest::Absent, SparePriest::Tapped] {
+        let (mut runner, zahid, ring, ornithopter) = zahid_with_sol_ring(true, priest);
+        let ornithopter = ornithopter.unwrap();
+        assert!(offered(&runner, zahid), "the cast is a legal action");
 
-    let trail = cast(
-        &mut runner,
-        zahid,
-        &Answers {
-            picks: vec![ornithopter],
-            ..ACCEPT_BOTH
-        },
-    );
+        let trail = cast(
+            &mut runner,
+            zahid,
+            &Answers {
+                picks: vec![ornithopter],
+                ..ACCEPT_BOTH
+            },
+        );
 
-    assert_cast_completes(&runner, zahid, &trail);
-    assert_eq!(
-        trail.prompts,
-        ["DefilerPayment", "OptionalCostChoice", "PayCost"]
-    );
-    assert!(runner.state().objects[&ornithopter].tapped);
-    assert!(runner.state().objects[&ring].tapped);
-    assert_eq!(life(&runner), 18);
+        assert_cast_completes(&runner, zahid, &trail);
+        assert_eq!(
+            trail.prompts,
+            ["DefilerPayment", "OptionalCostChoice", "PayCost"]
+        );
+        assert!(runner.state().objects[&ornithopter].tapped);
+        assert!(runner.state().objects[&ring].tapped);
+        assert_eq!(life(&runner), 18);
+    }
 }
 
 const TRINISPHERE: &str = "As long as this artifact is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)";
@@ -3250,20 +3300,26 @@ fn humility_on_the_tapped_artifact_keeps_the_alternative() {
 /// A Food token enchanted by Ensoul Artifact and made black by Darkest Hour, two
 /// black Walking Corpses, then Humility, then Ninja Pizza ("Foods you control
 /// have '{T}, Sacrifice this artifact: Add one mana of any color.'", a later
-/// timestamp), with Demon of Death's Gate under Trinisphere and {2}: the Food
-/// can't both be the third sacrifice and make the third mana, and Humility
-/// removed the prohibition that would hold it, so the fence refuses.
-/// Control: no Ninja Pizza, {3}.
+/// timestamp), and Demon of Death's Gate. `trinisphere` is `None` for no floor
+/// and an empty pool, else `Some(n)`: Trinisphere and `n` floating {C}.
+///
+/// CR 118.3c + CR 601.2g: Pizza's mana ability is never needed with no floor or
+/// with {3} floating, so the Food is sacrificed for the leg and the cast
+/// completes; with {2} the Food can't both be the third sacrifice and make the
+/// third mana, so the alternative is refused. The reservation holds the Food
+/// although Humility removed its own statics (CR 613.7).
 #[test]
-fn granted_self_sacrifice_surviving_humility_is_fenced() {
-    for pizza in [true, false] {
+fn granted_self_sacrifice_surviving_humility_is_held_by_the_reservation() {
+    for trinisphere in [None, Some(3), Some(2)] {
         let mut scenario = board();
-        add_trinisphere(&mut scenario);
+        if trinisphere.is_some() {
+            add_trinisphere(&mut scenario);
+        }
         let food = scenario
             .add_artifact_from_oracle(
                 P0,
                 "Food",
-                "{2}, {T}, Sacrifice this artifact: You gain 3 life.",
+                "{2}, {T}, Sacrifice this token: You gain 3 life.",
             )
             .with_subtypes(vec!["Food"])
             .id();
@@ -3274,15 +3330,13 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
         let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
         scenario.add_enchantment_from_oracle(P0, "Darkest Hour", "All creatures are black.");
         scenario.add_enchantment_from_oracle(P1, "Humility", HUMILITY);
-        if pizza {
-            scenario.add_enchantment_from_oracle(
-                P0,
-                "Ninja Pizza",
-                "Foods you control have \"{T}, Sacrifice this artifact: Add one mana of any color.\"",
-            );
-        }
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Ninja Pizza",
+            "Foods you control have \"{T}, Sacrifice this artifact: Add one mana of any color.\"",
+        );
         let demon = add_demon(&mut scenario);
-        let floating = if pizza { 2 } else { 3 };
+        let floating = trinisphere.unwrap_or(0);
         scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, floating)]));
         let mut runner = scenario.build();
         // CR 111.10b: a Food token, controlled since the previous turn.
@@ -3310,20 +3364,16 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
         );
         assert!(
             food_obj.static_definitions.iter_all().next().is_none(),
-            "reach: Humility removes statics, an injected prohibition included"
+            "reach: Humility removes the Food's own statics"
         );
         let food_mana =
             engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
                 .into_iter()
                 .filter(|s| s.source.object_id == food)
                 .count();
-        assert_eq!(
-            food_mana,
-            usize::from(pizza),
-            "reach: only Pizza's grant makes mana"
-        );
+        assert_eq!(food_mana, 1, "reach: Pizza's grant makes mana");
 
-        if pizza {
+        if trinisphere == Some(2) {
             assert!(
                 engine::game::alternative_mana_payable_with_nothing_held(
                     runner.state(),
@@ -3333,15 +3383,46 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
                 ),
                 "reach: the floored {{3}} is payable with nothing held"
             );
+            // The reservation's prohibition lives only on the probe's scratch.
+            let real = runner.state().clone();
+            let objects = serde_json::to_value(&real.objects).unwrap();
+            let unchanged = |state: &engine::types::game_state::GameState| {
+                state.transient_continuous_effects == real.transient_continuous_effects
+                    && state.next_timestamp == real.next_timestamp
+                    && state.next_continuous_effect_id == real.next_continuous_effect_id
+                    && state.next_end_effect_group_id == real.next_end_effect_group_id
+                    && state.layers_dirty == real.layers_dirty
+                    && state.resolved_rules_journal == real.resolved_rules_journal
+                    && serde_json::to_value(&state.objects).unwrap() == objects
+            };
+            assert!(!offered(&runner, demon));
+            assert!(
+                unchanged(runner.state()),
+                "offer probe left the state unchanged"
+            );
             assert_eq!(
                 verdict(&runner, demon),
                 engine::game::ReservationVerdict::Rejected
             );
-            assert!(!offered(&runner, demon));
+            assert!(
+                unchanged(runner.state()),
+                "verdict left the state unchanged"
+            );
+            assert!(
+                !runner.state().transient_continuous_effects.iter().any(|tce| {
+                    tce.modifications.iter().any(|m| {
+                        matches!(m,
+                            engine::types::ability::ContinuousModification::GrantStaticAbility { definition }
+                                if matches!(definition.mode, engine::types::statics::StaticMode::CantPayCost { .. }))
+                    })
+                }),
+                "no reservation grant reached the real state"
+            );
             let trail = cast(&mut runner, demon, &ACCEPT_BOTH);
             assert!(trail.refused, "{:?}", trail.prompts);
             assert_eq!((zone(&runner, demon), life(&runner)), (Zone::Hand, 20));
         } else {
+            assert!(offered(&runner, demon), "the alternative cast is offered");
             let trail = cast(
                 &mut runner,
                 demon,
