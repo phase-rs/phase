@@ -2822,6 +2822,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             }
             acc
         }
+        // CR 707.13: a copy created from a name reads no object in the game; only
+        // its count is scanned.
+        Effect::CreateCardCopyByName { name: _, count } => {
+            Axes::CONSERVATIVE.or(scan_quantity_expr(count, mode))
+        }
         Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -3063,7 +3068,10 @@ fn scan_choice_type(choice: &ChoiceType, mode: ScanMode) -> Axes<'_> {
         | ChoiceType::OddOrEven
         | ChoiceType::BasicLandType
         | ChoiceType::CardType { options: _ }
-        | ChoiceType::CardName
+        | ChoiceType::CardName {
+            options: _,
+            distinctness: _,
+        }
         | ChoiceType::NumberRange { .. }
         | ChoiceType::Labeled { options: _ }
         | ChoiceType::LandType
@@ -7177,6 +7185,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -9473,6 +9482,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -9682,6 +9692,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile

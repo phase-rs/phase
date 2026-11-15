@@ -47,7 +47,7 @@ use crate::types::statics::{
     ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, PermissionCastLimit,
     ProhibitionScope, StaticMode, StaticModeKind,
 };
-use crate::types::zones::{ExileCostSourceZone, Zone};
+use crate::types::zones::{CastProvenance, ExileCostSourceZone, Zone};
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -2793,6 +2793,26 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 601.2a + CR 707.13 + CR 400.11: the single authority for WHERE a spell is cast
+/// from as a typed [`CastProvenance`] — a zone, or outside the game. A copy created
+/// outside the game (Garth One-Eye) is staged in a zone, but "outside the game is not
+/// a zone", so it is cast from no zone: it is `OutsideGame`, never `Zone(staging)`.
+/// `None` means the spell is unknown to the game state, which satisfies no zone-gated
+/// restriction in either polarity. Mana-spend metadata ([`build_spell_meta`]) reads
+/// its origin only through here; the filter/trigger paths read the same fact from
+/// `GameObject::created_outside_game` via `SpellCastRecord::from_outside_game`.
+pub(crate) fn spell_cast_provenance(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<CastProvenance> {
+    let obj = state.objects.get(&object_id)?;
+    Some(if obj.created_outside_game {
+        CastProvenance::OutsideGame
+    } else {
+        CastProvenance::Zone(spell_cast_origin_zone(state, obj))
+    })
+}
+
 /// CR 118.9a + CR 601.2b: a spell may elect its printed alternative cost only
 /// when the exact exile authority elected for this cast leaves its mana cost
 /// available. A plain impulse grant supplies zone permission (CR 601.3) without
@@ -3624,7 +3644,7 @@ pub(super) fn build_spell_meta(
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
-        cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
+        cast_origin: spell_cast_provenance(state, object_id),
         // CR 202.3d + CR 702.102b: a FUSED split spell's mana value / color count
         // are the COMBINED values of both halves; a non-fused split cast and every
         // single-face spell use the object's own (chosen-half) cost. `spell_*` key

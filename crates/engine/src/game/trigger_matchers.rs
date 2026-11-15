@@ -1212,6 +1212,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
@@ -2091,13 +2092,14 @@ pub(super) fn match_spell_cast(
                 // spuriously.
                 return false;
             };
-            let ok = match constraint {
-                OriginConstraint::Any => unreachable!(),
-                OriginConstraint::Equals(z) => *z == origin,
-                OriginConstraint::NotEquals(z) => *z != origin,
-                OriginConstraint::OneOf(zs) => zs.contains(&origin),
-            };
-            if !ok {
+            // CR 601.2a + CR 707.13 + CR 400.11: a copy created outside the game
+            // is cast from no zone — the stamped `origin` is only its staging zone.
+            let origin = state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| !object.created_outside_game)
+                .then_some(origin);
+            if !constraint.matches_cast_origin(origin) {
                 return false;
             }
         }
