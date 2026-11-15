@@ -50,7 +50,7 @@ pub fn resolve(
         // follow-up ("turn it face up") both read `last_revealed_ids`. Record
         // the revealed objects so the sub-ability's `RevealedHasCardType`
         // condition and `it` pronoun resolve to the just-revealed permanent.
-        state.last_revealed_ids = object_ids.clone();
+        super::record_revealed_result(state, object_ids.clone());
 
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
