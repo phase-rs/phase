@@ -7,7 +7,6 @@ use engine::game::combat;
 use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
-use engine::game::game_object::GameObject;
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
@@ -228,10 +227,7 @@ fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) 
         return false;
     }
 
-    if beneficial_creature_effects
-        .iter()
-        .any(|effect| has_friendly_creature_recipient(ctx, Some(effect)))
-    {
+    if ai_controls_a_creature(ctx) {
         return false;
     }
 
@@ -451,14 +447,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         return legend_penalty + etb_whiff_penalty + copy_whiff_penalty;
     }
 
-    // An Aura carries no effect, so it is judged without a filter.
-    let has_own_creature = if beneficial_creature_effects.is_empty() {
-        has_friendly_creature_recipient(ctx, None)
-    } else {
-        beneficial_creature_effects
-            .iter()
-            .any(|effect| has_friendly_creature_recipient(ctx, Some(effect)))
-    };
+    let has_own_creature = ai_controls_a_creature(ctx);
     // Targeting legality (CR 702.11/702.16/702.18) is owned by the engine.
     // Ask `find_legal_targets` with the spell's own creature-only harmful
     // filter so Shroud, Hexproof-vs-opponents, "Hexproof from [quality]",
@@ -1221,67 +1210,30 @@ fn filter_reaches_only_own_permanents(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    let admitted = battlefield_objects_admitted(ctx.state, filter, filter_ctx);
-    !admitted.is_empty()
-        && admitted
-            .iter()
-            .all(|object| !players::is_opponent(ctx.state, ctx.ai_player, object.controller))
-}
-
-/// The battlefield objects `filter` admits.
-fn battlefield_objects_admitted<'s>(
-    state: &'s GameState,
-    filter: &TargetFilter,
-    filter_ctx: &FilterContext<'_>,
-) -> Vec<&'s GameObject> {
-    state
-        .battlefield
-        .iter()
-        .filter(|&&id| matches_target_filter(state, id, filter, filter_ctx))
-        .filter_map(|id| state.objects.get(id))
-        .collect()
-}
-
-/// Whether `filter` settles whose objects it admits from its source alone, with no target chosen.
-fn filter_settles_controller_from_source(filter: &TargetFilter) -> bool {
-    use engine::types::ability::ControllerRef;
-    match filter {
-        TargetFilter::Typed(typed) => matches!(
-            typed.controller,
-            None | Some(ControllerRef::You | ControllerRef::Opponent)
-        ),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            !filters.is_empty() && filters.iter().all(filter_settles_controller_from_source)
+    let mut reaches_own = false;
+    for &id in ctx.state.battlefield.iter() {
+        let Some(object) = ctx.state.objects.get(&id) else {
+            continue;
+        };
+        if !matches_target_filter(ctx.state, id, filter, filter_ctx) {
+            continue;
         }
-        _ => false,
+        if players::is_opponent(ctx.state, ctx.ai_player, object.controller) {
+            return false;
+        }
+        reaches_own = true;
     }
+    reaches_own
 }
 
-/// Whether a creature on the AI's side can receive `effect`: among those its object filter
-/// admits from the source, or any of them when it has none.
-fn has_friendly_creature_recipient(ctx: &PolicyContext<'_>, effect: Option<&Effect>) -> bool {
-    let friendly_creature = |object: &&GameObject| {
-        !players::is_opponent(ctx.state, ctx.ai_player, object.controller)
-            && object.card_types.core_types.contains(&CoreType::Creature)
-    };
-    let filter = effect
-        .and_then(extract_target_filter)
-        .filter(|filter| filter_settles_controller_from_source(filter));
-    match (filter, ctx.source_object()) {
-        (Some(filter), Some(source)) => battlefield_objects_admitted(
-            ctx.state,
-            filter,
-            &FilterContext::from_source(ctx.state, source.id),
-        )
-        .iter()
-        .any(friendly_creature),
-        _ => ctx
-            .state
-            .battlefield
-            .iter()
-            .filter_map(|id| ctx.state.objects.get(id))
-            .any(|object| friendly_creature(&object)),
-    }
+/// A recipient check asks about the AI's own seat; only harm scoring uses the team.
+fn ai_controls_a_creature(ctx: &PolicyContext<'_>) -> bool {
+    ctx.state.battlefield.iter().any(|&id| {
+        ctx.state.objects.get(&id).is_some_and(|object| {
+            object.controller == ctx.ai_player
+                && object.card_types.core_types.contains(&CoreType::Creature)
+        })
+    })
 }
 
 fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
@@ -1392,8 +1344,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         } else {
             object.controller
         };
-    // "Does this help or harm my side?" is the team relation (CR 102.3); "whom does this reach or
-    // whose does it become?" is the effect's own call: its filter, or the AI seat for gained control.
+    // CR 102.3: help and harm are scored for the AI's team; gained control goes to the AI's own seat.
     let friendly = if gains_control {
         effective_controller == ctx.ai_player
     } else {
@@ -3551,11 +3502,10 @@ mod tests {
         })
     }
 
-    /// CR 109.5: Silverflame Ritual's "each creature you control" never reaches the teammate's
-    /// creature, so with none of its own the AI is refused the cast; "target creature" (Giant
-    /// Growth) can reach the teammate's (CR 102.3), so that cast is not.
+    /// A creature-benefit spell needs a creature of the AI's own: with only the teammate's Grizzly
+    /// Bears, Silverflame Ritual and Giant Growth are refused; with its own, Silverflame is not.
     #[test]
-    fn a_beneficial_spell_reaches_only_the_recipients_its_filter_admits() {
+    fn a_beneficial_creature_spell_needs_a_creature_of_the_ais_own() {
         let reason = |verdict: PolicyVerdict| match verdict {
             PolicyVerdict::Reject { reason } => Some(reason.kind),
             PolicyVerdict::Score { .. } => None,
@@ -3570,36 +3520,104 @@ mod tests {
         );
         assert_eq!(
             reason(two_headed_giant_cast_verdict("Giant Growth", false)),
-            None
+            Some("anti_self_harm_beneficial_creature_spell_no_friendly_recipient")
         );
     }
 
-    /// Zombify's target is a creature card in the graveyard, not a creature on the
-    /// battlefield, so its filter admitting no battlefield creature, even beside P0's own
-    /// Grizzly Bears, does not refuse the cast.
+    /// Zombify's target is a creature card in the graveyard, not a creature on the battlefield, so
+    /// the cast is not refused, with or without a creature of P0's own on the battlefield.
     #[test]
     fn a_reanimation_spell_is_not_refused_for_want_of_a_battlefield_recipient() {
         for (format, players) in [
             (FormatConfig::standard(), 2),
             (FormatConfig::two_headed_giant(), 4),
         ] {
-            let verdict = cast_verdict(format, players, |scenario| {
-                let db = crate::test_support::shared_integration_card_db();
-                scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
-                scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Graveyard, db);
-                scenario.add_real_card(PlayerId(0), "Zombify", Zone::Hand, db)
-            });
-            assert!(
-                matches!(verdict, PolicyVerdict::Score { .. }),
-                "{players} players: {verdict:?}"
-            );
+            for own_bears in [true, false] {
+                let verdict = cast_verdict(format.clone(), players, |scenario| {
+                    let db = crate::test_support::shared_integration_card_db();
+                    if own_bears {
+                        scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+                    }
+                    scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Graveyard, db);
+                    scenario.add_real_card(PlayerId(0), "Zombify", Zone::Hand, db)
+                });
+                assert!(
+                    matches!(verdict, PolicyVerdict::Score { .. }),
+                    "{players} players, own Bears {own_bears}: {verdict:?}"
+                );
+            }
         }
+    }
+
+    const ANIMATE_LAND: &str =
+        "Until end of turn, target land becomes a 3/3 creature that's still a land.";
+
+    /// Animate Land's recipient is a land, not a creature: beside its own Grizzly Bears, the AI
+    /// casts it at its own Forest, which becomes a 3/3 creature land.
+    #[test]
+    fn a_land_animation_is_cast_at_the_ais_own_land() {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(PlayerId(0), "Grizzly Bears", Zone::Battlefield, db);
+        let forests = [
+            scenario.add_real_card(PlayerId(0), "Forest", Zone::Battlefield, db),
+            scenario.add_real_card(PlayerId(0), "Forest", Zone::Battlefield, db),
+        ];
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Animate Land", true, ANIMATE_LAND)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let candidate = engine::ai_support::candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell)
+            })
+            .expect("the engine offers the cast");
+        let verdict = shared_registry_verdicts_for(runner.state(), &candidate)
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict));
+        assert!(
+            matches!(verdict, Some(PolicyVerdict::Score { .. })),
+            "{verdict:?}"
+        );
+
+        runner.act(candidate.action).unwrap();
+        let config = AiConfig::default();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0);
+        let target = crate::search::choose_action(runner.state(), PlayerId(0), &config, &mut rng)
+            .expect("the AI chooses a target");
+        let GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(forest)),
+        } = target
+        else {
+            panic!("unexpected target choice {target:?}");
+        };
+        assert!(forests.contains(&forest));
+        runner.act(target).unwrap();
+        while !runner.state().stack.is_empty() {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let forest = &runner.state().objects[&forest];
+        assert!(forest.card_types.core_types.contains(&CoreType::Creature));
+        assert!(forest.card_types.core_types.contains(&CoreType::Land));
+        assert_eq!((forest.power, forest.toughness), (Some(3), Some(3)));
     }
 
     const PLEDGE_OF_UNITY: &str = "Put a +1/+1 counter on each creature you control. You gain 1 life for each creature you control.";
 
-    /// CR 109.5: Pledge of Unity's "each creature you control" never reaches the teammate's Grizzly
-    /// Bears, so with none of its own the cast is charged as wasted; with its own it is not.
+    /// Pledge of Unity with only the teammate's Grizzly Bears is charged as a wasted cast; with the
+    /// AI's own Grizzly Bears it is not.
     #[test]
     fn a_you_control_pump_with_only_a_teammates_creature_is_a_wasted_cast() {
         let delta = |own_bears: bool| {
