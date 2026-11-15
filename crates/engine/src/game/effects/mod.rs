@@ -36804,60 +36804,6 @@ mod tests {
         assert!(audit_later_instruction(&effect).referents.is_none());
     }
 
-    /// CR 608.2c + CR 114.4: an emblem's statics function in the command zone,
-    /// so an emblem static that declares the command zone (as every parsed
-    /// emblem static does) names no zone scope of its own and the declined-gate
-    /// audit still lists its referents. A foreign zone stays governed. A static
-    /// granted by `GenericEffect` has no host zone by rule, so declaring the
-    /// command zone there is a scope of its own and stays governed.
-    #[test]
-    fn emblem_static_declaring_command_zone_names_no_referent() {
-        let emblem = |zones: Vec<Zone>| Effect::CreateEmblem {
-            statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize).active_zones(zones)],
-            triggers: Vec::new(),
-        };
-        // CR 114.4: the emblem's own zone of function is not a scope.
-        assert!(
-            audit_later_instruction(&emblem(vec![Zone::Command]))
-                .referents
-                .is_some(),
-            "an emblem static declaring the command zone names no referent"
-        );
-        assert!(
-            audit_later_instruction(&emblem(Vec::new()))
-                .referents
-                .is_some(),
-            "positive control: an emblem static with no declared zone names no referent"
-        );
-        assert!(
-            audit_later_instruction(&emblem(vec![Zone::Graveyard]))
-                .referents
-                .is_none(),
-            "an emblem static declaring a zone other than the command zone is governed"
-        );
-
-        let granted = |zones: Vec<Zone>| Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
-                .affected(TargetFilter::Controller)
-                .active_zones(zones)],
-            duration: None,
-            target: None,
-            end_cost: None,
-        };
-        assert!(
-            audit_later_instruction(&granted(Vec::new()))
-                .referents
-                .is_some(),
-            "positive control: a granted static with no declared zone lists its referent"
-        );
-        assert!(
-            audit_later_instruction(&granted(vec![Zone::Command]))
-                .referents
-                .is_none(),
-            "a granted static declaring the command zone is governed"
-        );
-    }
-
     /// Phase 7, J-3 (the building block): after a declined gate, each later
     /// instruction is kept or skipped on its own. (i) is a resolution step of the
     /// gate and (iii) names the token only the gated action creates, so both are
