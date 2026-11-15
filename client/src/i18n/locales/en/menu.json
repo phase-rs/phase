@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Resume Game",
-      "description": "Continue the last saved match from its current turn and board state."
+      "description": "Continue the last saved match from its current turn and board state.",
+      "viewResult": "View Result"
     },
     "setup": {
       "title": "Play vs AI",

@@ -37,8 +37,9 @@ const THRUMMING_STONE_ORACLE: &str = "Spells you cast have ripple 4. (When you c
 const RAT_COLONY_ORACLE: &str = "Rat Colony gets +1/+0 for each other Rat you control named Rat Colony.\nA deck can have any number of cards named Rat Colony.";
 const AETHERFLUX_RESERVOIR_ORACLE: &str = "Whenever you cast a spell, you gain 1 life for each spell you've cast this turn.\nPay 50 life: This artifact deals 50 damage to any target.";
 
-/// CR 614.1a: a synthetic global Library-destination redirect used to force a
-/// genuine CR 616.1 ordering choice in the terminal Ripple bottom batch.
+/// CR 614.1a: a synthetic global Library-destination redirect installed as a
+/// control — the terminal Ripple bottom batch only reorders cards already in
+/// the library (CR 701.20b), so it must never consult it.
 fn redirect_library_move_to(destination: Zone) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Library)
@@ -280,12 +281,12 @@ fn thrumming_stone_ripple_retriggers_for_each_cast_rat_colony() {
     assert_eq!(runner.state().objects[&rat_c].zone, Zone::Stack);
 }
 
-/// CR 702.60a + CR 603.3b + CR 616.1: a terminal accepted Ripple cast whose
-/// miss bottom batch pauses for competing replacements keeps the typed terminal
-/// completion through the prompt, then puts B/C's exactly-once Ripple triggers
-/// above both spells after the final cast actually completes.
+/// CR 702.60a + CR 603.3b + CR 701.20b: a terminal accepted Ripple cast whose
+/// miss bottom batch is an in-library reorder (no zone change, so competing
+/// Library-destination replacements never prompt) still puts B/C's
+/// exactly-once Ripple triggers above both spells after the final cast completes.
 #[test]
-fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
+fn thrumming_stone_terminal_ripple_bottom_reorder_consults_no_replacement() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     red_pool(&mut scenario, 2);
@@ -361,40 +362,11 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
         .act(GameAction::RippleChoice {
             choice: CastChoice::Cast,
         })
-        .expect("accept terminal C until bottom replacement choice");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    assert!(
-        matches!(
-            runner
-                .state()
-                .active_batch_delivery()
-                .and_then(|batch| batch.completion.as_ref()),
-            Some(engine::types::game_state::BatchCompletion::RippleTerminalComplete {
-                player: P0,
-                source_id: _,
-                final_cast: Some(id),
-            }) if *id == rat_c
-        ),
-        "the terminal batch completion must survive the replacement prompt"
-    );
-    assert!(
-        matches!(
-            runner.state().pending_resolution_completion,
-            Some(engine::types::game_state::PendingResolutionCompletion {
-                player: P0,
-                final_cast: Some(id),
-                ..
-            }) if id == rat_c
-        ),
-        "the terminal marker must survive the replacement prompt until C reaches the stack"
-    );
-
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("resolve terminal bottom replacement");
+        .expect("accept terminal C; the in-library bottom placement does not pause");
+    // CR 701.20b + CR 401.4: the missed cards are already in the library, so
+    // putting them on the bottom is a reorder, not a zone change — the global
+    // Library-destination redirects installed above never get to prompt.
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OrderTriggers { ref triggers, .. } if triggers.len() == 2
@@ -420,7 +392,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
                 .filter(|&&source| source == id)
                 .count(),
             1,
-            "each accepted Ripple cast must contribute exactly one trigger after the pause"
+            "each accepted Ripple cast must contribute exactly one trigger"
         );
         let spell_index = runner
             .state()
@@ -456,7 +428,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
 /// battlefield source, so its exactly-once B/C triggers prove the synthetic
 /// terminal SpellCast collector keys on the event, not `source_id == final_cast`.
 #[test]
-fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
+fn terminal_ripple_collects_distinct_spell_cast_observer() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     red_pool(&mut scenario, 2);
@@ -591,14 +563,11 @@ fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
         .act(GameAction::RippleChoice {
             choice: CastChoice::Cast,
         })
-        .expect("accept terminal C until bottom replacement choice");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("resolve the terminal bottom replacement");
+        .expect("accept terminal C; the in-library bottom placement does not pause");
+    // CR 701.20b + CR 401.4: the missed card is already in the library, so the
+    // bottom placement is a reorder and the Library-destination redirects
+    // installed above never prompt.
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
 
     assert!(matches!(
         runner.state().waiting_for,

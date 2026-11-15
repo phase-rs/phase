@@ -2297,6 +2297,9 @@ mod tests {
                     // CR 202.3d + CR 709.4b: a split card's combined off-stack mana value,
                     // read by deck-construction checks. A cost, not what resolving does.
                     off_stack_mana_value_override: _,
+                    // CR 709.4b: a split card's per-half mana costs, read by
+                    // deck-construction checks. A cost, not what resolving does.
+                    off_stack_mana_costs: _,
                 },
 
             // ---- NOT RULES-BEARING. One reason each, because an unjustified entry here
