@@ -127,7 +127,8 @@ impl GameFileCache {
 
     /// Write one JSON-Lines row per [`GameLogEntry`], stamped with the
     /// wall-clock moment of writing — the entries themselves carry only
-    /// game-time (`turn`/`phase`); `seq` is left at whatever the engine set
+    /// game-time (`turn`/`phase`, and from a match's second game on,
+    /// `game_number`); `seq` is left at whatever the engine set
     /// (currently always `0` here — see `GameLogEntry`'s doc comment, it is
     /// assigned downstream by a UI consumer, not by this write path).
     /// Ordering for this stream comes from write order (callers write while
@@ -276,6 +277,7 @@ mod tests {
             // a UI consumer, not this layer) — using a non-zero value would
             // test a fixture production never produces.
             seq: 0,
+            game_number: 1,
             turn: 1,
             phase: Phase::PreCombatMain,
             category,

@@ -257,6 +257,45 @@ describe("EngineWorkerClient canonical card names", () => {
   });
 });
 
+describe("EngineWorkerClient LLM decisions", () => {
+  it("posts the settings revision and both clocks with a build and a reply", async () => {
+    const clock = { wallMs: 1_700_000_000_000, monotonicMs: 4_321 };
+    const client = new EngineWorkerClient();
+    const built = client.buildLlmDecisionRequest("Medium", 1, "{}", "[]", 3, clock);
+    const resolved = client.getAiActionProposalFromLlmResponse(
+      1, "fp", 7, "Anthropic", 200, "{}", clock,
+    );
+    const worker = currentWorker();
+    const [build, reply] = worker.posted;
+
+    expect(build).toMatchObject({
+      type: "buildLlmDecisionRequest",
+      difficulty: "Medium",
+      playerId: 1,
+      endpointJson: "{}",
+      historyJson: "[]",
+      settingsRevision: 3,
+      clock,
+    });
+    expect(reply).toMatchObject({
+      type: "getAiActionProposalFromLlmResponse",
+      playerId: 1,
+      fingerprint: "fp",
+      threadTurn: 7,
+      provider: "Anthropic",
+      status: 200,
+      responseBody: "{}",
+      clock,
+    });
+
+    worker.replyResult(build?.id as number, null);
+    worker.replyResult(reply?.id as number, null);
+    await expect(built).resolves.toBeNull();
+    await expect(resolved).resolves.toBeNull();
+    client.dispose();
+  });
+});
+
 describe("EngineWorkerClient structured action rejections", () => {
   it("preserves engine rejection metadata and stale disposition", async () => {
     const client = new EngineWorkerClient();
