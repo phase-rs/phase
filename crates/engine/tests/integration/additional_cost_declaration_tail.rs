@@ -1532,3 +1532,80 @@ fn defiler_payment_paused_for_replacement_ordering_still_offers_the_kicker() {
     );
     assert_eq!(pool(&runner), 1, "kicked, less the Defiler's {{B}}");
 }
+
+// ---------------------------------------------------------------------------
+// Alternative costs that are not mana (CR 118.9d)
+// ---------------------------------------------------------------------------
+
+const FIELDMIST_BORDERPOST: &str = "You may pay {1} and return a basic land you control to its owner's hand rather than pay this spell's mana cost.\nThis artifact enters tapped.\n{T}: Add {W} or {U}.";
+
+/// CR 118.9 + CR 601.2f: Fieldmist Borderpost (a printed card absent from the
+/// integration fixture, built from its Oracle text and printed {1}{W}{U}) cast
+/// for its alternative cost pays {1} and a basic land, not its mana cost too.
+#[test]
+fn composite_alternative_cost_pays_only_its_own_mana() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plains = scenario.add_real_card(P0, "Plains", Zone::Battlefield, db);
+    let borderpost = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Fieldmist Borderpost", FIELDMIST_BORDERPOST)
+        .with_mana_cost(cost(1, &[ManaCostShard::White, ManaCostShard::Blue]))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        mana(&[
+            (ManaType::Green, 4),
+            (ManaType::White, 1),
+            (ManaType::Blue, 1),
+        ]),
+    );
+    let mut runner = scenario.build();
+
+    let trail = cast(
+        &mut runner,
+        borderpost,
+        &Answers {
+            choice_preferred: true,
+            picks: vec![plains],
+            ..Answers::default()
+        },
+    );
+
+    assert_cast_completes(&runner, borderpost, &trail);
+    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
+    assert_eq!(zone(&runner, plains), Zone::Hand);
+    assert_eq!(pool(&runner), 5);
+}
+
+/// CR 118.9d: Thalia, Guardian of Thraben's {1} increase applies to Snuff Out's
+/// 4-life alternative cost.
+#[test]
+fn cost_increase_applies_to_a_life_alternative_cost() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    scenario.add_real_card(P1, "Thalia, Guardian of Thraben", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let snuff_out = scenario.add_real_card(P0, "Snuff Out", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Green, 4)]));
+    let mut runner = scenario.build();
+
+    let trail = cast(
+        &mut runner,
+        snuff_out,
+        &Answers {
+            choice_preferred: true,
+            targets: vec![bears],
+            ..Answers::default()
+        },
+    );
+
+    assert_cast_completes(&runner, snuff_out, &trail);
+    assert_eq!(trail.prompts, ["TargetSelection", "OptionalCostChoice"]);
+    assert_eq!(life(&runner), 16);
+    assert_eq!(pool(&runner), 3);
+}

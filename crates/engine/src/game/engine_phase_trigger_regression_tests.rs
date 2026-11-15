@@ -67,6 +67,7 @@ fn hand_to_battlefield_choice_ability(
 ) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
@@ -2982,6 +2983,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -2999,6 +3001,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -3061,6 +3064,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![chosen_land, unchosen_land],
         count: 2,
@@ -3078,6 +3082,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -3115,6 +3120,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -3132,6 +3138,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -4595,6 +4602,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let reflexive = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -4791,6 +4799,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
             ..crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,

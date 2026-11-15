@@ -143,6 +143,9 @@ pub enum OutsideGameSelection {
     /// the only stable identity — and it keeps two identically named cards in
     /// the same pack distinguishable.
     BoosterPack { pack_slot: usize },
+    /// CR 702.139a + CR 400.11: the player's revealed, not-yet-used companion.
+    /// There is at most one per player, so the selection needs no identity.
+    Companion,
 }
 
 #[derive(

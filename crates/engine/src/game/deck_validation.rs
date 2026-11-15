@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
-use crate::game::companion::{companion_starting_deck, is_eligible_companion};
+use crate::game::companion::{
+    companion_starting_deck_from_decklist, is_eligible_companion_with_min_deck_size,
+};
 use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
@@ -14,8 +16,8 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, ChallengeDeck, DeckCopyLimit, DeckSizeSubject, DeckSupply, FormatConfig, GameFormat,
-    SelectedFormat, SideboardPolicy, SurvivorDeckFormat,
+    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeSubject, DeckSupply,
+    FormatConfig, GameFormat, SelectedFormat, SideboardPolicy, SurvivorDeckFormat,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -61,6 +63,15 @@ pub struct DeckCompatibilityRequest {
     pub player_count: usize,
     #[serde(default)]
     pub summary_only: bool,
+    /// CR 100.2b + CR 702.139b: the minimum deck size the deck is built under,
+    /// when it is not the selected format's own. A draft session resolves its
+    /// minimum at configuration time (a Cube may configure 20 or 50 rather than
+    /// 40), so the session supplies it here and a "minimum deck size" companion
+    /// condition (Yorion) measures the starting deck against it. `None` keeps
+    /// the selected format's own minimum. Affects only companion eligibility;
+    /// deck-size legality is enforced by the draft session at submission.
+    #[serde(default)]
+    pub min_deck_size: Option<u32>,
     /// CR 903.13e / CR 903.13f(3): every set whose draft boosters this deck's
     /// draft CONTAINED. EMPTY for constructed play, which is why a constructed
     /// Commander deck is unaffected by the Commander Draft concessions.
@@ -87,6 +98,17 @@ impl DeckCompatibilityRequest {
             && self.planar_deck.is_empty()
             && self.scheme_deck.is_empty()
             && self.signature_spell.is_empty()
+    }
+
+    /// CR 100.2b + CR 702.139b: the minimum deck size a "minimum deck size"
+    /// companion condition measures the starting deck against: the session's
+    /// own minimum when the request carries one, else the selected format's.
+    pub fn companion_min_deck_size(&self, format_rules: &FormatConfig) -> usize {
+        usize::try_from(
+            self.min_deck_size
+                .unwrap_or_else(|| u32::from(format_rules.deck_size.min_cards())),
+        )
+        .unwrap_or(usize::MAX)
     }
 }
 
@@ -135,41 +157,67 @@ pub fn signature_spell_selection_policy(
     SignatureSpellSelectionPolicy::Required { candidates }
 }
 
-/// Returns eligible Commander-family companion cards that can be moved from
-/// the main deck into the dedicated companion slot. Candidate evaluation uses
-/// the same typed predicate as pregame reveal validation.
+/// Returns eligible companion cards that can be used with the deck under the
+/// selected format. Candidate evaluation uses the same typed predicate as
+/// pregame reveal validation and respects format minimum deck sizes.
 pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
-    // `SelectedFormat::rules()` returns `Err` for `Tag(Custom(_))` (a bare
-    // GameFormat cannot resolve it — see types::format). `selected_format`
-    // arrives from an untrusted request (this function is exposed directly
-    // via engine-wasm's `companion_candidates_js`), so it can only ever be a
-    // `Tag` (see the Wire-Inertness Invariant on `SelectedFormat`) — but no
-    // companion-candidate resolution exists for Custom formats yet anyway,
-    // so treating an `Err`/absent format the same as any other non-commander
-    // format (empty result) is the honest answer.
-    let uses_commander = request
+    let format_rules = request
         .selected_format
         .as_ref()
-        .and_then(|selected| selected.rules().ok())
-        .is_some_and(|rules| rules.uses_commander);
-    if !uses_commander {
+        .and_then(|selected| selected.rules().ok());
+    // An unresolvable (Custom) format has no candidate resolution: answering
+    // empty is the honest result.
+    let Some(format_rules) = format_rules else {
         return Vec::new();
+    };
+    // CR 702.139a: only a format with a designated companion slot offers
+    // candidates for it.
+    match format_rules.companion_slot() {
+        CompanionSlot::SideboardOnly => return Vec::new(),
+        CompanionSlot::CommanderFamily | CompanionSlot::LimitedPool => {}
     }
+    let uses_commander = format_rules.uses_commander;
+    let min_deck_size = request.companion_min_deck_size(&format_rules);
 
-    request
-        .main_deck
-        .iter()
-        .enumerate()
-        .filter_map(|(index, name)| {
-            let face = db.get_face_by_name(name)?;
-            let mut remaining_main = request.main_deck.clone();
-            remaining_main.remove(index);
+    let mut candidate_names = BTreeSet::new();
+    candidate_names.extend(request.main_deck.iter().cloned());
+    candidate_names.extend(request.sideboard.iter().cloned());
+    candidate_names.extend(request.companion.iter().cloned());
+
+    candidate_names
+        .into_iter()
+        .filter_map(|name| {
+            let face = db.get_face_by_name(&name)?;
+            let is_companion = face
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Companion(_)));
+            if !is_companion {
+                return None;
+            }
+            let is_already_registered = request.companion.iter().any(|c| c == &name);
+            let starting_main = if is_already_registered {
+                request.main_deck.clone()
+            } else if let Some(idx) = request.main_deck.iter().position(|n| n == &name) {
+                let mut rem = request.main_deck.clone();
+                rem.remove(idx);
+                rem
+            } else {
+                request.main_deck.clone()
+            };
             let companion = DeckEntry::from_resolved_face(db, face, 1);
-            let main = deck_entries_for_names(db, &remaining_main);
+            let main = deck_entries_for_names(db, &starting_main);
             let commanders = deck_entries_for_names(db, &request.commander);
-            let starting = companion_starting_deck(&main, &commanders, uses_commander);
-            is_eligible_companion(&companion, &starting, &commanders, uses_commander)
-                .then(|| face.name.clone())
+            let starting =
+                companion_starting_deck_from_decklist(&main, &commanders, uses_commander);
+            is_eligible_companion_with_min_deck_size(
+                &companion,
+                &starting,
+                &commanders,
+                uses_commander,
+                min_deck_size,
+            )
+            .then(|| face.name.clone())
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -585,6 +633,7 @@ pub fn validate_name_deck_for_format_full(
         // Rust handing off the `&FormatConfig` it already holds.
         selected_format: Some(SelectedFormat::Resolved(Box::new(format_config.clone()))),
         selected_challenge_deck: None,
+        min_deck_size: None,
         selected_match_type,
         player_count,
         summary_only: false,
@@ -787,13 +836,74 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
     })
 }
 
+/// CR 702.139a/b + CR 903.11a: whether `companion_name` is a legal companion for
+/// a starting deck of `main_deck`, measured against `min_deck_size` (Yorion-class
+/// conditions read the format's own minimum). With `uses_commander` the starting
+/// deck includes `commanders` and the companion must also clear the Commander
+/// rules for cards brought in from outside the game (name and color identity).
+///
+/// The single authority for companion eligibility at deck admission: the generic
+/// Limited gate, the Commander-family gate and a draft session's submission
+/// check all call it, so a draft deck that is acknowledged can never be refused
+/// at match admission. `None` when the companion card does not resolve in `db`
+/// (the caller decides whether that is an unknown-card refusal).
+pub fn companion_eligibility_for_deck(
+    db: &CardDatabase,
+    main_deck: &[String],
+    commanders: &[String],
+    uses_commander: bool,
+    companion_name: &str,
+    min_deck_size: usize,
+) -> Option<bool> {
+    let face = db.get_face_by_name(companion_name)?;
+    let companion = DeckEntry::from_resolved_face(db, face, 1);
+    let main = deck_entries_for_names(db, main_deck);
+    let commanders = deck_entries_for_names(db, commanders);
+    let starting = companion_starting_deck_from_decklist(&main, &commanders, uses_commander);
+    Some(is_eligible_companion_with_min_deck_size(
+        &companion,
+        &starting,
+        &commanders,
+        uses_commander,
+        min_deck_size,
+    ))
+}
+
 /// Every name in a Limited deck must resolve before game admission.
 /// A draft session applies its configured minimum at submission; this
 /// generic gate has no session provenance from which to recover that minimum.
-fn evaluate_limited(unknown_cards: &BTreeSet<String>) -> CompatibilityCheck {
+fn evaluate_limited(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    format_rules: &FormatConfig,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
     let mut reasons = Vec::new();
     if !unknown_cards.is_empty() {
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    if request.companion.len() > 1 {
+        reasons.push(format!(
+            "Limited decks may register at most one companion (found {})",
+            request.companion.len()
+        ));
+    } else if let Some(companion_name) = request.companion.first() {
+        // CR 702.139b: Yorion-class conditions measure the starting deck
+        // against this format's own minimum.
+        let min_deck_size = request.companion_min_deck_size(format_rules);
+        if companion_eligibility_for_deck(
+            db,
+            &request.main_deck,
+            &[],
+            false,
+            companion_name,
+            min_deck_size,
+        ) == Some(false)
+        {
+            reasons.push(format!(
+                "{companion_name}: not a legal companion for this starting deck"
+            ));
+        }
     }
     CompatibilityCheck {
         compatible: reasons.is_empty(),
@@ -1606,19 +1716,20 @@ fn validate_commander_companion(
     }
 
     let companion_name = &request.companion[0];
-    let Some(face) = db.get_face_by_name(companion_name) else {
-        return;
-    };
-    let companion = DeckEntry::from_resolved_face(db, face, 1);
-    let main = deck_entries_for_names(db, &request.main_deck);
-    let commanders = deck_entries_for_names(db, &request.commander);
     // Reads the STORED `uses_commander` field rather than the bare
     // `GameFormat::uses_commander()` method: `format_rules` may be a
     // `Resolved` custom config for which the bare method would return `Err`
     // (see `SelectedFormat`) — the stored field is always available.
-    let uses_commander = format_rules.uses_commander;
-    let starting = companion_starting_deck(&main, &commanders, uses_commander);
-    if !is_eligible_companion(&companion, &starting, &commanders, uses_commander) {
+    let min_deck_size = request.companion_min_deck_size(format_rules);
+    if companion_eligibility_for_deck(
+        db,
+        &request.main_deck,
+        &request.commander,
+        format_rules.uses_commander,
+        companion_name,
+        min_deck_size,
+    ) == Some(false)
+    {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));
@@ -2287,7 +2398,7 @@ pub fn is_tiny_leader_eligible(face: &CardFace) -> bool {
         || (is_legendary && (is_creature || is_vehicle || is_spacecraft_with_pt || is_planeswalker))
 }
 
-fn basic_land_type_colors(face: &CardFace) -> Vec<ManaColor> {
+pub(crate) fn basic_land_type_colors(face: &CardFace) -> Vec<ManaColor> {
     let mut colors = Vec::new();
     for subtype in &face.card_type.subtypes {
         let color = match subtype.as_str() {
@@ -2864,9 +2975,10 @@ fn evaluate_selected_format_summary(
     let Ok(format_rules) = selected.rules() else {
         return (None, Vec::new(), BTreeSet::new());
     };
-    let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && !request.companion.is_empty() {
+    if format_rules.companion_slot() == CompanionSlot::SideboardOnly
+        && !request.companion.is_empty()
+    {
         return (
             Some(false),
             vec![format!(
@@ -2975,7 +3087,7 @@ fn evaluate_selected_format_summary(
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
         GameFormat::Limited => {
             let unknown_cards = collect_unknown_cards(db, request);
-            let check = evaluate_limited(&unknown_cards);
+            let check = evaluate_limited(db, request, &format_rules, &unknown_cards);
             QuickCheckResult {
                 reason: check.reasons.into_iter().next(),
                 unknown_cards,
@@ -3392,9 +3504,10 @@ fn evaluate_selected_format(
     let Ok(format_rules) = selected.rules() else {
         return (Some(false), vec![CUSTOM_FORMAT_UNRESOLVED.to_string()]);
     };
-    let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && !request.companion.is_empty() {
+    if format_rules.companion_slot() == CompanionSlot::SideboardOnly
+        && !request.companion.is_empty()
+    {
         return (
             Some(false),
             vec![format!(
@@ -3598,7 +3711,7 @@ fn evaluate_selected_format(
         }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
         GameFormat::Limited => {
-            let check = evaluate_limited(unknown_cards);
+            let check = evaluate_limited(db, request, &format_rules, unknown_cards);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -4670,8 +4783,8 @@ pub fn is_commander_eligible(face: &CardFace) -> bool {
 /// Every core type on the face must be castable, and the type list must be
 /// NONEMPTY: `Iterator::all` is vacuously `true` on an empty list, which
 /// would re-admit a face with no recognized `CoreType` at all (the fixture
-/// carries such faces — Vanguard/Avatar cards, whose CR 313 card type has no
-/// `CoreType` variant) as though it were castable.
+/// carries such faces, e.g. un-set cards whose type line names no CR 205.2a
+/// card type) as though it were castable.
 pub fn is_freeform_commander_eligible(face: &CardFace) -> bool {
     let core_types = &face.card_type.core_types;
     !core_types.is_empty()
@@ -4709,12 +4822,13 @@ fn core_type_can_be_cast(core_type: CoreType) -> bool {
         // CR 108.2a: nontraditional card types, each of which its own CR
         // section says explicitly "can't be cast": CR 309.2c (Dungeon),
         // CR 311.2 (Plane), CR 312.2 (Phenomenon), CR 314.2 (Scheme),
-        // CR 315.3 (Conspiracy). Turtle Team-Up Bosses and Events likewise
-        // can't be cast (the product booklet is the authority — they have no
-        // CR section of their own).
+        // CR 315.3 (Conspiracy), CR 313.2 (Vanguard). Turtle Team-Up Bosses
+        // and Events likewise can't be cast (the product booklet is the
+        // authority — they have no CR section of their own).
         CoreType::Dungeon
         | CoreType::Plane
         | CoreType::Phenomenon
+        | CoreType::Vanguard
         | CoreType::Scheme
         | CoreType::Conspiracy
         | CoreType::Boss
@@ -5416,6 +5530,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Planechase)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count,
             summary_only: false,
@@ -5466,6 +5581,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Archenemy)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: 4,
             summary_only: false,
@@ -5824,6 +5940,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -5853,6 +5970,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6065,6 +6183,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6136,6 +6255,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6174,6 +6294,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6203,6 +6324,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: true,
@@ -6232,6 +6354,7 @@ mod tests {
             signature_spell: vec!["Grub Commander".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6289,6 +6412,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6333,6 +6457,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6360,6 +6485,200 @@ mod tests {
             .any(|reason| reason.contains("Commander Banned (banned)")));
     }
 
+    /// CR 100.2b + CR 702.139b: Yorion's "twenty cards more than the minimum
+    /// deck size" is measured against the draft session's own minimum, not a
+    /// fixed 40. Drives the production entry points (`evaluate_deck_compatibility`
+    /// and `companion_candidates`) with the request field the session supplies.
+    fn yorion_request(main_size: usize, session_minimum: Option<u32>) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_size),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: vec!["Yorion, Sky Nomad".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Limited)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            min_deck_size: session_minimum,
+            draft_set_codes: Vec::new(),
+            selected_challenge_deck: None,
+        }
+    }
+
+    fn yorion_db() -> CardDatabase {
+        let mut db_json: Value = serde_json::from_str(&test_db_json()).unwrap();
+        db_json["yorion, sky nomad"] = serde_json::json!({
+            "name": "Yorion, Sky Nomad",
+            "mana_cost": { "type": "Cost", "shards": [], "generic": 3 },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [
+                { "Companion": { "type": "MinDeckSizeOver", "data": 20 } }
+            ],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null,
+            "legalities": { "standard": "legal", "commander": "legal" }
+        });
+        CardDatabase::from_json_str(&db_json.to_string()).unwrap()
+    }
+
+    fn yorion_eligible(db: &CardDatabase, request: &DeckCompatibilityRequest) -> bool {
+        let verdict = evaluate_deck_compatibility(db, request);
+        let candidates = companion_candidates(db, request);
+        // The verdict and the candidate list are two surfaces over one rule.
+        assert_eq!(
+            verdict.selected_format_compatible == Some(true),
+            candidates.contains(&"Yorion, Sky Nomad".to_string()),
+            "compatibility verdict and candidate list must agree: {:?}",
+            verdict.selected_format_reasons
+        );
+        verdict.selected_format_compatible == Some(true)
+    }
+
+    /// CR 702.139b + CR 903.5a: a Commander Draft submission lists its commander
+    /// in the main deck AND in the command-zone slot; that is one physical card,
+    /// so at the 60-card minimum Yorion needs 80 cards counting it once.
+    #[test]
+    fn commander_listed_in_main_and_command_zone_counts_once_for_yorion() {
+        let db = yorion_db();
+        let deck = |size: usize| {
+            let mut main = vec!["Legal Standard".to_string()];
+            main.extend(expand("Plains", size - 1));
+            main
+        };
+        let commanders = vec!["Legal Standard".to_string()];
+        for (size, eligible) in [(79usize, false), (80, true)] {
+            assert_eq!(
+                companion_eligibility_for_deck(
+                    &db,
+                    &deck(size),
+                    &commanders,
+                    true,
+                    "Yorion, Sky Nomad",
+                    60,
+                ),
+                Some(eligible),
+                "{size}-card starting deck"
+            );
+        }
+        // A command-zone commander the main list does not name is one more card.
+        assert_eq!(
+            companion_eligibility_for_deck(
+                &db,
+                &expand("Plains", 79),
+                &commanders,
+                true,
+                "Yorion, Sky Nomad",
+                60,
+            ),
+            Some(true),
+            "79 listed cards plus an unlisted commander is 80"
+        );
+    }
+
+    #[test]
+    fn cube_minimum_50_requires_70_cards_for_yorion() {
+        let db = yorion_db();
+        assert!(
+            !yorion_eligible(&db, &yorion_request(60, Some(50))),
+            "60 cards is only 10 over a 50-card minimum"
+        );
+        assert!(
+            yorion_eligible(&db, &yorion_request(70, Some(50))),
+            "70 cards is 20 over a 50-card minimum"
+        );
+    }
+
+    #[test]
+    fn cube_minimum_20_makes_40_cards_eligible_for_yorion() {
+        let db = yorion_db();
+        assert!(yorion_eligible(&db, &yorion_request(40, Some(20))));
+        assert!(!yorion_eligible(&db, &yorion_request(39, Some(20))));
+    }
+
+    #[test]
+    fn absent_session_minimum_keeps_the_formats_own_minimum() {
+        let db = yorion_db();
+        assert!(!yorion_eligible(&db, &yorion_request(59, None)));
+        assert!(yorion_eligible(&db, &yorion_request(60, None)));
+    }
+
+    #[test]
+    fn companion_candidates_preserves_main_deck_for_already_registered_companion() {
+        let mut db_json: Value = serde_json::from_str(&test_db_json()).unwrap();
+        db_json["lurrus"] = serde_json::json!({
+            "name": "Lurrus",
+            "mana_cost": { "type": "Cost", "shards": [], "generic": 3 },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [
+                { "Companion": { "type": "MaxPermanentManaValue", "data": 2 } }
+            ],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null,
+            "legalities": { "standard": "legal", "commander": "legal" }
+        });
+        let db = CardDatabase::from_json_str(&db_json.to_string()).unwrap();
+
+        // When Lurrus is registered as companion AND a second Lurrus copy is in the main deck,
+        // the starting main deck contains a permanent with MV 3 (violating Lurrus's requirement).
+        // The candidate check must NOT remove the main-deck copy when Lurrus is already in request.companion.
+        let mut main = expand("Plains", 39);
+        main.push("Lurrus".to_string());
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: vec!["Lurrus".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Limited)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+            selected_challenge_deck: None,
+            min_deck_size: None,
+        };
+
+        let candidates = companion_candidates(&db, &request);
+        assert!(
+            !candidates.contains(&"Lurrus".to_string()),
+            "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("not a legal companion for this starting deck")));
+    }
+
     #[test]
     fn commander_rules_detect_size_singleton_and_legality_failures() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
@@ -6380,6 +6699,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6413,6 +6733,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
@@ -6448,6 +6769,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6478,6 +6800,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6565,6 +6888,7 @@ mod tests {
             commander,
             selected_format: Some(SelectedFormat::Tag(GameFormat::Horde)),
             selected_challenge_deck: challenge_deck,
+            min_deck_size: None,
             summary_only,
             ..Default::default()
         }
@@ -6703,6 +7027,7 @@ mod tests {
                     commander: commander.clone(),
                     selected_format: None,
                     selected_challenge_deck: Some(deck),
+                    min_deck_size: None,
                     ..Default::default()
                 },
             )
@@ -6762,6 +7087,7 @@ mod tests {
         let commander = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..horde
         };
         let result = validate_deck_for_format(&db, &commander);
@@ -6906,6 +7232,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6944,6 +7271,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -6971,6 +7299,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7002,6 +7331,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7043,6 +7373,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::ArchenemyCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: 4,
             summary_only,
@@ -7162,6 +7493,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::PlanechaseCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: 4,
             summary_only,
@@ -7291,6 +7623,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::PauperCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7368,6 +7701,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::PauperCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7444,6 +7778,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::PauperCommander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7475,6 +7810,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7503,6 +7839,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::FreeForAll)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7512,6 +7849,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiant)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..request.clone()
         };
 
@@ -7538,6 +7876,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
@@ -7553,6 +7892,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
@@ -7593,6 +7933,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Pioneer)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7615,6 +7956,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7639,6 +7981,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7667,6 +8010,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7696,6 +8040,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7718,6 +8063,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7742,6 +8088,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Premodern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7836,6 +8183,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(format)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7914,6 +8262,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Pauper)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7942,6 +8291,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -7996,6 +8346,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: true,
@@ -8098,6 +8449,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8244,6 +8596,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8282,6 +8635,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8324,6 +8678,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8346,6 +8701,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8368,6 +8724,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8397,6 +8754,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8423,6 +8781,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8449,6 +8808,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::HistoricBrawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8475,6 +8835,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8517,6 +8878,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8549,6 +8911,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8582,6 +8945,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::HistoricBrawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -8595,6 +8959,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..request
         };
         let brawl_result = evaluate_deck_compatibility(&db, &brawl_request);
@@ -8870,6 +9235,7 @@ mod tests {
                     commander: pair.clone(),
                     selected_format: Some(SelectedFormat::Tag(GameFormat::FreeformCommander)),
                     selected_challenge_deck: None,
+                    min_deck_size: None,
                     summary_only,
                     ..DeckCompatibilityRequest::default()
                 };
@@ -8948,6 +9314,7 @@ mod tests {
                 commander: pair_4.clone(),
                 selected_format: Some(SelectedFormat::Tag(GameFormat::FreeformCommander)),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 summary_only,
                 ..DeckCompatibilityRequest::default()
             };
@@ -9248,6 +9615,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9283,6 +9651,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9304,6 +9673,7 @@ mod tests {
             signature_spell: vec!["Legal Standard".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Modern)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9344,6 +9714,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::FreeForAll)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9365,6 +9736,7 @@ mod tests {
             signature_spell: vec!["Big Spell".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9401,6 +9773,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: None,
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9425,6 +9798,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9452,6 +9826,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9481,6 +9856,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9508,6 +9884,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9536,6 +9913,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9591,6 +9969,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9619,6 +9998,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9648,6 +10028,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9714,6 +10095,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9779,6 +10161,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9809,6 +10192,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9839,6 +10223,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -9865,6 +10250,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::FreeForAll)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
@@ -9898,6 +10284,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10004,6 +10391,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10032,6 +10420,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10060,6 +10449,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10092,6 +10482,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10156,6 +10547,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Vintage)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10189,6 +10581,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Vintage)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10226,6 +10619,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Momir)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10253,6 +10647,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Dandan)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only,
@@ -10725,6 +11120,7 @@ mod tests {
         let stricter = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Resolved(Box::new(stricter_rules.clone()))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..base
         };
         let check = evaluate_planechase(&db, &stricter, &BTreeSet::new(), &stricter_rules);
@@ -10772,6 +11168,7 @@ mod tests {
         let stricter = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Resolved(Box::new(stricter_rules))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..base
         };
         let result = evaluate_deck_compatibility(&db, &stricter);
@@ -10807,6 +11204,7 @@ mod tests {
         let stricter = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Resolved(Box::new(stricter_rules.clone()))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..base
         };
         let check = evaluate_archenemy(&db, &stricter, &BTreeSet::new(), &stricter_rules);
@@ -10834,6 +11232,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10857,6 +11256,7 @@ mod tests {
         let stricter = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Resolved(Box::new(stricter_rules.clone()))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..base
         };
         let check = evaluate_tiny_leaders(&db, &stricter, &BTreeSet::new(), &stricter_rules);
@@ -10891,6 +11291,7 @@ mod tests {
             signature_spell: Vec::new(),
             selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
@@ -10919,6 +11320,7 @@ mod tests {
         let stricter = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Resolved(Box::new(stricter_rules.clone()))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..base
         };
         let check = evaluate_oathbreaker(&db, &stricter, &BTreeSet::new(), &stricter_rules);
@@ -11493,6 +11895,7 @@ mod tests {
             commander: vec!["Tovolar, Dire Overlord // Tovolar, the Midnight Scourge".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11534,6 +11937,7 @@ mod tests {
             commander: vec!["Tovolar, Dire Overlord".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11571,6 +11975,7 @@ mod tests {
             commander: vec!["Tovolar, Dire Overlord".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11686,6 +12091,7 @@ mod tests {
                 commander: vec![composite.to_string()],
                 selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -11731,6 +12137,7 @@ mod tests {
                 signature_spell: vec!["Sig Front // Sig Back".to_string()],
                 selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -11769,6 +12176,7 @@ mod tests {
             signature_spell: vec!["Sig Front // Sig Back".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11813,6 +12221,7 @@ mod tests {
             signature_spell: vec!["Ob Front // Ob Back".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11846,6 +12255,7 @@ mod tests {
             signature_spell: vec!["Sig Front".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -11880,6 +12290,7 @@ mod tests {
             commander: vec!["Fire".to_string()],
             selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12213,6 +12624,7 @@ mod tests {
                 main_deck: expand("Plains", 60),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -12227,6 +12639,7 @@ mod tests {
                 main_deck: legal_60_main("Jeweled Bird"),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -12282,6 +12695,7 @@ mod tests {
                 main_deck: legal_60_main("Jeweled Bird"),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(format.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12302,6 +12716,7 @@ mod tests {
                 main_deck: expand("Plains", 60),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(format))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12337,6 +12752,7 @@ mod tests {
             sideboard,
             selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12547,6 +12963,7 @@ mod tests {
         // it directly.
         let config = FormatConfig {
             custom_rules: None,
+            deck_size_origin: Default::default(),
             ..FormatConfig::for_custom_rules(&base_custom_rules(
                 DeckSizeRule::Minimum(60),
                 DeckCopyLimit::Unlimited,
@@ -12595,6 +13012,7 @@ mod tests {
                 main_deck: deck_with_copies("Legal Standard", accept_n, 60),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12608,6 +13026,7 @@ mod tests {
                     main_deck: deck_with_copies("Legal Standard", n as usize + 1, 60),
                     selected_format: Some(SelectedFormat::Resolved(Box::new(config))),
                     selected_challenge_deck: None,
+                    min_deck_size: None,
                     player_count: default_player_count(),
                     ..Default::default()
                 };
@@ -12636,6 +13055,7 @@ mod tests {
                 main_deck: expand("Plains", n),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12648,6 +13068,7 @@ mod tests {
                 main_deck: expand("Plains", n - 1),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12662,6 +13083,7 @@ mod tests {
                     main_deck: expand("Plains", n + 1),
                     selected_format: Some(SelectedFormat::Resolved(Box::new(config))),
                     selected_challenge_deck: None,
+                    min_deck_size: None,
                     player_count: default_player_count(),
                     ..Default::default()
                 };
@@ -12713,6 +13135,7 @@ mod tests {
                 main_deck: expand("Plains", 60),
                 selected_format: Some(SelectedFormat::Resolved(Box::new(config))),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12734,6 +13157,7 @@ mod tests {
         let unresolved_request = DeckCompatibilityRequest {
             selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             ..Default::default()
         };
         let hint = evaluate_deck_compatibility(&db, &unresolved_request);
@@ -12751,6 +13175,7 @@ mod tests {
             main_deck: expand("Plains", 100),
             selected_format: Some(SelectedFormat::Resolved(Box::new(command_zone_config))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12780,6 +13205,7 @@ mod tests {
             main_deck: expand("Plains", 60),
             selected_format: Some(SelectedFormat::Resolved(Box::new(legacy_config))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12796,6 +13222,7 @@ mod tests {
         // still construct it directly, as this row does.
         let missing_config = FormatConfig {
             custom_rules: None,
+            deck_size_origin: Default::default(),
             ..FormatConfig::for_custom_rules(&base_custom_rules(
                 DeckSizeRule::Minimum(60),
                 DeckCopyLimit::Unlimited,
@@ -12805,6 +13232,7 @@ mod tests {
             main_deck: expand("Plains", 60),
             selected_format: Some(SelectedFormat::Resolved(Box::new(missing_config))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12871,6 +13299,7 @@ mod tests {
                 FormatConfig::for_custom_rules(&def_a.rules),
             ))),
             selected_challenge_deck: None,
+            min_deck_size: None,
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -12891,6 +13320,7 @@ mod tests {
                 main_deck: short_deck,
                 selected_format: Some(SelectedFormat::Tag(format)),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
@@ -12913,6 +13343,7 @@ mod tests {
                 main_deck: legal_60_main("Legal Standard"),
                 selected_format: Some(SelectedFormat::Tag(format)),
                 selected_challenge_deck: None,
+                min_deck_size: None,
                 player_count: default_player_count(),
                 ..Default::default()
             };
