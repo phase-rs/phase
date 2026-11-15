@@ -2739,6 +2739,7 @@ mod tests {
             .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
             component_delivery_parent: None,
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -2808,6 +2809,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -2877,6 +2879,7 @@ mod tests {
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             component_delivery_parent: None,
+            library_reorder: None,
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -3003,6 +3006,78 @@ mod tests {
                 } if *object_id == leaving
             )
         }));
+    }
+
+    /// CR 800.4a + CR 616.1: A leaving owner can be the paused batch member
+    /// while a living player owns the replacement prompt and a survivor remains
+    /// in the batch tail. The departure cancels only that exact unfinished
+    /// delivery; the tail must drain without trying to complete it a second time.
+    #[test]
+    fn leaving_owner_cancels_paused_batch_member_and_drains_surviving_tail() {
+        let mut state = setup_three_player();
+        let leaving = create_object(
+            &mut state,
+            CardId(712),
+            PlayerId(1),
+            "Paused leaving batch member".to_string(),
+            Zone::Battlefield,
+        );
+        let surviving = create_object(
+            &mut state,
+            CardId(713),
+            PlayerId(0),
+            "Surviving batch tail".to_string(),
+            Zone::Battlefield,
+        );
+        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parked batch has its pre-delivery authority");
+        let paused = paused_zone_change_delivery(&state, leaving, ObjectId(900));
+        state.pending_replacement = Some(pending_replacement_for(paused.expected_event.clone()));
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            component_delivery_parent: None,
+            staged: None,
+            library_reorder: None,
+            logical_zone_change_group: group,
+            paused_current: Some(paused),
+            remaining: vec![surviving],
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![leaving, surviving],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        let batch = state
+            .active_batch_delivery()
+            .expect("surviving tail retains its shared batch owner");
+        assert!(batch.paused_current.is_none());
+        assert_eq!(batch.remaining, vec![surviving]);
+        assert!(state.pending_replacement.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
+        assert!(state.active_batch_delivery().is_none());
+        assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
 
     /// CR 800.4a + CR 616.1: A living controller's paused ChangeZone family
@@ -5793,6 +5868,7 @@ mod r4b_staged_elimination_tests {
         let paused = PendingZoneChangeDelivery::new(members[0].identity, event.clone());
         let parent = PendingBatchDeliveries {
             component_delivery_parent: None,
+            library_reorder: None,
             logical_zone_change_group: parent_group,
             paused_current: Some(paused.clone()),
             remaining: Vec::new(),
@@ -5901,6 +5977,7 @@ mod r4b_staged_elimination_tests {
             asking: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: None,
@@ -6021,6 +6098,7 @@ mod r4b_staged_elimination_tests {
             status: StagedArrangementStatus::Offered,
         }];
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: None,

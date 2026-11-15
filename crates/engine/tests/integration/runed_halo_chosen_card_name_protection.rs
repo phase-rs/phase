@@ -98,7 +98,7 @@ fn runed_halo_casts_pauses_for_name_choice_and_persists() {
         );
     };
     assert!(
-        matches!(choice_type, ChoiceType::CardName),
+        matches!(choice_type, ChoiceType::CardName { .. }),
         "expected ChoiceType::CardName, got {choice_type:?}"
     );
 

@@ -1560,6 +1560,7 @@
     "gameOver": {
       "backToDraft": "返回轮抽",
       "backToLobby": "返回大厅",
+      "complete": "游戏结束",
       "continueRun": "继续挑战",
       "defeat": "失败",
       "draw": "平局",
