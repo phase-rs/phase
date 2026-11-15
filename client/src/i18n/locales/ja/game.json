@@ -706,6 +706,8 @@
     "commander": "統率者",
     "commanderTitle": "統率者: {{name}}",
     "commanderTitleTax": "統率者: {{name}}（税: +{{tax}}）",
+    "boss": "ボス",
+    "bossTitle": "ボス: {{name}}",
     "castCommander": "{{name}}を唱える — ダブルクリックまたはドラッグしてプレイ",
     "castCommanderTax": "{{name}}を唱える（税: +{{tax}}） — ダブルクリックまたはドラッグしてプレイ",
     "ninjutsuCommander": "統率者忍術: {{name}} — クリックしてブロックされていない攻撃クリーチャーを手札に戻し、この統率者をタップ状態で攻撃中に戦場へ出す",
@@ -1274,6 +1276,7 @@
       "draw": "引き分け",
       "victory": "勝利",
       "defeat": "敗北",
+      "complete": "ゲーム終了",
       "lifeSummary": "あなた：<player>{{playerLife}}</player> <sep>/</sep> 対戦相手：<opponent>{{opponentLife}}</opponent>",
       "turns": "ターン数：{{count}}",
       "duration": "対戦時間：{{time}}",
@@ -1584,7 +1587,9 @@
       "titleReveal": "手札から公開",
       "titleOpponentHand": "対戦相手の手札",
       "subtitleReveal": "公開するカードを選択するか、断る",
-      "subtitleChoose": "カードを選択"
+      "subtitleChoose": "カードを選択",
+      "subtitleRevealAnyNumber": "公開するカードを好きな枚数選択",
+      "subtitleChooseCount": "{{count}}枚のカードを選択"
     },
     "search": {
       "title": "ライブラリーを検索",
@@ -2670,6 +2675,7 @@
   },
   "outsideGame": {
     "fromExile": "追放領域から",
+    "fromCompanion": "相棒から",
     "fromSideboard": "サイドボードから",
     "fromBoosterPack": "{{setCode}}ブースターパックから",
     "fromCubeBoosterPack": "キューブ・ブースターパックから"

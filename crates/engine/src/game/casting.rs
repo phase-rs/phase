@@ -26,7 +26,7 @@ use crate::types::game_state::{
 };
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
-    CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
+    CastOfferKind, CastPaymentMode, CastTimingRoute, CastingPermissionIndex, CastingVariant,
     CastingVariantChoiceOption, CastingVariantFace, ConvokeMode, CostResume, DistributionUnit,
     EmergeSacrificeQuality, GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast,
@@ -47,7 +47,7 @@ use crate::types::statics::{
     ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, PermissionCastLimit,
     ProhibitionScope, StaticMode, StaticModeKind,
 };
-use crate::types::zones::{ExileCostSourceZone, Zone};
+use crate::types::zones::{CastProvenance, ExileCostSourceZone, Zone};
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -939,7 +939,7 @@ struct PreparedSpellCast {
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
     /// CancelCast (CR 601.2i) can return the object to its origin zone.
@@ -2792,6 +2792,26 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 601.2a + CR 707.13 + CR 400.11: the single authority for WHERE a spell is cast
+/// from as a typed [`CastProvenance`] — a zone, or outside the game. A copy created
+/// outside the game (Garth One-Eye) is staged in a zone, but "outside the game is not
+/// a zone", so it is cast from no zone: it is `OutsideGame`, never `Zone(staging)`.
+/// `None` means the spell is unknown to the game state, which satisfies no zone-gated
+/// restriction in either polarity. Mana-spend metadata ([`build_spell_meta`]) reads
+/// its origin only through here; the filter/trigger paths read the same fact from
+/// `GameObject::created_outside_game` via `SpellCastRecord::from_outside_game`.
+pub(crate) fn spell_cast_provenance(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<CastProvenance> {
+    let obj = state.objects.get(&object_id)?;
+    Some(if obj.created_outside_game {
+        CastProvenance::OutsideGame
+    } else {
+        CastProvenance::Zone(spell_cast_origin_zone(state, obj))
+    })
+}
+
 /// CR 118.9a + CR 601.2b: a spell may elect its printed alternative cost only
 /// when the exact exile authority elected for this cast leaves its mana cost
 /// available. A plain impulse grant supplies zone permission (CR 601.3) without
@@ -2887,8 +2907,8 @@ fn granted_spell_keywords_for(
         }
     }
 
-    // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
-    // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
+    // CR 611.2c: Player-scoped keyword grants applied by activated/triggered
+    // abilities live in the TCE table, not on a battlefield static.
     transient_granted_spell_keywords_for(
         state,
         caster,
@@ -2899,7 +2919,7 @@ fn granted_spell_keywords_for(
         fused,
     );
 
-    // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
+    // CR 601.2f: One-shot "the next spell …" keyword grants (Insist, Wand).
     apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false, fused);
 
     // CR 118.9 + CR 601.2f: Concretize any self-referential (`SelfManaCost` /
@@ -3068,26 +3088,25 @@ pub(crate) fn effective_casualty_grant_sources(
     sources
 }
 
-/// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
+/// CR 611.2c + CR 601.3b: Player-scoped spell-casting grants (e.g. Teferi,
 /// Time Raveler's +1 "you may cast sorcery spells as though they had flash") are
 /// registered by `effect.rs` as `SpecificPlayer { id }`-bound transient continuous
 /// effects rather than battlefield statics, so the grant survives the source
-/// permanent leaving play and expires on its own duration (CR 611.2a). This scan is
-/// the player-scoped counterpart to the `game_active_statics` loop in
-/// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
+/// permanent leaving play and expires on its own duration (CR 611.2a). Returns
+/// the mode of each such grant to `caster` whose spell filter matches
+/// `spell_obj`: the player-scoped counterpart to the `game_active_statics`
+/// scans, mirroring the condition gating of the sibling player
 /// query `transient_grants_static_mode_to_player` (static_abilities.rs). `fused`
 /// projects a pre-payment fused split spell with its COMBINED characteristics
 /// (CR 702.102b); see [`granted_spell_keywords_for`] for the rationale.
-#[allow(clippy::too_many_arguments)]
-fn transient_granted_spell_keywords_for(
-    state: &GameState,
+fn transient_spell_grants<'a>(
+    state: &'a GameState,
     caster: PlayerId,
     spell_obj: &crate::game::game_object::GameObject,
     origin_zone: Zone,
-    keywords: &mut Vec<Keyword>,
-    preserve_instances: bool,
     fused: bool,
-) {
+) -> Vec<&'a StaticMode> {
+    let mut grants = Vec::new();
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id } = tce.affected else {
             continue;
@@ -3105,9 +3124,6 @@ fn transient_granted_spell_keywords_for(
         }
         for modification in &tce.modifications {
             let ContinuousModification::GrantStaticAbility { definition } = modification else {
-                continue;
-            };
-            let StaticMode::CastWithKeyword { keyword } = &definition.mode else {
                 continue;
             };
             // CR 611.2c: the grant is bound to the grantee (outer SpecificPlayer
@@ -3142,8 +3158,28 @@ fn transient_granted_spell_keywords_for(
                 )
             });
             if matches {
-                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
+                grants.push(&definition.mode);
             }
+        }
+    }
+    grants
+}
+
+/// CR 611.2c: merge the keywords of the player-scoped `CastWithKeyword` grants
+/// [`transient_spell_grants`] returns for this spell.
+#[allow(clippy::too_many_arguments)]
+fn transient_granted_spell_keywords_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
+    fused: bool,
+) {
+    for mode in transient_spell_grants(state, caster, spell_obj, origin_zone, fused) {
+        if let StaticMode::CastWithKeyword { keyword } = mode {
+            merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
         }
     }
 }
@@ -3608,7 +3644,7 @@ pub(super) fn build_spell_meta(
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
-        cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
+        cast_origin: spell_cast_provenance(state, object_id),
         // CR 202.3d + CR 702.102b: a FUSED split spell's mana value / color count
         // are the COMBINED values of both halves; a non-fused split cast and every
         // single-face spell use the object's own (chosen-half) cost. `spell_*` key
@@ -4018,6 +4054,7 @@ fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: Player
                     frequency: CastFrequency::Unlimited,
                     extra_cost: None,
                     enters_with_counter: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     graveyard_destination_replacement: None,
                     required_cast_keyword: None,
                     pool: GraveyardPermissionPool::OwnGraveyard,
@@ -4376,7 +4413,10 @@ fn next_spell_without_paying_applies(
 
 /// CR 118.9a + CR 601.2b: a named permission or a prepared next-spell
 /// free cast has already elected its alternative. Do not scan sibling grants
-/// or offer another alternative over that exact choice.
+/// or offer another alternative over that exact choice. A cast's elected
+/// permission is asked what non-mana cost it makes the player pay, never matched
+/// by shape; the arms below are the mana-cost permissions `prepare_spell_cast`
+/// overrides.
 pub(super) fn cast_has_elected_alternative_cost(
     state: &GameState,
     player: PlayerId,
@@ -4386,6 +4426,21 @@ pub(super) fn cast_has_elected_alternative_cost(
 ) -> Result<bool, EngineError> {
     if variant.uses_alternative_cost()
         || next_spell_without_paying_applies(state, player, object_id, variant)
+        || super::casting_costs::elected_cast_alternative_ability_cost(
+            state,
+            player,
+            object_id,
+            variant,
+            permission_index,
+        )
+        .is_some()
+        // CR 118.9a: a static exile permission that replaces the mana cost is the cast's
+        // alternative cost.
+        || elected_exile_permission_source(state, player, object_id, Some(variant), permission_index)
+            .is_some_and(|source| {
+                exile_cast_permission_source_full(state, player, object_id, Some(source))
+                    .is_none_or(|elected| !static_source_is_normal_cost_authority(&elected))
+            })
     {
         return Ok(true);
     }
@@ -4408,12 +4463,18 @@ pub(super) fn cast_has_elected_alternative_cost(
             *cost_provenance == crate::types::ability::ExileGrantCostProvenance::Alternative
                 && !matches!(cost, ManaCost::SelfManaCost)
         }
-        CastingPermission::ExileWithAltAbilityCost { .. }
-        | CastingPermission::ExileWithEnergyCost
+        CastingPermission::ExileWithEnergyCost
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }
         | CastingPermission::Foretold { .. } => true,
-        CastingPermission::AdventureCreature | CastingPermission::PlayFromExile { .. } => false,
+        CastingPermission::AdventureCreature
+        | CastingPermission::ExileWithAltAbilityCost { .. } => false,
+        // CR 118.9: "You may cast [this object] without paying its mana cost" is an alternative
+        // cost.
+        CastingPermission::PlayFromExile {
+            without_paying_mana_cost,
+            ..
+        } => *without_paying_mana_cost,
     })
 }
 
@@ -4637,51 +4698,65 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
     )
 }
 
-// CR 122.1 + CR 614.1c + CR 607.1: read the enters-with counter rider carried by
-// the STATIC cast permission (`GraveyardCastPermission` / `ExileCastPermission`)
-// that authorized this cast. The authorizing source is embedded in
-// `casting_variant` (`GraveyardPermission`/`ExilePermission { source }`) rather
-// than re-derivable from zone — by the `finalize_cast` seam the cast object is
+// CR 122.1 + CR 614.1c + CR 614.1d + CR 607.1: read the entry riders (the
+// enters-with counter, and the enters-tapped rider) carried by the STATIC cast
+// permission (`GraveyardCastPermission` / `ExileCastPermission`) that authorized
+// this cast. The authorizing source is embedded in `casting_variant`
+// (`GraveyardPermission`/`ExilePermission { source }`) rather than
+// re-derivable from zone — by the `finalize_cast` seam the cast object is
 // already on the stack, so the zone-scan resolvers can no longer be called for
 // it. The source permanent never changes zone during the cast, so reading its
-// `active_static_definitions` is safe (CR 607.1: the enters-with rider is linked
-// to the "cast a spell this way" permission on that same object).
+// `active_static_definitions` is safe (CR 607.1: the rider is linked to the
+// "cast a spell this way" permission on that same object).
 //
-// Assumes at most one counter-bearing cast permission per source — true for every
-// printed card today (Noctis / Intrepid / Leonardo each carry exactly one); if a
-// future card stacks two, `find_map` takes the first. See the field docs on
-// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
-pub(super) fn selected_static_permission_enters_with_counter(
+// Consulted only for a cast with no announcement latch; a latched cast reads
+// its riders from the latch (CR 601.2a + the Intrepid Paleontologist / Edgar,
+// Master Machinist rulings: the source need not stay under your control).
+//
+// Assumes at most one rider-bearing cast permission per source — true for every
+// printed card today (Noctis / Intrepid / Leonardo / Edgar each carry exactly
+// one); if a future card stacks two, `find_map` takes the first. See the field
+// docs on `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter` and
+// `StaticMode::GraveyardCastPermission.enter_tapped`.
+pub(super) fn selected_static_permission_entry_riders(
     state: &GameState,
     player: PlayerId,
     casting_variant: &crate::types::game_state::CastingVariant,
-) -> Option<crate::types::counter::CounterType> {
+) -> CastPermissionEntryRiders {
     use crate::types::game_state::CastingVariant;
     let (source, from_graveyard) = match casting_variant {
         CastingVariant::GraveyardPermission { source, .. } => (*source, true),
         CastingVariant::ExilePermission { source, .. } => (*source, false),
-        _ => return None,
+        _ => return CastPermissionEntryRiders::default(),
     };
     let source_obj = state.objects.get(&source);
-    fn permission_counter(def: &StaticDefinition) -> Option<crate::types::counter::CounterType> {
-        match &def.mode {
+    fn permission_riders(def: &StaticDefinition) -> Option<CastPermissionEntryRiders> {
+        let riders = match &def.mode {
             StaticMode::GraveyardCastPermission {
                 enters_with_counter,
+                enter_tapped,
                 ..
-            }
-            | StaticMode::ExileCastPermission {
+            } => CastPermissionEntryRiders {
+                counter: enters_with_counter.clone(),
+                enter_tapped: *enter_tapped,
+            },
+            StaticMode::ExileCastPermission {
                 enters_with_counter,
                 ..
-            } => enters_with_counter.clone(),
-            _ => None,
-        }
+            } => CastPermissionEntryRiders {
+                counter: enters_with_counter.clone(),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            },
+            _ => return None,
+        };
+        (!riders.is_empty()).then_some(riders)
     }
     // Existing path (unchanged for BB3 separate-battlefield-source cards): the
     // permission still functions in zone on a source that never left the
     // battlefield during the cast.
     source_obj
         .and_then(|source_obj| {
-            active_static_definitions(state, source_obj).find_map(permission_counter)
+            active_static_definitions(state, source_obj).find_map(permission_riders)
         })
         // CR 601.3 + CR 607.1 + CR 113.6b: self-granting-permission fallback.
         // A self-granting source (Undead Sprinter — Gravecrawler shape) IS the
@@ -4689,17 +4764,17 @@ pub(super) fn selected_static_permission_enters_with_counter(
         // longer "functions in zone" (CR 113.6b) and the primary functioning-
         // abilities scan yields None. The permission that AUTHORIZED this cast
         // (CR 601.3, embedded in `casting_variant`) is a committed fact, and its
-        // enters-with rider is CR 607.1-linked to it, so read the rider directly
-        // from the printed definition — bypassing the now-zone-blocked gate.
-        // Additive: fires only when the primary path is None, so BB3 cards
-        // (Noctis / Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the
-        // rider is a replacement effect applied as the object enters.)
+        // rider is CR 607.1-linked to it, so read the rider directly from the
+        // printed definition — bypassing the now-zone-blocked gate. Additive:
+        // fires only when the primary path is None, so BB3 cards (Noctis /
+        // Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the rider is a
+        // replacement effect applied as the object enters.)
         .or_else(|| {
             source_obj.and_then(|source_obj| {
                 source_obj
                     .static_definitions
                     .iter_all()
-                    .find_map(permission_counter)
+                    .find_map(permission_riders)
             })
         })
         // CR 611.2a + CR 614.1c: a RESOLUTION-CREATED graveyard permission ("Until
@@ -4716,8 +4791,28 @@ pub(super) fn selected_static_permission_enters_with_counter(
             }
             transient_graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
                 .find(|candidate| candidate.source_id == source)
-                .and_then(|candidate| candidate.enters_with_counter.clone())
+                .map(|candidate| CastPermissionEntryRiders {
+                    counter: candidate.enters_with_counter.clone(),
+                    enter_tapped: candidate.enter_tapped,
+                })
+                .filter(|riders| !riders.is_empty())
         })
+        .unwrap_or_default()
+}
+
+/// CR 614.1c + CR 614.1d: the entry riders a static cast permission links to
+/// the spell cast through it ("If you cast a spell this way, that <permanent>
+/// enters with a [counter] counter on it" / "… enters tapped").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CastPermissionEntryRiders {
+    pub(super) counter: Option<crate::types::counter::CounterType>,
+    pub(super) enter_tapped: crate::types::zones::EtbTapState,
+}
+
+impl CastPermissionEntryRiders {
+    fn is_empty(&self) -> bool {
+        self.counter.is_none() && self.enter_tapped.is_unspecified()
+    }
 }
 
 // CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
@@ -5592,9 +5687,13 @@ struct GraveyardPermissionSource<'a> {
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
     /// CR 122.1 + CR 607.1: Optional "if you cast a spell this way, that creature
     /// enters with a [counter] counter on it" rider (Leonardo, Noctis). Applied at
-    /// the `finalize_cast` seam by `selected_static_permission_enters_with_counter`;
+    /// the `finalize_cast` seam by `selected_static_permission_entry_riders`;
     /// carried here so permission selection can see every rider a choice brings.
     enters_with_counter: &'a Option<crate::types::counter::CounterType>,
+    /// CR 614.1d + CR 607.1c: Optional "if you cast a spell this way, that
+    /// artifact enters tapped" rider (Edgar, Master Machinist). Latched at
+    /// announcement and written onto the spell at finalization.
+    enter_tapped: crate::types::zones::EtbTapState,
     /// CR 118.9b: the casting method this permission requires ("using its
     /// blitz ability"), or `None` when it leaves the method open, including the
     /// printed cost.
@@ -5852,7 +5951,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     ref extra_cost,
                     grantee,
                     // enters-with counter is read at the finalize_cast seam via
-                    // `selected_static_permission_enters_with_counter`, not here.
+                    // `selected_static_permission_entry_riders`, not here.
                     ..
                 } => {
                     // CR 406.6 + CR 607.1: "you may …" grants only the source's
@@ -6137,10 +6236,11 @@ pub(crate) fn exile_static_permission_grants_flash(
 }
 
 /// CR 702.8a + CR 601.3b: Does `player` have flash for `object_id`: its own
-/// Flash keyword, a granted one (a `CastWithKeyword` static, a transient or
-/// next-spell grant; `effective_spell_keyword_kinds_for`), or an exile-cast
-/// permission that grants flash ("you may cast them as though they had
-/// flash")? `fused` projects a pre-payment fused split spell's combined
+/// Flash keyword, a granted one (a `CastWithKeyword` static or transient grant,
+/// a next-spell keyword grant; `effective_spell_keyword_kinds_for`), an
+/// "as though it had flash" permission (`as_though_flash_permission`), or an
+/// exile-cast permission that grants flash ("you may cast them as though they
+/// had flash")? `fused` projects a pre-payment fused split spell's combined
 /// characteristics (CR 702.102b). The single authority that
 /// `prepare_spell_cast`'s timing check and
 /// `restrictions::spell_confined_to_sorcery_timing` read.
@@ -6152,6 +6252,50 @@ pub(crate) fn spell_has_effective_flash(
 ) -> bool {
     effective_spell_keyword_kinds_for(state, player, object_id, fused).contains(&KeywordKind::Flash)
         || exile_static_permission_grants_flash(state, player, object_id)
+        || as_though_flash_permission(state, player, object_id, fused)
+}
+
+/// CR 601.3b + CR 609.4: `caster` may cast `object_id` as though it had flash —
+/// a `CastWithFlash` static (Leyline of Anticipation), a player-scoped
+/// `CastWithFlash` grant (Borne Upon a Wind), or a pending next-spell
+/// `CastAsThoughFlash` (Savage Summoning). The permission changes only when the
+/// spell may be cast; the spell does not gain the Flash keyword.
+fn as_though_flash_permission(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> bool {
+    let Some(spell_obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
+    let static_grant = static_kind_present(state, StaticModeKind::CastWithFlash) && {
+        crate::game::perf_counters::record_spell_keyword_grant_scan();
+        super::functioning_abilities::game_active_statics(state).any(|(source_obj, def)| {
+            def.mode == StaticMode::CastWithFlash
+                && def.affected.as_ref().is_none_or(|filter| {
+                    super::filter::spell_object_matches_filter_from_state_for(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        filter,
+                        source_obj.id,
+                        &state.all_creature_types,
+                        fused,
+                    )
+                })
+        })
+    };
+    static_grant
+        || transient_spell_grants(state, caster, spell_obj, origin_zone, fused)
+            .contains(&&StaticMode::CastWithFlash)
+        || state.pending_next_spell_modifiers.iter().any(|entry| {
+            entry.player == caster
+                && matches!(entry.modifier, NextSpellModifier::CastAsThoughFlash)
+                && spell_matches_pending_next_spell_filter(state, caster, object_id, entry, fused)
+        })
 }
 
 /// CR 118.9 + CR 601.2f: When `exiled_id` is castable via the
@@ -6276,6 +6420,7 @@ fn graveyard_permission_sources(
                         // Applied at the finalize_cast seam from the cast's
                         // latched terms; carried here so the menu shows it.
                         ref enters_with_counter,
+                        enter_tapped,
                         required_cast_keyword,
                         pool,
                         cast_limit,
@@ -6306,6 +6451,7 @@ fn graveyard_permission_sources(
                                 graveyard_destination_replacement,
                                 extra_cost,
                                 enters_with_counter,
+                                enter_tapped,
                                 required_cast_keyword,
                                 pool,
                                 cast_limit,
@@ -6412,6 +6558,7 @@ fn transient_graveyard_permission_sources(
                         graveyard_destination_replacement,
                         ref extra_cost,
                         ref enters_with_counter,
+                        enter_tapped,
                         required_cast_keyword,
                         pool,
                         cast_limit,
@@ -6463,6 +6610,7 @@ fn transient_graveyard_permission_sources(
                             graveyard_destination_replacement,
                             extra_cost,
                             enters_with_counter,
+                            enter_tapped,
                             required_cast_keyword,
                             pool,
                             cast_limit,
@@ -6732,6 +6880,7 @@ impl GraveyardCastAuthority {
                 permission: source.permission,
                 extra_cost: source.extra_cost.clone(),
                 enters_with_counter: source.enters_with_counter.clone(),
+                enter_tapped: source.enter_tapped,
                 cast_limit: source.cast_limit,
                 mana_spend_permission: source.mana_spend_permission,
                 enters_modifications: source.enters_modifications.clone(),
@@ -7838,7 +7987,7 @@ fn cast_free_permission_from_source(
 /// what a per-object `CastingPermission` cannot express.
 ///
 /// Mirrors the condition gating of the sibling player-scoped scan
-/// `transient_granted_spell_keywords_for` (Teferi, Time Raveler's flash grant).
+/// `transient_spell_grants` (Teferi, Time Raveler's flash grant).
 fn transient_cast_free_permission(
     state: &GameState,
     player: PlayerId,
@@ -8023,10 +8172,11 @@ fn apply_pending_next_spell_keyword_grants(
             NextSpellModifier::HasKeyword { keyword } => {
                 merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
-            NextSpellModifier::CastAsThoughFlash => {
-                upsert_keyword_by_kind(keywords, Keyword::Flash);
-            }
-            NextSpellModifier::CantBeCountered | NextSpellModifier::WithoutPayingManaCost => {}
+            // CR 609.4: "as though it had flash" is a timing permission read by
+            // `as_though_flash_permission`, not a keyword the spell gains.
+            NextSpellModifier::CastAsThoughFlash
+            | NextSpellModifier::CantBeCountered
+            | NextSpellModifier::WithoutPayingManaCost => {}
         }
     }
 }
@@ -10710,12 +10860,13 @@ fn prepare_spell_cast_announced(
                 )?;
                 mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                    cast_timing_permission = Some(CastTimingRoute::SpellOption);
                 }
             } else if casting_costs::payable_spell_alternative_cost_for_timing(
                 state,
                 player,
                 object_id,
+                casting_variant,
                 CastTimingPermission::AsThoughHadFlash,
             )
             .is_some()
@@ -10732,12 +10883,12 @@ fn prepare_spell_cast_announced(
                     casting_variant,
                 )?;
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                    cast_timing_permission = Some(CastTimingRoute::AlternativeCost);
                 }
             } else if casting_costs::can_pay_offering_additional_cost(state, player, object_id) {
                 // CR 702.48a: "[Quality] offering" — if the controller has a legal
                 // sacrifice target, the spell may be cast at instant speed.
-                // `CastTimingPermission::Offering` signals that the upcoming sacrifice
+                // `CastTimingRoute::Offering` signals that the upcoming sacrifice
                 // prompt is required (not optional) because the player used Offering
                 // to unlock instant-speed timing.
                 restrictions::check_spell_timing(
@@ -10749,13 +10900,13 @@ fn prepare_spell_cast_announced(
                     casting_variant,
                 )?;
                 if cast_outside_sorcery_timing {
-                    cast_timing_permission = Some(CastTimingPermission::Offering);
+                    cast_timing_permission = Some(CastTimingRoute::Offering);
                 }
             } else {
                 return Err(base_timing_error);
             }
         } else if cast_outside_sorcery_timing && has_granted_flash {
-            cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+            cast_timing_permission = Some(CastTimingRoute::Permission);
         }
         restrictions::check_casting_restrictions(
             state,
@@ -18498,6 +18649,34 @@ pub fn handle_cast_spell_with_payment_mode(
         );
     }
 
+    // CR 118.9a + CR 601.6: only the granted alternative cost lets this cast begin now,
+    // so it is cast with that cost and no other casting method is offered.
+    let alternative_cost_cast = casting_costs::payable_spell_alternative_cost_for_timing(
+        state,
+        player,
+        object_id,
+        CastingVariant::Normal,
+        CastTimingPermission::AsThoughHadFlash,
+    )
+    .and_then(|_| {
+        prepare_casting_variant_on_face(
+            state,
+            player,
+            object_id,
+            CastingVariant::Normal,
+            CastingVariantFace::Current,
+            CastingMode::Actual,
+            None,
+        )
+        .ok()
+    })
+    .filter(|normal| {
+        normal.prepared.cast_timing_permission == Some(CastTimingRoute::AlternativeCost)
+    });
+    if let Some(normal) = alternative_cost_cast {
+        return continue_with_prepared_casting_variant(state, player, normal, payment_mode, events);
+    }
+
     // CR 702.117a + CR 118.9 + CR 601.2b: Surge — the sole prepared option is the
     // surge variant (the candidate gate already required a hand card with an
     // effective Surge keyword and another spell cast this turn by the caster or a
@@ -19387,8 +19566,26 @@ pub fn handle_cast_spell_with_payment_mode(
                     prototype_form.mana_cost.clone(),
                 )
                 .unwrap_or_else(|| prototype_form.mana_cost.clone());
+                // CR 718.3a + CR 118.9a: the prototyped cast is judged with its own
+                // characteristics, and may be paid with a granted alternative cost.
                 let prototype_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff)
+                        || prepare_casting_variant(
+                            state,
+                            player,
+                            object_id,
+                            CastingVariant::Prototype,
+                            CastingMode::Display,
+                            None,
+                        )
+                        .is_ok_and(|projected| {
+                            can_cast_prepared_now_with_probe(
+                                &projected.transformed_state,
+                                player,
+                                &projected.prepared,
+                                None,
+                            )
+                        });
                 if normal_affordable && prototype_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -20358,7 +20555,7 @@ fn continue_with_prepared(
                 prepared.object_id,
             )
             .expect("offering quality implies offering additional cost");
-            let required = prepared.cast_timing_permission == Some(CastTimingPermission::Offering);
+            let required = prepared.cast_timing_permission == Some(CastTimingRoute::Offering);
             if required {
                 // CR 702.48b: Required when cast used instant-speed timing via Offering.
                 return casting_costs::begin_required_cost_before_targets(
@@ -21592,7 +21789,7 @@ fn can_cast_prepared_now_with_probe(
     // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
     // candidate (marker not set during candidate generation) so a value-keyed
     // granted Flash is not dropped on the front half.
-    if prepared.cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+    if prepared.cast_timing_permission == Some(CastTimingRoute::SpellOption)
         && !restrictions::target_dependent_flash_permission_feasible(
             state,
             player,
@@ -21605,7 +21802,7 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 702.48a: When the Offering timing unlock was used, a legal sacrifice
     // target must still exist (state may have changed since prepare time).
-    if prepared.cast_timing_permission == Some(CastTimingPermission::Offering)
+    if prepared.cast_timing_permission == Some(CastTimingRoute::Offering)
         && !casting_costs::can_pay_offering_additional_cost(state, player, prepared.object_id)
     {
         return false;
@@ -21942,9 +22139,16 @@ fn can_cast_prepared_now_with_probe(
         return true;
     }
 
-    // CR 118.9a + CR 601.2b: a face-down or other non-Normal method already
-    // elected its own alternative cost and cannot use the printed self-option.
-    if prepared.casting_variant == CastingVariant::Normal
+    // CR 118.9a + CR 601.2b: a cast that already elected an alternative cost, by its method or its
+    // permission, can't also take a granted one.
+    if !cast_has_elected_alternative_cost(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_permission_index,
+        prepared.casting_variant,
+    )
+    .unwrap_or(true)
         && targets_ok
         && super::casting_costs::payable_spell_alternative_cost_details_at_index(
             state,
@@ -24049,7 +24253,13 @@ fn manual_mana_payment_route(
         .iter()
         .filter(|id| Some(**id) != excluded)
         .map(|&id| {
-            super::mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref())
+            super::mana_sources::feasible_mana_capacity_for_cast(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                source_id,
+            )
         })
         .sum::<u32>()
         .saturating_sub(shard_charge);
@@ -33267,7 +33477,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
             to: AttachmentReferent::DeclaredTarget { .. },
         } => read.includes_bindable(),
         FilterProp::CombatRelation { subject, .. } => {
-            read.includes_bindable() && matches!(subject, CombatRelationSubject::ParentTarget)
+            read.includes_bindable()
+                && match subject {
+                    CombatRelationSubject::ParentTarget
+                    | CombatRelationSubject::AnaphoricTarget => true,
+                    CombatRelationSubject::Source => false,
+                }
         }
         FilterProp::ControllerMatches { player } => player_filter_reads_chosen_target(player, read),
         FilterProp::DealtDamageThisTurn { recipient, .. } => recipient

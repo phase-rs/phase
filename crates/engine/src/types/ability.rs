@@ -183,7 +183,7 @@ impl ChosenAttribute {
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
-            Self::CardName(_) => ChoiceType::CardName,
+            Self::CardName(_) => ChoiceType::card_name(),
             // CR 101.4: the secret and the published number came from the same
             // `NumberRange` prompt; revealing changes visibility, not category.
             // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
@@ -956,6 +956,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -978,6 +979,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -4372,6 +4378,7 @@ impl ResolvedAbility {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }

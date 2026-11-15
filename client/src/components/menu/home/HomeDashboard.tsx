@@ -63,7 +63,7 @@ function CardActionButton({ action, disabled }: { action: ActionDef; disabled: b
 function ResumeHero() {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
-  const { match, matchSummary, quickDraft, pod, resumeMatch } = useResumables();
+  const { match, matchSummary, retainedResult, quickDraft, pod, resumeMatch, viewRetainedResult } = useResumables();
 
   // Build the ordered candidate list: the saved match leads (most-relevant
   // resumable), then drafts by recency. Nothing to resume → render nothing.
@@ -108,7 +108,20 @@ function ResumeHero() {
     onResume: resumeMatch,
   };
 
-  const ordered = [matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
+  // A finished match whose result is retained locally still owes the server an
+  // acknowledgement. It is not resumable gameplay, but the Menu must not strand
+  // it: the unresolved result leads the list so reopening re-displays it and
+  // retries the ACK. A successful ACK clears the pointer, which removes it.
+  const retainedFormatLabel = retainedResult?.formatConfig?.format?.replace(/([a-z])([A-Z])/g, "$1 $2");
+  const retainedEntry = retainedResult && {
+    cta: t("home.resume.viewResult"),
+    title: retainedFormatLabel || t(`home.dashboard.mode.${retainedResult.mode}`) || t("home.resume.title"),
+    chip: "",
+    meta: [] as string[],
+    onResume: viewRetainedResult,
+  };
+
+  const ordered = [retainedEntry, matchEntry, ...draftEntries].filter(Boolean) as { cta: string; title: string; chip: string; meta: string[]; onResume: () => void }[];
   if (ordered.length === 0) return null;
   const [primary, secondary] = ordered;
 

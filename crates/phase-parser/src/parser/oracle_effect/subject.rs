@@ -875,6 +875,8 @@ fn build_conditional_protection_grant_clause(
         })
         .collect();
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -940,6 +942,8 @@ fn build_additive_type_continuous_clause(
     let affected = static_affected_for_application(application);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1025,6 +1029,8 @@ fn try_parse_compound_all_subjects_become_clause(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1771,6 +1777,8 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1849,7 +1857,13 @@ fn try_parse_source_and_other_restriction_clause(
     let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
     let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
     secondary_clause.multi_target = secondary_multi;
-    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    let (secondary_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    // This recognizer constructs restriction clauses directly, before history capture.
+    assert!(
+        history.is_empty(),
+        "constructed restriction has no captured history"
+    );
     *ctx = tentative;
 
     Some(ClauseAst::SubjectPredicate {
@@ -2044,6 +2058,8 @@ fn try_parse_target_and_same_name_pump_clause(
         ],
     };
     let mass_clause = ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PumpAll {
@@ -2071,7 +2087,13 @@ fn try_parse_target_and_same_name_pump_clause(
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
-    let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    let (mass_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    // The mass clause is constructed above with empty parser provenance.
+    assert!(
+        history.is_empty(),
+        "constructed pump has no captured history"
+    );
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
@@ -2190,6 +2212,8 @@ fn try_parse_subject_restriction_clause(
             parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2246,6 +2270,8 @@ fn try_parse_subject_restriction_clause(
                 .map(|def| def.affected(affected.clone()))
                 .collect();
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2281,6 +2307,8 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2346,6 +2374,8 @@ fn try_parse_subject_restriction_clause(
                     });
             if let Some(application) = broadcast {
                 return Some(ParsedEffectClause {
+                    history: Vec::new(),
+                    head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
                     effect: Effect::ForceAttack {
@@ -2390,6 +2420,8 @@ fn try_parse_subject_restriction_clause(
                     TargetFilter::ParentTarget
                 ) {
                     return Some(ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
@@ -2424,6 +2456,8 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2492,6 +2526,8 @@ fn try_parse_subject_restriction_clause(
             kind: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2540,6 +2576,8 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2576,6 +2614,8 @@ fn try_parse_subject_restriction_clause(
         };
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2682,6 +2722,8 @@ fn try_parse_can_attack_with_defender(
         def = def.condition(condition);
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -2731,6 +2773,8 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
@@ -2790,6 +2834,8 @@ fn try_parse_can_block_additional(
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -5547,6 +5593,7 @@ fn try_split_pump_compound(
     // pump as a `ChooseOneOf` sub_ability keyed to the pumped creature
     // (`ParentTarget`). Non-modal remainders ("you gain 1 life") fall back to
     // the general effect-chain parse.
+    let mut history = Vec::new();
     let sub_ability = if remainder.is_empty() {
         None
     } else if let Some((choice, choice_duration)) =
@@ -5555,12 +5602,18 @@ fn try_split_pump_compound(
         duration = duration.or(choice_duration);
         Some(Box::new(choice))
     } else {
-        Some(Box::new(super::parse_effect_chain(
-            remainder,
-            AbilityKind::Spell,
-        )))
+        let lowered = super::parse_effect_chain_with_provenance(remainder, AbilityKind::Spell);
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+            )
+        }));
+        Some(Box::new(lowered.value))
     };
     Some(ParsedEffectClause {
+        history,
+        head_text: Some(pump_part.to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -5764,6 +5817,8 @@ fn build_keyword_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -5968,6 +6023,8 @@ fn build_pt_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -6015,6 +6072,8 @@ fn build_continuous_clause(
     {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6072,6 +6131,8 @@ fn build_continuous_clause(
         build_defender_attack_continuous_compound(&application, predicate_text)
     {
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -6188,6 +6249,8 @@ fn build_continuous_clause(
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6227,6 +6290,8 @@ fn build_continuous_clause(
         };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -6575,6 +6640,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6607,6 +6674,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6665,6 +6734,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6802,6 +6873,8 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::BecomeCopy {
@@ -6843,6 +6916,8 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::BecomeCopy {
@@ -6887,6 +6962,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6948,6 +7025,8 @@ fn build_become_clause(
 
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7087,6 +7166,8 @@ fn try_parse_become_and_attack_if_able(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7196,6 +7277,8 @@ fn try_parse_set_life_total(
         .clone()
         .unwrap_or_else(|| application.affected.clone());
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::SetLifeTotal { target, amount },
@@ -7458,6 +7541,8 @@ fn try_parse_become_choice(
     )));
 
     let clause = ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::Choose {
@@ -7537,6 +7622,8 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
             .modifications(vec![ContinuousModification::AddStaticMode { mode }])
     };
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7607,6 +7694,8 @@ fn build_restriction_clause(
             .modifications(vec![ContinuousModification::AddKeyword { keyword }])
             .description(predicate.to_string());
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -7817,6 +7906,8 @@ fn build_restriction_clause(
                 }])
                 .description(predicate.to_string());
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -7935,6 +8026,8 @@ fn build_restriction_clause(
         .collect();
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -8559,6 +8652,8 @@ fn try_parse_copula_goaded_clause(
         }
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -8717,6 +8812,8 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     // returns None for this effect → no-op) and the resolver reads only the flat
     // `ability.targets` vector, never `extra_source`.
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         multi_target: Some(multi_target),
         ..super::parsed_clause(Effect::EachDealsDamageEqualToPower {
             sources,
@@ -14567,6 +14664,68 @@ mod entry_onset_tests {
             "the animation sits in the Otherwise branch: {mode:#?}"
         );
         assert_eq!(found[0].entry_onset, WithEntry, "animation");
+    }
+
+    /// CR 611.2e + CR 613.1f: Xu-Ifit's "It's a Skeleton in addition to its other types and has
+    /// no abilities" rider removes all abilities of the returned object, with the entry. The
+    /// "loses all other abilities" arm (Hellcat) keeps its `WhenFollowed` onset.
+    #[test]
+    fn xu_ifit_has_no_abilities_rider_removes_all_abilities_with_entry() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::zones::Zone;
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let remove_all =
+            |m: &ContinuousModification| matches!(m, ContinuousModification::RemoveAllAbilities);
+
+        let xu = parse_oracle_text(
+            "{T}: Return target creature card from your graveyard to the battlefield. It's a Skeleton in addition to its other types and has no abilities. Activate only as a sorcery.",
+            "Xu-Ifit, Osteoharmonist",
+            &[],
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Wizard"]),
+        );
+        let def = xu.abilities.first().expect("the activated ability");
+        // Reach guard: the root is the graveyard return, and the Skeleton rider node exists.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "root effect: {def:#?}"
+        );
+        let skeleton = become_nodes(
+            def,
+            &TargetFilter::ParentTarget,
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Skeleton"),
+        );
+        assert_eq!(skeleton.len(), 1, "Skeleton rider node: {def:#?}");
+        let removal = become_nodes(def, &TargetFilter::ParentTarget, remove_all);
+        assert_eq!(removal.len(), 1, "RemoveAllAbilities node: {def:#?}");
+        assert!(
+            std::ptr::eq(removal[0], skeleton[0]),
+            "the Skeleton and the removal share the rider node: {def:#?}"
+        );
+        assert_eq!(removal[0].entry_onset, WithEntry, "ability removal onset");
+
+        let hellcat = parse_oracle_text(
+            "Haste\nWhen Hellcat dies, return her to the battlefield under her owner's control with a +1/+1 counter on her. She loses all abilities and gains haste.",
+            "Hellcat, Undying Vigilante",
+            &strings(&["Haste"]),
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Hero"]),
+        );
+        let execute = hellcat
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("the dies trigger's execute chain");
+        let removal = become_nodes(execute, &TargetFilter::SelfRef, remove_all);
+        assert_eq!(removal.len(), 1, "Hellcat removal node: {execute:#?}");
+        assert_eq!(removal[0].entry_onset, WhenFollowed, "Hellcat onset");
     }
 
     /// CR 205.1b: "It's still a land" qualifies the governing "becomes"; neither it nor the

@@ -673,6 +673,8 @@
     "commander": "Comandante",
     "commanderTitle": "Comandante: {{name}}",
     "commanderTitleTax": "Comandante: {{name}} (Taxa: +{{tax}})",
+    "boss": "Chefe",
+    "bossTitle": "Chefe: {{name}}",
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
@@ -1241,6 +1243,7 @@
       "draw": "EMPATE",
       "victory": "VITÓRIA",
       "defeat": "DERROTA",
+      "complete": "FIM DE JOGO",
       "lifeSummary": "Você: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duração: {{time}}",
@@ -1546,7 +1549,9 @@
       "titleReveal": "Revelar da Mão",
       "titleOpponentHand": "Mão do Oponente",
       "subtitleReveal": "Escolha uma carta para revelar ou recuse",
-      "subtitleChoose": "Escolha uma carta"
+      "subtitleChoose": "Escolha uma carta",
+      "subtitleRevealAnyNumber": "Escolha qualquer número de cartas para revelar",
+      "subtitleChooseCount": "Escolha {{count}} cartas"
     },
     "search": {
       "title": "Procurar no Grimório",
@@ -2652,6 +2657,7 @@
   },
   "outsideGame": {
     "fromExile": "Do exílio",
+    "fromCompanion": "Do companheiro",
     "fromSideboard": "Do sideboard",
     "fromBoosterPack": "De um booster de {{setCode}}",
     "fromCubeBoosterPack": "De um booster do cube"

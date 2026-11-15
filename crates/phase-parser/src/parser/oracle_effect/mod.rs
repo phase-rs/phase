@@ -106,12 +106,13 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_anaphoric_target_ref, parse_definite_anaphor, parse_definite_parent_reference,
-    parse_event_context_ref, parse_fight_target, parse_parent_target_controller_population,
-    parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
-    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    resolve_singular_exiled_card_target, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
-    DefiniteAnaphor, TargetSyntax,
+    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
+    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
+    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
+    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
+    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -123,32 +124,37 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_requires_parent_target_object,
-    extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp,
-    GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
-    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
+    extract_target_filter_from_effect, instruction_object_reach, mass_population_target,
+    payer_is_declared_target, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
+    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
+    LibraryShuffleMode, ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec,
+    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
+    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
+    ZoneOwner,
 };
+// Imported on its own line rather than folded into the block above: that block
+// is the busiest merge point in this file, and a one-name addition inside it
+// conflicts with every sibling branch that adds one too.
+use crate::types::ability::NameDistinctness;
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
@@ -1362,6 +1368,8 @@ fn classify_population_walk_step(
         unlowered_guard,
         optional_targeting: _,
         entry_onset: _,
+        history,
+        head_text: _,
     } = &clause.parsed;
     let clause_guarded = clause.condition.is_some()
         || clause.is_optional
@@ -1382,7 +1390,10 @@ fn classify_population_walk_step(
         || !clause.target_selection_mode.is_chosen()
         || !TargetReadOrigin::is_own(&clause.target_reads)
         || !ClausePlacement::is_sibling(&clause.placement);
-    let parsed_guarded = distribute.is_some()
+    // A clause carrying history records is rewritten bookkeeping, not a plain
+    // producer: fail closed.
+    let parsed_guarded = !history.is_empty()
+        || distribute.is_some()
         || multi_target.is_some()
         || condition.is_some()
         || *optional
@@ -2950,7 +2961,13 @@ fn try_parse_whenever_this_turn_from(
     inner_ctx.object_pronoun_ref = anaphors.object_pronoun_ref;
     inner_ctx.condition_object_antecedent = anaphors.condition_object_antecedent;
     inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
-    let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
     // CR 603.4: a delayed body that opens with an intervening "if" clause must
     // carry that condition on its root ability. When the shared conditional
     // splitter finds a leading "if …," but the parsed root carries no
@@ -2986,6 +3003,17 @@ fn try_parse_whenever_this_turn_from(
     };
 
     Some(ParsedEffectClause {
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3124,6 +3152,8 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
     trigger_def.valid_target = Some(TargetFilter::Controller);
 
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3171,6 +3201,8 @@ fn build_when_next_delayed_trigger(
         Box::new(alt)
     });
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3419,6 +3451,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_lower = after.lower;
 
     // Check for "that creature enters with an additional +1/+1 counter on it" pattern
+    let mut history = Vec::new();
     let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
@@ -3426,11 +3459,19 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         // hand down the event-source binding so the bare spell anaphor is not
         // refined to a parent target the delayed trigger does not have.
         // Standalone mode, matching this builder's pre-existing entry point.
-        lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
-            effect_text,
-            AbilityKind::Spell,
-            SpellAnaphorBinding::EventSource,
-        ))
+        let lowered =
+            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_spell_anaphor(
+                effect_text,
+                AbilityKind::Spell,
+                SpellAnaphorBinding::EventSource,
+            ));
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+            )
+        }));
+        lowered.value
     };
     // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
     // "that <spell>" anaphor in the body names the newly-cast spell object (the
@@ -3449,13 +3490,16 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     {
         use crate::types::triggers::TriggerMode;
 
-        return Some(build_when_next_delayed_trigger(
+        let mut clause = build_when_next_delayed_trigger(
             TriggerMode::SpellCast,
             spell_filter,
             Some(TargetFilter::Controller),
             inner,
             Some((TriggerMode::AbilityActivated, ability_filter)),
-        ));
+        );
+        clause.history = history;
+        clause.head_text = Some(tp.original[..tp.original.len() - effect_text.len()].to_string());
+        return Some(clause);
     }
 
     let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
@@ -3467,6 +3511,8 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     trigger_def.valid_target = Some(TargetFilter::Controller);
 
     Some(ParsedEffectClause {
+        history,
+        head_text: Some(tp.original[..tp.original.len() - effect_text.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3572,9 +3618,26 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     }
     trigger_def.execute = None;
 
-    let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        after.original,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
 
     Some(ParsedEffectClause {
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3674,9 +3737,26 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         def
     };
 
-    let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        after.original,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
 
     Some(ParsedEffectClause {
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3834,8 +3914,25 @@ fn try_parse_at_next_phase_delayed_trigger(
     let mut ctx = antecedents.clone_player_antecedents();
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
-    let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        kind,
+        &mut ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
     Some(ParsedEffectClause {
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -4703,6 +4800,8 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
@@ -4908,6 +5007,46 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 /// static builders take only the `CounterType` to set
 /// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
 pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(CounterType, &str)> {
+    let rest = parse_cast_this_way_rider_subject(lower)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" enters with ")
+        .parse(rest)
+        .ok()?;
+    // CR 122.1: the printed rider is always a single counter ("a [counter]").
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
+        .parse(rest)
+        .ok()?;
+    Some((counter_type, rest))
+}
+
+/// CR 614.1d + CR 110.5b + CR 607.1c: Shared recognizer for the linked "if you
+/// cast a spell this way, that <permanent> enters tapped" rider (Edgar, Master
+/// Machinist). Same gate and anaphoric subject grammar as
+/// [`parse_cast_this_way_enters_with_counter`] (one authority:
+/// [`parse_cast_this_way_rider_subject`]); returns the unconsumed remainder so
+/// the caller can require the rider to be complete ("enters tapped and
+/// attacking" leaves " and attacking" and is declined there).
+pub(crate) fn parse_cast_this_way_enters_tapped(lower: &str) -> Option<&str> {
+    let rest = parse_cast_this_way_rider_subject(lower)?;
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>(" enters "),
+        alt((tag("tapped"), tag("the battlefield tapped"))),
+    )
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
+/// CR 607.1 + CR 607.1c: the optional gate and the subject of a cast-this-way
+/// entry rider, up to (not including) its " enters …" verb phrase. The subject
+/// is anaphoric for the spell the permission let you cast ("that creature",
+/// "that artifact creature", "that permanent", "it") or the card itself for a
+/// self-granting permission (`~`, or the raw "this creature/permanent/artifact"
+/// forms that `swallow_check` passes un-normalized).
+fn parse_cast_this_way_rider_subject(lower: &str) -> Option<&str> {
     // CR 608.2c: optional "if you cast a spell this way," / "if you do," gate.
     // The rider only fires for a spell cast via the granted permission; the
     // runtime gates on the actual cast, so the condition prefix carries no
@@ -4936,11 +5075,7 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
     let (rest, _) = alt((
         value(
             (),
-            (
-                tag::<_, _, OracleError<'_>>("that "),
-                anaphoric_type_noun,
-                tag(" enters with "),
-            ),
+            (tag::<_, _, OracleError<'_>>("that "), anaphoric_type_noun),
         ),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
         // creature" in the printed Oracle text. The main parse pipeline
@@ -4952,23 +5087,15 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         // the normalized and literal CR 201.5 self-reference forms must be
         // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
-        value((), tag("~ enters with ")),
-        value((), tag("it enters with ")),
-        value((), tag("this creature enters with ")),
-        value((), tag("this permanent enters with ")),
-        value((), tag("this artifact enters with ")),
+        value((), tag("~")),
+        value((), tag("it")),
+        value((), tag("this creature")),
+        value((), tag("this permanent")),
+        value((), tag("this artifact")),
     ))
     .parse(lower)
     .ok()?;
-    // CR 122.1: the printed rider is always a single counter ("a [counter]").
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
-        .parse(rest)
-        .ok()?;
-    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
-        .parse(rest)
-        .ok()?;
-    Some((counter_type, rest))
+    Some(rest)
 }
 
 /// CR 614.1c + CR 122.1 + CR 205.1b: Parse the "the creature cast this way
@@ -5674,13 +5801,29 @@ fn try_parse_inline_delayed_trigger(
     if self_disjunction {
         inner_ctx.subject = Some(TargetFilter::SelfRef);
     }
-    let mut inner =
-        parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let mut inner = inner_lowered.value;
     if self_disjunction {
         rebind_triggering_source_to_parent_target(&mut inner);
     }
 
     Some(ParsedEffectClause {
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -6021,6 +6164,8 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction { restriction },
@@ -6092,6 +6237,8 @@ fn try_parse_cant_enter_battlefield_from_restriction(
     });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6158,6 +6305,8 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6223,6 +6372,8 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
     // inner static carries its own controller-scoped `affected` (cards you
     // control) so it functions exactly as if printed on the source.
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -6273,6 +6424,8 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         player: PlayerScope::Controller,
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -6342,6 +6495,8 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         player: PlayerScope::Controller,
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -6551,13 +6706,24 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         .trim_start()
         .trim_start_matches([',', ' '])
         .trim_start();
+    let mut history = Vec::new();
     let sub_ability = if tail.is_empty() {
         None
     } else {
-        Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
+        let lowered = parse_effect_chain_with_provenance(tail, AbilityKind::Spell);
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+            )
+        }));
+        Some(Box::new(lowered.value))
     };
 
     let clause = ParsedEffectClause {
+        history,
+        // The continuation owns its text and history, independently of this restriction.
+        head_text: Some(tp.original[..tp.original.len() - tail.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6659,6 +6825,8 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
     let land_filter = parse_passive_cant_be_played_land_filter(before_played)?;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6747,6 +6915,8 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6870,6 +7040,8 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6948,6 +7120,8 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -6993,6 +7167,8 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
     .filter(|((), rest)| rest.trim_matches(['.', ' ']).is_empty())?;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -7066,6 +7242,8 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         }
 
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::AddRestriction {
@@ -7147,6 +7325,8 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -7291,6 +7471,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     );
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -7416,6 +7598,8 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     .sub_ability(delayed_return);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::Animate {
@@ -7437,12 +7621,6 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     })
 }
 
-/// CR 402.2 + CR 114.1: Parse "you have no maximum hand size [for the rest of the game]"
-/// as an effect that creates an emblem with `NoMaximumHandSize` static.
-///
-/// When this text appears on a permanent as a static ability, the static parser handles it.
-/// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
-/// it needs to create an emblem to produce a persistent game-state effect.
 /// CR 118.12a: "[effect] unless a player has [~] deal N damage to them" — any
 /// player may have the source deal damage instead of the primary effect
 /// (Barbarian Bully).
@@ -7564,19 +7742,35 @@ fn try_parse_unless_three_branch_choice(
         return None;
     }
 
-    let mut default_def = ability_definition_from_clause(AbilityKind::Spell, default_clause);
+    let (mut default_def, default_history) =
+        ability_definition_from_clause(AbilityKind::Spell, default_clause);
     default_def.description = Some(default_orig.to_string());
-    let mut alt1_def = ability_definition_from_clause(AbilityKind::Spell, alt1_clause);
+    let (mut alt1_def, alt1_history) =
+        ability_definition_from_clause(AbilityKind::Spell, alt1_clause);
     alt1_def.description = Some(alt1_deconj);
-    let mut alt2_def = ability_definition_from_clause(AbilityKind::Spell, alt2_clause);
+    let (mut alt2_def, alt2_history) =
+        ability_definition_from_clause(AbilityKind::Spell, alt2_clause);
     alt2_def.description = Some(alt2_deconj);
 
     // Branch order mirrors oracle text: default consequence first, then avoidance options.
-    Some(parsed_clause(Effect::ChooseOneOf {
+    let mut clause = parsed_clause(Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller, // Rebound to scoped opponent via player_scope
         branches: vec![default_def, alt1_def, alt2_def],
         kind: ChooseOneOfKind::Ordinary,
-    }))
+    });
+    // The choice container owns no printed population; each branch owns its text.
+    clause.head_text = Some(String::new());
+    for (index, history) in [default_history, alt1_history, alt2_history]
+        .into_iter()
+        .enumerate()
+    {
+        carry_nested_clause_history(
+            &mut clause.history,
+            history,
+            crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(index),
+        );
+    }
+    Some(clause)
 }
 
 /// CR 111.2 + CR 608.2d: Token-choice clauses can elide the repeated verb:
@@ -8570,6 +8764,7 @@ fn try_parse_put_counter_choice(
         });
 
     let mut branches: Vec<AbilityDefinition> = Vec::with_capacity(branch_clauses.len());
+    let mut history = Vec::new();
     for (mut clause, description) in branch_clauses {
         clause.multi_target = None;
         // P3-B: an untargeted DESCRIBED recipient keeps its own parsed
@@ -8583,7 +8778,14 @@ fn try_parse_put_counter_choice(
                 retarget_put_counter_to_parent(&mut clause.effect);
             }
         }
-        let mut def = ability_definition_from_clause(AbilityKind::Spell, clause);
+        let (mut def, branch_history) = ability_definition_from_clause(AbilityKind::Spell, clause);
+        carry_nested_clause_history(
+            &mut history,
+            branch_history,
+            crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(
+                branches.len(),
+            ),
+        );
         def.description = Some(description);
         if suppress_lift {
             // CR 115.10a + CR 608.2d: `ability_definition_from_clause` does not
@@ -8638,11 +8840,13 @@ fn try_parse_put_counter_choice(
         // uncastable (Dismantle ruling 1: it targets only the destroyed
         // artifact). The leading counter-threshold gate (if any) attaches to
         // this clause's `condition` in the caller's effect-clause loop.
-        return Some(parsed_clause(Effect::ChooseOneOf {
+        let mut clause = parsed_clause(Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches,
             kind: ChooseOneOfKind::Ordinary,
-        }));
+        });
+        clause.history = history;
+        return Some(clause);
     }
 
     let mut choice = AbilityDefinition::new(
@@ -8660,6 +8864,11 @@ fn try_parse_put_counter_choice(
     });
     clause.multi_target = shared_multi_target;
     clause.sub_ability = Some(Box::new(choice));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
     Some(clause)
 }
 
@@ -8903,20 +9112,20 @@ fn try_parse_choose_one_of_inline(
     // single-clause `parse_effect_clause`. `build_resolved_from_def` consumes the
     // chained `AbilityDefinition` via `resolve_ability_chain` at resolution.
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let mut left_def;
-    let mut right_def;
+    let left_lowered;
+    let right_lowered;
     if scoped_choice_player {
         // Throwaway (`ChosenColorQualifierScope` rule 1) — only `diagnostics`
         // is copied back, never `*ctx = branch_ctx`.
         let mut branch_ctx = ctx.clone_throwaway();
         branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
-        left_def = parse_nested_effect_chain_with_damage_context(
+        left_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             left_orig,
             AbilityKind::Spell,
             &mut branch_ctx,
             damage_context,
         );
-        right_def = parse_nested_effect_chain_with_damage_context(
+        right_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             right_orig,
             AbilityKind::Spell,
             &mut branch_ctx,
@@ -8924,19 +9133,22 @@ fn try_parse_choose_one_of_inline(
         );
         ctx.diagnostics = branch_ctx.diagnostics;
     } else {
-        left_def = parse_nested_effect_chain_with_damage_context(
+        left_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             left_orig,
             AbilityKind::Spell,
             ctx,
             damage_context,
         );
-        right_def = parse_nested_effect_chain_with_damage_context(
+        right_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             right_orig,
             AbilityKind::Spell,
             ctx,
             damage_context,
         );
     }
+
+    let mut left_def = left_lowered.value;
+    let mut right_def = right_lowered.value;
 
     // Reject unless BOTH branches produce a non-Unimplemented HEAD effect. This
     // prevents false positives on noun-phrase disjunctions and "and/or"
@@ -8977,7 +9189,7 @@ fn try_parse_choose_one_of_inline(
     // CR 701.55a vs CR 608.2d: the "faces a villainous choice —" prefix is
     // the only printed villainous-choice instruction; every other inline
     // "A or B" parses ordinary, so Valeyard doubling never touches it.
-    Some(parsed_clause(Effect::ChooseOneOf {
+    let mut clause = parsed_clause(Effect::ChooseOneOf {
         chooser,
         branches: vec![left_def, right_def],
         kind: if scoped_choice_player {
@@ -8985,7 +9197,20 @@ fn try_parse_choose_one_of_inline(
         } else {
             ChooseOneOfKind::Ordinary
         },
-    }))
+    });
+    clause.head_text = Some(String::new());
+    for (index, history) in [left_lowered.history, right_lowered.history]
+        .into_iter()
+        .enumerate()
+    {
+        clause.history.extend(history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(index),
+            )
+        }));
+    }
+    Some(clause)
 }
 
 fn parse_villainous_choice_chooser_prefix(input: &str) -> OracleResult<'_, PlayerFilter> {
@@ -9055,6 +9280,18 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
     ))
 }
 
+/// Move parser-only records alongside a definition nested in an enclosing clause.
+fn carry_nested_clause_history(
+    destination: &mut Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+    mut history: Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+    step: crate::parser::oracle_ir::history_provenance::InstructionStep,
+) {
+    for record in &mut history {
+        record.prepend(step.clone());
+    }
+    destination.extend(history);
+}
+
 /// Lift of a lowered clause onto a fresh definition, for the seven sites that need a
 /// `ParsedEffectClause` as a nested branch/sub-definition rather than as a chain link:
 /// `try_parse_unless_three_branch_choice` (×3, one per branch), `try_parse_put_counter_choice`,
@@ -9081,6 +9318,10 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
 ///     test's census note), so carrying it moves no corpus card's parse; it closes the seam
 ///     for the next clause shape routed through a branch site rather than leaving a live
 ///     modifier to be dropped without a word.
+///   * `history` — CARRIED beside the definition. The caller prepends its typed
+///     nesting step and transfers every record to the enclosing clause.
+///   * `head_text` — DROPPED: parser bookkeeping for the block-history guard, which
+///     has already run on the clause; it lowers to nothing.
 ///   * `unlowered_guard` — DELIBERATELY DROPPED. This is the SECOND fail-open path for a
 ///     deferred guard verdict, alongside the `parse_effect_chain` one named in
 ///     [`UnloweredGuard`]'s own doc. A clause whose leading guard did not lower arrives here
@@ -9092,7 +9333,10 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
 fn ability_definition_from_clause(
     kind: AbilityKind,
     clause: ParsedEffectClause,
-) -> AbilityDefinition {
+) -> (
+    AbilityDefinition,
+    Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+) {
     let ParsedEffectClause {
         effect,
         duration,
@@ -9106,6 +9350,9 @@ fn ability_definition_from_clause(
         // CR 608.2c + CR 614.1a: dropped on purpose — see the doc comment above. Bound as `_`
         // rather than omitted via `..` so a new field cannot hide behind the rest pattern.
         unlowered_guard: _,
+        // Parser bookkeeping the block-history guard has already read; nothing to lower.
+        head_text: _,
+        history,
         entry_onset,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
@@ -9120,7 +9367,7 @@ fn ability_definition_from_clause(
     def.distribute = distribute;
     def.unless_pay = unless_pay;
     def.entry_onset = entry_onset;
-    def
+    (def, history)
 }
 
 fn parse_event_context_ref_with_ctx<'a>(
@@ -9158,6 +9405,14 @@ fn parse_event_context_ref_with_ctx<'a>(
     Some((target, rest))
 }
 
+/// CR 611.2 + CR 402.2: Parse "you have no maximum hand size [for the rest of the game]"
+/// as an effect: a continuous effect from a resolving spell or ability that changes a
+/// rule of the game. The engine carries it on an emblem object with a
+/// `NoMaximumHandSize` static, which functions from the command zone (CR 114.4).
+///
+/// When this text appears on a permanent as a static ability, the static parser handles it.
+/// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
+/// the emblem carrier produces the persistent game-state effect.
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
     // Strip optional "you " prefix, then match "have no maximum hand size"
     let after_you = nom_on_lower(tp.original, tp.lower, |i| value((), tag("you ")).parse(i));
@@ -9178,9 +9433,13 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
         return None;
     }
 
+    let mut statics = vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
+        .description("You have no maximum hand size.".to_string())];
+    // CR 611.2 + CR 402.2: the engine carries this effect on an emblem object; like every
+    // emblem static it functions from the command zone (CR 114.4).
+    declare_emblem_static_zones(&mut statics);
     Some(Effect::CreateEmblem {
-        statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
-            .description("You have no maximum hand size.".to_string())],
+        statics,
         triggers: Vec::new(),
     })
 }
@@ -9502,6 +9761,8 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::ChooseOneOf {
@@ -9547,6 +9808,8 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
     let categories = all_core_type_categories();
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::ChooseFromZone {
@@ -9657,6 +9920,8 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::ForEachCategory {
@@ -9744,6 +10009,8 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::ForEachCategory {
@@ -9915,6 +10182,16 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
 }
 
 fn parse_effect_clause_with_damage_context(
+    text: &str,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> ParsedEffectClause {
+    let mut clause = parse_effect_clause_with_damage_context_inner(text, ctx, damage_context);
+    crate::parser::oracle_ir::history_provenance::capture_own_history(&mut clause, text, ctx);
+    clause
+}
+
+fn parse_effect_clause_with_damage_context_inner(
     text: &str,
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
@@ -11815,6 +12092,8 @@ fn try_parse_player_draws_and_gains_control(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::Draw {
@@ -12379,8 +12658,9 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
-    // CR 402.2 + CR 114.1: "you have no maximum hand size [for the rest of the game]" —
-    // as an effect, this creates an emblem with NoMaximumHandSize static.
+    // CR 611.2 + CR 402.2: "you have no maximum hand size [for the rest of the game]" is a
+    // continuous effect from a resolving spell or ability that changes a rule of the game;
+    // the engine carries it on an emblem object with a NoMaximumHandSize static.
     if let Some(effect) = try_parse_no_max_hand_size_effect(tp) {
         return parsed_clause(effect);
     }
@@ -12781,12 +13061,23 @@ fn parse_effect_clause_inner_with_damage_context(
         // CR 603.7 + CR 608.2k: reflexive delayed body — keep the event-source
         // binding for a bare spell anaphor.
         // Standalone mode, matching this builder's pre-existing entry point.
-        let inner = lower_ability_ir(&parse_ability_ir_standalone_with_spell_anaphor(
-            effect_text,
-            AbilityKind::Spell,
-            SpellAnaphorBinding::EventSource,
-        ));
-        return build_reflexive_coin_flip_trigger(is_win, inner);
+        let lowered =
+            lower_ability_ir_with_provenance(&parse_ability_ir_standalone_with_spell_anaphor(
+                effect_text,
+                AbilityKind::Spell,
+                SpellAnaphorBinding::EventSource,
+            ));
+        let mut clause = build_reflexive_coin_flip_trigger(is_win, lowered.value);
+        clause.head_text = Some(text[..text.len() - effect_text.len()].to_string());
+        clause
+            .history
+            .extend(lowered.history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            }));
+        return clause;
     }
 
     // CR 705: "If you win/lose the flip, [effect]" — coin flip branch.
@@ -13171,6 +13462,8 @@ fn parse_effect_clause_inner_with_damage_context(
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
     if let Some((effect, onset)) = try_parse_perpetual_base_pt(tp) {
         return ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             entry_onset: onset,
             ..parsed_clause(effect)
         };
@@ -13269,6 +13562,15 @@ fn parse_effect_clause_inner_with_damage_context(
 
     // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
     if let Some(effect) = try_parse_conjure(tp) {
+        return parsed_clause(effect);
+    }
+
+    // CR 707.13 + CR 201.4: "create a copy of the card with the chosen name".
+    // Tried here, beside the conjures it shares a materialization path with, and
+    // before the imperative dispatcher: "create" is a dispatched verb, and its
+    // token/creation argument grammar rejects this clause (the recorded gap was
+    // `unparsed_verb_arguments`).
+    if let Some(effect) = try_parse_create_card_copy_by_name(tp) {
         return parsed_clause(effect);
     }
 
@@ -15145,6 +15447,37 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     })
 }
 
+/// CR 707.13 + CR 201.4: "Create a copy of the card with the chosen name."
+///
+/// The copy source is a NAME, not an object: the named card need not be in any
+/// zone, so none of the object-copy verbs (`CopySpell`, `CopyTokenOf`,
+/// `CastCopyOfCard`) can express it — they all read copiable values off
+/// something that exists. `Effect::CreateCardCopyByName` takes the copy's
+/// characteristics from the Oracle card reference instead (CR 707.13).
+///
+/// Deliberately narrow: only the chosen-name referent, which is the one
+/// `TargetFilter::HasChosenName` already names elsewhere in the parser. A literal
+/// "create a copy of a card named X" would fill in the effect's `name` field; no
+/// printed card asks for it yet, and inventing the grammar without one is how a
+/// wrong shape gets locked in.
+fn try_parse_create_card_copy_by_name(tp: TextPair) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("create a copy of ")
+        .parse(tp.lower)
+        .ok()?;
+    let rest = rest.trim_end().trim_end_matches('.').trim_end();
+    // The copy object is the chosen-name referent and nothing else; `all_consuming`
+    // is what makes that exact rather than a prefix match.
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "the card with the chosen name",
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(Effect::CreateCardCopyByName {
+        name: None,
+        count: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 /// Digital-only keyword action: Parse "conjure a duplicate of {reference} into/onto {zone}".
 /// The reference is either an explicit target ("target creature card exiled with ~")
 /// or an anaphoric pronoun ("it" / "that card") resolving to the parent target.
@@ -15618,6 +15951,8 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -15721,6 +16056,8 @@ impl ParsedRetainedTypeClause {
     fn lower(self, duration_binding: RetainedTypeDurationBinding) -> ParsedEffectClause {
         let duration = duration_binding.duration();
         ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -17028,36 +17365,51 @@ fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
     .map(|(c, _)| c)
 }
 
+/// CR 109.5: the library possessor is a printed part of the reveal instruction.
+/// "your" fixes the activator; "their/that/..." leaves the actor to the
+/// subject/antecedent context.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RevealLibraryPossessor {
+    Controller,
+    Context,
+}
+
 /// CR 701.20a: Shared prefix `"reveal[s] cards from the top of <possessive> library until "`.
-/// Returns the input positioned at the first token after `"until "`.
+/// Returns the possessor and the input positioned at the first token after
+/// `"until "`.
 /// Used by both the active-form and passive-form `RevealUntil` parsers so that
 /// any future possessive arm addition only needs to be made in one place.
-fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_cards_from_library_until(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
     let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
     // CR 109.5: possessive determiner identifying the library owner. Both English
     // possessive forms ("your"/"their"/"his"/"her"/"its") map to the same parsed
     // structure; the actual player is supplied by the caller via subject context.
-    let (input, _) = alt((
-        tag("your "),
-        tag("their "),
-        tag("his "),
-        tag("her "),
-        tag("its "),
+    let (input, possessor) = alt((
+        value(RevealLibraryPossessor::Controller, tag("your ")),
+        value(RevealLibraryPossessor::Context, tag("their ")),
+        value(RevealLibraryPossessor::Context, tag("his ")),
+        value(RevealLibraryPossessor::Context, tag("her ")),
+        value(RevealLibraryPossessor::Context, tag("its ")),
         // CR 109.5: "top of that library" — Mirror-Mad Phantasm class
-        tag("that "),
+        value(RevealLibraryPossessor::Context, tag("that ")),
     ))
     .parse(input)?;
-    value((), tag("library until ")).parse(input)
+    let (input, _) = tag("library until ").parse(input)?;
+    Ok((input, possessor))
 }
 
 /// CR 701.20a: Parse the active-voice prefix `"reveal[s] cards from the top of
 /// <possessive> library until <pronoun> reveal[s] "`, stopping *before* the
 /// count/article. The caller parses the count (article → `Fixed(1)`, or a
 /// number / `X` for "reveal X [filter] cards") and the filter phrase.
-fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = parse_reveal_cards_from_library_until(input)?;
+fn parse_reveal_until_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
+    let (input, possessor) = parse_reveal_cards_from_library_until(input)?;
     // Active-voice pronoun + matching verb form.
     let (input, _) = alt((
         tag("you reveal "),
@@ -17067,7 +17419,7 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("it reveals "),
     ))
     .parse(input)?;
-    Ok((input, ()))
+    Ok((input, possessor))
 }
 
 /// CR 701.20a + CR 608.2c: Parse the count phrase that follows
@@ -17118,7 +17470,9 @@ fn parse_reveal_until_count(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// the function body.
 ///
 /// Covers: Indomitable Creativity, Blessed Reincarnation, Tunnel Vision.
-fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_until_passive_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     parse_reveal_cards_from_library_until(input)
 }
 
@@ -17154,7 +17508,12 @@ fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> 
 }
 
 fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+    all_consuming(alt((
+        terminated(take_until(" cards"), tag(" cards")),
+        terminated(take_until(" card"), tag(" card")),
+        rest,
+    )))
+    .parse(input)
 }
 
 /// Match a disjunction separator at the head of `input`: `", or "` / `", "` /
@@ -17235,6 +17594,28 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
         }
     }
     (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
+}
+
+/// CR 608.2c / CR 701.20a: Check whether a disjunct in a reveal-until filter list
+/// opens with its own count threshold (Thought Dissector: "until an artifact card or
+/// X cards are revealed" — "X cards"; "until a land card or two creature cards are
+/// revealed" — "two creature"). A single `RevealUntil` carries one count, so a
+/// disjunct that leads with a quantity cannot be folded into the card filter.
+/// Article-prefixed disjuncts ("a land", "an artifact") are plain card filters.
+fn is_reveal_until_count_disjunct(disjunct: &str) -> bool {
+    let count_token = alt((
+        value((), nom_primitives::parse_number_or_x),
+        value((), nom_quantity::parse_that_much_or_many),
+    ));
+    preceded(
+        not(nom_primitives::parse_article),
+        terminated(
+            count_token,
+            peek(alt((value((), eof), value((), tag(" "))))),
+        ),
+    )
+    .parse(disjunct.trim())
+    .is_ok()
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -17405,6 +17786,16 @@ fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFil
 /// in both active voice (`"until <pronoun> reveal[s] a <filter>"`) and
 /// passive voice (`"until a/an <filter> [card] is revealed [and exiles that card]"`).
 /// Builds [`Effect::RevealUntil`] with `player` identifying whose library is revealed.
+fn reveal_player_for_possessor(
+    player: TargetFilter,
+    possessor: RevealLibraryPossessor,
+) -> TargetFilter {
+    match possessor {
+        RevealLibraryPossessor::Controller => TargetFilter::Controller,
+        RevealLibraryPossessor::Context => player,
+    }
+}
+
 fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
     // CR 701.20a + CR 608.2c: strip a trailing "where X is …" binding first so a
     // dynamic count ("reveal X [filter] cards, where X is the number of colors
@@ -17416,7 +17807,8 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // CR 701.20a: Active-voice form — "…until they reveal a <filter>" (count =
     // Fixed(1)) or "…until you reveal X [filter] cards" (dynamic count).
     let active_result = nom_on_lower(count_tp.original, count_tp.lower, parse_reveal_until_prefix);
-    if let Some((_, rest_orig)) = active_result {
+    if let Some((possessor, rest_orig)) = active_result {
+        let player = reveal_player_for_possessor(player, possessor);
         let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
         let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
@@ -17450,37 +17842,81 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
     // CR 701.20a: Passive-voice form — "…until a/an <filter> [card] is revealed
     // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
-    // Tunnel Vision). Passive prefix stops before the article; extract article,
+    // Tunnel Vision) or "…until four land cards are revealed" (Mind Funeral).
+    // Passive prefix stops before the article or count; extract count,
     // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+    let (possessor, rest_orig) = nom_on_lower(
+        count_tp.original,
+        count_tp.lower,
+        parse_reveal_until_passive_prefix,
+    )?;
+    let player = reveal_player_for_possessor(player, possessor);
+    let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
 
-    // Consume the article ("a" / "an").
-    let (_, after_article_orig) =
-        nom_on_lower(rest_orig, rest_lower, nom_primitives::parse_article)?;
-    let after_article_lower = &rest_lower[rest_lower.len() - after_article_orig.len()..];
+    // Consume the article ("a" / "an") or count ("four", "X", etc.).
+    let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
 
-    // Capture everything up to " is revealed" — this is the filter phrase.
-    let (remainder, captured) = take_until::<_, _, OracleError<'_>>(" is revealed")
-        .parse(after_article_lower)
-        .ok()?;
+    // Capture everything up to " is revealed" or " are revealed" — this is the filter phrase.
+    let (remainder, (captured, _)) = alt((
+        pair(
+            take_until::<_, _, OracleError<'_>>(" is revealed"),
+            tag(" is revealed"),
+        ),
+        pair(
+            take_until::<_, _, OracleError<'_>>(" are revealed"),
+            tag(" are revealed"),
+        ),
+    ))
+    .parse(after_count_lower)
+    .ok()?;
 
-    // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
-    // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
+    // Strip trailing " cards" or " card" if present ("artifact or creature card" → "artifact or creature",
+    // "land cards" → "land"). Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
     let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
 
-    let filter = build_reveal_until_filter(filter_text);
+    // CR 608.2c / CR 701.20a: Reject compound stopping conditions where a second
+    // stopping condition is joined by "or" (e.g. Thought Dissector: "until an artifact
+    // card or X cards are revealed, whichever comes first"). If any disjunct is a standalone
+    // count expression or number, this is a compound stopping condition rather than a simple card filter.
+    if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
+        // An article-prefixed disjunct ("a land") carries an implicit threshold of one,
+        // so it cannot share a leading count other than one ("four cards or a land card").
+        let leading_count_is_one = matches!(raw_count, QuantityExpr::Fixed { value: 1 });
+        let has_article_disjunct = disjuncts
+            .iter()
+            .any(|d| nom_primitives::parse_article(d.trim()).is_ok());
+        if disjuncts.iter().any(|d| is_reveal_until_count_disjunct(d))
+            || (!leading_count_is_one && has_article_disjunct)
+        {
+            return Some(parsed_clause(Effect::unimplemented(
+                "compound_reveal_until",
+                count_tp.original,
+            )));
+        }
+    }
 
-    // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
-    // card goes directly to Exile. Consume " is revealed" via nom tag, then check
-    // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
-    let (after_is_revealed, _) = tag::<_, _, OracleError<'_>>(" is revealed")
-        .parse(remainder)
-        .ok()?;
-    let inline_exile = tag::<_, _, OracleError<'_>>(" and exiles that card")
-        .parse(after_is_revealed)
-        .is_ok();
-    let kept_destination = if inline_exile {
+    let filter = build_reveal_until_filter(filter_text);
+    // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+    let count = apply_where_x_quantity_expression(
+        raw_count,
+        WhereXBinding::bare(where_x_expression.as_deref()),
+    )?;
+
+    // CR 608.2c: Preserve the full instruction after " is revealed" or " are revealed".
+    // The only recognized suffix is the optional inline exile (CR 406.2) on
+    // Indomitable Creativity followed by terminal punctuation. An unconsumed
+    // tail such as Thought Dissector's ", whichever comes first" fails closed.
+    let (after_inline_exile, inline_exile) =
+        opt(tag::<_, _, OracleError<'_>>(" and exiles that card"))
+            .parse(remainder)
+            .ok()?;
+    if !imperative::terminal_punctuation_only(after_inline_exile) {
+        return Some(parsed_clause(Effect::unimplemented(
+            "unconsumed_reveal_until_tail",
+            count_tp.original,
+        )));
+    }
+    let kept_destination = if inline_exile.is_some() {
         Zone::Exile
     } else {
         Zone::Hand
@@ -17489,7 +17925,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     Some(parsed_clause(Effect::RevealUntil {
         player,
         filter,
-        count: QuantityExpr::Fixed { value: 1 },
+        count,
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,
@@ -18365,6 +18801,24 @@ fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
             definition.mode,
             StaticMode::MayPlayAdditionalLand | StaticMode::AdditionalLandDrop { .. }
         ))
+    )
+}
+
+/// CR 601.3b + CR 608.2d: a granted "as though they had flash" permission is used by a later
+/// cast, so its "may" is not a choice made at resolution.
+fn clause_is_flash_timing_permission_grant(clause: &ParsedEffectClause) -> bool {
+    matches!(
+        &clause.effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities.iter().any(|definition| {
+            definition.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.mode == StaticMode::CastWithFlash
+            ))
+        })
     )
 }
 
@@ -20529,6 +20983,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     if let Some(effect) = parse_energy_gain_base(&numeric_base_lower, quantity.clone()) {
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -20579,6 +21035,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 imperative::lower_targeted_action_ast(ast.with_for_each_quantity(quantity.clone()));
             let effect = thread_for_each_subject(effect, base_no_duration, ctx);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect,
@@ -20860,6 +21318,8 @@ fn parsed_for_each_quantity_effect(
             let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, effect);
             sub_ability.duration = duration;
             return ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::TargetOnly { target },
@@ -20876,6 +21336,8 @@ fn parsed_for_each_quantity_effect(
     }
 
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -20956,7 +21418,7 @@ fn try_parse_gain_energy(
         return Some(clause);
     }
     if let Some(continuation) = parse_energy_gain_continuation(rest) {
-        clause.sub_ability = Some(Box::new({
+        let lowered = {
             let ir = parse_effect_chain_ir_with_damage_context(
                 continuation,
                 AbilityKind::Spell,
@@ -20964,8 +21426,18 @@ fn try_parse_gain_energy(
                 0,
                 Some(damage_context),
             );
-            lower_effect_chain_ir(&ir)
-        }));
+            lower::lower_effect_chain_ir_with_provenance(&ir)
+        };
+        clause.sub_ability = Some(Box::new(lowered.value));
+        clause
+            .history
+            .extend(lowered.history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                )
+            }));
+        clause.head_text = Some(tp.lower[..tp.lower.len() - continuation.len()].to_string());
         return Some(clause);
     }
     None
@@ -21023,6 +21495,8 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -21292,10 +21766,12 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             count,
             target: TargetFilter::Controller,
             destination,
+            position,
         } => Effect::Mill {
             count,
             target,
             destination,
+            position,
         },
         Effect::Draw {
             count,
@@ -22185,6 +22661,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
             },
         )
     };
@@ -22206,6 +22683,8 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
     });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         // CR 115.1: `TargetOnly` surfaces the "target permanent" slot; the chosen
@@ -23615,6 +24094,8 @@ fn try_parse_reanimate_self_and_target(
     sub_ability.optional = sub_clause.optional;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         sub_ability: Some(Box::new(sub_ability)),
         ..parsed_clause(primary)
     })
@@ -23847,6 +24328,8 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                 parse_target_with_ctx(target_text.trim_start(), &mut continuation_ctx);
             if sub_rem.trim().is_empty() && !matches!(sub_target, TargetFilter::Any) {
                 sub_clause = ParsedEffectClause {
+                    history: Vec::new(),
+                    head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
                     effect: Effect::PutCounter {
@@ -24037,6 +24520,13 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 608.2c + CR 608.2i: the continuation is its own instruction, so its history
+    // clauses are checked against its own text and population, under the context it was
+    // lowered with, and fail it closed when dropped.
+    if instruction_drops_block_partner(&sub_clause, &sub_lower, &continuation_ctx) {
+        sub_clause = parsed_clause(Effect::unimplemented("block_history_partner", sub_text));
+    }
+
     // CR 115.10a + CR 608.2d: the continuation is its own instruction, so an untargeted
     // choice in it is made while it resolves, by the same classifier as a standalone clause.
     let continuation_timing = lower::target_choice_timing_for_parsed(
@@ -24046,6 +24536,15 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         sub_clause.multi_target.is_some(),
         continuation_ctx.target_selection_mode,
     );
+    crate::parser::oracle_ir::history_provenance::capture_own_history(
+        &mut sub_clause,
+        &sub_lower,
+        &continuation_ctx,
+    );
+    let mut continuation_history = std::mem::take(&mut sub_clause.history);
+    for record in &mut continuation_history {
+        record.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+    }
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.target_choice_timing = continuation_timing;
     sub_ability.sub_ability = sub_clause.sub_ability;
@@ -24109,6 +24608,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     };
 
     Some(ParsedEffectClause {
+        // CR 608.2c: the head owns only the text before " and "; the block-history
+        // guard reads its clauses there (`instruction_drops_block_partner`).
+        history: continuation_history,
+        head_text: Some(text[..text.len() - remainder.len()].to_lowercase()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect,
@@ -24149,6 +24652,8 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Goad { target });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary,
@@ -24518,6 +25023,8 @@ fn try_parse_compound_player_object_damage(
     // effects (rules 614 and 615), so that single event is what those shields
     // observe — see `resolve_all` in game/effects/deal_damage.rs.
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DamageAll {
@@ -24651,6 +25158,8 @@ fn try_parse_compound_object_player_damage(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DamageAll {
@@ -24790,6 +25299,8 @@ fn try_parse_radiance_color_fanout_damage_inner(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect.clone(),
@@ -25178,6 +25689,8 @@ fn try_parse_multi_target_damage_chain_inner(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect,
@@ -25309,6 +25822,8 @@ fn try_parse_multi_target_counter_chain(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect,
@@ -25774,6 +26289,8 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
 
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: copy_effect,
@@ -25951,6 +26468,8 @@ fn try_split_damage_compound_with_damage_context(
     sub_ability.entry_onset = sub_clause.entry_onset;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect,
@@ -26054,6 +26573,12 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, &str, TargetF
 /// Parse "shuffle X and Y into their owners' libraries" as a compound ChangeZone chain.
 /// Returns a ParsedEffectClause with a ChangeZone for the first subject and a sub_ability
 /// for the second subject, both with owner_library: true.
+///
+/// CR 608.2f: a self+target compound ("this creature and target …") lowers to
+/// one grouped ChangeZone over `Or { SelfRef, target }`, so both members share
+/// one logical zone-change group and the tracked-owner terminal still settles
+/// each owner's shuffle. Other compound shapes retain sequential ChangeZone
+/// nodes.
 fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     tag::<_, _, OracleError<'_>>("shuffle ")
@@ -26095,9 +26620,15 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
-        target: second,
+        target: second.clone(),
         owner_library,
-        library_shuffle: Default::default(),
+        // CR 701.24c: the compound instruction settles both legs through one
+        // terminal owner population; neither leg may shuffle its own delivery.
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -26111,6 +26642,17 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_def.sub_ability = sub_clause.sub_ability;
+    if owner_library {
+        // The second leg's terminal constructor would scope a typed target to a
+        // single owner; the compound instruction must settle every owner from
+        // both legs, so replace it with the tracked-owner ScopedPlayer shuffle.
+        if let Some(terminal) = sub_def.sub_ability.as_deref_mut() {
+            *terminal.effect = Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            };
+            terminal.player_scope = Some(imperative::owner_library_shuffle_scope());
+        }
+    }
     // CR 115.6 + CR 701.24a: the SECOND subject is a clause of its own ("up to
     // three target cards from a single graveyard" — Serene Remembrance), but the
     // compound-shuffle producer builds its `AbilityDefinition` directly from the
@@ -26121,14 +26663,63 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         sub_def.multi_target = extract_optional_target_multi_target(second_text, &sub_def.effect);
     }
 
-    // Build ChangeZone for the first subject as the primary effect
+    // Build ChangeZone for the first subject as the primary effect. A
+    // "this creature/permanent" source names a permanent only while it is on
+    // the battlefield (CR 400.7); a sacrificed/removed source must not be moved
+    // from its graveyard. A "~" source can be a spell still on the stack (Serene
+    // Remembrance), so it keeps the unconstrained origin.
+    let first_origin = if matches!(first, TargetFilter::SelfRef)
+        && (scan_contains_phrase(&lower, "this creature")
+            || scan_contains_phrase(&lower, "this permanent"))
+    {
+        Some(Zone::Battlefield)
+    } else {
+        None
+    };
+    // CR 608.2f: a self+target compound is one simultaneous action. A single
+    // ChangeZone over `Or { SelfRef, second }` keeps both members in one logical
+    // zone-change group (Dour Port-Mage sees one departure), while the
+    // tracked-owner terminal still settles each affected owner's shuffle.
+    // CR 115.1c: SelfRef is a context reference, so the targeting layer excludes
+    // it from the declared target candidates; only `second` is announced.
+    if owner_library && matches!(first, TargetFilter::SelfRef) {
+        let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            origin: first_origin,
+            destination: Zone::Library,
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, second.clone()],
+            },
+            owner_library,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mut clause = imperative::with_shuffle_sub_ability(effect);
+        if clause.multi_target.is_none() {
+            clause.multi_target = extract_optional_target_multi_target(second_text, &clause.effect);
+        }
+        return Some(clause);
+    }
+
     let primary_effect = Effect::ChangeZone {
         actor: crate::types::ability::LibraryInstructionActor::Controller,
-        origin: None,
+        origin: first_origin,
         destination: Zone::Library,
         target: first,
         owner_library,
-        library_shuffle: Default::default(),
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -26141,6 +26732,8 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: primary_effect,
@@ -26498,6 +27091,8 @@ fn try_parse_shared_equal_to_quantity_compound(
         })
     });
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         sub_ability: sub_ability.map(Box::new),
         ..parsed_clause(head.lower_conjunct(qty, subject.as_ref(), tp.original))
     })
@@ -26582,13 +27177,15 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let Some(target) = application.target else {
         return Some(contest);
     };
-    Some(ParsedEffectClause {
-        sub_ability: Some(Box::new(ability_definition_from_clause(
-            AbilityKind::Spell,
-            contest,
-        ))),
-        ..parsed_clause(Effect::TargetOnly { target })
-    })
+    let (definition, history) = ability_definition_from_clause(AbilityKind::Spell, contest);
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.sub_ability = Some(Box::new(definition));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
+    Some(clause)
 }
 
 /// CR 109.5 + CR 608.2c + CR 608.2e: "<A> and <B> each <body>". Two paths:
@@ -26654,7 +27251,15 @@ fn try_parse_compound_subject_each(
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed body is
     // kept, `body_ctx` is dropped.
     let mut body_ctx = ctx.clone_throwaway();
-    let parsed_body = parse_effect_chain_with_context(body_text, AbilityKind::Spell, &mut body_ctx);
+    let lowered_body = parse_nested_effect_chain_with_damage_context_and_provenance(
+        body_text,
+        AbilityKind::Spell,
+        &mut body_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let parsed_body = lowered_body.value;
+    let body_history = lowered_body.history;
+    let owner_text = text[..consumed_prefix].to_string();
 
     // A body that already carries its own iteration scope is refused by the
     // channel, so the set never overwrites that scope; it takes the halves path.
@@ -26666,13 +27271,19 @@ fn try_parse_compound_subject_each(
         // through a `TargetOnly` head; a possessive actor announces its object.
         let head = declares_target
             .or_else(|| is_targeted_player_conjunct(&second_filter).then(|| second_filter.clone()));
-        return Some(bind_coordinated_player_set(
-            parsed_body,
-            member,
-            head,
-            text,
-            ctx,
-        ));
+        let has_head = head.is_some();
+        let mut clause = bind_coordinated_player_set(parsed_body, member, head, text, ctx);
+        if !matches!(clause.effect, Effect::Unimplemented { .. }) {
+            clause.head_text = Some(owner_text);
+            clause.history = body_history.into_iter().map(|record| {
+                let mut pending = crate::parser::oracle_ir::history_provenance::PendingHistory::relocated(record);
+                if has_head {
+                    pending.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+                }
+                pending
+            }).collect();
+        }
+        return Some(clause);
     }
 
     // CR 508.6: "those players" names a player SET; only the coordinated channel
@@ -26736,12 +27347,32 @@ fn try_parse_compound_subject_each(
     // at the TAIL of half A's chain so half A's own deeper links (e.g. a
     // MustAttack rider) survive. A plain overwrite would clobber them.
     let mut tail = &mut half_a;
+    let mut second_half_depth = 1;
     while tail.sub_ability.is_some() {
         tail = tail.sub_ability.as_mut().unwrap();
+        second_half_depth += 1;
     }
     tail.sub_ability = Some(Box::new(half_b));
 
+    // Both clones represent the printed body. Preserve its logical origin in
+    // each half and address the second copy after the entire first chain.
+    let mut history: Vec<_> = body_history
+        .iter()
+        .cloned()
+        .map(crate::parser::oracle_ir::history_provenance::PendingHistory::relocated)
+        .collect();
+    history.extend(body_history.into_iter().map(|record| {
+        let mut pending =
+            crate::parser::oracle_ir::history_provenance::PendingHistory::relocated(record);
+        for _ in 0..second_half_depth {
+            pending
+                .prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+        }
+        pending
+    }));
     let distributed = ParsedEffectClause {
+        history,
+        head_text: Some(owner_text),
         optional_targeting: false,
         unlowered_guard: None,
         effect: *half_a.effect,
@@ -26765,22 +27396,16 @@ fn try_parse_compound_subject_each(
     let Some(target) = declares_target else {
         return Some(distributed);
     };
-    Some(ParsedEffectClause {
-        optional_targeting: false,
-        unlowered_guard: None,
-        effect: Effect::TargetOnly { target },
-        duration: None,
-        sub_ability: Some(Box::new(ability_definition_from_clause(
-            AbilityKind::Spell,
-            distributed,
-        ))),
-        distribute: None,
-        multi_target: None,
-        condition: None,
-        optional: false,
-        unless_pay: None,
-        entry_onset: ContinuousEffectOnset::WhenFollowed,
-    })
+    let (definition, history) = ability_definition_from_clause(AbilityKind::Spell, distributed);
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.head_text = Some(text[..consumed_prefix].to_string());
+    clause.sub_ability = Some(Box::new(definition));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
+    Some(clause)
 }
 
 /// CR 608.2c + CR 608.2e: Bind a parsed coordinated body to the player set
@@ -26836,12 +27461,16 @@ fn bind_coordinated_player_set(
     }
     match head {
         Some(target) => ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             sub_ability: Some(Box::new(body)),
             ..parsed_clause(Effect::TargetOnly { target })
         },
         None => {
             ctx.pending_player_scope = Some(set);
             ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 duration: body.duration,
                 sub_ability: body.sub_ability,
                 condition: body.condition,
@@ -27273,6 +27902,7 @@ fn try_parse_class_wide_graveyard_cast_grant(lower: &str, ctx: &ParseContext) ->
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool,
         cast_limit,
@@ -27586,6 +28216,469 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
+/// The affected populations owned by this instruction. Nested payloads and
+/// continuation instructions have their own operands and are deliberately excluded.
+/// Both the lowering guard and the final provenance audit must use this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PopulationOperand {
+    Effect,
+    Static(usize),
+}
+
+pub(crate) fn own_instruction_population(
+    effect: &Effect,
+    operand: PopulationOperand,
+) -> Option<&TargetFilter> {
+    match operand {
+        PopulationOperand::Effect => mass_population_filter(effect)
+            .or_else(|| mass_population_target(effect))
+            .or_else(|| match effect {
+                Effect::Transform {
+                    scope: EffectScope::All,
+                    target,
+                } => Some(target),
+                _ => effect.target_filter(),
+            }),
+        PopulationOperand::Static(index) => match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: None,
+                ..
+            } => static_abilities.get(index)?.affected.as_ref(),
+            _ => None,
+        },
+    }
+}
+
+pub(crate) fn own_instruction_population_operands(effect: &Effect) -> Vec<PopulationOperand> {
+    let mut operands = Vec::new();
+    if own_instruction_population(effect, PopulationOperand::Effect).is_some() {
+        operands.push(PopulationOperand::Effect);
+    }
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        operands.extend(
+            static_abilities
+                .iter()
+                .enumerate()
+                .filter_map(|(index, definition)| {
+                    definition
+                        .affected
+                        .as_ref()
+                        .filter(|filter| is_broadcast_population_filter(filter))
+                        .map(|_| PopulationOperand::Static(index))
+                }),
+        );
+    }
+    operands
+}
+
+pub(crate) fn own_instruction_populations(effect: &Effect) -> Vec<&TargetFilter> {
+    own_instruction_population_operands(effect)
+        .into_iter()
+        .filter_map(|operand| own_instruction_population(effect, operand))
+        .collect()
+}
+
+/// CR 608.2c + CR 608.2i + CR 115.1a: an instruction whose affected objects — a mass
+/// population or a target — are defined by a block-history clause their filter does not
+/// carry: a partner that is an indefinite filter phrase (Time to Reflect: "target creature
+/// that blocked or was blocked by a Zombie this turn"), any other partner no subject word
+/// covers (Triton Tactics: "each creature that was blocked by one of those creatures this
+/// turn"), or a recognized partner with no source or earlier-target antecedent.
+/// Representing it without the clause would widen it to every creature, or every creature
+/// as a legal target, so the caller fails the instruction closed. The populations are read
+/// from the clause's own instruction only, and from a broadcast grant's statics, against
+/// the text that instruction owns: a compound split's head reads its own prefix
+/// (`ParsedEffectClause::head_text`), and the split checks its "and" continuation against
+/// the continuation's own text (`try_split_targeted_compound`), so a relation on one
+/// conjunct never vouches for a clause written in another ("destroy it and all creatures
+/// it blocked this turn"). A partner word binds the subject `ctx` gives it, as the
+/// lowering bound it.
+fn instruction_drops_block_partner(
+    clause: &ParsedEffectClause,
+    lower: &str,
+    ctx: &ParseContext,
+) -> bool {
+    let own_history: Vec<_> = clause
+        .history
+        .iter()
+        .filter(|record| record.instruction.0.is_empty() && record.lineage.is_empty())
+        .collect();
+    if !own_history.is_empty() {
+        return own_history.iter().any(|record| {
+            record.expected.is_none_or(|expected| {
+                record.occurrence.operands.is_empty()
+                    || record.occurrence.operands.iter().any(|operand| {
+                        own_instruction_population(&clause.effect, *operand).is_none_or(|filter| {
+                            !crate::parser::oracle_target::restricting_block_pairings(filter)
+                                .contains(&expected)
+                        })
+                    })
+            })
+        });
+    }
+    let populations = own_instruction_populations(&clause.effect);
+    let own_text = clause.head_text.as_deref().unwrap_or(lower);
+    populations.into_iter().any(|population| {
+        population_drops_block_history_clause(own_text, &[vec![population]], |word| {
+            history_clause_subject(word, ctx)
+        })
+    })
+}
+
+#[cfg(test)]
+mod instruction_drops_block_partner_tests {
+    use super::{instruction_drops_block_partner, parse_effect_chain, parsed_clause};
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::types::ability::{
+        AbilityKind, BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+        Effect, EffectScope, FilterProp, TargetFilter, TypedFilter,
+    };
+
+    /// A context whose bare "it" names the ability's source.
+    fn source_ctx() -> ParseContext {
+        ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        }
+    }
+
+    /// "Creatures ~ blocked this turn", as `parse_block_history_clause` binds it.
+    fn blocked_by_source_this_turn() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::Source,
+            }]),
+        )
+    }
+
+    /// The guard's three outcomes for one mass population: a history clause its
+    /// filter carries binds; the same clause over the bare population (a declined
+    /// "it") and a partner no subject word covers both fail closed.
+    fn assert_guard_reads_population(population: fn(TargetFilter) -> Effect, verb: &str) {
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let represented = format!("{verb} all creatures it blocked this turn.");
+        let unbound =
+            format!("{verb} each creature that was blocked by one of those creatures this turn.");
+        assert!(
+            !instruction_drops_block_partner(
+                &parsed_clause(population(blocked_by_source_this_turn())),
+                &represented,
+                &source_ctx()
+            ),
+            "{verb}: a represented partner binds"
+        );
+        assert!(
+            instruction_drops_block_partner(
+                &parsed_clause(population(bare.clone())),
+                &represented,
+                &source_ctx()
+            ),
+            "{verb}: a declined partner fails closed"
+        );
+        assert!(
+            instruction_drops_block_partner(
+                &parsed_clause(population(bare)),
+                &unbound,
+                &source_ctx()
+            ),
+            "{verb}: an unbound partner fails closed"
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on a mass
+    /// transform (Moonmist's "Transform all Humans" has none). CR 608.2c + CR 608.2i:
+    /// a scope-`All` Transform hides its population from `target_filter()` and from
+    /// both shared population accessors, so the guard reads it itself.
+    #[test]
+    fn transform_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(
+            |target| Effect::Transform {
+                target,
+                scope: EffectScope::All,
+            },
+            "transform",
+        );
+    }
+
+    /// Synthetic guard control: no printed card puts a history clause on an explore
+    /// population. CR 608.2c + CR 608.2i: `ExploreAll` reaches the guard through the
+    /// parser-side population accessor, which `mass_population_target` lacks.
+    #[test]
+    fn explore_all_population_binds_or_fails_closed() {
+        assert_guard_reads_population(|filter| Effect::ExploreAll { filter }, "explore");
+    }
+
+    /// Parser shape only. CR 608.2c + CR 608.2i: an "each <type> ... explores"
+    /// population reaches the guard through the shared mass-population accessor,
+    /// so a history clause its filter does not carry fails the instruction closed
+    /// instead of leaving every creature to explore. Hand-built: no printed card
+    /// puts a history clause on an explore population.
+    #[test]
+    fn explore_population_with_an_unbound_partner_fails_closed() {
+        let def = parse_effect_chain(
+            "Each creature that was blocked by a Zombie this turn explores.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "{def:?}"
+        );
+        // Reach guard: without the clause the same subject parses as an explore population.
+        let bare = parse_effect_chain("Each creature explores.", AbilityKind::Spell);
+        assert!(
+            matches!(&*bare.effect, Effect::ExploreAll { .. }),
+            "{bare:?}"
+        );
+    }
+
+    /// The three-branch "unless that player" choice carries each branch's history
+    /// record at that branch (`InstructionStep::ChoiceBranch`), and the container
+    /// owns none. Hand-built: no printed card reaches this parser with a history clause.
+    #[test]
+    fn a_choice_branch_carries_its_own_history_record() {
+        use crate::parser::oracle_ir::history_provenance::InstructionStep;
+        let text = "Tap all creatures ~ blocked this turn unless that player draws a card or gains 3 life.";
+        let lower = text.to_lowercase();
+        let clause = super::try_parse_unless_three_branch_choice(
+            crate::parser::oracle_util::TextPair::new(text, &lower),
+            &mut source_ctx(),
+        )
+        .expect("the three-branch choice");
+        assert!(
+            matches!(clause.effect, Effect::ChooseOneOf { .. }),
+            "{:?}",
+            clause.effect
+        );
+        assert_eq!(clause.history.len(), 1, "{:?}", clause.history);
+        assert_eq!(
+            clause.history[0].instruction.0,
+            vec![InstructionStep::ChoiceBranch(0)],
+            "the default branch wrote the clause"
+        );
+    }
+
+    /// "Tap/untap all creatures", restricted by `filter`.
+    fn set_tap_all(state: crate::types::ability::TapStateChange, filter: TargetFilter) -> Effect {
+        Effect::SetTapState {
+            target: filter,
+            scope: EffectScope::All,
+            state,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2i: a history clause belongs to the instruction it is written
+    /// in. Constructed: "Tap all creatures it blocked this turn and untap all creatures."
+    /// with the source relation moved onto the Untap node fails closed, though the chain
+    /// carries one; bound on the Tap node, it binds. A relation the continuation owns
+    /// ("... and untap all creatures it blocked this turn") isn't read against the head
+    /// (`head_text`), which the split checks on its own.
+    #[test]
+    fn a_history_clause_binds_only_its_own_instruction() {
+        use crate::types::ability::{AbilityDefinition, TapStateChange};
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let clause = |head: TargetFilter, tail: TargetFilter, head_text: Option<&str>| {
+            let mut clause = parsed_clause(set_tap_all(TapStateChange::Tap, head));
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                set_tap_all(TapStateChange::Untap, tail),
+            )));
+            clause.head_text = head_text.map(str::to_string);
+            clause
+        };
+        let tap_clause = "tap all creatures it blocked this turn and untap all creatures.";
+        for head_text in [None, Some("tap all creatures it blocked this turn")] {
+            assert!(
+                instruction_drops_block_partner(
+                    &clause(bare.clone(), blocked_by_source_this_turn(), head_text),
+                    tap_clause,
+                    &source_ctx(),
+                ),
+                "{head_text:?}: the Untap node's relation can't vouch for the Tap clause"
+            );
+            assert!(
+                !instruction_drops_block_partner(
+                    &clause(blocked_by_source_this_turn(), bare.clone(), head_text),
+                    tap_clause,
+                    &source_ctx(),
+                ),
+                "{head_text:?}: bound on its own node, it binds"
+            );
+        }
+        let untap_clause = "tap all creatures and untap all creatures it blocked this turn.";
+        assert!(!instruction_drops_block_partner(
+            &clause(
+                bare.clone(),
+                blocked_by_source_this_turn(),
+                Some("tap all creatures")
+            ),
+            untap_clause,
+            &source_ctx(),
+        ));
+        assert!(
+            instruction_drops_block_partner(
+                &clause(bare, blocked_by_source_this_turn(), None),
+                untap_clause,
+                &source_ctx(),
+            ),
+            "without the split's record the whole text is the head's"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2i: the compound split hands each conjunct its own text. Parser
+    /// shape, hand-built: "~" names the source in either conjunct, and the relation lands
+    /// on the conjunct that wrote it.
+    #[test]
+    fn a_compound_split_checks_each_conjunct_on_its_own_text() {
+        for (text, on_tail) in [
+            (
+                "Destroy target creature and all creatures ~ blocked this turn.",
+                true,
+            ),
+            (
+                "Tap all creatures ~ blocked this turn and untap target creature.",
+                false,
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            // The effect's own serialized tree, which a chained continuation isn't in.
+            let relation_on = |effect: &Effect| {
+                crate::parser::swallow_evidence::UnitEvidence::of_effect(effect)
+                    .any::<FilterProp>(|prop| matches!(prop, FilterProp::CombatRelation { .. }))
+            };
+            let tail = def.sub_ability.as_deref().expect("a compound continuation");
+            assert!(
+                !matches!(*def.effect, Effect::Unimplemented { .. })
+                    && !matches!(*tail.effect, Effect::Unimplemented { .. }),
+                "{text}: both conjuncts bind; {def:?}"
+            );
+            assert_eq!(relation_on(&tail.effect), on_tail, "{text}");
+            assert_eq!(relation_on(&def.effect), !on_tail, "{text}");
+        }
+    }
+
+    #[test]
+    fn broadcast_guard_checks_each_statics_own_affected() {
+        let text = "Creatures ~ blocked this turn gain trample until end of turn.";
+        let mut definition = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = definition.effect.as_mut()
+        else {
+            panic!("broadcast grant: {definition:?}");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let original = static_abilities[0].clone();
+        let mut sibling = original.clone();
+        sibling.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+        static_abilities.push(sibling);
+        let mut clause = parsed_clause(*definition.effect);
+        crate::parser::oracle_ir::history_provenance::capture_own_history(
+            &mut clause,
+            text,
+            &source_ctx(),
+        );
+        assert!(!instruction_drops_block_partner(
+            &clause,
+            text,
+            &source_ctx()
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &mut clause.effect
+        else {
+            unreachable!()
+        };
+        static_abilities[0].affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+        static_abilities[1] = original;
+        assert!(
+            instruction_drops_block_partner(&clause, text, &source_ctx()),
+            "static 1 cannot vouch for static 0's widened affected"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2c: a broadcast grant keeps its population in its statics'
+    /// `affected`. Ride Down's bound partner ("that creature", the earlier target)
+    /// binds. Synthetic: an "each creature" grant over a partner no subject word
+    /// covers (an indefinite "a Zombie", or "one of those creatures") parses its
+    /// population bare, so it fails closed instead of granting trample to every
+    /// creature. No printed card has these shapes; Ride Down is the nearest printed
+    /// card.
+    #[test]
+    fn broadcast_grant_population_binds_or_fails_closed() {
+        let ride_down = parse_effect_chain(
+            "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        let grant = ride_down.sub_ability.as_deref().expect("Ride Down's grant");
+        let Effect::GenericEffect {
+            static_abilities,
+            target: None,
+            ..
+        } = &*grant.effect
+        else {
+            panic!("Ride Down's grant binds: {grant:?}");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|static_def| static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(|affected| matches!(
+                        affected,
+                        TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::CombatRelation {
+                                subject: CombatRelationSubject::AnaphoricTarget,
+                                ..
+                            }
+                        ))
+                    ))),
+            "Ride Down's grant carries its partner: {grant:?}"
+        );
+
+        for partner in ["a Zombie", "one of those creatures"] {
+            let text = format!(
+                "Each creature that was blocked by {partner} this turn gains trample until end of turn."
+            );
+            let def = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                ),
+                "{partner}: {def:?}"
+            );
+        }
+        // Reach guard: without the clause the same subject parses as a broadcast grant.
+        let bare = parse_effect_chain(
+            "Each creature gains trample until end of turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*bare.effect,
+                Effect::GenericEffect { target: None, static_abilities, .. }
+                    if static_abilities.iter().any(|static_def| static_def.affected.is_some())
+            ),
+            "{bare:?}"
+        );
+    }
+}
+
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.
 fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
     condition.any_quantity_expr(&|expr| {
@@ -27678,7 +28771,16 @@ fn replace_target_with_parent(effect: &mut Effect) {
         {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+        // CR 701.3d: in "unattach it" the anaphor IS the attachment and no host
+        // is named, so the host stays `Any`; "unattach all Equipment from it"
+        // names the host by anaphor.
+        Effect::UnattachAll { attachment, target }
+            if !matches!(target, TargetFilter::LastCreated)
+                && !matches!(
+                    attachment,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                ) =>
+        {
             *target = TargetFilter::ParentTarget;
         }
         // CR 122.1 + CR 701.10e + CR 608.2c: the counter-target anaphor family.
@@ -27695,8 +28797,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // Terra: "Create a token that's a copy of target enchantment … put up to
         // three lore counters on it"). Mirrors the identical `LastCreated` guard on
         // the `Attach`/`UnattachAll` arms above.
+        // CR 122.1 + CR 115.10a: only a single-scope removal has an anaphoric
+        // target to rebind; a mass removal's population is not "it".
         Effect::PutCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::MultiplyCounter { target, .. }
             if !matches!(target, TargetFilter::LastCreated) =>
         {
@@ -28656,6 +29764,9 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         | Effect::TargetOnly { target, .. }
         | Effect::CastFromZone { target, .. }
         | Effect::Counter { target, .. }
+        // CR 701.19a + CR 608.2c: "Regenerate target creature." announces a referent for
+        // later text (Gaze of the Gorgon's "it").
+        | Effect::Regenerate { target }
         // CR 608.2c regression (review round on PR #8494): `Effect::SetLifeTotal`
         // is also the "a stat becomes equal to/becomes N" setter for a NAMED
         // TARGET object, not only a player's life total (Baffling Defenses:
@@ -31399,6 +32510,8 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
             onset,
         } => ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -31418,6 +32531,8 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
             onset,
         } => ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -31436,6 +32551,8 @@ fn lower_subject_predicate_ast_body(
             duration,
             sub_ability,
         } => ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -31507,6 +32624,7 @@ fn lower_subject_predicate_ast_body(
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
+                && !scan_contains_phrase(&pred_lower, "until")
             {
                 // Delegate to nom combinator (input already lowercase from pred_lower).
                 let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
@@ -31783,6 +32901,8 @@ fn lower_subject_predicate_ast_body(
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
                     return ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         effect: Effect::TargetOnly {
@@ -32021,6 +33141,8 @@ fn lower_subject_predicate_ast_body(
                             crate::types::ability::TargetChoiceTiming::Resolution;
                     }
                     return ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         effect: Effect::TargetOnly {
@@ -32048,6 +33170,8 @@ fn lower_subject_predicate_ast_body(
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
                     explore.sub_ability = clause.sub_ability;
                     return ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         effect: Effect::TargetOnly {
@@ -32069,6 +33193,8 @@ fn lower_subject_predicate_ast_body(
 
                 if !matches!(affected, TargetFilter::SelfRef) {
                     return ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         effect: Effect::ExploreAll {
@@ -32268,6 +33394,14 @@ fn extract_player_anchor(
             target_player: Some(filter),
             ..
         } => (filter, true),
+        // CR 400.3 + CR 608.2c: a source-owner shuffle ("this creature's owner
+        // shuffles it …") establishes the owner as the actor for a following
+        // "that player"/"they" clause. `Owner` is not a targetable player filter,
+        // but it is a valid antecedent, so register it before the player-slot
+        // predicate below.
+        Effect::Shuffle {
+            target: TargetFilter::Owner,
+        } => return Some(TargetFilter::Owner),
         Effect::Shuffle { target } => (target, false),
         Effect::ChangeZoneAll { target, .. } => (target, false),
         _ => return None,
@@ -32701,39 +33835,63 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
+fn apply_anchor_subject(
+    effect: &mut Effect,
+    anchor: &TargetFilter,
+    draw_inherits_anchor: bool,
+    preserve_reveal_controller: bool,
+    preserve_search_controller: bool,
+) {
     // `ParentTarget` reaches this chain-local applier only from
     // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
     // shared predicate because it can otherwise name an object.
     if !matches!(
         anchor,
-        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. }
+        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. } | TargetFilter::Owner
     ) && !target_filter_can_target_player(anchor)
     {
         return;
     }
     let slot_anchor = matches!(anchor, TargetFilter::DeclaredPlayer { .. });
+    let owner_anchor = matches!(anchor, TargetFilter::Owner);
     match effect {
         Effect::Shuffle { target }
-            if matches!(
-                *target,
-                TargetFilter::Controller
-                    | TargetFilter::Player
-                    | TargetFilter::ParentTargetController
-            ) || (slot_anchor
-                && matches!(
+            if !owner_anchor
+                && !preserve_search_controller
+                && (matches!(
                     *target,
-                    TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
-                )) =>
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) || (slot_anchor
+                    && matches!(
+                        *target,
+                        TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
+                    ))) =>
         {
             *target = anchor.clone();
         }
         Effect::SearchLibrary {
             target_player: tp @ None,
             ..
-        } => {
+        } if !owner_anchor && !preserve_search_controller => {
             *tp = Some(anchor.clone());
+        }
+        // CR 608.2c: "If that player does, they reveal …" after a source-owner
+        // shuffle names the same owner. The chain anchor is the parser's shared
+        // actor authority; bind it here, at the clause that resolves the
+        // subject, instead of rewriting the completed ability tree.
+        Effect::RevealUntil { player, .. }
+            if !preserve_reveal_controller
+                && (matches!(*player, TargetFilter::ParentTarget | TargetFilter::Player)
+                    || (draw_inherits_anchor
+                        && matches!(
+                            *player,
+                            TargetFilter::Controller | TargetFilter::ParentTargetController
+                        ))) =>
+        {
+            *player = anchor.clone();
         }
         // A `ParentTarget` anchor is provenance-safe only for the nested mass
         // library move that established it. Search result collection uses a
@@ -32744,11 +33902,12 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
             destination: Zone::Library,
             target,
             ..
-        } if *target == TargetFilter::Controller => {
+        } if !owner_anchor && *target == TargetFilter::Controller => {
             *target = anchor.clone();
         }
         Effect::ChangeZoneAll { target, .. }
-            if !matches!(anchor, TargetFilter::ParentTarget)
+            if !owner_anchor
+                && !matches!(anchor, TargetFilter::ParentTarget)
                 && *target == TargetFilter::Controller =>
         {
             *target = anchor.clone();
@@ -32791,13 +33950,47 @@ fn apply_anchor_subject_to_clause(
     text_lower: &str,
 ) {
     let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
+    // CR 109.5: an explicit "your library" possession is printed, not an
+    // inherited actor; never let the previous clause's anchor overwrite it.
+    let preserve_reveal_controller = scan_contains_phrase(text_lower, "your library");
+    // CR 109.5 + CR 701.23: "search your library" is printed to the ability's
+    // controller, not the preceding owner anchor.
+    let preserve_search_controller = scan_contains_phrase(text_lower, "search your library");
+    let preserve_caster_shuffle =
+        preserve_search_controller || scan_contains_phrase(text_lower, "then shuffle");
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
+    apply_anchor_subject(
+        &mut clause.effect,
+        anchor,
+        draw_inherits_anchor,
+        preserve_reveal_controller,
+        preserve_search_controller,
+    );
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
+        apply_anchor_subject(
+            def.effect.as_mut(),
+            anchor,
+            draw_inherits_anchor,
+            preserve_reveal_controller,
+            preserve_search_controller,
+        );
         sub = def.sub_ability.as_deref_mut();
+    }
+    // CR 701.23 + CR 109.5: "Search your library …, then shuffle" is the
+    // caster's own shuffle; a preceding owner anchor must not retarget it.
+    if preserve_caster_shuffle {
+        if let Effect::Shuffle { target } = &mut clause.effect {
+            *target = TargetFilter::Controller;
+        }
+        let mut node = clause.sub_ability.as_deref_mut();
+        while let Some(def) = node {
+            if let Effect::Shuffle { target } = def.effect.as_mut() {
+                *target = TargetFilter::Controller;
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
     }
 }
 
@@ -33703,6 +34896,8 @@ fn wrap_target_subject_damage(
     damage_ability.distribute = clause.distribute;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::TargetOnly {
@@ -34127,6 +35322,13 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    // CR 109.5 + CR 608.2c: the source-owner anchor is resolvable only by the
+    // reveal path (live-or-LKI). Do not inject it into Draw/other recipients
+    // whose shared resolver has no Owner arm and would fall back to the
+    // activator.
+    if subject_filter == TargetFilter::Owner && !matches!(effect, Effect::RevealUntil { .. }) {
+        return;
+    }
     // CR 115.1 + CR 701.21a (R1 honest gap): a Sacrifice/ChangeZone whose
     // subject is a bare, unproven `ParentTarget` anaphor (no
     // `inherits_parent` proof — My Forces Are Innumerable's collective
@@ -34352,6 +35554,20 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         {
             *target = subject_filter;
         }
+        // CR 401.2 + CR 115.1: "Target player puts the bottom card of their
+        // library into their graveyard" (Cellar Door) — the Mill effect's target
+        // is resolved from the possessive pronoun "their library" to
+        // `TriggeringPlayer` or `ParentTarget` (via `that_player_library_filter`),
+        // but the clause's subject ("Target player") is a declared player target
+        // whose library supplies the card. Inject the subject filter when the
+        // target is a context-dependent `TriggeringPlayer` or `ParentTarget` and
+        // the subject has a declared player target.
+        Effect::Mill { target, .. }
+            if (*target == TargetFilter::TriggeringPlayer || *target == TargetFilter::ParentTarget)
+                && subject.target.as_ref().is_some_and(TargetFilter::is_player_scope) =>
+        {
+            *target = subject_filter;
+        }
         // CR 701.14a: "enchanted creature fights target creature" — the subject
         // of the fight is the enchanted/equipped creature, not the Aura/Equipment.
         Effect::Fight {
@@ -34397,7 +35613,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             target,
             ..
         }
-        | Effect::RemoveCounter { target, .. }
+        // CR 122.1 + CR 115.10a: likewise only the single-scope counter removal.
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Sacrifice { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::ChangeZone { target, .. }
@@ -34638,6 +35859,19 @@ fn strip_balanced_outer_quotes(s: &str) -> &str {
     s
 }
 
+/// CR 114.4 + CR 113.6b: abilities of emblems function in the command zone.
+/// Single parser authority for the zone of function of an emblem's static
+/// abilities, and the static-side twin of the trigger branch's
+/// `trigger_zones = [Zone::Command]`. Replaces (never extends) the zones the
+/// static-line parser declared for the same text on a permanent (for example
+/// `keyword_grant`'s CR 113.6 `[Battlefield]` on `CastWithKeyword`): an emblem
+/// is put into the command zone (CR 114.2) and is never a permanent (CR 114.5).
+fn declare_emblem_static_zones(statics: &mut [StaticDefinition]) {
+    for static_def in statics {
+        static_def.active_zones = vec![Zone::Command];
+    }
+}
+
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
@@ -34702,9 +35936,11 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     // several statics at once; `parse_static_line_multi` emits them all and
     // internally falls back to the single-def parser for simple bodies. An
     // empty result routes to an explicit `emblem_creation` failure below,
-    // so an unparseable body stays a visible coverage gap.
+    // so an unparseable body stays a visible coverage gap. Every emblem static
+    // then declares the command zone as its zone of function (CR 114.4).
     let mut static_defs = super::oracle_static::parse_static_line_multi(inner);
     if !static_defs.is_empty() {
+        declare_emblem_static_zones(&mut static_defs);
         // CR 114: retain the emblem's granted rules text for the display
         // tooltip on the first def only, mirroring the trigger branch.
         if let Some(first) = static_defs.first_mut() {
@@ -36212,17 +37448,14 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         }
     }
 
-    let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
-        keyword: Keyword::Flash,
-    })
-    .affected(spell_filter);
+    let granted_static = StaticDefinition::new(StaticMode::CastWithFlash).affected(spell_filter);
 
     // CR 611.2c + CR 601.3b + CR 702.8a: This grant modifies the rules of the game
     // for its CONTROLLER (the player gains permission to cast matching spells at
     // instant speed), not the characteristics of an object. Store it as a
     // player-scoped transient continuous effect: `target: Controller` resolves at
     // effect.rs (the `Some(TargetFilter::Controller)` arm) to a
-    // `SpecificPlayer { id: controller }` binding, read by `granted_spell_keywords`
+    // `SpecificPlayer { id: controller }` binding, read by `spell_has_effective_flash`
     // (casting.rs). Binding it to the source object (`SelfRef` → `SpecificObject`)
     // was the wrong seam — `prune_affected_object_left_effects` (layers.rs) drops it
     // the instant Teferi leaves, violating CR 611.2a/c (the effect's DURATION, not
@@ -39177,6 +40410,105 @@ fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
     }
 }
 
+/// CR 201.4 + CR 608.2d: "a card name [that hasn't been chosen] from among A, B,
+/// …, and F" (Garth One-Eye) — a CLOSED, Oracle-listed card-name domain, as
+/// `parse_creature_type_enumeration` above is for creature types.
+///
+/// The names are proper nouns, so they have to come out of the ORIGINAL text and
+/// not the lowercased copy the rest of this phrase table runs on: the engine
+/// enumerates this domain into `WaitingFor::NamedChoice.options`, and "black
+/// lotus" in a prompt is a defect even though the registry lookup that follows is
+/// case-insensitive. `original` is the same byte span as `rest` (`TextPair`'s
+/// invariant). Without one the enumeration DECLINES and the caller falls through
+/// to the open "a card name" form — today's behavior, never a mis-cased name.
+///
+/// BOUNDARY: the separator is the comma. " and " alone is not usable as one — it
+/// is a legal substring of a card name (Sword of Fire and Ice) — so a two-name
+/// "from among A and B" declines rather than risk splitting a name in half. No
+/// printed card uses that form today; one that did would keep the open prompt,
+/// which is what it gets now.
+fn parse_card_name_enumeration(
+    rest: &str,
+    original: Option<&str>,
+) -> Option<(Vec<String>, NameDistinctness)> {
+    type E<'a> = OracleError<'a>;
+
+    /// One printed name: everything up to the comma that separates it from the
+    /// next. `is_not` rather than a hand-rolled scan so the separator stays the
+    /// only structure this grammar knows about.
+    fn name_item(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        nom::bytes::complete::is_not(",").parse(input)
+    }
+
+    let original = original?;
+    if original.len() != rest.len() {
+        return None;
+    }
+
+    let (tail, _) = tag::<_, _, E>("a card name ").parse(rest).ok()?;
+    // CR 608.2d: a name chosen before is no longer a legal option. Both
+    // apostrophes: the corpus is not normalized on this character
+    // (see the straight/typographic pairs in `oracle.rs`'s "can't" handling).
+    let (tail, distinctness) = opt(alt((
+        value(
+            NameDistinctness::DistinctFromSourceHistory,
+            tag::<_, _, E>("that hasn't been chosen "),
+        ),
+        value(
+            NameDistinctness::DistinctFromSourceHistory,
+            tag("that hasn\u{2019}t been chosen "),
+        ),
+    )))
+    .parse(tail)
+    .ok()
+    .map(|(tail, d)| (tail, d.unwrap_or(NameDistinctness::Repeatable)))?;
+    // "from among" (Garth One-Eye, Ersta) and the bare "among" (Interrogation
+    // Robot: "a card name that hasn't been chosen among Who, What, …"). Same
+    // construct, one word apart; accepting only the longer form would leave the
+    // shorter one on the open prompt while its sibling clause parsed.
+    let (list, _) = alt((tag::<_, _, E>("from among "), tag("among ")))
+        .parse(tail)
+        .ok()?;
+
+    // The names are proper nouns, so they come off the ORIGINAL at the same byte
+    // offset (equal lengths, checked above) — the grammar above is what the
+    // lowercased copy is for.
+    let list_original = &original[original.len() - list.len()..];
+    let list_original = list_original.trim_end().trim_end_matches('.').trim_end();
+
+    let (_, items) = all_consuming(separated_list1(tag::<_, _, E>(", "), name_item))
+        .parse(list_original)
+        .ok()?;
+    // Two or more, and the comma is the only separator this accepts: " and " is a
+    // legal substring of a card name (Sword of Fire and Ice), so a two-name
+    // "from among A and B" declines here rather than risk splitting a name.
+    if items.len() < 2 {
+        return None;
+    }
+
+    let mut names = Vec::with_capacity(items.len());
+    let last = items.len() - 1;
+    for (index, piece) in items.into_iter().enumerate() {
+        let piece = piece.trim();
+        // Only the final item carries the coordinating conjunction ("…, and Black
+        // Lotus"), so stripping it there keeps a name that merely begins with
+        // "And" intact.
+        let name = if index == last {
+            opt(alt((tag::<_, _, E>("and "), tag("or "))))
+                .parse(piece)
+                .map(|(rest, _)| rest)
+                .unwrap_or(piece)
+        } else {
+            piece
+        };
+        if name.is_empty() {
+            return None;
+        }
+        names.push(name.to_string());
+    }
+    Some((names, distinctness))
+}
+
 /// CR 107.1 + CR 107.1a: a printed enumeration of whole numbers ("choose 2, 3,
 /// or 4" — Haktos the Unscarred) states an explicit candidate set of integers.
 /// Returns the enumeration's `(min, max)` when `rest` is a 2+-element ascending
@@ -39432,13 +40764,31 @@ pub(crate) fn try_parse_named_choice_with_provenance(
     lower: &str,
     has_number_choice: bool,
 ) -> Option<ChoiceType> {
+    try_parse_named_choice_with_text(lower, None, has_number_choice)
+}
+
+/// [`try_parse_named_choice_with_provenance`] with the ORIGINAL, un-lowercased
+/// clause alongside. Only one phrase needs it — the closed card-name domain
+/// (`parse_card_name_enumeration`), whose options are proper nouns — and passing
+/// `None` is exactly the behavior of every caller that has only the lowercase
+/// text: the enumeration declines and the open "a card name" form takes over.
+pub(crate) fn try_parse_named_choice_with_text(
+    lower: &str,
+    original: Option<&str>,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("choose "),
         nom::sequence::preceded(tag("secretly "), tag("choose ")),
     ))
     .parse(lower)
     .ok()?;
-    parse_named_choice_object_with_provenance(rest, has_number_choice)
+    // Same byte offset in the original, which `TextPair` guarantees is the same
+    // length; a caller whose pair does not line up passes `None` below.
+    let rest_original = original.and_then(|original| {
+        (original.len() == lower.len()).then(|| &original[original.len() - rest.len()..])
+    });
+    parse_named_choice_object_with_text(rest, rest_original, has_number_choice)
 }
 
 /// The object phrase of a named choice, with any leading "choose "/"secretly
@@ -39453,6 +40803,14 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
 
 pub(crate) fn parse_named_choice_object_with_provenance(
     rest: &str,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
+    parse_named_choice_object_with_text(rest, None, has_number_choice)
+}
+
+pub(crate) fn parse_named_choice_object_with_text(
+    rest: &str,
+    original: Option<&str>,
     has_number_choice: bool,
 ) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
@@ -39484,6 +40842,10 @@ pub(crate) fn parse_named_choice_object_with_provenance(
         parse_card_type_other_than(rest).map(ChoiceType::card_type_from)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
         Some(ChoiceType::card_type())
+    } else if let Some((options, distinctness)) = parse_card_name_enumeration(rest, original) {
+        // CR 201.4: the CLOSED domain must be tried before the open
+        // "a card name" tag below, which matches it as a prefix and drops the list.
+        Some(ChoiceType::card_name_from(options, distinctness))
     } else if alt((
         tag::<_, _, E>("a card name"),
         tag("any card name"),
@@ -39494,7 +40856,7 @@ pub(crate) fn parse_named_choice_object_with_provenance(
     .parse(rest)
     .is_ok()
     {
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     } else if let Some((min, max)) = parse_number_enumeration(rest) {
         // CR 107.1: "choose 2, 3, or 4" (Haktos the Unscarred) — an explicit
         // printed integer candidate set. Grouped with the other `NumberRange`
@@ -43033,6 +44395,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Meld { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::TurnFaceUp { .. }
@@ -45078,7 +46441,18 @@ pub(crate) enum ChainLoweringMode {
 /// The step is a no-op on an empty `die_results`, which is what keeps every
 /// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
-    let mut def = lower_effect_chain_ir(&ir.body);
+    lower_ability_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_ability_ir_with_provenance(
+    ir: &AbilityIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let lowered = lower::lower_effect_chain_ir_with_provenance(&ir.body);
+    let mut def = lowered.value;
+    let transport = crate::parser::oracle_ir::history_provenance::HistoryTransport::from_lowered(
+        &def,
+        lowered.history,
+    );
     attach_die_result_branches_before_finalization(&mut def, &ir.die_results);
     finalize_effect_chain(&mut def);
     // CR 608.2c + CR 121.1: finalization can assemble the Great Aurora class's
@@ -45106,20 +46480,35 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
         }
     }
     apply_ability_root_transforms(&mut def, &ir.root_transforms);
+    let mut mode_history = Vec::new();
     if let Some(modal) = &ir.modal {
         def = def.with_modal(
             modal.choice.clone(),
             modal
                 .modes
                 .iter()
-                .map(|mode| lower_ability_ir(&mode.ability))
+                .enumerate()
+                .map(|(index, mode)| {
+                    let mut lowered = lower_ability_ir_with_provenance(&mode.ability);
+                    for record in &mut lowered.history {
+                        record.prepend(
+                            crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(
+                                index,
+                            ),
+                        );
+                    }
+                    mode_history.extend(lowered.history);
+                    lowered.value
+                })
                 .collect(),
         );
     }
     // CR 605.1a + CR 605.3b: classify after the activation envelope and
     // stages, so a library-moving cost keeps the supported stack-using path.
     refuse_linked_paid_cast_in_activated_mana_ability(&mut def, &ir.source_text);
-    def
+    let mut lowered = transport.finish(def);
+    lowered.history.extend(mode_history);
+    lowered
 }
 
 /// CR 602.1a + CR 605.1a: require the completed activation envelope before
@@ -45517,7 +46906,7 @@ pub(crate) fn parse_ability_ir_standalone_with_spell_anaphor(
 /// Parse an explicit ability root in `WithContext` mode.
 ///
 /// Shares the whole-body recognizers and lowering pipeline with
-/// [`parse_effect_chain_with_context`], but not its damage-target default: this
+/// [`parse_effect_chain_with_context_and_provenance`], but not its damage-target default: this
 /// root permits fresh chunks to authorize parent-target population binding,
 /// whereas the nested wrapper withholds it. Converting a caller changes that
 /// permission default. Preserve `Standalone` versus `WithContext` mode separately:
@@ -45564,6 +46953,13 @@ pub(super) fn parse_child_ability_with_parent_target(
 
 /// The algebraic identity T8 rests on, written literally:
 /// `parse_effect_chain(t, k)` **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))`.
+pub(crate) fn parse_effect_chain_with_provenance(
+    text: &str,
+    kind: AbilityKind,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    lower_ability_ir_with_provenance(&parse_ability_ir_standalone(text, kind))
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
@@ -45575,17 +46971,13 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 /// callers that retain clause provenance use the explicit-context sibling.
 /// Withheld permission leaves the pre-existing unbound population fallback;
 /// this entry does not turn that fallback into a strict failure.
-pub fn parse_effect_chain_with_context(
+#[cfg(test)]
+pub(super) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    parse_nested_effect_chain_with_damage_context(
-        text,
-        kind,
-        ctx,
-        DamageTargetContext::InheritedTargets,
-    )
+    parse_effect_chain_with_context_and_provenance(text, kind, ctx).value
 }
 
 /// Parse the first instruction of an independent ability, retaining subject context.
@@ -45608,13 +47000,27 @@ pub(crate) fn parse_effect_chain_with_context_ability_root(
     ))
 }
 
-fn parse_nested_effect_chain_with_damage_context(
+/// Nested lowering always returns its parser-only provenance companion.
+pub(crate) fn parse_effect_chain_with_context_and_provenance(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    parse_nested_effect_chain_with_damage_context_and_provenance(
+        text,
+        kind,
+        ctx,
+        DamageTargetContext::InheritedTargets,
+    )
+}
+
+fn parse_nested_effect_chain_with_damage_context_and_provenance(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
-) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir_with_damage_context(
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    lower_ability_ir_with_provenance(&parse_ability_ir_with_damage_context(
         text,
         kind,
         ChainLoweringMode::WithContext,
@@ -47476,6 +48882,8 @@ fn parse_effect_chain_ir_body(
                     .clause(
                         normalized_text,
                         ParsedEffectClause {
+                            history: Vec::new(),
+                            head_text: None,
                             // CR 611.2e: "It's an Aura enchantment …" is an "is"
                             // statement, so it applies simultaneously with the entry.
                             entry_onset: ContinuousEffectOnset::WithEntry,
@@ -50585,7 +51993,9 @@ fn parse_effect_chain_ir_body(
                 0,
                 Some(damage_context),
             );
-            let mut inner_def = lower_effect_chain_ir(&inner_ir);
+            let inner_lowered = lower::lower_effect_chain_ir_with_provenance(&inner_ir);
+            let mut inner_def = inner_lowered.value;
+            let inner_history = inner_lowered.history;
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
             }
@@ -50640,10 +52050,16 @@ fn parse_effect_chain_ir_body(
                     ctx.push_diagnostic(d);
                 }
             }
+            let mut delayed_clause = parsed_clause(delayed_effect);
+            delayed_clause.history = inner_history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record, crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            }).collect();
             builder
                 .clause(
                     normalized_text,
-                    parsed_clause(delayed_effect),
+                    delayed_clause,
                     chunk.boundary_after,
                     ClauseDisposition::Emit {
                         followup: None,
@@ -50729,6 +52145,8 @@ fn parse_effect_chain_ir_body(
                 .clause(
                     normalized_text,
                     ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         effect: (*animate_def.effect).clone(),
@@ -51292,7 +52710,7 @@ fn parse_effect_chain_ir_body(
         // reads the clause without that definition, or "put X counters on target
         // creature you control, where X is that card's mana value" would have
         // its explicit target clobbered to the parent's referent.
-        let recipient_anaphor_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
+        let where_x_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
             .0
             .lower
             .to_string();
@@ -51305,8 +52723,12 @@ fn parse_effect_chain_ir_body(
         // out of recipient detection, that referent silently misbound the
         // target; now that the explicit target binds, fail the clause closed so
         // coverage does not claim the ruling's timing.
-        let where_x_referent_was_the_only_anaphor = has_anaphoric_reference(&text_lower)
-            && !has_anaphoric_reference(&recipient_anaphor_lower);
+        let where_x_referent_was_the_only_anaphor =
+            has_anaphoric_reference(&text_lower) && !has_anaphoric_reference(&where_x_lower);
+        // CR 608.2c: a block-history clause's partner belongs to a population. It never
+        // names this clause's recipient, or Ride Down's grant would bind to the creature it
+        // just destroyed instead of the attackers.
+        let recipient_anaphor_lower = strip_block_history_clauses(&where_x_lower);
         let normalized_lower = normalized_text.to_lowercase();
         let reflexive_when_head = tag::<_, _, OracleError<'_>>("when ")
             .parse(normalized_lower.as_str())
@@ -51496,6 +52918,17 @@ fn parse_effect_chain_ir_body(
             } else {
                 replace_target_with_parent(&mut clause.effect);
             }
+        }
+        crate::parser::oracle_ir::history_provenance::capture_own_history(
+            &mut clause,
+            &text_lower,
+            ctx,
+        );
+        if instruction_drops_block_partner(&clause, &text_lower, ctx) {
+            clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
+            clause.sub_ability = None;
+            clause.multi_target = None;
+            clause.distribute = None;
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));
@@ -51766,6 +53199,7 @@ fn parse_effect_chain_ir_body(
         // CR 601.3: a granted graveyard cast permission ("you may cast <type>
         // spells from your graveyard this turn") lets the player cast later; its
         // "may" is that later cast, not a choice made at resolution (CR 608.2d).
+        // So is a granted "as though they had flash" timing permission.
         //
         // CR 606.3 + CR 101.1: the same holds for an extra loyalty-activation
         // grant ("you may activate ~'s loyalty ability two more times this turn"):
@@ -51789,6 +53223,7 @@ fn parse_effect_chain_ir_body(
                 }
             )
             || clause_is_additional_land_permission(&clause)
+            || clause_is_flash_timing_permission_grant(&clause)
             || clause_is_extra_loyalty_activation_grant(&clause)
             || clause_is_pay_to_end_effect_termination(normalized_text)
         {
@@ -57709,8 +59144,8 @@ mod resolution_time_division_parse_tests {
     /// number of those Wolves." — lowers to a CR 608.2d untargeted division: the
     /// source is the declared target (CR 120.1), "its power" is that target's
     /// (CR 608.2h; bound to `Target`, not the effect-context ladder), the
-    /// recipients are the Wolves tapped this way (the chain's tracked set,
-    /// CR 115.10a), the target's controller chooses, and no node is
+    /// recipients are the Wolves tapped this way (the chain's tracked set read
+    /// by its Tapped cause, CR 115.10a), the target's controller chooses, and no node is
     /// `Unimplemented`.
     #[test]
     fn master_of_the_wild_hunt_clause_three_is_a_resolution_time_division() {
@@ -57759,7 +59194,9 @@ mod resolution_time_division_parse_tests {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
                         "Wolf".to_string()
                     )))),
-                    caused_by: None,
+                    // "those Wolves" names the Wolves tapped this way, not a
+                    // Wolf the mass tap selected but left untapped.
+                    caused_by: Some(ThisWayCause::Tapped),
                 },
                 damage_source: Some(DamageSource::Target),
                 excess: None,

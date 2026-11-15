@@ -191,6 +191,7 @@ pub fn resolve(
                 .collect();
             events.push(GameEvent::CardsRevealed {
                 player: ability.controller,
+                occurrences: state.disclosed_occurrences(&cards),
                 card_ids: cards.clone(),
                 card_names,
             });
@@ -223,13 +224,14 @@ pub fn resolve(
         for &card_id in &cards {
             state.revealed_cards.insert(card_id);
         }
-        state.last_revealed_ids = cards.clone();
+        super::record_revealed_result(state, cards.clone());
         let card_names: Vec<String> = cards
             .iter()
             .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&cards),
             card_ids: cards.clone(),
             card_names,
         });
