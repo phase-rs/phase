@@ -1211,6 +1211,10 @@ pub fn create_horde_library_token(
     // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
     obj.is_token = true;
     obj.is_horde_deck_token = true;
+    // Token-layout art lives behind `token_image_ref`, which the client only
+    // reads when `display_source` is `Token` — stamp it so these objects never
+    // fall back to name lookup (their display names resolve nowhere).
+    obj.display_source = crate::game::game_object::DisplaySource::Token;
     // CR 111.4: the token's predefined identity, so `reveal_library_token` can
     // recover its catalog `rules_text` abilities on the apply path.
     obj.token_image_ref = token_image_ref.clone();

@@ -1,3 +1,6 @@
+import type { TokenImageRef } from "../adapter/types.ts";
+import { fetchTokenImageAssetByRef } from "./scryfall.ts";
+
 interface AvatarIdentity {
   name: string;
   cardName: string;
@@ -20,6 +23,20 @@ const PLANESWALKER_IDENTITIES: AvatarIdentity[] = [
   { name: "Tamiyo", cardName: "Tamiyo, Field Researcher" },
   { name: "Narset", cardName: "Narset, Parter of Veils" },
   { name: "Vivien", cardName: "Vivien, Monsters' Advocate" },
+];
+
+/**
+ * Survivor-seat identities for Turtle Team-Up Horde games, in seat order:
+ * the four Turtles, each pinned to a real `tmt` printing whose art resolves
+ * through the same card-name path as the planeswalker roster above. A name
+ * missing from an older local card database degrades to the initial tile —
+ * the same fallback every other name-based avatar already has.
+ */
+export const TURTLE_TEAMUP_SURVIVOR_IDENTITIES: readonly AvatarIdentity[] = [
+  { name: "Leonardo", cardName: "Leonardo, Sewer Samurai" },
+  { name: "Raphael", cardName: "Raphael, Ninja Destroyer" },
+  { name: "Donatello", cardName: "Donatello, Gadget Master" },
+  { name: "Michelangelo", cardName: "Michelangelo, Improviser" },
 ];
 
 export interface PlayerAvatar {
@@ -57,6 +74,24 @@ export function assignAvatarForSeat(
 
 export function avatarCardNameForName(name: string): string | null {
   return PLANESWALKER_IDENTITIES.find((id) => id.name === name)?.cardName ?? null;
+}
+
+/**
+ * Boss avatar art for a pinned `token_image_ref`, resolved through the
+ * token-image sidecar. Bosses are token-layout cards with no card-database
+ * entry, so the card-name path cannot resolve them — the sidecar is the
+ * only art channel whose host the desktop CSP allows as an image source
+ * (`api.scryfall.com` is fetch-only there, so a direct `?format=image` URL
+ * renders as initials on desktop). `art_crop` matches the square avatar
+ * tile. Null when the sidecar misses: callers fall back to the initial
+ * tile, the same fallback every other name-based avatar already has.
+ */
+export async function fetchBossAvatarUrl(ref: TokenImageRef): Promise<string | null> {
+  try {
+    return (await fetchTokenImageAssetByRef(ref, "art_crop"))?.src ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function hashStringToSeed(s: string): number {
