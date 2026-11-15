@@ -5973,7 +5973,7 @@ fn named_choice_actions(
         }
     }
 
-    if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
+    if options.is_empty() && matches!(choice_type, ChoiceType::CardName { .. }) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
@@ -9007,7 +9007,7 @@ mod tests {
         state.waiting_for = WaitingFor::NamedChoice {
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -9030,7 +9030,7 @@ mod tests {
         state.waiting_for = WaitingFor::NamedChoice {
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,

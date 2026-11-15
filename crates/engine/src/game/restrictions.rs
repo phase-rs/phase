@@ -411,6 +411,9 @@ pub(crate) fn spell_cast_record_for(
         // history record carries provenance so own-cast exclusion (CR 601.2i)
         // can identify a permanent's own pending cast positionally.
         spell_object_id: Some(obj.id),
+        // CR 601.2a + CR 707.13: an outside-the-game copy is staged in a zone but
+        // is not cast from it; every "cast from [zone]" record predicate reads this.
+        from_outside_game: obj.created_outside_game,
         // CR 722.3d + CR 601.2i: capture the prepare-spell designation the
         // spell has as it becomes cast (the CR 722.3c linked copy's marker), so
         // `FilterProp::PrepareSpell` and its negation are exact on the history
@@ -4439,6 +4442,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -4477,6 +4481,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
@@ -4493,6 +4498,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
@@ -4509,6 +4515,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),

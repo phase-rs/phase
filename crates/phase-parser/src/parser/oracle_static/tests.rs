@@ -28130,9 +28130,9 @@ fn static_peri_brown_first_historic_spell_each_turn_has_convoke() {
 
 #[test]
 fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
-    // CR 601.2a + CR 702.144a: The Twelfth Doctor — cast-origin "from anywhere
-    // other than your hand" lowers to InAnyZone over the cast-capable non-hand
-    // zones; gated to the first such spell each turn.
+    // CR 601.2a + CR 702.144a + CR 400.11: The Twelfth Doctor — cast-origin "from
+    // anywhere other than your hand" lowers to the negation of InZone(Hand) (so a cast
+    // from outside the game qualifies); gated to the first such spell each turn.
     let def = parse_static_line(
         "The first spell you cast from anywhere other than your hand each turn has demonstrate.",
     )
@@ -28143,16 +28143,16 @@ fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
             keyword: Keyword::Demonstrate,
         }
     );
-    let expected_zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+    let expected_prop = FilterProp::Not {
+        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+    };
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
         panic!("expected Typed affected, got {:?}", def.affected);
     };
     assert_eq!(tf.controller, Some(ControllerRef::You));
     assert!(
-        tf.properties.contains(&FilterProp::InAnyZone {
-            zones: expected_zones.clone(),
-        }),
-        "expected InAnyZone({expected_zones:?}), got {:?}",
+        tf.properties.contains(&expected_prop),
+        "expected {expected_prop:?}, got {:?}",
         tf.properties
     );
     assert_first_spell_gate(
