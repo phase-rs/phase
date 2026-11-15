@@ -51220,6 +51220,37 @@ mod tests {
         }
     }
 
+    /// CR 602.5c: a released-writer save whose activation journals still use
+    /// the pre-occurrence `objectId_index` encoding is explicitly rejected in
+    /// both envelopes — provenance is unrecoverable from an index, so no
+    /// guessed identity is admitted (a granted Ranger use can neither restore
+    /// spent under the wrong key nor silently unspend: the load fails closed).
+    #[test]
+    fn persisted_restore_rejects_legacy_usage_keys_in_both_envelopes() {
+        let state = GameState::new_two_player(42);
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+
+        for mut persisted in [raw, trusted] {
+            let state = if persisted.get("state").is_some() {
+                persisted
+                    .get_mut("state")
+                    .expect("trusted fixture has an inner state")
+            } else {
+                &mut persisted
+            };
+            state["activated_abilities_this_turn"]["7_0"] = serde_json::json!(1);
+            let error = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect_err("persisted restore must reject legacy usage keys");
+            assert!(
+                error.to_string().contains("invalid ability usage key"),
+                "expected legacy-key rejection, got {error}"
+            );
+        }
+    }
+
     #[test]
     fn direct_current_resolution_wire_preserves_normal_continuations() {
         let mut state = normal_trigger_firing_fixture();
