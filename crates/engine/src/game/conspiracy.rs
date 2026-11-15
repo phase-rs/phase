@@ -350,6 +350,7 @@ pub fn reveal_face_down_conspiracies(
     }
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&card_ids),
         card_ids,
         card_names,
     });

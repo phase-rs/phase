@@ -302,6 +302,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeGame",
@@ -311,6 +312,7 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      draftSessionMinDeckSize,
     });
   }
 
@@ -328,6 +330,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeMultiplayerHostGame",
@@ -337,6 +340,7 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      draftSessionMinDeckSize,
     });
   }
 

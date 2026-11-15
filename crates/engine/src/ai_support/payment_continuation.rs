@@ -1466,6 +1466,7 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![ObjectId(1)],
                 card_names: vec!["Hidden".to_string()],
+                occurrences: Vec::new(),
             }]
         ));
         let _ = rand::RngCore::next_u32(state.rng.draw(RandomDraw::Placement));

@@ -516,6 +516,7 @@ fn pending_chain(tag: Option<ChosenGroupId>) -> (GameState, StackEntry) {
             count: q(1),
             target: declared(G),
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
         vec![],
         source,

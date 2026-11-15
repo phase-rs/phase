@@ -1867,14 +1867,25 @@ mod post_load_creators {
         };
         assert_eq!(*player, P0);
         assert!(*reveal);
+        // CR 702.139a + CR 400.11: the sideboard entry (`available` copies) and the
+        // revealed, not-yet-used companion (one card outside the game) are the ONLY
+        // sources offered, in that order. An extra or missing source fails here.
         assert!(
             matches!(
                 choices.as_slice(),
-                [entry] if entry.count == available
-                    && matches!(
-                        &entry.source,
-                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
-                    )
+                [sideboard, companion]
+                    if sideboard.count == available
+                        && sideboard.name == LURRUS
+                        && matches!(
+                            &sideboard.source,
+                            OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                        )
+                        && companion.count == 1
+                        && companion.name == LURRUS
+                        && matches!(
+                            &companion.source,
+                            OutsideGameChoiceSource::Companion { card } if card.name == LURRUS
+                        )
             ),
             "{choices:?}"
         );
@@ -2024,7 +2035,10 @@ mod post_load_creators {
         assert!(runner.state().stack.is_empty());
         assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
         // Positive reveal control for the hidden-information test: the fetch revealed it.
-        assert!(runner.state().revealed_cards.contains(&fetched));
+        // CR 701.20a: the transient reveal ends with the resolution, before the resolved
+        // view is published; the table keeps the card's public identity in hand.
+        assert!(!runner.state().revealed_cards.contains(&fetched));
+        assert!(runner.state().public_revealed_cards.contains(&fetched));
         assert!(first_events.iter().any(|event| matches!(
             event,
             GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&fetched)
@@ -2173,7 +2187,7 @@ mod post_load_creators {
         } = companion_and_fetch();
         let state = runner.state();
 
-        // The transient reveal ended: later actions from `Priority` clear `revealed_cards`.
+        // The transient reveal ended with the fetch's resolution (CR 701.20a).
         // (The positive control, that it WAS revealed, is in `companion_and_fetch`.) The
         // fetched card stays publicly identified through retained public identity knowledge
         // under the engine's information policy: `CardsRevealed` publishes
