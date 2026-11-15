@@ -10158,10 +10158,11 @@ mod tests {
 
     const LIGHTNING_BLAST: &str = "Lightning Blast deals 4 damage to any target.";
 
-    /// The AI at 3 poison in Two-Headed Giant casts Lightning Blast with The Serpent Society
-    /// opposing and its teammate at 7, controlling Platinum Angel when `angel`; returns the
-    /// runner at target selection, the gate's verdict on The Serpent Society, and its id.
-    fn blast_at_serpent_society(angel: bool) -> (GameRunner, bool, ObjectId) {
+    /// The AI at 3 poison in Two-Headed Giant casts Lightning Blast with The Serpent Society and a
+    /// Leyline of Sanctity per head opposing, and its teammate at 7, controlling Platinum Angel
+    /// when `angel`; returns the runner at target selection, the gate's verdict on The Serpent
+    /// Society, its id, and the Angel's.
+    fn blast_at_serpent_society(angel: bool) -> (GameRunner, bool, ObjectId, Option<ObjectId>) {
         use engine::game::scenario_db::GameScenarioDbExt;
         let db = crate::test_support::shared_integration_card_db();
         let format = engine::types::format::FormatConfig::two_headed_giant();
@@ -10169,9 +10170,11 @@ mod tests {
         scenario.at_phase(Phase::PreCombatMain);
         let serpent =
             scenario.add_real_card(PlayerId(2), "The Serpent Society", Zone::Battlefield, db);
-        if angel {
-            scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+        for head in [PlayerId(2), PlayerId(3)] {
+            scenario.add_real_card(head, "Leyline of Sanctity", Zone::Battlefield, db);
         }
+        let angel =
+            angel.then(|| scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db));
         let blast = scenario
             .add_spell_to_hand_from_oracle(P0, "Lightning Blast", true, LIGHTNING_BLAST)
             .with_mana_cost(ManaCost::Cost {
@@ -10224,26 +10227,29 @@ mod tests {
         )
         .iter()
         .any(|g| g.candidate.action == serpent_action);
-        (runner, kept, serpent)
+        (runner, kept, serpent, angel)
     }
 
     /// CR 702.21a + CR 704.6b + CR 810.8a: a teammate's Platinum Angel keeps the AI's team in the
-    /// game at fifteen shared poison, so the gate keeps The Serpent Society as a target, the AI
-    /// pays its Ward, and Lightning Blast resolves; without the Angel the payment stays rejected.
+    /// game at fifteen shared poison, so the AI targets The Serpent Society, pays its Ward, and
+    /// Lightning Blast resolves; without the Angel the payment stays rejected.
     #[test]
     fn a_team_that_cannot_lose_pays_a_poison_ward_past_its_threshold() {
-        let (_, kept_without_angel, _) = blast_at_serpent_society(false);
+        let (_, kept_without_angel, _, _) = blast_at_serpent_society(false);
         assert!(!kept_without_angel);
 
-        let (mut runner, kept, serpent) = blast_at_serpent_society(true);
+        let (mut runner, kept, serpent, _) = blast_at_serpent_society(true);
         assert!(kept);
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(serpent)),
-            })
-            .unwrap();
         let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
         let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let target = crate::search::choose_action(runner.state(), P0, &config, &mut rng);
+        assert_eq!(
+            target,
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(serpent)),
+            })
+        );
+        runner.act(target.unwrap()).unwrap();
         let mut paid = false;
         while !runner.state().stack.is_empty() {
             let state = runner.state();
@@ -10265,6 +10271,65 @@ mod tests {
         assert_eq!(engine::game::players::team_poison_total(state, P0), 15);
         assert!(engine::game::players::is_alive(state, P0));
         assert!(engine::game::players::is_alive(state, P1));
+    }
+
+    /// CR 102.3: a Two-Headed Giant teammate is not an opponent, so Lightning Blast at the
+    /// teammate's Platinum Angel or face is refused as at the AI's own, while The Serpent Society
+    /// is scored.
+    #[test]
+    fn a_teammates_permanent_is_not_an_enemy_target() {
+        use crate::policies::registry::{PolicyId, PolicyRegistry, PolicyVerdict};
+        let (runner, _, serpent, angel) = blast_at_serpent_society(true);
+        let state = runner.state();
+        let issued = candidate_actions(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let anti_self_harm = |target: TargetRef| {
+            let candidate = issued
+                .iter()
+                .find(|c| {
+                    c.action
+                        == GameAction::ChooseTarget {
+                            target: Some(target.clone()),
+                        }
+                })
+                .expect("an issued target");
+            let ctx = PolicyContext {
+                state,
+                decision: &decision,
+                candidate,
+                ai_player: P0,
+                config: &config,
+                context: &AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            PolicyRegistry::shared()
+                .verdicts(&ctx)
+                .into_iter()
+                .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
+                .expect("AntiSelfHarm judges a target choice")
+        };
+        let rejected = |verdict: PolicyVerdict| match verdict {
+            PolicyVerdict::Reject { reason } => Some(reason.kind),
+            PolicyVerdict::Score { .. } => None,
+        };
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Object(angel.unwrap()))),
+            Some("anti_self_harm_own_permanent_with_opponent_target")
+        );
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Player(P1))),
+            Some("anti_self_harm_wrong_player_target")
+        );
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Player(P0))),
+            Some("anti_self_harm_wrong_player_target")
+        );
+        assert_eq!(rejected(anti_self_harm(TargetRef::Object(serpent))), None);
     }
 
     /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in

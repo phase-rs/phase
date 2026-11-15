@@ -200,7 +200,7 @@ fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) 
 
     let has_friendly_creature = ctx.state.battlefield.iter().any(|&id| {
         ctx.state.objects.get(&id).is_some_and(|object| {
-            object.controller == ctx.ai_player
+            !players::is_opponent(ctx.state, ctx.ai_player, object.controller)
                 && object.card_types.core_types.contains(&CoreType::Creature)
         })
     });
@@ -452,7 +452,8 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     let has_own_creature = ctx.state.battlefield.iter().any(|&id| {
         ctx.state.objects.get(&id).is_some_and(|o| {
-            o.controller == ctx.ai_player && o.card_types.core_types.contains(&CoreType::Creature)
+            !players::is_opponent(ctx.state, ctx.ai_player, o.controller)
+                && o.card_types.core_types.contains(&CoreType::Creature)
         })
     });
     // Targeting legality (CR 702.11/702.16/702.18) is owned by the engine.
@@ -533,7 +534,11 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             && matches!(effect_polarity(e), EffectPolarity::Beneficial)
     });
     if has_pump {
-        let own_turn = turn_control::turn_decision_maker(ctx.state) == ctx.ai_player;
+        let own_turn = !players::is_opponent(
+            ctx.state,
+            ctx.ai_player,
+            turn_control::turn_decision_maker(ctx.state),
+        );
         if !own_turn
             && matches!(
                 ctx.state.phase,
@@ -872,7 +877,11 @@ fn own_permanent_with_opponent_alternative(
         return None;
     }
 
-    if ctx.state.objects.get(&object_id)?.controller != ctx.ai_player {
+    if players::is_opponent(
+        ctx.state,
+        ctx.ai_player,
+        ctx.state.objects.get(&object_id)?.controller,
+    ) {
         return None;
     }
 
@@ -1002,14 +1011,12 @@ fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<
         }
 
         let reaches_beyond_own_board = targets.iter().any(|target| match target {
-            TargetRef::Object(id) => ctx
-                .state
-                .objects
-                .get(id)
-                .is_none_or(|object| object.controller != ctx.ai_player),
+            TargetRef::Object(id) => ctx.state.objects.get(id).is_none_or(|object| {
+                players::is_opponent(ctx.state, ctx.ai_player, object.controller)
+            }),
             // CR 115.4: a player slot the AI can point somewhere other than
             // itself is a real alternative, so the pool is not own-board-only.
-            TargetRef::Player(player) => *player != ctx.ai_player,
+            TargetRef::Player(player) => players::is_opponent(ctx.state, ctx.ai_player, *player),
         });
         if reaches_beyond_own_board {
             return None;
@@ -1204,10 +1211,8 @@ fn filter_can_reach_an_opponent(filter: &TargetFilter) -> bool {
     }
 }
 
-/// True when at least one permanent the AI controls matches `filter` and no
-/// permanent an opponent controls does. A teammate's permanent counts as
-/// neither, so a filter reaching only a teammate's board stands the penalty
-/// down rather than guessing at team politics.
+/// True when at least one permanent the AI's team controls matches `filter` and no
+/// permanent an opponent controls does.
 fn filter_reaches_only_own_permanents(
     ctx: &PolicyContext<'_>,
     filter: &TargetFilter,
@@ -1224,7 +1229,7 @@ fn filter_reaches_only_own_permanents(
         if players::is_opponent(ctx.state, ctx.ai_player, object.controller) {
             return false;
         }
-        reaches_own |= object.controller == ctx.ai_player;
+        reaches_own = true;
     }
     reaches_own
 }
@@ -1234,14 +1239,15 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
         TargetRef::Player(player_id) => {
             if let Some(impact) = exact_pending_player_impact(ctx, target) {
                 let prefers_self = impact > 0.0;
-                return (impact != 0.0 && prefers_self != (*player_id == ctx.ai_player))
+                let is_friendly = !players::is_opponent(ctx.state, ctx.ai_player, *player_id);
+                return (impact != 0.0 && prefers_self != is_friendly)
                     .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"));
             }
 
             let beneficial = is_spell_beneficial(ctx);
-            let is_self = *player_id == ctx.ai_player;
+            let is_friendly = !players::is_opponent(ctx.state, ctx.ai_player, *player_id);
 
-            if !is_self && !beneficial {
+            if !is_friendly && !beneficial {
                 if let Some(damage) = extract_damage_amount(&ctx.effects()) {
                     let opponent_life = ctx.state.players[player_id.0 as usize].life;
                     if damage >= opponent_life {
@@ -1253,7 +1259,7 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
             let prefers_self =
                 slot_is_beneficial(ctx, targeted_player_impact(ctx, *player_id), beneficial);
 
-            (prefers_self != is_self)
+            (prefers_self != is_friendly)
                 .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"))
         }
         TargetRef::Object(object_id) => {
@@ -1273,8 +1279,8 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
                 .iter()
                 .any(|subtype| subtype == "Aura")
                 && matches!(aura_polarity(source), EffectPolarity::Beneficial)
-                && target.controller != ctx.ai_player)
-                .then(|| PolicyReason::new("anti_self_harm_beneficial_aura_opponent_target"))
+                && players::is_opponent(ctx.state, ctx.ai_player, target.controller))
+            .then(|| PolicyReason::new("anti_self_harm_beneficial_aura_opponent_target"))
         }
     }
 }
@@ -1292,10 +1298,10 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
     let beneficial = is_spell_beneficial(ctx);
     match target {
         TargetRef::Player(player_id) => {
-            let is_self = *player_id == ctx.ai_player;
+            let is_friendly = !players::is_opponent(ctx.state, ctx.ai_player, *player_id);
 
             // Lethal burn check: if damage would kill opponent, overwhelm all other targeting
-            if !is_self && !beneficial {
+            if !is_friendly && !beneficial {
                 if let Some(damage) = extract_damage_amount(&ctx.effects()) {
                     let opponent_life = ctx.state.players[player_id.0 as usize].life;
                     if damage >= opponent_life {
@@ -1329,15 +1335,20 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
     let effects = ctx.effects();
 
-    let effective_controller = if beneficial
-        && gain_control_target_has_ai_beneficiary(ctx)
-        && players::is_opponent(ctx.state, ctx.ai_player, object.controller)
-    {
-        ctx.ai_player
+    let gains_control = beneficial && gain_control_target_has_ai_beneficiary(ctx);
+    let effective_controller =
+        if gains_control && players::is_opponent(ctx.state, ctx.ai_player, object.controller) {
+            ctx.ai_player
+        } else {
+            object.controller
+        };
+    // CR 102.3: a teammate's permanent is friendly, except that taking control moves it to the AI.
+    let friendly = if gains_control {
+        effective_controller == ctx.ai_player
     } else {
-        object.controller
+        !players::is_opponent(ctx.state, ctx.ai_player, effective_controller)
     };
-    let controller_delta = if effective_controller == ctx.ai_player {
+    let controller_delta = if friendly {
         if beneficial {
             1.0
         } else {
@@ -1365,7 +1376,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         })
     {
         if object.tapped {
-            score += if effective_controller == ctx.ai_player {
+            score += if friendly {
                 ctx.penalties().untap_own_tapped_bonus
             } else {
                 ctx.penalties().untap_opponent_tapped_penalty
@@ -1456,7 +1467,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             // Lethal removal is exempt: killing a tapped creature still removes a
             // future threat (it untaps next turn and can attack/block).
             if object.tapped
-                && object.controller != ctx.ai_player
+                && players::is_opponent(ctx.state, ctx.ai_player, object.controller)
                 && matches!(ctx.state.phase, Phase::PreCombatMain)
             {
                 let is_lethal_burn = extract_damage_amount(&effects)
