@@ -503,12 +503,7 @@ pub fn stage_life_gains(
             // the gain outright. CR 101.4: it happens with the rest of the
             // simultaneous batch, so hold it instead of running it now.
             ReplacementResult::Prevented => {
-                if let Some(drain) = state.take_ready_post_replacement_drain() {
-                    staged.substitutes.push(StagedLifeGainSubstitute {
-                        drain,
-                        amount: state.last_effect_count,
-                    });
-                }
+                staged.substitutes.extend(take_life_gain_substitute(state));
             }
             ReplacementResult::NeedsChoice(player) => {
                 state.waiting_for =
@@ -521,13 +516,26 @@ pub fn stage_life_gains(
     StagedLifeGainOutcome::Staged
 }
 
+/// CR 101.4 + CR 614.6: take the continuation a cross-event substitute (Lich,
+/// Tainted Remedy) just left in place of a staged life gain, with the replaced
+/// gain's amount, so it runs with the rest of the simultaneous batch instead of
+/// now. `None` when the replacement left no continuation to run.
+pub(crate) fn take_life_gain_substitute(state: &mut GameState) -> Option<StagedLifeGainSubstitute> {
+    let drain = state.take_ready_post_replacement_drain()?;
+    Some(StagedLifeGainSubstitute {
+        drain,
+        amount: state.last_effect_count,
+    })
+}
+
 /// CR 101.4 + CR 119.3: settle one simultaneous life gain once every recipient is
 /// staged. The surviving gains are applied together in the order staged, then any
 /// same-event continuation the replacements left drains (CR 614.6), then each
-/// substituted outcome runs its own continuation (CR 614.6 + CR 615.5: it reads
-/// the amount of the gain it replaced). Returns the total life actually gained,
-/// or the deferral when a continuation paused for player input; the outcomes not
-/// yet run stay in `staged` for the caller to park.
+/// substituted outcome runs its own continuation (CR 614.6: the replaced gain
+/// never happens and the modified event occurs instead, reading the amount of the
+/// gain it replaced). Returns the total life actually gained, or the deferral
+/// when a continuation paused for player input; the outcomes not yet run stay in
+/// `staged` for the caller to park.
 pub fn settle_staged_life_gains(
     state: &mut GameState,
     staged: &mut StagedLifeGains,

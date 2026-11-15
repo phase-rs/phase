@@ -26,6 +26,7 @@ use crate::types::resolution::ChildStackDepth;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
+use super::casting_costs::AnsweredLifeGain;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
@@ -459,6 +460,17 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change)
         .unwrap_or_default();
+    // CR 101.4 + CR 616.1: the recipient whose life gain this answer settles.
+    // The Prevented arm stages a substitute for a life-gain cost that is
+    // mid-staging on this recipient, and its payload no longer names them.
+    let parked_life_gain_recipient =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match pending.proposed {
+                ProposedEvent::LifeGain { player_id, .. } => Some(player_id),
+                _ => None,
+            });
     // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
     // sacrifice was accepted. The resumed payload is only a ZoneChange, so
     // capture the enclosing sacrifice before `continue_replacement` consumes
@@ -1054,7 +1066,9 @@ fn handle_replacement_choice_inner(
                 // parked record's policy decides an unrepresentable final edit:
                 // `Reject` fails the answer (the boundary restores the record and
                 // its prompt), `IgnoreImpossible` skips the change and resumes.
-                gain @ ProposedEvent::LifeGain { .. } => {
+                gain @ ProposedEvent::LifeGain {
+                    player_id, amount, ..
+                } => {
                     // A settle that parks a prompt (the Horde loss redirect's
                     // mill choice; gain itself never pauses) early-returns the
                     // parked prompt like the Mill arm above, so the
@@ -1062,7 +1076,11 @@ fn handle_replacement_choice_inner(
                     // not clobber it.
                     // CR 101.4: a life-gain cost's recipient answering mid-staging
                     // joins the batch applied together instead of applying alone.
-                    if super::casting_costs::stage_answered_life_gain_cost(state, &gain) {
+                    if super::casting_costs::stage_answered_life_gain_cost(
+                        state,
+                        player_id,
+                        AnsweredLifeGain::Gained(amount),
+                    ) {
                         // Staged; the cost resumes and settles the batch.
                     } else {
                         match settle_life_gain_after_choice(state, gain, parked_life_policy, events)
@@ -1936,6 +1954,24 @@ fn handle_replacement_choice_inner(
                     WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
                 )
             {
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 101.4 + CR 614.6: the answer replaced a life-gain cost
+            // recipient's gain outright while the cost is mid-staging. Its
+            // substitute joins the cost's staged batch rather than running now,
+            // so the recipients still owed read the life totals from before the
+            // instruction; the cost then resumes, stages them and settles all.
+            if parked_life_gain_recipient.is_some_and(|recipient| {
+                super::casting_costs::stage_answered_life_gain_cost(
+                    state,
+                    recipient,
+                    AnsweredLifeGain::Substituted,
+                )
+            }) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
                 return Ok(state.waiting_for.clone());
             }
             if let Some(loser) = pending_phase_drain_life_loser {

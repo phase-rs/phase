@@ -10368,8 +10368,9 @@ pub struct StagedLifeGainSubstitute {
     /// The substitute's continuation with its event context (the affected
     /// player, the replacing source, its controller).
     pub drain: PostReplacementDrain,
-    /// CR 615.5: the replaced gain's amount ("that much life"), which the
-    /// continuation reads from `last_effect_count`.
+    /// CR 614.6: the modified event occurs instead of the replaced gain, so it
+    /// reads that gain's amount ("that much life"), which the continuation takes
+    /// from `last_effect_count`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<i32>,
 }

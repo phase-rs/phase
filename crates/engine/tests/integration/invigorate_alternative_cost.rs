@@ -1912,3 +1912,90 @@ fn v27_substituted_gain_does_not_change_the_life_later_recipients_read() {
     assert_eq!(runner.life(P0), p0_before, "the caster gains nothing");
     assert!(!tapped(&runner, forest), "no mana spent");
 }
+
+/// F1 — CR 101.4 + CR 614.6 + CR 616.1 + CR 810.9a: a recipient whose ordering
+/// answer turns the gain into a substitute is still part of the simultaneous
+/// instruction. P2 has Tainted Remedy (P0's) and Doctor Strange competing for
+/// their gain and applies Tainted Remedy first, so the gain becomes a 6-point
+/// loss. That loss must wait for the rest of the batch: P3's Phial of Galadriel
+/// ("5 or less life") reads the opposing team's total before any of the gains,
+/// 10 (5 + 5), so it never applies and P3 is offered no ordering choice. Had the
+/// answered substitute run before P3 was staged, the team would read 4 and P3
+/// would have to order Tainted Remedy against Phial. Each opposing recipient
+/// loses exactly 6.
+#[test]
+fn v28_answered_substitute_does_not_change_the_life_later_recipients_read() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    let (silence, forest, _anthem) = reverent_silence_board(&mut scenario);
+    let remedy = scenario
+        .add_enchantment_from_oracle(P0, "Tainted Remedy", TAINTED_REMEDY)
+        .id();
+    scenario.add_creature_from_oracle(P2, "Doctor Strange, Surgeon", 2, 2, DOCTOR_STRANGE);
+    scenario.add_artifact_from_oracle(P3, "Phial of Galadriel", PHIAL_OF_GALADRIEL);
+    scenario.with_life(P2, 5);
+    scenario.with_life(P3, 5);
+    let mut runner = scenario.build();
+    assert_eq!(team_life_total(runner.state(), P2), 10);
+    let p0_before = runner.life(P0);
+
+    let card_id = runner.state().objects[&silence].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: silence,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast should start");
+    let mut saw_optional_cost = false;
+    let mut prompt_order = Vec::new();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                saw_optional_cost = true;
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("accept the alternative cost");
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                prompt_order.push(player);
+                assert_eq!(player, P2, "only P2 has competing replacements");
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == remedy)
+                    .expect("Tainted Remedy is a candidate");
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("replacement choice should succeed");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("finalize");
+            }
+            // CR 810.8c: the opposing team ends at -2, so it loses at payment.
+            WaitingFor::GameOver { winner } => {
+                assert_eq!(winner, Some(P0), "the caster's team wins");
+                break;
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(saw_optional_cost, "alternative cost must be offered");
+    assert_eq!(
+        prompt_order,
+        vec![P2],
+        "P2 orders Tainted Remedy against Doctor Strange; P3 gets no Phial choice"
+    );
+    assert_eq!(runner.life(P2), 5 - 6, "P2's gain became a 6-point loss");
+    assert_eq!(
+        runner.life(P3),
+        5 - 6,
+        "P3's gain became a 6-point loss, not 12"
+    );
+    // CR 810.9: the two losses land on the shared total, 10 - 6 - 6.
+    assert_eq!(runner.life(P2) + runner.life(P3), -2);
+    assert_eq!(runner.life(P0), p0_before, "the caster gains nothing");
+    assert!(!tapped(&runner, forest), "no mana spent");
+}

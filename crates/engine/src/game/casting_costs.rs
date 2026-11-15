@@ -2862,39 +2862,65 @@ fn settled_public_discard_referent(
         .cloned()
 }
 
-/// CR 101.4 + CR 616.1: a replacement-ordering answer produced the surviving life
-/// gain event for a recipient of a life-gain cost that is mid-staging. Record it
-/// in the cost's staged batch instead of applying it, so the remaining
-/// recipients' gains and this one are applied together. Returns `false` when no
-/// such cost is waiting on that recipient and the caller applies the gain itself.
-pub(crate) fn stage_answered_life_gain_cost(
+/// What a life-gain cost recipient's answered CR 616.1 replacement choice left of
+/// their gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnsweredLifeGain {
+    /// The gain survived replacement with this final amount.
+    Gained(u32),
+    /// CR 614.6: a cross-event substitute (Tainted Remedy) replaced the gain
+    /// outright; its continuation is waiting on the replacement drain.
+    Substituted,
+}
+
+/// The staged batch and paused recipient of a life-gain cost being paid, if a
+/// cast is parked mid-staging.
+fn owed_life_gain_cost_mut(
     state: &mut GameState,
-    gain: &crate::types::proposed_event::ProposedEvent,
-) -> bool {
-    let crate::types::proposed_event::ProposedEvent::LifeGain {
-        player_id, amount, ..
-    } = gain
-    else {
-        return false;
-    };
+) -> Option<(&mut StagedLifeGains, &mut Option<PlayerId>)> {
     let Some(crate::types::game_state::DeferredLifeCostResume::Cast {
         pending: Some(pending),
         ..
     }) = state.pending_deferred_life_cost_resume.as_mut()
     else {
-        return false;
+        return None;
     };
     let Some(DeferredLifeGainCost::Owed {
         staged, paused_on, ..
     }) = pending.deferred_life_gain_cost.as_mut()
     else {
-        return false;
+        return None;
     };
-    if *paused_on != Some(*player_id) {
-        return false;
+    Some((staged, paused_on))
+}
+
+/// CR 101.4 + CR 616.1: a replacement-ordering answer settled the gain of a
+/// life-gain cost's recipient while the cost is mid-staging. Record the outcome
+/// in the cost's staged batch instead of applying it, so the remaining
+/// recipients' replacements still read the life totals from before the
+/// instruction and every outcome is applied together. A substituted gain's
+/// continuation is taken off the replacement drain here, before the generic
+/// resume can run it (CR 614.6). Returns `false` when no such cost is waiting
+/// on `recipient` and the caller settles the outcome itself.
+pub(crate) fn stage_answered_life_gain_cost(
+    state: &mut GameState,
+    recipient: PlayerId,
+    answer: AnsweredLifeGain,
+) -> bool {
+    match owed_life_gain_cost_mut(state) {
+        Some((_, paused_on)) if *paused_on == Some(recipient) => *paused_on = None,
+        _ => return false,
     }
-    *paused_on = None;
-    staged.gains.push((*player_id, *amount));
+    let substitute = match answer {
+        AnsweredLifeGain::Gained(_) => None,
+        AnsweredLifeGain::Substituted => super::effects::life::take_life_gain_substitute(state),
+    };
+    let (staged, _) =
+        owed_life_gain_cost_mut(state).expect("the paused life-gain cost was found above");
+    match answer {
+        AnsweredLifeGain::Gained(amount) => staged.gains.push((recipient, amount)),
+        AnsweredLifeGain::Substituted => staged.substitutes.extend(substitute),
+    }
     true
 }
 
