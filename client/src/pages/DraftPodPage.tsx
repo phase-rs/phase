@@ -1390,6 +1390,7 @@ function DraftingPhaseContent({
 /** A deck submission held until the player answers the confirmation dialog. */
 interface PendingDeckSubmission {
   commanders: string[];
+  companion?: string | null;
   resolve: () => void;
   reject: (error: unknown) => void;
 }
@@ -1416,6 +1417,9 @@ function PodDeckBuilder({
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  // CR 702.139a: reopening a submitted deck starts from its designation, so a
+  // resubmission keeps an unchanged companion rather than silently clearing it.
+  const submittedCompanion = useMultiplayerDraftStore((s) => s.submittedCompanion);
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
@@ -1435,9 +1439,9 @@ function PodDeckBuilder({
   // The deck builder awaits this promise, so its submitting state and error
   // display stay in force until the player answers the dialog: Confirm settles
   // it with the store submission's outcome, Cancel resolves it unsubmitted.
-  const confirmSubmitDeck = (commanders: string[] = []) =>
+  const confirmSubmitDeck = (commanders: string[] = [], companion?: string | null) =>
     new Promise<void>((resolve, reject) => {
-      pendingSubmission.current = { commanders, resolve, reject };
+      pendingSubmission.current = { commanders, companion, resolve, reject };
       setConfirmOpen(true);
     });
   const takePendingSubmission = () => {
@@ -1449,7 +1453,10 @@ function PodDeckBuilder({
   const handleConfirmSubmit = () => {
     const pending = takePendingSubmission();
     if (!pending) return;
-    submitDeck(pending.commanders).then(() => {
+    const submission = pending.companion
+      ? submitDeck(pending.commanders, pending.companion)
+      : submitDeck(pending.commanders);
+    submission.then(() => {
       if (mode.kind === "betweenRounds") mode.onSubmitted();
       pending.resolve();
     }, pending.reject);
@@ -1481,6 +1488,7 @@ function PodDeckBuilder({
           onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
           onAutoSuggestLands: autoSuggestLands,
           onSubmitDeck: confirmSubmitDeck,
+          initialCompanion: submittedCompanion,
         }}
         submissionError={submissionError}
         showSuggestions

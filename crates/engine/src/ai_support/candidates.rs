@@ -1610,6 +1610,10 @@ pub fn candidate_actions_broad_with_probe(
                             pack_slot: *pack_slot,
                         });
                     }
+                    // CR 702.139a: the revealed companion is one card.
+                    OutsideGameChoiceSource::Companion { .. } => {
+                        pool.push(OutsideGameSelection::Companion);
+                    }
                 }
             }
             let sizes = if *up_to {

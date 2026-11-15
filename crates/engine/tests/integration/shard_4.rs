@@ -279,6 +279,7 @@ mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
 mod liminal_copy_token_etb_observers;
 mod limited_command_zone;
+mod limited_companion_match_launch;
 mod limited_deck_format_gate;
 mod linked_exile_ltb_return;
 mod living_armor_target_mana_value_1375;
