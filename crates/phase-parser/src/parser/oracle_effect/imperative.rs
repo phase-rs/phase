@@ -30192,8 +30192,8 @@ mod tests {
                         let filter = filter.expect("cast-origin filter must be present");
                         assert!(
                             matches!(&filter, TargetFilter::Typed(t)
-                                if t.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. }))),
-                            "draw count must carry the cast-origin InAnyZone filter, got {filter:?}"
+                                if t.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(prop.as_ref(), FilterProp::InZone { zone: Zone::Hand })))),
+                            "draw count must carry the cast-origin Not(InZone(Hand)) filter, got {filter:?}"
                         );
                     }
                     other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),

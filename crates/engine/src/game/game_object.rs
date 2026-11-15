@@ -4500,6 +4500,13 @@ impl GameObject {
         self.cast_from_zone.filter(|_| !self.created_outside_game)
     }
 
+    /// CR 707.13 + CR 400.11: whether this object was created outside the game (Garth
+    /// One-Eye's copy). It is staged in a zone for the casting pipeline's bookkeeping,
+    /// but outside the game is not a zone, so no zone's public listing may show it.
+    pub fn is_outside_game(&self) -> bool {
+        self.created_outside_game
+    }
+
     /// CR 108.2 + CR 109.1: Whether this object belongs to the population of
     /// "cards" in its current zone — the population that queries such as "the
     /// number of cards in exile" or "instant cards you own in exile" range

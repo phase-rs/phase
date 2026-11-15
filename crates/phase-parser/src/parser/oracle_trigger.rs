@@ -22632,12 +22632,12 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
         }
     }
 
-    // CR 601.2a: cast-origin qualifier. A spell is cast from a zone; "from
-    // anywhere other than [hand]" matches the cast-capable zones except the hand
-    // (The Twelfth Doctor), and "from exile" / "from your graveyard" match that
-    // single origin zone (Wild-Magic Sorcerer class). Emits an InAnyZone /
-    // InZone origin predicate consumed by `spell_object_matches_filter_from_state`
-    // against the cast-from zone.
+    // CR 601.2a + CR 707.13 + CR 400.11: cast-origin qualifier. "from anywhere other
+    // than [hand]" (The Twelfth Doctor) is the NEGATION of "from [hand]" — a cast from
+    // outside the game (Garth One-Eye's copy) is from no zone and satisfies it — while
+    // "from exile" / "from your graveyard" match that single origin zone (Wild-Magic
+    // Sorcerer class). Emits a `Not(InZone)` / `InZone` origin predicate consumed by
+    // `spell_object_matches_filter_from_state` against the cast origin.
     if let Ok((rest, ())) = value(
         (),
         tag::<_, _, OracleError<'_>>("from anywhere other than your hand"),
@@ -22646,8 +22646,8 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Typed(TypedFilter::default().properties(
-                vec![FilterProp::InAnyZone {
-                    zones: super::oracle_target::cast_capable_zones_except(Zone::Hand),
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
                 }],
             )));
         }

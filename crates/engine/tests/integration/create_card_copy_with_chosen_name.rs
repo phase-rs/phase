@@ -918,6 +918,57 @@ fn real_db() -> &'static CardDatabase {
                 "{T}, Sacrifice this artifact: Add three mana of any one color.",
                 "",
             ),
+            // The cast-origin readers of the F2/F3 tests: printed Oracle text,
+            // verbatim from card-data.json.
+            atomic(
+                "Surge of Brilliance",
+                r#""Instant""#,
+                "{1}{U}",
+                "Paradox \u{2014} Draw a card for each spell you've cast this turn from anywhere \
+                 other than your hand.\\nForetell {1}{U} (During your turn, you may pay {2} and \
+                 exile this card from your hand face down. Cast it on a later turn for its \
+                 foretell cost.)",
+                "",
+            ),
+            atomic(
+                "The Twelfth Doctor",
+                r#""Creature""#,
+                "{3}{U}{R}",
+                "The first spell you cast from anywhere other than your hand each turn has \
+                 demonstrate. (When you cast that spell, you may copy it. If you do, choose an \
+                 opponent to also copy it. A copy of a permanent spell becomes a token.)\\n\
+                 Whenever you copy a spell, put a +1/+1 counter on The Twelfth Doctor.",
+                r#""power": "4", "toughness": "4","#,
+            ),
+            atomic(
+                "Nalfeshnee",
+                r#""Creature""#,
+                "{5}{R}",
+                "Flying\\nWhenever you cast a spell from exile, copy it. You may choose new \
+                 targets for the copy. If it's a permanent spell, the copy gains haste and \
+                 \\\"At the beginning of the end step, sacrifice this permanent.\\\" (A copy of a \
+                 permanent spell becomes a token.)",
+                r#""power": "4", "toughness": "6","#,
+            ),
+            atomic(
+                "Wild-Magic Sorcerer",
+                r#""Creature""#,
+                "{3}{R}",
+                "The first spell you cast from exile each turn has cascade. (When you cast your \
+                 first spell from exile, exile cards from the top of your library until you \
+                 exile a nonland card that costs less. You may cast it without paying its mana \
+                 cost. Put the exiled cards on the bottom in a random order.)",
+                r#""power": "4", "toughness": "3","#,
+            ),
+            atomic(
+                "Interdimensional Web Watch",
+                r#""Artifact""#,
+                "{4}",
+                "When this artifact enters, exile the top two cards of your library. Until the \
+                 end of your next turn, you may play those cards.\\n{T}: Add two mana in any \
+                 combination of colors. Spend this mana only to cast spells from exile.",
+                "",
+            ),
             atomic(
                 "Enlightened Tutor",
                 r#""Instant""#,
@@ -1374,4 +1425,536 @@ fn an_independent_later_cast_clause_keeps_its_own_target_and_window() {
         casts.len() >= 2,
         "the independent clause parsed as a second cast: {casts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 601.2a + CR 707.13 + CR 400.11: Garth's copy is cast from OUTSIDE the game.
+// Outside the game is not a zone, so the cast satisfies every "from anywhere other
+// than your hand" reader and fails every "from exile" reader — in the history
+// counts, the static keyword grants, the cast triggers, and the mana that may pay.
+// Every test drives the printed cards through the production cast pipeline, with
+// a real cast from exile as the positive control.
+// ---------------------------------------------------------------------------
+
+use engine::game::derived_views::derive_filtered_views;
+use engine::game::visibility::filter_state_for_viewer;
+use engine::types::ability::{CardPlayMode, CastingPermission, Duration, PlayFromExileProvenance};
+use engine::types::keywords::Keyword;
+use engine::types::player::PlayerId;
+use engine::types::statics::CastFrequency;
+use engine::types::zones::EtbTapState;
+
+/// Real Garth casts the copy of its closed domain's Black Lotus (cost {0}); the
+/// copy is left on the stack and returned.
+fn garth_casts_black_lotus_copy(runner: &mut GameRunner, garth: ObjectId) -> ObjectId {
+    garth_choose(runner, garth, "Black Lotus");
+    let copy = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("the copy was created");
+    drive_copy_cast(runner, 0, None);
+    assert_eq!(
+        runner.state().objects[&copy].zone,
+        Zone::Stack,
+        "reach guard: the copy was cast: {:?}",
+        runner.state().waiting_for
+    );
+    copy
+}
+
+/// A plain "cast this card from exile" permission for P0 (the impulse-draw shape).
+fn grant_exile_cast(runner: &mut GameRunner, card: ObjectId) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&card)
+        .expect("the exiled card exists")
+        .casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            provenance: PlayFromExileProvenance::Impulse,
+            duration: Duration::UntilEndOfTurn,
+            granted_to: P0,
+            mode: CardPlayMode::Cast,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: EtbTapState::Unspecified,
+        });
+}
+
+/// Cast a card from exile for its own cost ({0} here) through the production cast
+/// action, then settle the cast triggers' ordering prompt (CR 603.3b) so every
+/// trigger the cast caused is on the stack.
+fn cast_from_exile(runner: &mut GameRunner, card: ObjectId) {
+    grant_exile_cast(runner, card);
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the exiled card is castable under its permission");
+    settle_cast_triggers(runner);
+}
+
+fn settle_cast_triggers(runner: &mut GameRunner) {
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+    }
+}
+
+fn spell_has_keyword(
+    runner: &GameRunner,
+    spell: ObjectId,
+    is_keyword: fn(&Keyword) -> bool,
+) -> bool {
+    runner.state().objects[&spell]
+        .cast_spell_keywords
+        .iter()
+        .any(is_keyword)
+}
+
+/// Surge of Brilliance after a first spell cast the given way, in a two-player
+/// game with three cards to draw. Returns how many cards Surge drew.
+fn surge_draw_after_first_spell(first_cast: FirstCast) -> i64 {
+    let (mut runner, ids) = real_game(vec![ManaType::Blue, ManaType::Blue], |scenario, db| {
+        let garth = scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db);
+        let surge = scenario.add_real_card(P0, "Surge of Brilliance", Zone::Hand, db);
+        let exiled_lotus = scenario.add_real_card(P0, "Black Lotus", Zone::Exile, db);
+        for _ in 0..3 {
+            scenario.add_spell_to_library_top(P0, "Library Filler", true);
+        }
+        vec![garth, surge, exiled_lotus]
+    });
+    let (garth, surge, exiled_lotus) = (ids[0], ids[1], ids[2]);
+    match first_cast {
+        FirstCast::None => {}
+        FirstCast::HandCast => unreachable!("Surge is measured against exile and Garth casts"),
+        FirstCast::GarthsCopy => {
+            garth_casts_black_lotus_copy(&mut runner, garth);
+        }
+        FirstCast::RealExileCast => cast_from_exile(&mut runner, exiled_lotus),
+    }
+    runner.advance_until_stack_empty();
+    runner.cast(surge).commit().resolve().hand_drawn(P0)
+}
+
+#[derive(Clone, Copy)]
+enum FirstCast {
+    None,
+    /// A real cast from hand: the negative control for every cast-origin reader.
+    HandCast,
+    GarthsCopy,
+    RealExileCast,
+}
+
+/// F2 (CR 601.2a + CR 707.13 + CR 400.11): Surge of Brilliance — "Draw a card for
+/// each spell you've cast this turn from anywhere other than your hand." Garth's
+/// Black Lotus copy is cast from outside the game, which is not a zone, so it is
+/// one such spell: Surge, cast from hand, draws exactly one card. The positive
+/// control (a real exile cast) draws one; with no earlier spell Surge draws none.
+#[test]
+fn surge_of_brilliance_counts_garths_outside_game_cast() {
+    assert_eq!(
+        surge_draw_after_first_spell(FirstCast::None),
+        0,
+        "control: Surge's own hand cast counts for nothing"
+    );
+    assert_eq!(
+        surge_draw_after_first_spell(FirstCast::RealExileCast),
+        1,
+        "control: a real cast from exile is a cast from anywhere other than the hand"
+    );
+    assert_eq!(
+        surge_draw_after_first_spell(FirstCast::GarthsCopy),
+        1,
+        "CR 400.11: a cast from outside the game is not from the hand, so Surge draws one"
+    );
+}
+
+/// What the first spell of the turn gets from the cast-origin statics, however it
+/// was cast.
+struct FirstCastReaders {
+    demonstrate: bool,
+    cascade: bool,
+    nalfeshnee_triggered: bool,
+}
+
+/// The Twelfth Doctor ("The first spell you cast from anywhere other than your hand
+/// each turn has demonstrate"), Wild-Magic Sorcerer ("The first spell you cast from
+/// exile each turn has cascade") and Nalfeshnee ("Whenever you cast a spell from
+/// exile, copy it") on the battlefield, then the first spell of the turn is cast.
+fn first_cast_readers(first_cast: FirstCast) -> FirstCastReaders {
+    let (mut runner, ids) = real_game(Vec::new(), |scenario, db| {
+        for name in ["The Twelfth Doctor", "Wild-Magic Sorcerer", "Nalfeshnee"] {
+            scenario.add_real_card(P0, name, Zone::Battlefield, db);
+        }
+        vec![
+            scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db),
+            scenario.add_real_card(P0, "Black Lotus", Zone::Exile, db),
+            scenario.add_real_card(P0, "Black Lotus", Zone::Hand, db),
+        ]
+    });
+    let (garth, exiled_lotus, hand_lotus) = (ids[0], ids[1], ids[2]);
+    let spell = match first_cast {
+        FirstCast::HandCast => {
+            let card_id = runner.state().objects[&hand_lotus].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: hand_lotus,
+                    card_id,
+                    targets: Vec::new(),
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                })
+                .expect("the Black Lotus in hand is castable for {0}");
+            hand_lotus
+        }
+        FirstCast::GarthsCopy => garth_casts_black_lotus_copy(&mut runner, garth),
+        FirstCast::RealExileCast => {
+            cast_from_exile(&mut runner, exiled_lotus);
+            exiled_lotus
+        }
+        FirstCast::None => unreachable!("the readers are measured on a cast"),
+    };
+    settle_cast_triggers(&mut runner);
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "reach guard: the first spell of the turn is on the stack"
+    );
+    FirstCastReaders {
+        demonstrate: spell_has_keyword(&runner, spell, |k| matches!(k, Keyword::Demonstrate)),
+        cascade: spell_has_keyword(&runner, spell, |k| matches!(k, Keyword::Cascade)),
+        nalfeshnee_triggered: runner.stack_names().contains(&"Nalfeshnee".to_string()),
+    }
+}
+
+/// F2 (CR 601.2a + CR 707.13 + CR 400.11): Garth's first qualifying cast receives
+/// The Twelfth Doctor's demonstrate (a cast from anywhere other than the hand), but
+/// neither Wild-Magic Sorcerer's exile-only cascade nor Nalfeshnee's exile trigger.
+/// A real cast from exile is the positive control for all three readers.
+#[test]
+fn garths_cast_gets_the_not_hand_grant_but_no_exile_only_reader() {
+    // Negative control: a real cast from the hand is read by none of the three.
+    let hand = first_cast_readers(FirstCast::HandCast);
+    assert!(
+        !hand.demonstrate && !hand.cascade && !hand.nalfeshnee_triggered,
+        "control: a cast from the hand is neither from exile nor from anywhere other than          the hand"
+    );
+
+    let real_exile = first_cast_readers(FirstCast::RealExileCast);
+    assert!(
+        real_exile.demonstrate,
+        "control: an exile cast is not from the hand"
+    );
+    assert!(
+        real_exile.cascade,
+        "control: Wild-Magic Sorcerer grants an exile cast cascade"
+    );
+    assert!(
+        real_exile.nalfeshnee_triggered,
+        "control: Nalfeshnee triggers on a cast from exile"
+    );
+
+    let garth = first_cast_readers(FirstCast::GarthsCopy);
+    assert!(
+        garth.demonstrate,
+        "CR 400.11: Garth's cast is from anywhere other than the hand — demonstrate applies"
+    );
+    assert!(
+        !garth.cascade,
+        "CR 707.13: Garth's cast is not a cast from exile — no cascade"
+    );
+    assert!(
+        !garth.nalfeshnee_triggered,
+        "CR 707.13: Garth's cast is not a cast from exile — Nalfeshnee stays silent"
+    );
+}
+
+/// Why the Watch's mana can or cannot pay for a given cast.
+struct WatchTable {
+    runner: GameRunner,
+    garth: ObjectId,
+    watch: ObjectId,
+    exiled_disenchant: ObjectId,
+}
+
+fn watch_table(unrestricted_white: usize) -> WatchTable {
+    let (runner, ids) = real_game(vec![ManaType::White; unrestricted_white], |scenario, db| {
+        vec![
+            scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db),
+            scenario.add_real_card(P0, "Interdimensional Web Watch", Zone::Battlefield, db),
+            scenario.add_real_card(P0, "Disenchant", Zone::Exile, db),
+        ]
+    });
+    let mut table = WatchTable {
+        runner,
+        garth: ids[0],
+        watch: ids[1],
+        exiled_disenchant: ids[2],
+    };
+    grant_exile_cast(&mut table.runner, table.exiled_disenchant);
+    table
+}
+
+/// Tap the real Watch for its restricted white mana ("Spend this mana only to cast
+/// spells from exile") through its printed activated mana ability.
+fn tap_watch_for_white(table: &mut WatchTable) {
+    table
+        .runner
+        .act(GameAction::ActivateAbility {
+            source_id: table.watch,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the Watch's mana ability is activatable");
+    assert!(
+        matches!(
+            table.runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "the Watch asks for its color combination: {:?}",
+        table.runner.state().waiting_for
+    );
+    table
+        .runner
+        .act(GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+            ]),
+            count: 1,
+        })
+        .expect("two white is a legal combination");
+    let restricted = table.runner.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.color == ManaType::White && !unit.restrictions.is_empty())
+        .count();
+    assert_eq!(
+        restricted, 2,
+        "reach guard: the Watch's two restricted white mana are in the pool"
+    );
+}
+
+fn restricted_units_in_pool(runner: &GameRunner) -> usize {
+    runner.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| !unit.restrictions.is_empty())
+        .count()
+}
+
+/// Drive a Garth copy cast like [`drive_copy_cast`], but report a refusal instead of
+/// panicking — a cast the pool cannot pay for is refused.
+fn try_drive_copy_cast(runner: &mut GameRunner, target: TargetRef) -> bool {
+    for _ in 0..24 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::CastOffer { .. } => GameAction::GraveyardPaidCastChoice {
+                choice: CastChoice::Cast,
+            },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            _ => return true,
+        };
+        if runner.act(action).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// F3 (CR 106.6 + CR 601.2h + CR 707.13 + CR 400.11): Interdimensional Web Watch —
+/// "Spend this mana only to cast spells from exile." Its mana pays for a real cast
+/// from exile, but cannot pay for Garth's Disenchant copy, which is cast from
+/// outside the game even though it is staged in exile. Unrestricted mana still
+/// pays for the copy.
+#[test]
+fn web_watch_mana_pays_for_an_exile_cast_but_not_for_garths_copy() {
+    // Control: a real cast of Disenchant from exile is paid with the Watch's mana.
+    let mut table = watch_table(0);
+    tap_watch_for_white(&mut table);
+    let watch = table.watch;
+    let disenchant = table.exiled_disenchant;
+    table.runner.cast(disenchant).target_object(watch).commit();
+    assert_eq!(
+        table.runner.state().objects[&disenchant].zone,
+        Zone::Stack,
+        "control: exile-only mana pays for a spell cast from exile"
+    );
+    assert_eq!(
+        restricted_units_in_pool(&table.runner),
+        0,
+        "control: the Watch's mana was spent on it"
+    );
+
+    // Garth's copy of Disenchant cannot be paid with the Watch's mana.
+    let mut table = watch_table(0);
+    tap_watch_for_white(&mut table);
+    garth_choose(&mut table.runner, table.garth, "Disenchant");
+    assert_eq!(
+        table.runner.state().last_created_token_ids.len(),
+        1,
+        "reach guard: the copy was created"
+    );
+    let cast = try_drive_copy_cast(&mut table.runner, TargetRef::Object(table.watch));
+    // CR 601.2h: the announced copy stays unpaid — the Watch's mana is refused.
+    assert!(
+        !cast
+            && matches!(
+                table.runner.state().waiting_for,
+                WaitingFor::ManaPayment { .. }
+            ),
+        "CR 707.13: exile-only mana cannot pay for a cast from outside the game (cast          accepted: {cast}): {:?}",
+        table.runner.state().waiting_for
+    );
+    assert_eq!(
+        restricted_units_in_pool(&table.runner),
+        2,
+        "the Watch's mana was never spent on the copy"
+    );
+
+    // Unrestricted mana still pays for the copy.
+    let mut table = watch_table(2);
+    garth_choose(&mut table.runner, table.garth, "Disenchant");
+    assert!(try_drive_copy_cast(
+        &mut table.runner,
+        TargetRef::Object(table.watch)
+    ));
+    assert!(
+        table
+            .runner
+            .stack_names()
+            .contains(&"Disenchant".to_string()),
+        "unrestricted mana pays for the copy: {:?}",
+        table.runner.state().waiting_for
+    );
+}
+
+/// The exile lists each viewer is shown: the projected zone list (what the client
+/// counts) and the derived public pile.
+fn exile_projection(
+    runner: &GameRunner,
+    viewer: PlayerId,
+) -> (Vec<ObjectId>, Vec<(PlayerId, Vec<ObjectId>)>) {
+    let filtered = filter_state_for_viewer(runner.state(), viewer);
+    let derived = derive_filtered_views(runner.state(), &filtered, Some(viewer));
+    (
+        filtered.exile.iter().copied().collect(),
+        derived.visible_exile_object_ids.into_iter().collect(),
+    )
+}
+
+/// F4 (CR 707.13 + CR 400.11): while Garth's "You may cast the copy" prompt is
+/// pending, the staged copy is outside the game, so neither viewer's exile list or
+/// public pile shows it — and the prompt can still cast it.
+#[test]
+fn the_pending_garth_copy_is_not_in_either_viewers_exile() {
+    let (mut runner, garth, _) = garth_scenario(3, |scenario| {
+        scenario.add_creature_to_exile(P0, "Exiled Of P0", 1, 1);
+        scenario.add_creature_to_exile(P1, "Exiled Of P1", 1, 1);
+        None
+    });
+    let before = (exile_projection(&runner, P0), exile_projection(&runner, P1));
+    assert_eq!(
+        before.0 .0.len(),
+        2,
+        "reach guard: both exiled cards are listed"
+    );
+    assert!(
+        before.0 .1.iter().any(|(owner, _)| *owner == P0)
+            && before.1 .1.iter().any(|(owner, _)| *owner == P1),
+        "reach guard: both public piles are populated: {before:?}"
+    );
+
+    activate_to_the_prompt(&mut runner, garth);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Grizzly Bears".to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the optional cast prompt is pending: {:?}",
+        runner.state().waiting_for
+    );
+    let copy = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("the copy was created");
+    // Reach guard: the authoritative state really holds the staged copy in exile.
+    assert!(runner.state().exile.contains(&copy));
+    assert!(runner.state().objects[&copy].created_outside_game);
+
+    let at_prompt = (exile_projection(&runner, P0), exile_projection(&runner, P1));
+    assert_eq!(
+        at_prompt, before,
+        "CR 400.11: the outside-the-game copy is in neither viewer's exile"
+    );
+
+    // The public pile is also withheld when the projection is handed the authoritative
+    // state itself (the staged copy is in its exile list there).
+    for viewer in [P0, P1] {
+        let authoritative = derive_filtered_views(runner.state(), runner.state(), Some(viewer));
+        assert_eq!(
+            authoritative
+                .visible_exile_object_ids
+                .into_iter()
+                .collect::<Vec<_>>(),
+            exile_projection(&runner, viewer).1,
+            "the derived pile skips the outside-the-game copy by itself"
+        );
+    }
+
+    // The prompt can still cast the copy.
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the cast is legal");
+    let hit = match &runner.state().waiting_for {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { hit_card, .. },
+            ..
+        } => *hit_card,
+        other => panic!("expected the cast offer over the copy, got {other:?}"),
+    };
+    assert_eq!(hit, copy, "the offer is over the staged copy");
+    assert_eq!(
+        (exile_projection(&runner, P0), exile_projection(&runner, P1)),
+        before,
+        "the exile lists are unchanged at the paid-cast offer too"
+    );
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("taking the offered cast is legal");
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pay {1}{G}");
+    }
+    assert_eq!(runner.state().objects[&copy].zone, Zone::Stack);
 }

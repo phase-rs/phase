@@ -1436,6 +1436,16 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     };
     filtered.play_trace = None;
     filtered.spell_cast_reversal = None;
+    // CR 707.13 + CR 400.11: an object created outside the game (Garth One-Eye's copy)
+    // is staged in exile for the casting pipeline while its "you may cast" prompt is
+    // pending, but outside the game is not a zone — no viewer's exile list shows it.
+    // The object itself stays in `objects`, so the prompt can still cast it.
+    filtered.exile.retain(|object_id| {
+        !filtered
+            .objects
+            .get(object_id)
+            .is_some_and(|object| object.is_outside_game())
+    });
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };

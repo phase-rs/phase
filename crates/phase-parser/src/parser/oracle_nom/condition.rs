@@ -24,9 +24,8 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_source_anaphoric_pronoun,
-    parse_type_phrase_folding, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
-    superlative_property_filter_prop,
+    parse_shared_quality, parse_source_anaphoric_pronoun, parse_type_phrase_folding,
+    parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -7528,6 +7527,17 @@ fn target_filter_origin_zones(filter: &TargetFilter) -> Option<Vec<Zone>> {
         TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| match prop {
             FilterProp::InZone { zone } => Some(vec![*zone]),
             FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            // CR 305.1 + CR 601.2a: "from anywhere other than <zone>" is the negation
+            // of a single origin zone. A land is always played from a ZONE (it can't
+            // come from outside the game, CR 400.11), so the land-play history keeps
+            // the explicit zone list — every zone a card can be played from except
+            // `zone` — while the spell half keeps the negation itself.
+            FilterProp::Not { prop } => match prop.as_ref() {
+                FilterProp::InZone { zone } => Some(
+                    crate::parser::oracle_target::cast_capable_zones_except(*zone),
+                ),
+                _ => None,
+            },
             _ => None,
         }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -10125,9 +10135,13 @@ fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<Filt
     let (rest, _) = peek_zone_boundary(rest).ok()?;
 
     let consumed = leading_ws + trimmed.len() - rest.len();
+    // CR 601.2a + CR 707.13 + CR 400.11: "from anywhere other than <zone>" is the
+    // NEGATION of "from <zone>", not a positive list of the remaining zones — a spell
+    // cast from outside the game (Garth One-Eye's copy) is from no zone, so it is
+    // not from <zone> and must satisfy the clause.
     Some((
-        vec![FilterProp::InAnyZone {
-            zones: cast_capable_zones_except(zone),
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone }),
         }],
         consumed,
     ))
@@ -14930,14 +14944,14 @@ mod tests {
             );
         };
 
-        let zones = properties.iter().find_map(|prop| match prop {
-            FilterProp::InAnyZone { zones } => Some(zones),
-            _ => None,
-        });
-        let zones = zones.expect("expected InAnyZone origin qualifier");
-        assert!(!zones.contains(&Zone::Hand));
-        assert!(zones.contains(&Zone::Exile));
-        assert!(zones.contains(&Zone::Graveyard));
+        // CR 601.2a + CR 400.11: the spell half is the negation of a cast from the hand.
+        assert!(
+            properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            }),
+            "expected Not(InZone(Hand)) origin qualifier, got {properties:?}"
+        );
+        assert!(land_zones.contains(&Zone::Graveyard));
     }
 
     /// Helper: assert a condition is `LandsPlayedThisTurn{Controller, None} >= 1`.

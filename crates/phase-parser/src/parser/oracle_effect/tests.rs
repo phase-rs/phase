@@ -7952,18 +7952,12 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
             else {
                 panic!("spell-history filter must be Typed, got: {filter:?}");
             };
-            let zones = tf
-                .properties
-                .iter()
-                .find_map(|prop| match prop {
-                    FilterProp::InAnyZone { zones } => Some(zones),
-                    _ => None,
-                })
-                .expect("cast-origin clause must carry an InAnyZone filter");
-            assert_eq!(
-                zones,
-                &crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand),
-                "\"from anywhere other than your hand\" must exclude the hand",
+            assert!(
+                tf.properties.contains(&FilterProp::Not {
+                    prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                }),
+                "\"from anywhere other than your hand\" must negate InZone(Hand), got {:?}",
+                tf.properties
             );
             assert_eq!(
                 *player_filter,

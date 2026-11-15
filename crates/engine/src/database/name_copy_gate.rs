@@ -27,7 +27,7 @@ use crate::types::card::CardFace;
 
 /// Gap name recorded for a copy clause (and its dependent cast) the database
 /// cannot materialize. Distinct from the effect's own coverage label.
-pub(crate) const GAP_NAME: &str = "copy_by_name_unmaterializable";
+pub const GAP_NAME: &str = "copy_by_name_unmaterializable";
 
 /// Replace every `Effect::CreateCardCopyByName` on `face` whose name domain
 /// includes a name `is_single_faced_card` rejects — and the "you may cast the
