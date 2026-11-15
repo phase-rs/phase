@@ -97,6 +97,9 @@ describe("P2PDraftHost public draft code", () => {
     expect(draftCode).toMatch(/^[A-Z0-9]{6}$/);
     // Pinned to the second draw (0xbbbbbbbb) reduced modulo 36^6, base 36.
     expect(draftCode).toBe((0xbbbbbbbb % 36 ** 6).toString(36).toUpperCase().padStart(6, "0"));
+    // Literal shared with the server contract test
+    // `p2p_backup_store_accepts_client_draft_code_and_rejects_legacy_shape`.
+    expect(draftCode).toBe("G37RUJ");
     expect(drawIndex).toBe(2);
 
     // THE CLAIM. A code derived from the seed draw (0xaaaaaaaa) reds both of

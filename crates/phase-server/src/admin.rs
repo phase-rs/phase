@@ -480,4 +480,43 @@ mod tests {
             assert!(!rows.contains(&reaped));
         });
     }
+
+    /// Contract with the P2P draft host client (`hostDraftCode` in
+    /// client/src/adapter/p2p-draft-host.ts). `G37RUJ` is what the client's
+    /// code draw yields for the pinned draw 0xbbbbbbbb
+    /// (p2pDraftHostPublicCode.test.ts asserts the same literal); `draft-bbbbbbbb`
+    /// is the `draft-` + 8 hex identifier the host sent before that fix. The
+    /// production handler must store the first and reject the second before
+    /// storage (HTTP 400).
+    #[tokio::test]
+    async fn p2p_backup_store_accepts_client_draft_code_and_rejects_legacy_shape() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let request = |draft_code: &str| super::P2pBackupRequest {
+            draft_code: draft_code.to_string(),
+            host_peer_id: "host-peer-abc".to_string(),
+            snapshot_json: r#"{"draftStarted":true}"#.to_string(),
+        };
+
+        let accepted = super::p2p_backup_store(State(state.clone()), axum::Json(request("G37RUJ")))
+            .await
+            .into_response();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+        assert!(state
+            .game_db
+            .load_p2p_backup("G37RUJ")
+            .expect("load")
+            .is_some());
+
+        let rejected =
+            super::p2p_backup_store(State(state.clone()), axum::Json(request("draft-bbbbbbbb")))
+                .await
+                .into_response();
+        assert_eq!(rejected.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state
+            .game_db
+            .load_p2p_backup("draft-bbbbbbbb")
+            .expect("load")
+            .is_none());
+    }
 }
