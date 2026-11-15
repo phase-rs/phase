@@ -31,23 +31,13 @@ vi.mock("../../../game/dispatch.ts", () => ({
   dispatchInteraction: vi.fn(),
 }));
 
-vi.mock("../../../components/animation/cardVfx/cardAnchors.ts", () => ({
-  measureSurface: vi.fn((el: HTMLElement) => {
-    const rect = el.getBoundingClientRect();
-    const w = rect.width || 200;
-    const h = rect.height || 300;
-    return {
-      pose: {
-        x: rect.left + w / 2,
-        y: rect.top + h / 2,
-        w,
-        h,
-        angleDeg: 0,
-      },
-      opacity: 1,
-    };
-  }),
-}));
+vi.mock("../../../components/animation/cardVfx/cardAnchors.ts", async () => {
+  const actual = await vi.importActual<{ measureSurface: typeof import("../../../components/animation/cardVfx/cardAnchors.ts").measureSurface }>("../../../components/animation/cardVfx/cardAnchors.ts");
+  return {
+    ...actual,
+    measureSurface: vi.fn((el: HTMLElement, origin: DOMRectReadOnly) => actual.measureSurface(el, origin)),
+  };
+});
 
 vi.mock("../../card/CardImage.tsx", () => ({
   CardImage: ({
@@ -1054,12 +1044,8 @@ describe("PermanentCard", () => {
       expect(host.contains(badge)).toBe(true);
       expect(host.getAttribute("data-tap-angle")).toBe("17");
 
-      // Mock measureSurface to return the 17° rotated pose with fractional rendered dimensions.
-      // Untransformed card is 85.7142857x120 (120px height with 5/7 aspect ratio) centered at (200, 250).
-      // Rotated by 17°, the actual half-width is 42.857px.
-      // A badge point at (-42.95, -18) in local coordinates lies beyond the actual 42.857px half-width
-      // but within an integer-rounded 86px (43px half-width) boundary.
-      // Both pointer routes must reject the outboard badge point and accept the inboard neighbor (-42.5, -18).
+      // Drive the real measureSurface with fractional computed dimensions, integer offsetWidth/Height,
+      // and the rendered 17° rotation. This ensures the hit test uses the actual measured geometry.
       const { measureSurface } = await import("../../../components/animation/cardVfx/cardAnchors.ts");
       const cardW = 120 * (5 / 7); // 85.71428571428571
       const cardH = 120;
@@ -1081,16 +1067,29 @@ describe("PermanentCard", () => {
         toJSON: () => {},
       };
       vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
-      vi.mocked(measureSurface).mockReturnValue({
-        pose: {
-          x: 200,
-          y: 250,
-          w: cardW,
-          h: cardH,
-          angleDeg: 17,
-        },
-        opacity: 1,
-      });
+
+      // Set fractional computed style dimensions on the host element.
+      host.style.width = `${cardW}px`;
+      host.style.height = `${cardH}px`;
+      host.style.boxSizing = "border-box";
+      // Apply the 17° rotation via CSS transform (jsdom getComputedStyle reads transform, not rotate).
+      host.style.transform = `rotate(${angleDeg}deg)`;
+
+      // Mock integer-rounded offsetWidth/offsetHeight (fallback in measureSurface).
+      Object.defineProperty(host, "offsetWidth", { value: Math.round(cardW), configurable: true });
+      Object.defineProperty(host, "offsetHeight", { value: Math.round(cardH), configurable: true });
+
+      // Ensure ancestors don't contribute transforms. The test container is the parent.
+      const parent = host.parentElement;
+      if (parent) {
+        parent.style.transform = "none";
+      }
+
+      // Verify measureSurface computes the expected pose.
+      const measured = measureSurface(host, new DOMRect(0, 0, 0, 0));
+      expect(measured.pose.w).toBeCloseTo(cardW, 5);
+      expect(measured.pose.h).toBeCloseTo(cardH, 5);
+      expect(measured.pose.angleDeg).toBeCloseTo(angleDeg, 5);
 
       // Outboard badge point: local (-42.95, -18) -> client coordinates
       const outboardX = 200 + (-42.95 * cos - (-18) * sin);
@@ -1190,30 +1189,44 @@ describe("PermanentCard", () => {
       const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
       expect(host.getAttribute("data-tap-angle")).toBe("90");
 
-      // Mock measureSurface to return 0° (upright) with valid dimensions.
+      // Drive the real measureSurface with 0° live rotation (upright) and integer dimensions.
       const { measureSurface } = await import("../../../components/animation/cardVfx/cardAnchors.ts");
-      vi.mocked(measureSurface).mockReturnValue({
-        pose: {
-          x: 200,
-          y: 250,
-          w: 100,
-          h: 140,
-          angleDeg: 0,
-        },
-        opacity: 1,
-      });
+      const cardW = 100;
+      const cardH = 140;
       const hostRect = {
         left: 150,
         top: 180,
         right: 250,
         bottom: 320,
-        width: 100,
-        height: 140,
+        width: cardW,
+        height: cardH,
         x: 150,
         y: 180,
         toJSON: () => {},
       };
       vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+      // Set computed style dimensions on the host element (upright, no rotation).
+      host.style.width = `${cardW}px`;
+      host.style.height = `${cardH}px`;
+      host.style.boxSizing = "border-box";
+      host.style.transform = "none";
+
+      // Mock integer offsetWidth/offsetHeight.
+      Object.defineProperty(host, "offsetWidth", { value: cardW, configurable: true });
+      Object.defineProperty(host, "offsetHeight", { value: cardH, configurable: true });
+
+      // Ensure ancestors don't contribute transforms.
+      const parent = host.parentElement;
+      if (parent) {
+        parent.style.transform = "none";
+      }
+
+      // Verify measureSurface computes the expected upright pose.
+      const measured = measureSurface(host, new DOMRect(0, 0, 0, 0));
+      expect(measured.pose.w).toBeCloseTo(cardW, 5);
+      expect(measured.pose.h).toBeCloseTo(cardH, 5);
+      expect(measured.pose.angleDeg).toBeCloseTo(0, 5);
 
       // Point at (149, 226) = center + (−51, −24) — 1px outside upright face.
       // With 0° this is outside; with 90° it would be inside.
@@ -1229,6 +1242,28 @@ describe("PermanentCard", () => {
       setUnActions([0], [1, 2]);
       const { container } = renderPermanent();
       const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
+      // Ensure measureSurface has valid dimensions for the attachment.
+      attachment.style.width = "100px";
+      attachment.style.height = "140px";
+      attachment.style.boxSizing = "border-box";
+      attachment.style.transform = "none";
+      Object.defineProperty(attachment, "offsetWidth", { value: 100, configurable: true });
+      Object.defineProperty(attachment, "offsetHeight", { value: 140, configurable: true });
+      const parent = attachment.parentElement;
+      if (parent) parent.style.transform = "none";
+      // Mock getBoundingClientRect for the attachment (centered at 200, 250).
+      const attachmentRect = {
+        left: 150,
+        top: 180,
+        right: 250,
+        bottom: 320,
+        width: 100,
+        height: 140,
+        x: 150,
+        y: 180,
+        toJSON: () => {},
+      };
+      vi.spyOn(attachment, "getBoundingClientRect").mockReturnValue(attachmentRect as DOMRect);
       fireEvent.pointerOver(attachment, { pointerId: 1, pointerType: "mouse", clientX: 200, clientY: 250 });
       expect(touches()).toEqual([[touchOf(2)]]);
     });

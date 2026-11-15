@@ -14,18 +14,13 @@ vi.mock("../dispatch.ts", () => ({
   },
 }));
 
-vi.mock("../../components/animation/cardVfx/cardAnchors.ts", () => ({
-  measureSurface: vi.fn((el: HTMLElement) => ({
-    pose: {
-      x: el.offsetLeft + el.offsetWidth / 2,
-      y: el.offsetTop + el.offsetHeight / 2,
-      w: el.offsetWidth,
-      h: el.offsetHeight,
-      angleDeg: 0,
-    },
-    opacity: 1,
-  })),
-}));
+vi.mock("../../components/animation/cardVfx/cardAnchors.ts", async () => {
+  const actual = await vi.importActual<{ measureSurface: typeof import("../../components/animation/cardVfx/cardAnchors.ts").measureSurface }>("../../components/animation/cardVfx/cardAnchors.ts");
+  return {
+    ...actual,
+    measureSurface: vi.fn((el: HTMLElement, origin: DOMRectReadOnly) => actual.measureSurface(el, origin)),
+  };
+});
 
 const { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } = await import("../unTouch.ts");
 
@@ -129,21 +124,32 @@ describe("Un-card touch pointer boundary", () => {
     const badge = document.createElement("span");
     card.append(badge);
 
-    const hostRect = { left: 100, top: 100, right: 300, bottom: 400, width: 200, height: 300, x: 100, y: 100, toJSON: () => {} };
+    const cardW = 200;
+    const cardH = 300;
+    const hostRect = { left: 100, top: 100, right: 300, bottom: 400, width: cardW, height: cardH, x: 100, y: 100, toJSON: () => {} };
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
 
-    // Mock measureSurface to return 0° upright pose at (200, 250) with 200x300 dimensions.
+    // Drive the real measureSurface with 0° upright pose at (200, 250) with 200x300 dimensions.
     const { measureSurface } = await import("../../components/animation/cardVfx/cardAnchors.ts");
-    vi.mocked(measureSurface).mockReturnValue({
-      pose: {
-        x: 200,
-        y: 250,
-        w: 200,
-        h: 300,
-        angleDeg: 0,
-      },
-      opacity: 1,
-    });
+
+    // Set computed style dimensions on the card element.
+    card.style.width = `${cardW}px`;
+    card.style.height = `${cardH}px`;
+    card.style.boxSizing = "border-box";
+    card.style.transform = "none";
+
+    // Mock integer offsetWidth/offsetHeight.
+    Object.defineProperty(card, "offsetWidth", { value: cardW, configurable: true });
+    Object.defineProperty(card, "offsetHeight", { value: cardH, configurable: true });
+
+    // Ensure ancestors (body) don't contribute transforms.
+    document.body.style.transform = "none";
+
+    // Verify measureSurface computes the expected pose.
+    const measured = measureSurface(card, new DOMRect(0, 0, 0, 0));
+    expect(measured.pose.w).toBeCloseTo(cardW, 5);
+    expect(measured.pose.h).toBeCloseTo(cardH, 5);
+    expect(measured.pose.angleDeg).toBeCloseTo(0, 5);
 
     const under: Element = badge;
     Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
@@ -206,18 +212,29 @@ describe("Un-card touch pointer boundary", () => {
     };
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
 
-    // Mock measureSurface to return the 17° rotated pose.
+    // Drive the real measureSurface with fractional computed dimensions, integer offsetWidth/Height,
+    // and the rendered 17° rotation.
     const { measureSurface } = await import("../../components/animation/cardVfx/cardAnchors.ts");
-    vi.mocked(measureSurface).mockReturnValue({
-      pose: {
-        x: 200,
-        y: 250,
-        w: cardW,
-        h: cardH,
-        angleDeg: 17,
-      },
-      opacity: 1,
-    });
+
+    // Set fractional computed style dimensions on the card element.
+    card.style.width = `${cardW}px`;
+    card.style.height = `${cardH}px`;
+    card.style.boxSizing = "border-box";
+    // Apply the 17° rotation via CSS transform (jsdom getComputedStyle reads transform, not rotate).
+    card.style.transform = `rotate(${angleDeg}deg)`;
+
+    // Mock integer-rounded offsetWidth/offsetHeight (fallback in measureSurface).
+    Object.defineProperty(card, "offsetWidth", { value: Math.round(cardW), configurable: true });
+    Object.defineProperty(card, "offsetHeight", { value: Math.round(cardH), configurable: true });
+
+    // Ensure ancestors (body) don't contribute transforms.
+    document.body.style.transform = "none";
+
+    // Verify measureSurface computes the expected pose.
+    const measured = measureSurface(card, new DOMRect(0, 0, 0, 0));
+    expect(measured.pose.w).toBeCloseTo(cardW, 5);
+    expect(measured.pose.h).toBeCloseTo(cardH, 5);
+    expect(measured.pose.angleDeg).toBeCloseTo(angleDeg, 5);
 
     let under: Element = badge;
     Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
