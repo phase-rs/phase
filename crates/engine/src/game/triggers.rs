@@ -10820,26 +10820,6 @@ fn paused_exit_retained_events(state: &GameState) -> Vec<GameEvent> {
     retained
 }
 
-/// CR 603.2c: the ordinary half of every paused exit. Collects the observer
-/// triggers of `events[event_start..]` that no collector has claimed and no
-/// live owner retains, then claims exactly those occurrences for ordinary
-/// collectors. Logical zone-change owners can queue observers without claiming
-/// the ledger, so their queued contexts are honored as collection witnesses.
-fn collect_unclaimed_ordinary_observers(
-    state: &mut GameState,
-    events: &[GameEvent],
-    event_start: usize,
-    matches: impl Fn(&GameEvent) -> bool,
-) {
-    collect_unclaimed_ordinary_observers_matching(
-        state,
-        events,
-        event_start,
-        matches,
-        ObserverCollection::Direct,
-    );
-}
-
 /// How [`collect_unclaimed_ordinary_observers_matching`] queues what it collects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObserverCollection {
@@ -10850,9 +10830,14 @@ pub(crate) enum ObserverCollection {
     ThroughEntryGate,
 }
 
-/// [`collect_unclaimed_ordinary_observers`] narrowed to the events `keep` accepts, queued as
-/// `collection` says. The occurrences are claimed either way: a held entry is released from
-/// the gate's own list, never re-read from a buffer.
+/// CR 603.2c: the ordinary half of every paused exit. Collects the observer
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains, narrowed to the events `keep` accepts, queued as
+/// `collection` says, then claims exactly those occurrences for ordinary
+/// collectors. Logical zone-change owners can queue observers without claiming
+/// the ledger, so their queued contexts are honored as collection witnesses.
+/// The occurrences are claimed either way: a held entry is released from the
+/// gate's own list, never re-read from a buffer.
 fn collect_unclaimed_ordinary_observers_matching(
     state: &mut GameState,
     events: &[GameEvent],
