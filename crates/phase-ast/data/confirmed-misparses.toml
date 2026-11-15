@@ -2822,7 +2822,6 @@ face = [
   { key = "voidstone gargoyle", class = "dropped_qualifier", clauses = ["As this creature enters, choose a nonland card name."] },
   { key = "volatile stormdrake", class = "wrong_object", clauses = ["then sacrifice that creature unless you pay an amount of {E} equal to its mana value."] },
   { key = "volcanic villain", class = "cost_wrong", clauses = ["Power-up — {5}{R}: Put two +1/+1 counters on this creature."] },
-  { key = "volcanic vision", class = "wrong_object", clauses = ["Volcanic Vision deals damage equal to that card's mana value to each creature your opponents control."] },
   { key = "volrath's laboratory", class = "missing_effect", clauses = ["As this artifact enters, choose a color and a creature type.", "{5}, {T}: Create a 2/2 creature token of the chosen color and type."] },
   { key = "voltstorm angel", class = "cost_wrong", clauses = ["When you do, choose one —"] },
   { key = "volunteer reserves", class = "missing_effect", clauses = ["Banding"] },
