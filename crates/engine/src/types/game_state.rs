@@ -17652,6 +17652,7 @@ impl PersistedGameState {
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.rehydrate_recovered_checkpoint_rng();
         crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
+        crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )

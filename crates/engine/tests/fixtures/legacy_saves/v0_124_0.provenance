@@ -45,6 +45,8 @@ Fixtures (P0's turn; board, then the prompt the save is paused at):
   leyline_fist_of_suns_offered: Leyline, Fist of Suns, Grizzly Bears; Choice(Mana WUBRG, Mana {1}{G}), Offered.
   prayers_bears_whisperer_energy2: Primal Prayers, Beast Whisperer, Grizzly Bears, energy 2, empty pool, Auto;
     Choice(PayEnergy 1, Mana NoCost), energy 1, Offered.
+  shoal_pitch_prompt: Nourishing Shoal cast for its alternative cost, Centaur Courser in hand;
+    PayCost(ExileFromZone Hand) with CostResume::Spell.
 
 Generator source:
 
@@ -100,6 +102,8 @@ Birds, Cats, Dragons, Faeries, Foxes, Frogs, Imps, Lizards, and Spiders are fami
 any creature with \"Familiar\" in its name.)\n{T}: Add X {G} and each opponent loses X life, \
 where X is the number of familiars you control.";
     const BEAST_WHISPERER: &str = "Whenever you cast a creature spell, draw a card.";
+    const NOURISHING_SHOAL: &str = "You may exile a green card with mana value X from your hand \
+rather than pay this spell's mana cost.\nYou gain X life.";
 
     fn timely_ward(builder: &mut CardBuilder<'_>) -> ObjectId {
         builder
@@ -513,6 +517,28 @@ where X is the number of familiars you control.";
             runner.state_mut().players[0].energy = 2;
             cast(&mut runner, bears, CastPaymentMode::Auto);
             write("prayers_bears_whisperer_energy2", runner.state().clone());
+        }
+        // Nourishing Shoal cast for its alternative cost, paused at the pitch selection.
+        {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let shoal = scenario
+                .add_spell_to_hand_from_oracle(P0, "Nourishing Shoal", true, NOURISHING_SHOAL)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::X, ManaCostShard::Green, ManaCostShard::Green],
+                    generic: 0,
+                })
+                .with_subtypes(vec!["Arcane"])
+                .id();
+            scenario
+                .add_creature_to_hand(P0, "Centaur Courser", 3, 3)
+                .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 2 })
+                .with_subtypes(vec!["Centaur", "Warrior"]);
+            let mut runner = scenario.build();
+            cast(&mut runner, shoal, CastPaymentMode::Auto);
+            println!("shoal wf {:?}", runner.state().waiting_for);
+            runner.act(GameAction::DecideOptionalCost { pay: true }).expect("pitch");
+            write("shoal_pitch_prompt", runner.state().clone());
         }
     }
 }

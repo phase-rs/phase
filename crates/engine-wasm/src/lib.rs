@@ -5995,6 +5995,31 @@ mod legacy_pending_cast_timing_restore_tests {
         let state = cast_after_restore(restored, lions);
         assert!(cast_with_flash(&state, lions));
     }
+
+    // CR 107.3a: an old save paused at Nourishing Shoal's pitch takes X from the exiled card.
+    #[test]
+    fn legacy_shoal_pitch_prompt_binds_x_from_the_pitched_card() {
+        let restored = restore(&v124!("shoal_pitch_prompt"));
+        let courser = object_named(&restored, "Centaur Courser");
+        let life_before = restored.players[P0.0 as usize].life;
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![courser],
+            })
+            .expect("P0 pitches Centaur Courser");
+        let Some(engine::types::game_state::StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        }) = runner.state().stack.last().map(|entry| &entry.kind)
+        else {
+            panic!("expected Nourishing Shoal on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(3));
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[P0.0 as usize].life, life_before + 3);
+        assert_eq!(runner.state().objects[&courser].zone, Zone::Exile);
+    }
 }
 
 #[cfg(test)]

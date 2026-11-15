@@ -1702,6 +1702,48 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     Ok(())
 }
 
+/// CR 107.3a + CR 601.2b: an old save's pitch prompt recorded no paid cost, so the elected
+/// alternative cost (a permission's, else the spell's own) is recovered for the exile handler
+/// that reads X from it.
+pub(crate) fn restore_legacy_pitch_cost_resume(state: &mut GameState) {
+    let WaitingFor::PayCost {
+        kind: crate::types::game_state::PayCostKind::ExileFromZone { .. },
+        resume: crate::types::game_state::CostResume::Spell { spell },
+        ..
+    } = &state.waiting_for
+    else {
+        return;
+    };
+    let Some(cost) = casting_costs::elected_cast_alternative_ability_cost(
+        state,
+        spell.ability.controller,
+        spell.object_id,
+        spell.casting_variant,
+        spell.casting_permission_index,
+    )
+    .or_else(|| {
+        casting_costs::payable_spell_alternative_cost_details_at_index(
+            state,
+            spell.ability.controller,
+            spell.object_id,
+            spell.casting_permission_index,
+        )
+        .map(|alternative| alternative.cost)
+    }) else {
+        return;
+    };
+    if let WaitingFor::PayCost { resume, .. } = &mut state.waiting_for {
+        let crate::types::game_state::CostResume::Spell { spell } = resume else {
+            return;
+        };
+        *resume = crate::types::game_state::CostResume::SpellCost {
+            spell: spell.clone(),
+            cost: Box::new(cost),
+            source: crate::types::game_state::SpellCostSource::Other,
+        };
+    }
+}
+
 /// Whether the caster lost energy to a cost of `pending` within its reversal window.
 fn casting_energy_debited(state: &GameState, pending: &PendingCast) -> bool {
     use crate::types::resolved_commands::{
