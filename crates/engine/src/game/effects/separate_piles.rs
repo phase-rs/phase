@@ -226,6 +226,7 @@ fn resolve_revealed_from_library_top(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&revealed_ids),
         card_ids: revealed_ids.clone(),
         card_names,
     });

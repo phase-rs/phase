@@ -324,6 +324,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -817,6 +818,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             target,
             counter_type: _,
+            scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -860,6 +862,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             target,
             destination: _,
+            position: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -919,6 +922,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         // CR 732.2a: which object moves is the proposal's choice; the scan reads what the
         // move's own fields read. The three entry riders stay unscanned: prover incomplete here.
         Effect::ChangeZone {
+            actor,
             target,
             enters_under,
             enter_with_counters,
@@ -944,6 +948,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(target, target_ctx, mode);
+                // CR 608.2c: the performer reads what its player filter reads.
+                acc = acc.or(scan_library_instruction_actor(actor, target_ctx, mode));
                 if let Some(controller) = enters_under {
                     acc = acc.or(scan_controller_ref(controller));
                 }
@@ -1458,6 +1464,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1738,9 +1745,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
         Effect::CreateDrawReplacement { replacement_effect } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect, mode));
-            acc
+            ability_definition_axes(replacement_effect, mode)
         }
         Effect::LoseTheGame { target } => {
             let mut acc = Axes::NONE;
@@ -2270,6 +2275,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::Conjure { .. } => Axes::CONSERVATIVE,
+        // CR 707.13: a copy created from a NAME reads no object in the game, so
+        // there is no axis to scan — same verdict as `Conjure` above.
+        Effect::CreateCardCopyByName { .. } => Axes::CONSERVATIVE,
         Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -5591,7 +5599,8 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
 }
 
 /// CR 608.2c: the reads of the player who performs a library instruction
-/// (`Effect::ExileTop.actor`). The resolver (`effects/exile_top.rs`) reads the
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`). The resolver
+/// (`effects/exile_top.rs`, `effects/change_zone.rs`) reads the
 /// named subject through the same context the instruction's own `player`
 /// selector uses, so `ctx` is the effect's target context.
 fn scan_library_instruction_actor(
@@ -5981,6 +5990,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6128,6 +6138,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // dynamic board read — no resolution-time axis.
+        grant_chain: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -7474,6 +7487,14 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // single announced/anaphoric target (a2), relaxed in the single-object group
         // below. Exhaustive over EffectScope = {Single, All}.
         | Effect::Transform { scope: EffectScope::All, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal ("remove all counters from all
+        // permanents", scope:All) is a non-targeting battlefield-population read
+        // (`target_filter()`==None; `counters::counter_removal_targets` enumerates the
+        // phased-in battlefield through `resolved_battlefield_population_ids`) ⇒ census,
+        // the removal twin of PutCounterAll. scope:Single is a single announced or
+        // anaphoric target, relaxed in the single-object group below. Exhaustive over
+        // EffectScope = {Single, All}.
+        | Effect::RemoveCounter { scope: EffectScope::All, .. }
         // ── DUAL-MODE MASS-BATTLEFIELD RESOLVERS: each has a resolver mode that, when
         // the ability carries NO explicit object target, enumerates the battlefield (or
         // all phased-in/-out permanents) and applies the effect to EVERY matching
@@ -7574,7 +7595,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
-        | Effect::RemoveCounter { .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            ..
+        }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -7767,6 +7791,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7914,6 +7939,13 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Transform {
             scope: EffectScope::All,
             ..
+        }
+        // CR 122.1 + CR 115.10a: mass counter removal (scope:All) enumerates the
+        // phased-in battlefield population; parity with the effect_target_ctx
+        // LiveBoardCensus member. scope:Single relaxes below.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            ..
         } => CensusRole::Census,
 
         // -- SetTapState (scope-DESTRUCTURED, exhaustive over EffectScope): scope:All is
@@ -7969,6 +8001,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
@@ -8003,7 +8036,10 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
-        | Effect::RemoveCounter { .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            ..
+        }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -8740,6 +8776,38 @@ mod tests {
                 "{mode:?}: the targeted opponent keeps the Typed event read"
             );
         }
+    }
+
+    /// CR 608.2c: a zone move's performer is read through its own filter in
+    /// LoopFirewall mode, as `ExileTop`'s is: the controller adds no axis, a
+    /// triggering-player subject ("that player exiles a card from their hand")
+    /// is an event read.
+    /// Revert-probe: bind `actor: _` in the `ChangeZone` arm ⇒ the
+    /// triggering-player row equals the controller row.
+    #[test]
+    fn change_zone_actor_is_read_as_its_player_filter() {
+        let pick = |actor| Effect::ChangeZone {
+            actor,
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let event = |actor| scan_effect(&pick(actor), ScanMode::LoopFirewall).event;
+        assert!(!event(LibraryInstructionActor::Controller));
+        assert!(event(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        }));
     }
 
     /// The actor read survives nesting — a subject filter composed inside
@@ -9818,6 +9886,12 @@ mod tests {
             "GoadAll",
             "PumpAll",
             "PutCounterAll",
+            // CR 122.1 + CR 115.10a: mass counter removal (scope:All) enumerates the
+            // battlefield population (`counters::counter_removal_targets` via
+            // `resolved_battlefield_population_ids`). Scope-gated on `EffectScope::All`
+            // in the census `|`-chain; the scope:Single arm sits past the census
+            // terminator in the relax group and is NOT scanned here.
+            "RemoveCounter",
             // CR 722.3a/b + CR 115.10a: BecomePrepared/BecomeUnprepared scope:All ("each
             // creature you control becomes prepared") enumerate the battlefield population
             // (`prepare.rs` via `resolved_battlefield_population_ids`). Scope-gated on
@@ -9858,7 +9932,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 34, "exactly 34 mass-population census tags");
+        assert_eq!(got.len(), 35, "exactly 35 mass-population census tags");
     }
 
     /// With `SnapshotOrEvent` the DEFAULT, the obligation-(ii)-PROVEN census-role
@@ -10054,7 +10128,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 34, "exactly 34 census members");
+        assert_eq!(ecr_census.len(), 35, "exactly 35 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -10164,6 +10238,16 @@ mod tests {
             },
             false,
         );
+        // CR 122.1 + CR 115.10a: mass counter removal is a battlefield census in BOTH
+        // oracles; the single scope relaxes in both.
+        let removal = |scope| Effect::RemoveCounter {
+            counter_type: None,
+            count: QuantityExpr::Fixed { value: -1 },
+            target: f(),
+            scope,
+        };
+        census(&removal(EffectScope::All), true);
+        census(&removal(EffectScope::Single), false);
         assert_eq!(
             effect_census_role(&Effect::Transform {
                 target: f(),
@@ -12171,6 +12255,7 @@ mod tests {
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
         let mut effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,

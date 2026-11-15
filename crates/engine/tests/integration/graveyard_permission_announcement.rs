@@ -385,6 +385,8 @@ fn leonardos_counter_applies_after_it_is_sacrificed_mid_payment() {
         "Leonardo's rider was latched at announcement, counters: {:?}",
         entered.counters
     );
+    // CR 110.5b: Leonardo prints no tapped rider, so the Decoy enters untapped.
+    assert!(!entered.tapped);
 }
 
 // --- Muldrotha vs Exploration Broodship ----------------------------------
@@ -1309,6 +1311,7 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: Some(CounterType::Finality),
+        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
         cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1424,6 +1427,7 @@ fn land_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,

@@ -183,7 +183,7 @@ impl ChosenAttribute {
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
-            Self::CardName(_) => ChoiceType::CardName,
+            Self::CardName(_) => ChoiceType::card_name(),
             // CR 101.4: the secret and the published number came from the same
             // `NumberRange` prompt; revealing changes visibility, not category.
             // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
@@ -696,6 +696,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // an object out of it (an unrestricted or battlefield origin) and sends
         // it somewhere else.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -712,6 +713,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
             enters_modified_if: _,
         }
         | Effect::ChangeZoneAll {
+            actor: _,
             origin,
             destination,
             target,
@@ -954,6 +956,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -976,6 +979,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -2088,6 +2096,14 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
+    /// ("that player" anaphors to the player whose phase it is). Stamped only by
+    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
+    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_turn_player: Option<crate::types::player::PlayerId>,
 }
 
 impl SpellContext {
@@ -2428,13 +2444,15 @@ impl CopyCountStatus {
 /// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
-    /// CR 401.5 (issue #1365): A `Dig` (or `RevealTop`) looked at an empty library. Consulted
-    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
-    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
-    /// cast/play operations avoid offering a nonexistent card regardless of
-    /// whether their driver is immediate or lingering.
-    /// Without the first guard, the Dig's own source (e.g. a reanimated
-    /// Thassa's Oracle) would move into the library it just found empty.
+    /// CR 609.3 + CR 608.2c (issue #1365): A `Dig` (or `RevealTop`) looked at an
+    /// empty library. Consulted by exact `ParentTarget` no-op guards: the
+    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) avoids the generic
+    /// self-fallback, and optional cast/play operations avoid offering a
+    /// nonexistent card regardless of whether their driver is immediate or
+    /// lingering.
+    /// The guard also protects previously parsed chains that still carry a
+    /// separate placement step. Thassa's Oracle now parses the placement
+    /// into `Dig` itself.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -3194,6 +3212,15 @@ pub struct ResolvedAbility {
     /// activation records nothing. Engine authority: never shown to a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_record: Option<Box<crate::types::game_state::AbilityActivationRecord>>,
+    /// CR 602.2a + CR 602.2b: the activation's own usage key, announced
+    /// before any cost is paid (`casting::record_activation_announcement`)
+    /// and published to the turn/game journals only when the ability is
+    /// placed on the stack — so a reversed activation records nothing, and a
+    /// cost that moves the source cannot unresolve the slot. An existing
+    /// capture is never overwritten, and placement never recomputes it.
+    /// Engine authority: never shown to a viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<Box<crate::types::game_state::AbilityUsageKey>>,
     /// CR 608.2b: Declared target slots — numbered as
     /// `ability_utils::flatten_targets_in_chain` numbers this chain — whose
     /// target failed the legality check made as the chain began to resolve.
@@ -3680,6 +3707,9 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: a_chosen_target_slots,
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
+            // Transport only: the announcement's own key rides the ability
+            // to the placement journal and never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: a_illegal_target_slots,
             unjudged_target_slots: a_unjudged_target_slots,
             illegal_local_target_slots: a_illegal_local_target_slots,
@@ -3759,6 +3789,8 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: b_chosen_target_slots,
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
+            // Transport only: never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: b_illegal_target_slots,
             unjudged_target_slots: b_unjudged_target_slots,
             illegal_local_target_slots: b_illegal_local_target_slots,
@@ -4299,6 +4331,7 @@ impl ResolvedAbility {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -4414,6 +4447,7 @@ impl ResolvedAbility {
             chosen_target_slots: ChosenTargetSlots::Unrecorded,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
@@ -6023,8 +6057,34 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
+        self.context.phase_turn_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
+        }
+    }
+
+    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
+    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
+    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
+    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+        self.scoped_player = Some(player);
+        self.context.phase_turn_player = Some(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_phase_turn_player_recursive(player);
+        }
+    }
+
+    /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
+    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
+    /// other stays an instruction's.
+    pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
+        let Some(player) = source.scoped_player else {
+            return;
+        };
+        if source.context.phase_turn_player == Some(player) {
+            self.set_phase_turn_player_recursive(player);
+        } else {
+            self.set_scoped_player_recursive(player);
         }
     }
 
@@ -6663,6 +6723,7 @@ mod tests {
     fn resolved_ability_duration_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7095,6 +7156,7 @@ mod tests {
         ) -> ResolvedAbility {
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,

@@ -2820,8 +2820,10 @@ impl<'a> SpellCast<'a> {
                     };
                     act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
                 }
-                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
-                // Sole-opponent games auto-latch and never raise this prompt.
+                // Cast-time opponent choice (Gift recipient, CR 702.174a, or
+                // effect-cost player, CR 601.2h) — the driver picks the first
+                // candidate; tests that must observe the pick drive it manually.
+                // A sole candidate auto-binds and never raises this prompt.
                 WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                     let opponent = candidates.first().copied().unwrap_or_else(|| {
                         panic!("ChooseGiftRecipient raised with empty candidates")
@@ -3927,6 +3929,9 @@ fn drive_resolution(
                 };
                 act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
             }
+            // Cast-time opponent choice (Gift recipient, CR 702.174a, or effect-cost
+            // player, CR 601.2h) — the driver picks the first candidate; tests that
+            // must observe the pick drive it manually.
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates
                     .first()
@@ -5726,6 +5731,7 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,

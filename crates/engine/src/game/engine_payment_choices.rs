@@ -671,7 +671,7 @@ pub(super) fn handle_tribute_choice(
     waiting_for: WaitingFor,
     accept: bool,
     events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::TributeChoice {
         player,
         source_id,
@@ -684,8 +684,9 @@ pub(super) fn handle_tribute_choice(
         ));
     };
 
+    let events_before = events.len();
     if accept && !effects::tribute::apply_paid(state, player, source_id, count, events) {
-        return Ok(action_result(events, state.waiting_for.clone()));
+        return Ok(state.waiting_for.clone());
     } else if !accept {
         effects::tribute::apply_declined(state, source_id);
     }
@@ -694,7 +695,17 @@ pub(super) fn handle_tribute_choice(
     // the persisted TributeOutcome when its intervening-if condition is checked.
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
-    Ok(action_result(events, state.waiting_for.clone()))
+    // CR 603.2 + CR 603.6a + CR 702.104a: the tribute is decided as the creature
+    // enters, so this answer puts it onto the battlefield (and may go on to a
+    // co-entrant's prompt) without reaching `run_post_action_pipeline`. Its
+    // battlefield entries go to the entry gate here; its other events are left
+    // as before.
+    super::triggers::collect_and_drain_entry_observer_triggers_if_settled(
+        state,
+        events,
+        events_before,
+    );
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 118.12a: Resolve the player's choice between sub-costs of a disjunctive
@@ -4245,6 +4256,7 @@ mod tests {
 
     fn redirect_to(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,
@@ -7164,6 +7176,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -7184,6 +7197,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,

@@ -2,6 +2,7 @@ import { PLAYER_ID } from "../constants/game";
 import { boundedDiagnosticProbe, recordDiagnostic, registerEngineDiagnostics } from "../services/troubleshooting";
 import type { EngineDiagnosticSnapshot } from "../services/troubleshooting";
 import { trackEvent } from "../services/telemetry";
+import { draftSessionAuthorityOf } from "../services/draftFormatConfig";
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -18,6 +19,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ObjectId,
@@ -905,6 +907,8 @@ export class WasmAdapter
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     this.assertInitialized("buildLlmDecisionRequest");
     try {
@@ -914,6 +918,8 @@ export class WasmAdapter
           playerId,
           endpointJson,
           historyJson,
+          settingsRevision,
+          clock,
         );
       }
       return await this.fallback!.buildLlmDecisionRequest(
@@ -921,6 +927,8 @@ export class WasmAdapter
         playerId,
         endpointJson,
         historyJson,
+        settingsRevision,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -930,9 +938,11 @@ export class WasmAdapter
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     this.assertInitialized("getAiActionProposalFromLlmResponse");
     try {
@@ -940,17 +950,21 @@ export class WasmAdapter
         return await this.engine.getAiActionProposalFromLlmResponse(
           playerId,
           fingerprint,
+          threadTurn,
           provider,
           status,
           responseBody,
+          clock,
         );
       }
       return await this.fallback!.getAiActionProposalFromLlmResponse(
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -1603,6 +1617,7 @@ export class WasmAdapter
         matchConfig ?? null,
         playerCount,
         firstPlayer,
+        draftSessionAuthorityOf(formatConfig),
       );
       this.invalidateAiDecisionDiagnostics();
       return result;
@@ -1614,6 +1629,7 @@ export class WasmAdapter
       matchConfig ?? null,
       playerCount,
       firstPlayer,
+      draftSessionAuthorityOf(formatConfig),
     );
     this.invalidateAiDecisionDiagnostics();
     return result;
@@ -1648,6 +1664,7 @@ export class WasmAdapter
         matchConfig ?? null,
         playerCount,
         firstPlayer,
+        draftSessionAuthorityOf(formatConfig),
       );
       this.invalidateAiDecisionDiagnostics();
       return result;
@@ -1660,6 +1677,7 @@ export class WasmAdapter
       playerCount,
       firstPlayer,
       owner,
+      draftSessionAuthorityOf(formatConfig),
     );
     this.invalidateAiDecisionDiagnostics();
     return { events: result.events, log_entries: result.log_entries };
@@ -1734,13 +1752,17 @@ interface MainThreadFallback {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
   getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
@@ -1764,6 +1786,7 @@ interface MainThreadFallback {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult>;
   initializeMultiplayerHostGame(
     deckData: unknown | null,
@@ -1773,6 +1796,7 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
     owner?: HostSessionOwner,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
@@ -1969,28 +1993,42 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerId: number,
       endpointJson: string,
       historyJson: string,
+      settingsRevision: number,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
-          (wasm.buildLlmDecisionRequest(difficulty, playerId, endpointJson, historyJson) ??
-            null) as LlmDecisionRequestResult | null,
+          (wasm.buildLlmDecisionRequest(
+            difficulty,
+            playerId,
+            endpointJson,
+            historyJson,
+            settingsRevision,
+            clock.wallMs,
+            clock.monotonicMs,
+          ) ?? null) as LlmDecisionRequestResult | null,
       ),
 
     getAiActionProposalFromLlmResponse: (
       playerId: number,
       fingerprint: string,
+      threadTurn: number | null,
       provider: string,
       status: number,
       responseBody: string,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
           (wasm.getAiActionProposalFromLlmResponse(
             playerId,
             fingerprint,
+            threadTurn,
             provider,
             status,
             responseBody,
+            clock.wallMs,
+            clock.monotonicMs,
           ) ?? null) as AiLlmProposalResult | null,
       ),
 
@@ -2076,16 +2114,17 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
+      draftSessionMinDeckSize?: number,
     ) =>
       enqueue(() => {
-        const r = wasm.initialize_game(
-          deckData,
-          seed,
-          formatConfig,
-          matchConfig,
-          playerCount ?? undefined,
-          firstPlayer ?? undefined,
-        );
+        const r = draftSessionMinDeckSize === undefined
+          ? wasm.initialize_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+          )
+          : wasm.initialize_draft_match_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+            draftSessionMinDeckSize,
+          );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
@@ -2098,16 +2137,17 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerCount?: number,
       firstPlayer?: number,
       owner?: HostSessionOwner,
+      draftSessionMinDeckSize?: number,
     ) =>
       enqueue(() => {
-        const r = wasm.initialize_multiplayer_host_game(
-          deckData,
-          seed,
-          formatConfig,
-          matchConfig,
-          playerCount ?? undefined,
-          firstPlayer ?? undefined,
-        );
+        const r = draftSessionMinDeckSize === undefined
+          ? wasm.initialize_multiplayer_host_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+          )
+          : wasm.initialize_draft_match_host_game(
+            deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
+            draftSessionMinDeckSize,
+          );
         throwInitFailure(r);
         if (owner) {
           runtime.hostGeneration = ++runtime.nextHostGeneration;

@@ -24,6 +24,9 @@ crates/phase-parser/src/parser/oracle_class.rs    3
 crates/phase-parser/src/parser/oracle_ir/doc.rs      12
 crates/phase-parser/src/parser/oracle_ir/feature.rs   7
 
+# History-provenance consumer: read-only matches on PreLoweredSpell to place history records; no producers.
+crates/phase-parser/src/parser/oracle_ir/history_provenance.rs   3
+
 # Prose references in the T1 witness-corpus comment.
 crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs   2
 

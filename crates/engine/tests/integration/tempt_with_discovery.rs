@@ -415,6 +415,7 @@ fn parsed_tempt_with_discovery_two_accepting_opponents_full_flow() {
 fn make_step_4_ability() -> ResolvedAbility {
     let put = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,

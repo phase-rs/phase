@@ -71,16 +71,19 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
-        enter_with_grants: Vec::new(),
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
         library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
@@ -751,7 +754,7 @@ fn specific_discard_cards(state: &GameState, ability: &ResolvedAbility) -> Optio
 /// CR 701.9a: the cards a player-hand discard can move — the discarding
 /// player's hand, narrowed by the recipient-scoped card filter — or why there
 /// is no pool.
-enum PlayerHandDiscardPool {
+pub(super) enum PlayerHandDiscardPool {
     /// CR 608.2b: no discarding player resolves (an illegal declared player).
     NoPlayer,
     /// CR 701.9a + CR 609.3: an opponent's spell or ability can't force this
@@ -767,7 +770,7 @@ enum PlayerHandDiscardPool {
 
 /// The single authority on which hand cards a player-hand discard can move,
 /// shared by [`resolve`] and [`optional_discard_is_infeasible`].
-fn player_hand_discard_pool(
+pub(super) fn player_hand_discard_pool(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -1876,6 +1879,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -1908,6 +1912,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -2084,6 +2089,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
@@ -2219,6 +2225,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,

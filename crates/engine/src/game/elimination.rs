@@ -504,6 +504,8 @@ pub(crate) fn eliminate_players(
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
         state.pending_player_scope_sacrifice_choice = None;
+        // CR 104.1: nor is a player-scope return owed to a finished game.
+        state.pending_player_scope_choice = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -568,6 +570,26 @@ pub(crate) fn eliminate_players(
                     debug_assert!(
                         false,
                         "player-scope sacrifice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 101.4 + CR 608.2m: an open player-scope return ("each
+        // player returns a permanent they control…") or discard ("each opponent
+        // discards a card") is reconciled the same way: a departed player chooses
+        // and moves nothing, a collected pick that left its zone is not moved,
+        // and the walk goes on or the collected batch is delivered.
+        let player_scope_choice =
+            match super::engine_resolution_choices::settle_player_scope_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "player-scope return was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "player-scope return was not reconciled after a departure: {error}"
                     );
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 }
@@ -742,6 +764,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     player_scope_sacrifice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    player_scope_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && matches!(
@@ -2327,6 +2353,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.payment_transaction_just_handled = false;
     state.pending_player_scope_unless_payment = None;
     state.pending_player_scope_sacrifice_choice = None;
+    state.pending_player_scope_choice = None;
     state.pending_mass_library_order_choice = None;
     state.pending_discard_batch = None;
     state.pending_single_discard = None;
@@ -2603,6 +2630,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -2671,6 +2699,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -2687,6 +2716,7 @@ mod tests {
                 .collect(),
             source_id,
             controller,
+            performed_by: controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,
@@ -2696,6 +2726,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
@@ -2737,6 +2768,7 @@ mod tests {
             },
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -2761,6 +2793,7 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
                     library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
@@ -2782,6 +2815,7 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
                     library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
@@ -2896,6 +2930,7 @@ mod tests {
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: group,
             paused_current: Some(paused),
             remaining: vec![surviving],
