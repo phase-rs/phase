@@ -110,6 +110,18 @@ pub fn apply_resolved_library_shuffle(
         state,
         crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
     );
+
+    // CR 701.20d: If cards in a player's library are shuffled or otherwise
+    // reordered, any revealed cards that are reordered stop being revealed
+    // and become new objects.
+    //
+    // CR 701.24a + CR 701.24e: A shuffle randomizes knowledge even when the
+    // sampled permutation matches the input order (identity shuffle). A zero-
+    // or one-card library shuffle is still a shuffle. Retire reveals for any
+    // non-empty library that was shuffled.
+    if !command.precondition_order.is_empty() {
+        crate::game::zones::retire_reordered_library_reveals(state, &command.precondition_order);
+    }
     // CR 701.24a + CR 701.24e: every library shuffle, including an identity
     // shuffle of a zero- or one-card library, publishes one action event.
     events.push(GameEvent::PlayerPerformedAction {

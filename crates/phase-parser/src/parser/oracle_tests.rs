@@ -14,6 +14,7 @@ use crate::types::ability::{
     TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::CompanionCondition;
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -14607,7 +14608,7 @@ fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -25491,7 +25492,7 @@ fn petrified_hamlet_full_parse() {
         matches!(
             *trig_exec.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 persist: true,
                 ..
             }
@@ -35527,6 +35528,97 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
 
+#[test]
+fn metalworker_reveal_any_number_and_add_mana() {
+    let oracle = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Metalworker",
+        &[],
+        &["Artifact".into(), "Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.cost, Some(AbilityCost::Tap));
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(ref tf),
+                cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
+                choice_optional: false,
+                ..
+            } if tf.type_filters.contains(&TypeFilter::Artifact)
+        ),
+        "expected an any-number artifact RevealHand, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("has sub_ability for mana addition");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: ref inner_expr,
+                    }
+                },
+                ..
+            } if matches!(**inner_expr, QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { .. } })
+        ),
+        "expected Effect::Mana producing {{C}}{{C}} for each revealed card, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 107.1c + CR 701.20a: an any-number hand reveal whose card type phrase the
+/// parser cannot read must surface as an unimplemented gap, never as an
+/// any-number `RevealHand` with an empty filter (a reveal that can select
+/// nothing, reported as supported). Sacellum Godspeaker and Rosheen, Roaring
+/// Prophet — verified Oracle text (Scryfall).
+#[test]
+fn unreadable_any_number_reveal_filter_is_an_unimplemented_gap() {
+    for (name, oracle, types) in [
+        (
+            "Sacellum Godspeaker",
+            "{T}: Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+            vec!["Creature".to_string()],
+        ),
+        (
+            "Rosheen, Roaring Prophet",
+            "{T}: Reveal any number of cards with {X} in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain {X}.",
+            vec!["Legendary".to_string(), "Creature".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(crate::parser::oracle::has_unimplemented),
+            "{name}: the unreadable reveal filter must be an unimplemented gap, got {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !parsed.abilities.iter().any(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::RevealHand {
+                    card_filter: TargetFilter::None,
+                    ..
+                }
+            )),
+            "{name}: no filterless RevealHand may survive, got {:?}",
+            parsed.abilities
+        );
+    }
+}
+
 /// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
 /// unsupported residual as the production pipeline.
 #[test]
@@ -36101,6 +36193,100 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
             link = def.sub_ability.as_deref();
         }
     }
+}
+
+/// CR 702.139a + CR 702.139b: Yorion, Sky Nomad's companion condition (printed Oracle text
+/// verified against Scryfall) is a surplus over the format's minimum deck size, not a fixed
+/// card count. It used to fall through to `SharedCardType`, so deck validation accepted
+/// Yorion with forty Plains.
+#[test]
+fn companion_deck_size_condition_parses_to_min_deck_size_over() {
+    const YORION: &str = "Companion — Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
+    let parsed = parse_oracle_text(
+        YORION,
+        "Yorion, Sky Nomad",
+        &["Companion".into(), "Flying".into()],
+        &["Creature".into()],
+        &["Bird".into(), "Serpent".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::MinDeckSizeOver(20)]);
+
+    // The surplus is read from the text, digits or words, not assumed.
+    for (fragment, surplus) in [
+        ("companion:— your starting deck contains at least 10 cards more than the minimum deck size.", 10),
+        ("companion:your starting deck contains at least five cards more than the minimum deck size", 5),
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::MinDeckSizeOver(surplus)),
+            "{fragment}"
+        );
+    }
+
+    // Paired control: another companion's condition (Gyruda's printed Oracle
+    // text, verified against Scryfall) still takes its own arm.
+    const GYRUDA_LINE: &str = "Companion — Your starting deck contains only cards with even mana values. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
+    let gyruda = parse_oracle_text(
+        GYRUDA_LINE,
+        "Gyruda, Doom of Depths",
+        &["Companion".into()],
+        &["Creature".into()],
+        &["Demon".into(), "Kraken".into()],
+    );
+    assert!(gyruda
+        .extracted_keywords
+        .contains(&Keyword::Companion(CompanionCondition::EvenManaValues)));
+}
+
+/// CR 702.139a: Lutri's printed condition (verified against Scryfall) is the singleton
+/// condition over NONLAND cards. It used to fall through to the `SharedCardType`
+/// fallback, so deck validation accepted repeated nonland names.
+#[test]
+fn companion_different_name_condition_parses_to_singleton() {
+    const LUTRI: &str = "Companion — Each nonland card in your starting deck has a different name. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlash\nWhen Lutri enters, if you cast it, copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+    let parsed = parse_oracle_text(
+        LUTRI,
+        "Lutri, the Spellchaser",
+        &["Companion".into(), "Flash".into()],
+        &["Creature".into()],
+        &["Elemental".into(), "Otter".into()],
+    );
+    let companions: Vec<_> = parsed
+        .extracted_keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Companion(condition) => Some(condition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(companions, vec![CompanionCondition::Singleton]);
+
+    // The separator spelling and the older phrasing do not change the condition, and a
+    // condition this grammar does not name still takes its own arm.
+    for fragment in [
+        "companion:- each nonland card in your starting deck has a different name.",
+        "companion:no two nonland cards in your starting deck have the same name",
+    ] {
+        assert_eq!(
+            fragment.parse::<Keyword>().unwrap(),
+            Keyword::Companion(CompanionCondition::Singleton),
+            "{fragment}"
+        );
+    }
+    assert_eq!(
+        "companion:each nonland card in your starting deck shares a card type"
+            .parse::<Keyword>()
+            .unwrap(),
+        Keyword::Companion(CompanionCondition::SharedCardType)
+    );
 }
 
 /// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach

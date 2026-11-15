@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import initDraft from "@wasm/draft";
 import initEngine, {
-  export_game_state_json, get_legal_actions_js, initialize_game, load_card_database as loadEngineCards,
+  export_game_state_json, get_legal_actions_js, initialize_draft_match_game, initialize_game, load_card_database as loadEngineCards,
 } from "@wasm/engine";
 
 const { hostRoom, saveDraftHostSession } = vi.hoisted(() => ({
@@ -35,8 +35,10 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 const wasmDir = resolve(__dirname, "../../wasm");
 const cubeList = fixture.spells.map((name) => `15 ${name}`).join("\n");
 
+const YORION = "Yorion, Sky Nomad";
+
 function cardData(): string {
-  return JSON.stringify(Object.fromEntries([...fixture.spells, ...fixture.basics].map((name) => [
+  return JSON.stringify(Object.fromEntries([...fixture.spells, ...fixture.basics, YORION].map((name) => [
     name.toLowerCase(),
     {
       name,
@@ -55,7 +57,9 @@ function cardData(): string {
       triggers: [],
       static_abilities: [],
       replacements: [],
-      keywords: [],
+      // CR 702.139: Yorion's companion condition is "twenty cards more than the
+      // minimum deck size" (the parser's `MinDeckSizeOver(20)`).
+      keywords: name === YORION ? [{ Companion: { type: "MinDeckSizeOver", data: 20 } }] : [],
       bracket_signals: {
         game_changer: false, mass_land_denial: false, extra_turn: false, efficient_tutor: false,
       },
@@ -133,8 +137,10 @@ describe("custom Cube submission to real Limited game", () => {
       ai_decks: [],
     };
     expect(payload.player.main_deck).toBe(exported.main_deck);
-    const result = initialize_game(
+    const result = initialize_draft_match_game(
       payload, 291, formatMetadata("Limited")!.default_config, { match_type: "Bo1" }, 2, 0,
+      // The draft-match initializer's authority: the session's resolved minimum.
+      view.min_deck_size,
     ) as { error?: boolean; reasons?: string[] };
     expect(result.error, result.reasons?.join("; ")).not.toBe(true);
     const decks = installedDecks();
@@ -144,13 +150,113 @@ describe("custom Cube submission to real Limited game", () => {
     expect((get_legal_actions_js() as { actions: unknown[] }).actions.length).toBeGreaterThan(0);
     console.info(`Cube proof: exported submission ${exported.main_deck.length}, game decks ${decks.map((deck) => deck.length).join("/")}`);
 
-    const invalid = initialize_game(
+    const invalid = initialize_draft_match_game(
       { ...payload, player: { ...payload.player, main_deck: [...exported.main_deck.slice(1), "Unknown proof card"] } },
-      291, formatMetadata("Limited")!.default_config, { match_type: "Bo1" }, 2, 0,
+      291, formatMetadata("Limited")!.default_config, { match_type: "Bo1" }, 2, 0, view.min_deck_size,
     ) as { error?: boolean; reasons?: string[] };
     expect(invalid.error).toBe(true);
     expect(invalid.reasons?.join("; ")).toContain("Unknown proof card");
   }, 300_000);
+
+  // CR 100.2b + CR 702.139: a Cube session's configured minimum deck size (20,
+  // 50) is proven end to end through the REAL draft and engine WASM. The draft
+  // submission applies the ordinary minimum and the Yorion-class companion
+  // condition (twenty cards over the minimum); the match is then started
+  // through the draft-match initializer, the only entry that confers the
+  // session minimum on a Limited game.
+  const cubeListWithYorion = `${cubeList}
+8 ${YORION}`;
+
+  async function draftWithYorion(
+    adapter: DraftAdapter, minimum: number, seed: number,
+  ): Promise<{ view: DraftPlayerView; spells: string[] }> {
+    let view = await adapter.initializeCube(cubeListWithYorion, "Yorion proof", settings(minimum), 0, seed);
+    for (let step = 0; step < 25 && view.status === "Drafting"; step += 1) {
+      const pack = view.current_pack ?? [];
+      const card = pack.find((c) => c.name === YORION) ?? pack[0];
+      if (!card) throw new Error(`Cube draft stalled at pick ${step}: ${view.status}`);
+      view = await adapter.submitPick(card.instance_id);
+    }
+    expect(view.status).toBe("Deckbuilding");
+    const names = view.pool.map((card) => card.name);
+    const yorionAt = names.indexOf(YORION);
+    expect(yorionAt, "the pool holds a drafted Yorion").toBeGreaterThanOrEqual(0);
+    // Every other drafted card is deck material; the Yorion copy is the one
+    // "outside the game" (CR 702.139a), so it stays out of the deck.
+    return { view, spells: names.filter((_, i) => i !== yorionAt) };
+  }
+
+  const deckOf = (spells: string[], size: number): string[] =>
+    size <= spells.length ? spells.slice(0, size) : [...spells, ...Array<string>(size - spells.length).fill("Plains")];
+
+  function launch(
+    mainDeck: string[], minimum: number | undefined, config = formatMetadata("Limited")!.default_config,
+  ): { error?: boolean; reasons?: string[] } {
+    const payload = {
+      player: { main_deck: mainDeck, sideboard: [], commander: [], companion: [YORION] },
+      opponent: { main_deck: Array<string>(20).fill("Forest"), sideboard: [], commander: [] },
+      ai_decks: [],
+    };
+    // `undefined` is an ordinary launch through the generic initializer, which
+    // takes no minimum; a number is the accepted draft's match launch.
+    return (minimum === undefined
+      ? initialize_game(payload, 291, config, { match_type: "Bo1" }, 2, 0)
+      : initialize_draft_match_game(payload, 291, config, { match_type: "Bo1" }, 2, 0, minimum)
+    ) as { error?: boolean; reasons?: string[] };
+  }
+
+  it.each([20, 50])("accepts exactly the %i-card Cube minimum and refuses one card fewer", async (minimum) => {
+    const adapter = new DraftAdapter();
+    const { spells } = await draftWithYorion(adapter, minimum, 291);
+    await expect(adapter.submitDeck(deckOf(spells, minimum - 1), []))
+      .rejects.toThrow(`minimum is ${minimum}`);
+    const accepted = await adapter.submitDeck(deckOf(spells, minimum), []);
+    expect(accepted.seats[0].has_submitted_deck).toBe(true);
+  }, 300_000);
+
+  it.each([20, 50])(
+    "measures Yorion against a %i-card Cube minimum, at submission and at the draft-match initializer",
+    async (minimum) => {
+      const adapter = new DraftAdapter();
+      const { spells } = await draftWithYorion(adapter, minimum, 291);
+      const threshold = minimum + 20;
+      // One card short of "twenty more than the minimum": refused before the
+      // draft acknowledges anything.
+      await expect(adapter.submitDeck(deckOf(spells, threshold - 1), [], YORION))
+        .rejects.toThrow("not a legal companion");
+      expect((await adapter.getView()).seats[0].has_submitted_deck).toBe(false);
+      const accepted = await adapter.submitDeck(deckOf(spells, threshold), [], YORION);
+      expect(accepted.seats[0].has_submitted_deck).toBe(true);
+      expect(accepted.submitted_companion).toBe(YORION);
+
+      // The engine agrees at match admission, under the draft authority.
+      const base = formatMetadata("Limited")!.default_config;
+      const exact = launch(deckOf(spells, threshold), minimum);
+      expect(exact.error, exact.reasons?.join("; ")).not.toBe(true);
+      const short = launch(deckOf(spells, threshold - 1), minimum);
+      expect(short.error).toBe(true);
+      expect(short.reasons?.join("; ")).toContain("not a legal companion");
+
+      // The session minimum is conferred only by the initializer's parameter.
+      if (minimum < 40) {
+        // The registry's 40 would demand 60 cards, so this deck needs the session rule.
+        const registry = launch(deckOf(spells, threshold), undefined);
+        expect(registry.error).toBe(true);
+        expect(registry.reasons?.join("; ")).toContain("not a legal companion");
+      }
+      const forged = launch(deckOf(spells, threshold), undefined, {
+        ...base, deck_size: { type: "Minimum", data: minimum }, deck_size_origin: "DraftSession",
+      });
+      expect(forged.error).toBe(true);
+      expect(forged.reasons?.join("; ")).toContain("conferred by a draft match");
+      const handEdited = launch(deckOf(spells, threshold), undefined, {
+        ...base, deck_size: { type: "Minimum", data: minimum },
+      });
+      expect(handEdited.error).toBe(true);
+      expect(handEdited.reasons?.join("; ")).toContain("deserialization failed");
+    },
+    300_000,
+  );
 
   it("rejects the adjacent 21-card Cube minimum after reaching Deckbuilding", async () => {
     const adapter = new DraftAdapter();

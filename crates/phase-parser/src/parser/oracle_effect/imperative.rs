@@ -4425,7 +4425,7 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
-        let (target, card_filter) =
+        let (target, card_filter, cardinality) =
             parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
         // CR 701.20a: a counted reveal ("X cards from their hand", "a card at
         // random from their hand") reveals that many cards, not the whole hand.
@@ -4438,9 +4438,19 @@ pub(super) fn parse_hand_reveal_ast(
         {
             return parse_counted_hand_reveal(after_reveal, ctx);
         }
+        // CR 107.1c + CR 701.20a: an any-number reveal without a readable card
+        // filter is an honest gap, not a reveal that can never select a card.
+        if cardinality == ObjectSelectionCardinality::AnyNumber
+            && matches!(card_filter, TargetFilter::None)
+        {
+            return Some(HandRevealImperativeAst::UnreadableAnyNumberFilter {
+                fragment: text.to_string(),
+            });
+        }
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            cardinality,
         });
     }
 
@@ -4509,11 +4519,15 @@ fn parse_reveal_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
 fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
     ctx: &mut ParseContext,
-) -> (TargetFilter, TargetFilter) {
+) -> (TargetFilter, TargetFilter, ObjectSelectionCardinality) {
     if let Ok((_, target)) = all_consuming(terminated(parse_subject_hand_owner, opt(tag("."))))
         .parse(after_reveal_lower.trim())
     {
-        return (target, TargetFilter::None);
+        return (
+            target,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     }
 
     // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
@@ -4535,12 +4549,27 @@ fn parse_hand_reveal_target_and_card_filter(
                     .is_ok();
 
             if chooses_card_from_it {
-                return (target, super::parse_choose_filter(choose, ctx));
+                return (
+                    target,
+                    super::parse_choose_filter(choose, ctx),
+                    ObjectSelectionCardinality::SINGLE,
+                );
             }
         }
     }
 
-    if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
+    // CR 107.1c + CR 701.20a: "any number of [type] cards in your hand" lets the
+    // player choose which matching cards (zero or more) to reveal; "all [type]
+    // cards" keeps the historical single post-reveal choice.
+    if let Ok((after_quantifier, cardinality)) = alt((
+        value(
+            ObjectSelectionCardinality::AnyNumber,
+            tag::<_, _, OracleError<'_>>("any number of "),
+        ),
+        value(ObjectSelectionCardinality::SINGLE, tag("all ")),
+    ))
+    .parse(after_reveal_lower)
+    {
         let Ok((hand_phrase, descriptor)) = terminated(
             take_until::<_, _, OracleError<'_>>(" cards"),
             alt((
@@ -4548,42 +4577,54 @@ fn parse_hand_reveal_target_and_card_filter(
                 tag(" cards from "),
             )),
         )
-        .parse(after_all) else {
-            return (TargetFilter::Any, TargetFilter::None);
+        .parse(after_quantifier) else {
+            return (TargetFilter::Any, TargetFilter::None, cardinality);
         };
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
         if descriptor.trim().is_empty() {
-            return (target, TargetFilter::Any);
+            return (target, TargetFilter::Any, cardinality);
         }
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) =
             parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-            return (target, filter);
+            return (target, filter, cardinality);
         }
-        return (target, TargetFilter::None);
+        return (target, TargetFilter::None, cardinality);
     }
 
     // CR 701.20a: "reveal a card from your hand" / "reveal an [type] card from ..."
     let Ok((after_article, _)) =
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(after_reveal_lower)
     else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (
+            TargetFilter::Any,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     };
     if let Ok((hand_phrase, _)) = tag::<_, _, OracleError<'_>>("card from ").parse(after_article) {
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
-        return (target, TargetFilter::Any);
+        return (
+            target,
+            TargetFilter::Any,
+            ObjectSelectionCardinality::SINGLE,
+        );
     }
     let Ok((hand_phrase, descriptor)) = terminated(
         take_until::<_, _, OracleError<'_>>(" card from "),
         tag(" card from "),
     )
     .parse(after_article) else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (
+            TargetFilter::Any,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     };
     let target = parse_hand_possessive_target(hand_phrase)
         .map(|(_, target)| target)
@@ -4592,9 +4633,13 @@ fn parse_hand_reveal_target_and_card_filter(
     let (filter, rem) =
         parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        (target, filter)
+        (target, filter, ObjectSelectionCardinality::SINGLE)
     } else {
-        (target, TargetFilter::None)
+        (
+            target,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        )
     }
 }
 
@@ -4615,17 +4660,22 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             },
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            cardinality,
         } => Effect::RevealHand {
             target,
             card_filter,
             count: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
+            // CR 107.1c: an "any number" selection already admits zero, so it
+            // is not a "may" choice.
             choice_optional: false,
             reveal: true,
+            cardinality,
         },
         HandRevealImperativeAst::RevealPartial {
             count,
@@ -4638,6 +4688,7 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             selection,
             choice_optional: false,
             reveal: true,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
         // ParentTarget binds at runtime to the parent ability's affected IDs.
@@ -4646,6 +4697,9 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
         },
         // CR 701.20: Reveal a targeted object (Hauntwoods Shrieker).
         HandRevealImperativeAst::RevealObject { target } => Effect::Reveal { target },
+        HandRevealImperativeAst::UnreadableAnyNumberFilter { fragment } => {
+            Effect::unimplemented("reveal_any_number_card_filter", fragment)
+        }
     }
 }
 
@@ -5241,8 +5295,10 @@ pub(super) fn parse_choose_ast(
         ctx.pending_choice_type,
         Some(crate::types::ability::ChoiceType::NumberRange { .. })
     );
+    // CR 201.4: `text` is the un-lowercased clause. It is what lets the closed
+    // card-name domain (Garth One-Eye's six names) come out in printed case.
     if let Some(choice_type) =
-        super::try_parse_named_choice_with_provenance(lower, has_number_choice)
+        super::try_parse_named_choice_with_text(lower, Some(text), has_number_choice)
     {
         // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at
         // random" (Strax) — the game selects the referent, not the controller.
@@ -7191,7 +7247,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // number within that resolution (CR 608.2c; The Toymaker's Trap).
             persist: matches!(
                 choice_type,
-                ChoiceType::CardName
+                ChoiceType::CardName { .. }
                     | ChoiceType::CreatureType { .. }
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
@@ -7214,6 +7270,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional,
             reveal: true,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         // CR 608.2d: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).
@@ -7569,6 +7626,26 @@ pub(super) fn parse_utility_imperative_ast(
         let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
         if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
+        }
+    }
+    // CR 701.3d: "unattach it" names one attachment by anaphor and no host, so
+    // it is unattached from whatever it is attached to. Only a parent-referent
+    // anaphor is admitted: other operands ("unattach ~", "unattach enchanted
+    // Equipment") have no resolver binding here and stay unimplemented.
+    if let Some(((), object_text)) = nom_on_lower(text, lower, |input| {
+        value((), tag("unattach ")).parse(input)
+    }) {
+        let (attachment, rem) = parse_target_with_ctx(object_text, ctx);
+        if rem.trim().is_empty()
+            && matches!(
+                attachment,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            )
+        {
+            return Some(UtilityImperativeAst::UnattachAll {
+                attachment,
+                target: TargetFilter::Any,
+            });
         }
     }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
@@ -30352,8 +30429,8 @@ mod tests {
                         let filter = filter.expect("cast-origin filter must be present");
                         assert!(
                             matches!(&filter, TargetFilter::Typed(t)
-                                if t.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. }))),
-                            "draw count must carry the cast-origin InAnyZone filter, got {filter:?}"
+                                if t.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(prop.as_ref(), FilterProp::InZone { zone: Zone::Hand })))),
+                            "draw count must carry the cast-origin Not(InZone(Hand)) filter, got {filter:?}"
                         );
                     }
                     other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),

@@ -2024,7 +2024,7 @@ fn card_name_choice_validates_against_all_card_names() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2043,7 +2043,7 @@ fn card_name_choice_validates_against_all_card_names() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2066,7 +2066,7 @@ fn card_name_choice_is_case_insensitive() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,

@@ -1243,6 +1243,7 @@
       "draw": "MATCH NUL",
       "victory": "VICTOIRE",
       "defeat": "DÉFAITE",
+      "complete": "PARTIE TERMINÉE",
       "lifeSummary": "Vous : <player>{{playerLife}}</player> <sep>/</sep> Adversaire : <opponent>{{opponentLife}}</opponent>",
       "turns": "Tours : {{count}}",
       "duration": "Durée : {{time}}",
@@ -1548,7 +1549,9 @@
       "titleReveal": "Révéler depuis la main",
       "titleOpponentHand": "Main de l'adversaire",
       "subtitleReveal": "Choisissez une carte à révéler, ou refusez",
-      "subtitleChoose": "Choisissez une carte"
+      "subtitleChoose": "Choisissez une carte",
+      "subtitleRevealAnyNumber": "Choisissez un nombre quelconque de cartes à révéler",
+      "subtitleChooseCount": "Choisissez {{count}} cartes"
     },
     "search": {
       "title": "Chercher dans la bibliothèque",
@@ -2654,6 +2657,7 @@
   },
   "outsideGame": {
     "fromExile": "Depuis l'exil",
+    "fromCompanion": "Depuis le compagnon",
     "fromSideboard": "Depuis la réserve",
     "fromBoosterPack": "D'un booster {{setCode}}",
     "fromCubeBoosterPack": "D'un booster du cube"

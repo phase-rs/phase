@@ -104,6 +104,13 @@ pub(super) fn finish_resolving_stack_entry(
     if let Some(entry) = entry.as_ref() {
         state.release_stack_bound_reveals(entry.id);
     }
+    // CR 701.20a: instruction-owned transient reveals end at the resolution
+    // completion boundary before publishing viewer projections.
+    if !super::engine::transient_reveal_outlives_action_boundary(state)
+        && !super::engine::ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     debug_assert!(
         firing.is_none()
             || entry
@@ -191,6 +198,10 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
+    // CR 614.12a: these entries had not happened yet; abandoning the family
+    // abandons them. Entries held in `unsettled_entry_batch_events` did happen
+    // (CR 603.2), so they stay and are checked at the next collector; CR 800.4a
+    // removes the departed player's own abilities there.
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }

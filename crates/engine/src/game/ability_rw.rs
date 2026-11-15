@@ -3961,6 +3961,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::GiftDelivery { .. }
         | Effect::SetDayNight { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::HeistExile
@@ -4009,7 +4010,7 @@ fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
         | crate::types::ability::ChoiceType::OddOrEven
         | crate::types::ability::ChoiceType::BasicLandType
         | crate::types::ability::ChoiceType::CardType { .. }
-        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::CardName { .. }
         | crate::types::ability::ChoiceType::NumberRange { .. }
         | crate::types::ability::ChoiceType::Labeled { .. }
         | crate::types::ability::ChoiceType::LandType
@@ -6138,6 +6139,17 @@ fn rw_effect(
             p.merge(rw_token_attack_destination(attack_destination));
             (p, Some(WriteScope::Created))
         }
+        // CR 707.13: same write profile as a conjure — a new object appears
+        // (never in a hand or library), and the copy's `count` is a read.
+        Effect::CreateCardCopyByName { name: _, count } => {
+            let mut p = RwProfile::empty();
+            p.writes_external.set(StateKind::SetMembership);
+            p.writes_created.set(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            (p, Some(WriteScope::Created))
+        }
         Effect::Conjure {
             cards: _,
             destination,
@@ -6754,6 +6766,7 @@ fn rw_effect(
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut p = RwProfile::empty();
             if let Some(q) = count {
@@ -7016,7 +7029,7 @@ fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile 
         | crate::types::ability::ChoiceType::OddOrEven
         | crate::types::ability::ChoiceType::BasicLandType
         | crate::types::ability::ChoiceType::CardType { .. }
-        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::CardName { .. }
         | crate::types::ability::ChoiceType::NumberRange { .. }
         | crate::types::ability::ChoiceType::Labeled { .. }
         | crate::types::ability::ChoiceType::LandType

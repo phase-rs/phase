@@ -6391,6 +6391,7 @@ pub(crate) fn handle_behold_for_cost(
     } else if !revealed_ids.is_empty() {
         events.push(GameEvent::CardsRevealed {
             player,
+            occurrences: state.disclosed_occurrences(&revealed_ids),
             card_ids: revealed_ids,
             card_names: revealed_names,
         });
@@ -7970,6 +7971,7 @@ fn surface_next_interactive_activation_cost_leg(
                 ));
             events.push(GameEvent::CardsRevealed {
                 player,
+                occurrences: state.disclosed_occurrences(&[source_id]),
                 card_ids: vec![source_id],
                 card_names: vec![obj.name.clone()],
             });
@@ -12008,6 +12010,7 @@ fn pay_additional_cost_with_source(
                     );
                     events.push(GameEvent::CardsRevealed {
                         player,
+                        occurrences: state.disclosed_occurrences(&[pending.object_id]),
                         card_ids: vec![pending.object_id],
                         card_names: vec![obj.name.clone()],
                     });
@@ -12160,6 +12163,7 @@ pub(crate) fn handle_reveal_for_cost(
 
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(chosen),
         card_ids: chosen.to_vec(),
         card_names: revealed_names,
     });
@@ -17396,7 +17400,13 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::x_ceiling_mana_capacity(state, id, player, spell_ctx.as_ref());
+            let mana = mana_sources::x_ceiling_mana_capacity(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                object_id,
+            );
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);

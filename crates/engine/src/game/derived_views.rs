@@ -2580,7 +2580,11 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
                 .copied()
                 .filter(|object_id| {
                     state.objects.get(object_id).is_some_and(|object| {
-                        object.owner == player.id
+                        // CR 707.13 + CR 400.11: a copy created outside the game is
+                        // staged in exile only as casting-pipeline bookkeeping; it is
+                        // in no zone, so it is never part of the public exile pile.
+                        !object.is_outside_game()
+                            && object.owner == player.id
                             && (!object.face_down || object.display_visible_to_viewer)
                     })
                 })

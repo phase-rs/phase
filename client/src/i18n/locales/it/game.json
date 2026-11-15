@@ -1243,6 +1243,7 @@
       "draw": "PAREGGIO",
       "victory": "VITTORIA",
       "defeat": "SCONFITTA",
+      "complete": "PARTITA FINITA",
       "lifeSummary": "Tu: <player>{{playerLife}}</player> <sep>/</sep> Avversario: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turni: {{count}}",
       "duration": "Durata: {{time}}",
@@ -1548,7 +1549,9 @@
       "titleReveal": "Rivela dalla mano",
       "titleOpponentHand": "Mano dell'avversario",
       "subtitleReveal": "Scegli una carta da rivelare, o rifiuta",
-      "subtitleChoose": "Scegli una carta"
+      "subtitleChoose": "Scegli una carta",
+      "subtitleRevealAnyNumber": "Scegli un numero qualsiasi di carte da rivelare",
+      "subtitleChooseCount": "Scegli {{count}} carte"
     },
     "search": {
       "title": "Cerca nel grimorio",
@@ -2654,6 +2657,7 @@
   },
   "outsideGame": {
     "fromExile": "Dall'esilio",
+    "fromCompanion": "Dal compagno",
     "fromSideboard": "Dalla sideboard",
     "fromBoosterPack": "Da una busta {{setCode}}",
     "fromCubeBoosterPack": "Da una busta del cube"

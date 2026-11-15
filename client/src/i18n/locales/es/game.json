@@ -1243,6 +1243,7 @@
       "draw": "EMPATE",
       "victory": "VICTORIA",
       "defeat": "DERROTA",
+      "complete": "FIN DE LA PARTIDA",
       "lifeSummary": "Tú: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duración: {{time}}",
@@ -1548,7 +1549,9 @@
       "titleReveal": "Revelar de la mano",
       "titleOpponentHand": "Mano del oponente",
       "subtitleReveal": "Elige una carta para revelar, o rechaza",
-      "subtitleChoose": "Elige una carta"
+      "subtitleChoose": "Elige una carta",
+      "subtitleRevealAnyNumber": "Elige cualquier cantidad de cartas para revelar",
+      "subtitleChooseCount": "Elige {{count}} cartas"
     },
     "search": {
       "title": "Buscar en la biblioteca",
@@ -2654,6 +2657,7 @@
   },
   "outsideGame": {
     "fromExile": "Desde el exilio",
+    "fromCompanion": "Desde el compañero",
     "fromSideboard": "Desde el banquillo",
     "fromBoosterPack": "De un sobre de {{setCode}}",
     "fromCubeBoosterPack": "De un sobre del cube"

@@ -1315,6 +1315,17 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
         }
     }
 
+    /// CR 601.2a + CR 707.13: whether the source was cast from OUTSIDE the game,
+    /// so its `cast_from_zone` stamp is only a staging zone. A latched snapshot
+    /// answers `false`: an outside-the-game copy ceases to exist (CR 704.5e) when
+    /// it leaves the stack or battlefield, so no departed incarnation is read.
+    pub fn cast_from_outside_game(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.created_outside_game,
+            Self::Latched(_) => false,
+        }
+    }
+
     pub fn played_from_zone(self) -> Option<Zone> {
         match self {
             Self::ExactLive(object) => object.played_from_zone,
@@ -1535,6 +1546,11 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 601.2a + CR 707.13 + CR 400.11: the spell was cast from OUTSIDE the game
+    /// (the copy Garth One-Eye creates), so `from_zone` holds only its staging
+    /// zone and every "cast from [zone]" predicate over this record must be false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_outside_game: bool,
     /// CR 702.185c: The alternative-cast variant chosen when this spell was
     /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
     /// conditions ("a spell was warped this turn") can answer after the spell
@@ -1608,6 +1624,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             has_adventure: false,
             from_zone: Zone::Hand,
+            from_outside_game: false,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
@@ -2202,6 +2219,22 @@ pub(crate) fn exact_battlefield_departure_row(
 }
 
 impl GameState {
+    /// CR 608.2c + CR 603.6a: which instruction recorded the ledger row at `ledger_index`: the
+    /// number of instruction boundaries at or below it. Rows with the same value were recorded
+    /// between the same two boundaries (one instruction, or one performance of a repeated keyword action),
+    /// so a battlefield entry among them is treated as part of the same simultaneous entry
+    /// event as the others (every permanent, newcomers included, is checked against it).
+    pub(crate) fn instruction_of_zone_change(&self, ledger_index: usize) -> usize {
+        self.instruction_boundary_marks
+            .partition_point(|mark| *mark <= ledger_index)
+    }
+
+    /// CR 608.2c: the ledger length at the last instruction boundary; every row below it was
+    /// recorded by an instruction that has completed.
+    pub(crate) fn completed_instruction_ledger_len(&self) -> usize {
+        self.instruction_boundary_marks.last().copied().unwrap_or(0)
+    }
+
     /// CR 603.10 + CR 400.7: the settled observation of the battlefield entry `record` describes,
     /// or `None`. Exact: this turn's row at this record's ledger index, naming this record's object
     /// at its post-entry incarnation; a later entry reusing the storage id is a different object
@@ -5082,6 +5115,26 @@ impl PendingZoneChangeDelivery {
     }
 }
 
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+///
+/// CR 616.1: a delivery can pause on a replacement ordering choice between the
+/// captures and the settlement, so the operation rides on the delivery's resume
+/// carrier (`PendingChangeZoneIteration::library_reorder` or
+/// `PendingBatchDeliveries::library_reorder`) and is settled by the drain that
+/// completes the instruction — never by the call that started it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryReorderOperation {
+    pub(crate) members: Vec<ObjectId>,
+    pub(crate) libraries: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -5177,6 +5230,11 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this delivery performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
     /// position of a terminal-shuffle operation, carried across the pause.
     #[serde(
@@ -7166,6 +7224,11 @@ pub struct PendingBatchDeliveries {
     /// for newly parked actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this batch performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
     /// `enter_tapped` mod survives the pause boundary).
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -7714,8 +7777,16 @@ pub enum BatchCompletion {
         /// determines the printed placement order and remains the
         /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
-        /// Selection members that were already in a library at delivery time.
-        /// They are repositions, not replaceable zone-change requests.
+        /// CR 401.4: Selection members that were already in a library when the
+        /// owner's arrangement was answered, for a completion parked by a build
+        /// that queued only the non-library moves and left these members to be
+        /// repositioned by this tail. A current completion writes this empty
+        /// because every selected member — this set included — is delivered by
+        /// the replacement-consulting batch (CR 614.1 + CR 701.20d). A non-empty
+        /// restored set is therefore the migration marker for the legacy
+        /// arrange-then-reposition shape: the completion settles it through
+        /// [`super::game::engine_resolution_choices`]'s legacy reposition rather
+        /// than resuming the non-library moves and silently dropping the order.
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
@@ -8299,6 +8370,29 @@ pub struct PendingTokenEventDelivery {
     pub source_id: ObjectId,
 }
 
+/// CR 614.12a + CR 607.2d: counter evaluation held until an acquired entry
+/// choice has bound its answer. `None` exceptions retains the meld-only policy;
+/// `Some` retains the merged placement policy, including an empty exception list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyEntryPendingCounters {
+    pub exceptions: Option<Vec<ContinuousModification>>,
+    pub replay_entry_events: bool,
+}
+
+/// CR 707.5 + CR 614.12a: remaining work for a copied as-enters choice.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyEntryResumeStage {
+    /// Counters have settled and the tail still offers the acquired choice:
+    /// the order when no counter reads it, and the meaning of a save that
+    /// predates this field.
+    #[default]
+    ChoiceOwedAfterCounters,
+    /// The acquired choice is answered; counters have settled.
+    ChoiceSettled,
+    /// The acquired choice paused before counter evaluation.
+    BeforeCounters(Box<CopyEntryPendingCounters>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -8455,9 +8549,10 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary or liminal-token interactive
-    /// enter-as-copy entry after its merged counter placement settles. Never
-    /// minted by Meld. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: resume an interactive enter-as-copy entry after
+    /// its acquired choice or merged counter placement settles. Meld uses this
+    /// only before counters; its own completion still owns the post-counter tail.
+    /// The incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
@@ -8472,12 +8567,16 @@ pub enum PendingCounterPostAction {
     ///   + CR 616.1; this is not a leaf-reference layer.
     ///
     /// Serialized surface: PendingEffectResolved::post_actions on the existing
-    /// resolution-state frame wire, exactly like ContinueProliferateActions
-    /// and ContinuePlayerScopeSacrifice. Backward compatible, not forward
-    /// compatible: older builds cannot load a save containing this new tag.
-    /// Same one-way contract; no game protocol or resolution-state wire bump.
+    /// resolution-state frame wire. Version 14 protects the new resume stages:
+    /// older readers reject that version before decoding or dispatching state,
+    /// rather than silently ignoring `resume_stage` on this existing tag.
+    /// Legacy saves without the field retain ChoiceOwedAfterCounters semantics.
+    /// Full-game and P2P protocol versions move together for this state change.
     FinishCopyTargetChoiceEntry {
         entrant: ObjectIncarnationRef,
+        /// Missing on legacy saves that still owe the acquired choice.
+        #[serde(default)]
+        resume_stage: CopyEntryResumeStage,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -9595,6 +9694,23 @@ pub struct FinalizePrePaymentChecks {
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
+/// CR 602.2b + CR 605.3b: progress of a mana ability's activation publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityActivationStage {
+    /// Costs are not yet fully paid; the activation has not been published.
+    #[default]
+    Unpublished,
+    /// The activation event was emitted and its triggers observed.
+    Published,
+}
+
+impl ManaAbilityActivationStage {
+    fn is_unpublished(&self) -> bool {
+        matches!(self, Self::Unpublished)
+    }
+}
+
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
 /// the activator to choose the produced mana. An auto-tap plan already selected
 /// production; a direct activation has not.
@@ -9648,6 +9764,14 @@ pub struct ManaAbilityCostParent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaAbilityCostCursor {
     pub remaining: Vec<AbilityCost>,
+    /// CR 602.2b + CR 605.3b: whether this activation's `AbilityActivated` event
+    /// and trigger observation already happened at the paid-cost boundary. A
+    /// resume after a paused inline preamble continues past that boundary.
+    #[serde(
+        default,
+        skip_serializing_if = "ManaAbilityActivationStage::is_unpublished"
+    )]
+    pub activation: ManaAbilityActivationStage,
     /// CR 118.3b + CR 119.4 + CR 616.1: Selected Phyrexian life components
     /// that follow an already-paid component whose replacement post-effect
     /// paused. They complete before the cursor advances to mana production.
@@ -10554,6 +10678,36 @@ impl GameState {
                 }
             }
         }
+    }
+
+    /// CR 400.7 + CR 701.20a: The exact occurrence of each live card a reveal
+    /// is disclosing right now, in `card_ids` order. Captured into
+    /// [`GameEvent::CardsRevealed`] where the event is built, so knowledge
+    /// finalized later in the action attaches to the disclosed object and not
+    /// to a new object that reuses its storage id (CR 701.20d reorders).
+    ///
+    /// [`GameEvent::CardsRevealed`]: crate::types::events::GameEvent::CardsRevealed
+    pub fn disclosed_occurrences(&self, card_ids: &[ObjectId]) -> Vec<ObjectIncarnationRef> {
+        card_ids
+            .iter()
+            .filter_map(|id| self.objects.get(id))
+            .map(ObjectIncarnationRef::from_object)
+            .collect()
+    }
+
+    /// CR 400.7 + CR 701.20a/d: The storage id through which a disclosure of
+    /// `occurrence` still identifies a card, or `None` once that object is gone.
+    ///
+    /// The disclosed object itself qualifies while it is still current. Once it
+    /// has become a new object, only a move into a hand carries the disclosure
+    /// along: the table saw which card was put there (CR 701.20a), the same
+    /// destination rule `clear_revealed_information_on_zone_exit` applies to a
+    /// publication made before the move. A card reordered within its library
+    /// (CR 701.20d) or moved anywhere else is a new object nobody was shown.
+    pub(crate) fn disclosure_survivor(&self, occurrence: ObjectIncarnationRef) -> Option<ObjectId> {
+        let object = self.objects.get(&occurrence.object_id)?;
+        (ObjectIncarnationRef::from_object(object) == occurrence || object.zone == Zone::Hand)
+            .then_some(occurrence.object_id)
     }
 
     /// Returns whether `viewer` learned this exact still-current card
@@ -12312,6 +12466,16 @@ pub enum OutsideGameChoiceSource {
         /// and the `game_state_stack_budget` regression). `Sideboard` already
         /// sets that ceiling; adding a pack origin beside a second inline face
         /// would raise it.
+        card: Box<crate::types::card::CardFace>,
+    },
+    /// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+    /// outside the game (`Player::companion` with `used == false`). Revealing it
+    /// does not bring it into the game, so an effect that finds cards "from
+    /// outside the game" can find it until the companion special action (or a
+    /// prior such effect) puts it into hand (CR 702.139c). It leaves the
+    /// sideboard pool at the reveal, so it is not a `Sideboard` entry. Boxed for
+    /// the same `WaitingFor` size budget as `BoosterPack`.
+    Companion {
         card: Box<crate::types::card::CardFace>,
     },
 }
@@ -14076,6 +14240,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     // namespace. Live deferred events keep their own recorded turn separately.
     // Retain the old positions so current-turn replay keys can follow their
     // ledger row through this compaction.
+    let original_ledger_len = ledger.len();
     let mut old_to_current_index = HashMap::new();
     let mut current_ledger = Vec::with_capacity(ledger.len());
     for (old_index, record) in std::mem::take(ledger).into_iter().enumerate() {
@@ -14122,6 +14287,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     }
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
+    remap_persisted_instruction_boundary_marks(state, original_ledger_len, &old_to_current_index)?;
 
     let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
@@ -14129,6 +14295,129 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     })?;
 
     Ok(())
+}
+
+/// CR 608.2c + CR 603.6a: `instruction_boundary_marks` are ledger lengths. They must strictly
+/// increase and lie within the ledger as it was persisted, before stale rows are pruned; a value
+/// past it would declare unfinished entries complete. Pruning stale rows removes rows below a
+/// mark, so each mark follows the rows that survive (a mark with no surviving row below it
+/// disappears).
+fn remap_persisted_instruction_boundary_marks(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    original_ledger_len: usize,
+    old_to_current_index: &HashMap<usize, usize>,
+) -> Result<(), String> {
+    let Some(marks) = state.get_mut("instruction_boundary_marks") else {
+        return Ok(());
+    };
+    let marks = marks
+        .as_array_mut()
+        .ok_or_else(|| "instruction_boundary_marks must be an array".to_string())?;
+    let mut surviving: Vec<usize> = old_to_current_index.keys().copied().collect();
+    surviving.sort_unstable();
+    let mut previous = 0;
+    let mut remapped: Vec<usize> = Vec::with_capacity(marks.len());
+    for mark in marks.iter() {
+        let mark = json_usize(mark)
+            .ok_or_else(|| "instruction_boundary_marks entries must be integers".to_string())?;
+        if mark <= previous || mark > original_ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = mark;
+        let kept = surviving.partition_point(|old_index| *old_index < mark);
+        if kept > remapped.last().copied().unwrap_or(0) {
+            remapped.push(kept);
+        }
+    }
+    *marks = remapped.into_iter().map(serde_json::Value::from).collect();
+    Ok(())
+}
+
+/// CR 603.6a + CR 400.7: the restored entry hold must be coherent with the ledger it indexes.
+/// The marks strictly increase within the ledger; the held entries are battlefield entries of this
+/// turn, each naming a distinct ledger row of the same object and incarnation. A duplicate
+/// would be collected twice on release, and a stale mark would release unfinished entries.
+fn validate_restored_entry_hold(state: &GameState) -> Result<(), String> {
+    let ledger_len = state.zone_changes_this_turn.len();
+    let mut previous = 0;
+    for mark in &state.instruction_boundary_marks {
+        if *mark <= previous || *mark > ledger_len {
+            return Err(
+                "instruction_boundary_marks must strictly increase within the ledger".to_string(),
+            );
+        }
+        previous = *mark;
+    }
+    let mut seen = HashSet::new();
+    for event in &state.unsettled_entry_batch_events {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to: Zone::Battlefield,
+            record,
+        } = event
+        else {
+            return Err(
+                "unsettled_entry_batch_events may hold only battlefield-entry events".to_string(),
+            );
+        };
+        // The matcher reads the event's own origin, so it must be the record's.
+        if *from != record.from_zone || record.to_zone != Zone::Battlefield {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with its own record".to_string(),
+            );
+        }
+        if record.recorded_turn_number != state.turn_number {
+            return Err(
+                "unsettled_entry_batch_events holds an entry from another turn".to_string(),
+            );
+        }
+        let row = state
+            .zone_changes_this_turn
+            .get(record.turn_zone_change_index)
+            .ok_or_else(|| {
+                "unsettled_entry_batch_events entry points outside the current ledger".to_string()
+            })?;
+        if row.object_id != *object_id
+            || record.object_id != *object_id
+            || row.to_zone != Zone::Battlefield
+            || row.entered_incarnation != record.entered_incarnation
+        {
+            return Err(
+                "unsettled_entry_batch_events entry disagrees with the current ledger".to_string(),
+            );
+        }
+        if !seen.insert(record.turn_zone_change_index) {
+            return Err("unsettled_entry_batch_events holds one entry twice".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// CR 603.6a + CR 608.2c: a saved instruction mark is a ledger position, not evidence that the
+/// instruction below it completed, and nothing else in a save records that for a held entry. A
+/// mark above a held entry's row would release that entry to the observer scan while its
+/// co-entrants may still be entering, so such marks are not restored: the held entries stay
+/// held until the engine establishes their completion again (the next instruction boundary it
+/// reaches, or the action settling). Marks at or below every held row are kept; they cut
+/// completed instructions that hold nothing.
+fn withhold_unestablished_entry_completion(state: &mut GameState) {
+    let Some(first_held_row) = state
+        .unsettled_entry_batch_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+            _ => None,
+        })
+        .min()
+    else {
+        return;
+    };
+    state
+        .instruction_boundary_marks
+        .retain(|mark| *mark <= first_held_row);
 }
 
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
@@ -14513,6 +14802,7 @@ fn visit_persisted_live_zone_changed_records(
     // `resolved_rules_journal` snapshots.
     const LIVE_EVENT_CARRIER_FIELDS: &[&str] = &[
         "deferred_entry_events",
+        "unsettled_entry_batch_events",
         "pending_trigger",
         "pending_trigger_event_batch",
         "deferred_triggers",
@@ -19001,6 +19291,21 @@ pub enum WaitingFor {
         /// use an empty selection to skip their follow-up instead.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decline_runs_continuation: bool,
+        /// CR 608.2d: how many distinct `cards` a non-declining selection must
+        /// hold. `Exactly { count: 1 }` (the default) is the historical single
+        /// post-reveal pick. CR 107.1c + CR 701.20a: `AnyNumber` ("reveal any
+        /// number of artifact cards in your hand") admits any subset of `cards`,
+        /// including none, and the chosen cards are exactly the ones revealed.
+        #[serde(
+            default = "super::ability::ObjectSelectionCardinality::single",
+            skip_serializing_if = "super::ability::ObjectSelectionCardinality::is_single"
+        )]
+        cardinality: super::ability::ObjectSelectionCardinality,
+        /// CR 605.3b: the activated mana ability this reveal belongs to, when the
+        /// choice is part of a mana ability's immediate resolution (Metalworker).
+        /// Its production resumes from this record once the selection is made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
@@ -22519,6 +22824,12 @@ impl WaitingFor {
             WaitingFor::PayAmountChoice {
                 pending_mana_ability,
                 ..
+            }
+            // CR 605.3b + CR 701.20a: a reveal selection inside a mana
+            // ability's immediate resolution (Metalworker).
+            | WaitingFor::RevealChoice {
+                pending_mana_ability,
+                ..
             } => pending_mana_ability.as_deref(),
             WaitingFor::PayManaAbilityMana {
                 pending_mana_ability,
@@ -22574,7 +22885,6 @@ impl WaitingFor {
             | WaitingFor::DigChoice { .. }
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
-            | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -22805,7 +23115,8 @@ impl WaitingFor {
             // CR 608.2d: a reveal choice the chooser cannot decline is no stop.
             || matches!(
                 self,
-                WaitingFor::RevealChoice { optional: false, cards, .. } if cards.len() >= 2
+                WaitingFor::RevealChoice { optional: false, cards, cardinality, .. }
+                    if cardinality.has_multiple_selections(cards.len())
             )
             || matches!(
                 self,
@@ -22859,8 +23170,11 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 optional: false,
                 cards,
+                cardinality,
                 ..
-            } if cards.len() >= 2 => Some(ChoicePoint::ResolutionSet),
+            } if cardinality.has_multiple_selections(cards.len()) => {
+                Some(ChoicePoint::ResolutionSet)
+            }
             _ => None,
         }
     }
@@ -22871,10 +23185,13 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 cards,
                 optional: false,
+                cardinality,
                 ..
-            } if cards.len() == 1 => Some(crate::types::actions::GameAction::SelectCards {
-                cards: cards.clone(),
-            }),
+            } if cardinality.forces_all_eligible(cards.len()) => {
+                Some(crate::types::actions::GameAction::SelectCards {
+                    cards: cards.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -25121,6 +25438,14 @@ declare_game_state! {
     // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 111.1 + CR 614.12: the tokens the copy-token resolution whose owner frame is off the
+    /// resolution stack (drained inline, or held by a compound token event's delivery) has
+    /// already created; they enter in one event with the token being created now (Clone Legion
+    /// ruling 2015-02-25). `None` when the owner is parked; its frame is read instead
+    /// (`token_copy::copy_token_co_entrants`). Published only by
+    /// `token_copy::publish_committed_copy_tokens`; never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_copy_token_resolution_tokens: Option<Vec<ObjectId>>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -25150,6 +25475,14 @@ declare_game_state! {
     /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
     pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    /// CR 603.6a: the ledger rows of the battlefield entries in an entry cohort that included an
+    /// entry held across answers, set by `triggers::settle_entry_batch_scan` and
+    /// `triggers::collect_completed_entry_instruction` for the collection that follows. Only
+    /// these entries are observed by a co-entrant that entered later in their instruction
+    /// (`triggers::source_enters_with_event`); every other entry keeps the positional
+    /// lifetime guard. Transient — never serialized, cleared per action.
+    #[serde(skip)]
+    pub(crate) released_entry_rows: Vec<usize>,
     /// A replacement's computed life, player-counter or energy quantity
     /// overflowed while the current event was being replaced (see
     /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
@@ -25385,6 +25718,18 @@ declare_game_state! {
     /// (Soul Warden) match against the fully-realized copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
+
+    /// CR 603.6a + CR 611.3c: battlefield-entry events of an entering
+    /// instruction that had not completed when its action stopped while a
+    /// co-entrant's entry was still being made (its CR 616.1 ordering, CR 707.5
+    /// copy choice or CR 614.12a entry choice). All permanents, newcomers
+    /// included, are checked against the event once it has finished, so these
+    /// wait unmatched. `triggers::settle_entry_batch_scan` is the only writer:
+    /// it releases them to the first observer scan that runs once no entry is
+    /// in progress, their instruction has completed, or the action has settled. `zones::settle_battlefield_entry_observations` reads
+    /// them so their entrants are observed with the last co-entrant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled_entry_batch_events: Vec<GameEvent>,
 
     /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
     /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
@@ -26759,6 +27104,26 @@ declare_game_state! {
     /// every viewer projection.
     #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
     pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
+    /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
+    /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
+    /// not that boundary deferred the entry observations), strictly increasing and never zero.
+    /// A mark is written only while no battlefield entry is in progress
+    /// (`triggers::battlefield_entry_in_progress`: a rider chain run inside an entry has
+    /// boundaries of its own) and no paused player-scope clause is between seat legs resuming
+    /// under its sidecar (`resolving_player_scope_tail`: CR 101.4 makes its seats' actions one
+    /// event). A repeated keyword action ("Populate X times", "Investigate twice") is
+    /// performed that many times in succession, so each occurrence after the first is a
+    /// boundary too (`effects::settle_entries_before_repeat_occurrence`); any other repeated
+    /// entering effect ("for each …, create …") is one instruction. The marks cut the ledger into instructions: rows between two marks were
+    /// recorded by one instruction, so every battlefield entry among them is treated as one
+    /// simultaneous entry event
+    /// ([`GameState::instruction_of_zone_change`]), and every entry below the last mark is a
+    /// completed event that `triggers::settle_entry_batch_scan` never holds. Cleared with the
+    /// ledger, zeroed with it by the loop projection
+    /// (`analysis::resource::project_out_resources`), validated and remapped by the persisted
+    /// restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_boundary_marks: Vec<usize>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -27157,6 +27522,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_label_this_resolution: Option<String>,
 
+    /// CR 201.4 + CR 608.2c: the card name the current resolution's most recent
+    /// card-name choice named ("the card with the chosen name", Garth One-Eye).
+    /// Unlike the source's `ChosenAttribute::CardName` history, this answers
+    /// what THIS resolution chose: an impossible choice (an exhausted closed
+    /// domain, CR 609.3) leaves it `None`, and it is written even when the
+    /// source has left its zone (CR 113.7a: the ability still resolves).
+    /// Cleared at every top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_card_name_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -27255,6 +27630,15 @@ declare_game_state! {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+    /// CR 608.2c: how many times a look/reveal instruction has published its
+    /// result into `last_revealed_ids` (`effects::record_revealed_result`).
+    /// A resolving instruction compares the count before and after its own
+    /// step to tell its exact result, an empty one included, apart from an
+    /// earlier producer's entry still in the ledger. Only ever compared within
+    /// one synchronous step, so it is never serialized and is not part of
+    /// state equality (a monotonic tally would break AI-search dedup).
+    #[serde(skip)]
+    pub(crate) revealed_publications: u64,
 
     /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
@@ -29746,6 +30130,8 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
+        validate_restored_entry_hold(&state)?;
+        withhold_unestablished_entry_completion(&mut state);
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -32273,6 +32659,30 @@ impl GameState {
         &mut self,
     ) -> Result<Option<PendingBatchDeliveries>, ResolutionStackError> {
         self.resolution_stack.take_active_batch_delivery()
+    }
+
+    /// CR 701.20d + CR 701.20a: Whether `card_id` is tracked by an active
+    /// in-flight whole-library reorder operation whose terminal finish settles
+    /// reveal retirement at the batch completion boundary, so per-card reorder
+    /// moves do not prematurely retire it during intermediate deliveries.
+    pub fn is_active_library_reorder_member(&self, card_id: ObjectId) -> bool {
+        if let Some(pending) = self.active_batch_delivery() {
+            if let Some(reorder) = &pending.library_reorder {
+                if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                    return true;
+                }
+            }
+        }
+        if let Some(frame) = self.active_change_zone_frame() {
+            if let Some(pending) = &frame.pending {
+                if let Some(reorder) = &pending.library_reorder {
+                    if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Returns the CounterMoves queue only when its typed frame owns the stack
@@ -35569,11 +35979,13 @@ impl GameState {
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
+            active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
+            released_entry_rows: Vec::new(),
             replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
@@ -35612,6 +36024,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            unsettled_entry_batch_events: Vec::new(),
             pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             layers_read_current_step: layers_read_current_step_unknown(),
@@ -35759,6 +36172,7 @@ impl GameState {
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
             battlefield_entry_observations: im::OrdMap::new(),
+            instruction_boundary_marks: Vec::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -35815,6 +36229,7 @@ impl GameState {
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
             named_label_this_resolution: None,
+            named_card_name_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -35828,6 +36243,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            revealed_publications: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -37025,6 +37441,7 @@ impl GameState {
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
         self.named_label_this_resolution.hash(&mut h);
+        self.named_card_name_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -37421,6 +37838,7 @@ impl GameState {
         self.die_result_publication = None;
         self.consumed_before_priority_trigger_events.clear();
         self.ingress_life_window = None;
+        self.released_entry_rows.clear();
         self.replacement_quantity_overflow = None;
     }
 
@@ -37799,6 +38217,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -38165,6 +38584,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -38341,6 +38761,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -39270,6 +39691,9 @@ impl GameState {
             // `ZoneChanged` record inside it would hold unranked pins; but
             // `is_loop_comparable` requires both empty, so no sampled position holds one.
             deferred_entry_events: _,
+            // Likewise: held battlefield-entry events (`GameState::unsettled_entry_batch_events`),
+            // and `is_loop_comparable` requires them empty.
+            unsettled_entry_batch_events: _,
             pending_attack_trigger_events: _,
             // The hero-event batch is likewise excluded by `is_loop_comparable`.
             pending_hero_event: _,
@@ -39312,11 +39736,14 @@ impl GameState {
             ability_onset_record: _,
             active_payment_pins: _,
             active_rules_execution_node: _,
+            // A synchronous-window `ObjectId` list, never serialized and never compared.
+            active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
             ingress_life_window: _,
+            released_entry_rows: _,
             replacement_quantity_overflow: _,
             active_auto_tap_row_policy: _,
             battlefield: _,
@@ -39514,6 +39941,7 @@ impl GameState {
             chosen_color_this_resolution: _,
             named_color_this_resolution: _,
             named_label_this_resolution: _,
+            named_card_name_this_resolution: _,
             placed_sticker_this_resolution: _,
             noted_numbers_this_resolution: _,
             last_chosen_damage_source: _,
@@ -39527,6 +39955,7 @@ impl GameState {
             log_player_names: _,
             last_created_token_ids: _,
             last_revealed_ids: _,
+            revealed_publications: _,
             last_parent_target_missing_reason: _,
             private_look_ids: _,
             private_look_player: _,
@@ -39646,6 +40075,10 @@ impl GameState {
             sacrificed_permanents_this_turn: _,
             zone_changes_this_turn: _,
             battlefield_entry_observations: _,
+            // Ledger lengths (`GameState::instruction_boundary_marks`), one per entering
+            // instruction: they hold no incarnation id, grow with the ledger they index and
+            // are cleared with it by the loop projection.
+            instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
@@ -39766,6 +40199,7 @@ impl GameState {
             && self.pending_combat_damage.is_none()
             && self.pending_each_source_batches.is_empty()
             && self.deferred_entry_events.is_empty()
+            && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
             && self
                 .combat
@@ -41126,11 +41560,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
+        active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
+        released_entry_rows: _,
         replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
@@ -41187,6 +41623,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        unsettled_entry_batch_events: _,
         pending_token_battlefield_entry: _,
         layers_dirty: _,
         layers_read_current_step: _,
@@ -41357,6 +41794,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
         battlefield_entry_observations: _,
+        instruction_boundary_marks: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -41399,6 +41837,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
         named_label_this_resolution: _,
+        named_card_name_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -41412,6 +41851,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
+        revealed_publications: _,
         last_parent_target_missing_reason: _,
         private_look_ids: _,
         private_look_player: _,
@@ -41914,6 +42354,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.unsettled_entry_batch_events == other.unsettled_entry_batch_events
             && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike
@@ -42058,6 +42499,7 @@ impl PartialEq for GameState {
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entry_observations == other.battlefield_entry_observations
+            && self.instruction_boundary_marks == other.instruction_boundary_marks
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
@@ -42124,6 +42566,7 @@ impl PartialEq for GameState {
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
             && self.named_label_this_resolution == other.named_label_this_resolution
+            && self.named_card_name_this_resolution == other.named_card_name_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
@@ -42201,6 +42644,7 @@ mod resolved_information_tests {
                 selection: CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -42292,7 +42736,7 @@ mod resolved_information_tests {
     }
 
     #[test]
-    fn reveal_until_reveal_only_records_exact_retained_information() {
+    fn reveal_until_reveal_only_records_controller_until_action_boundary() {
         let mut state = GameState::new_two_player(42);
         let revealed = create_object(
             &mut state,
@@ -42325,8 +42769,11 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
+        // CR 701.20a: the reveal lasts while the effect still needs it. The
+        // resolver records only the controller reveal; the resolution's completion
+        // boundary ends it, and a reveal-only pile is never published durably.
         assert!(state.revealed_cards.contains(&revealed));
-        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
             .entries()
@@ -42336,7 +42783,8 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(information.len(), 2);
+        assert_eq!(information.len(), 1);
+        assert_eq!(information[0].edit, ResolvedInformationEdit::Reveal);
 
         let mut replay = pre_state;
         for command in &information {
@@ -42461,6 +42909,8 @@ mod forced_cascade_window_tests {
             filter: crate::types::ability::default_target_filter_any(),
             optional,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         }
     }
 
@@ -43728,6 +44178,30 @@ mod tests {
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
     use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
+
+    #[test]
+    fn copy_entry_resume_stage_defaults_to_legacy_choice_owed() {
+        let action = PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant: ObjectIncarnationRef {
+                object_id: ObjectId(42),
+                incarnation: LEGACY_INCARNATION,
+            },
+            resume_stage: CopyEntryResumeStage::ChoiceSettled,
+        };
+        let mut json = serde_json::to_value(action).unwrap();
+        json["FinishCopyTargetChoiceEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resume_stage");
+        let restored: PendingCounterPostAction = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            restored,
+            PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                resume_stage: CopyEntryResumeStage::ChoiceOwedAfterCounters,
+                ..
+            }
+        ));
+    }
 
     fn exact_destination() -> EntryAttackDestination {
         EntryAttackDestination::Exact {
@@ -46214,6 +46688,7 @@ mod tests {
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -48452,6 +48927,144 @@ mod tests {
             19,
             0
         )));
+    }
+
+    fn persisted_entry_record(object_id: ObjectId, index: usize, turn: u32) -> ZoneChangeRecord {
+        ZoneChangeRecord {
+            recorded_turn_number: turn,
+            turn_zone_change_index: index,
+            ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
+        }
+    }
+
+    /// The state at a pause between two co-entrants: two battlefield entries on
+    /// this turn's ledger, the first held, `marks` as the instruction boundaries.
+    fn persisted_entry_hold_fixture(marks: Vec<usize>) -> GameState {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let first = persisted_entry_record(ObjectId(9_140), 0, 19);
+        let second = persisted_entry_record(ObjectId(9_141), 1, 19);
+        state.zone_changes_this_turn.push_back(first.clone());
+        state.zone_changes_this_turn.push_back(second);
+        state.unsettled_entry_batch_events = vec![persisted_zone_change_event(first)];
+        state.instruction_boundary_marks = marks;
+        state
+    }
+
+    fn restore_error(state: GameState) -> String {
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("the restore must reject this state")
+            .to_string()
+    }
+
+    /// CR 608.2c + CR 603.6a: the instruction-boundary marks index the ledger, so
+    /// pruning a stale row below them moves them down with the rows, and a mark
+    /// with no surviving row below it disappears.
+    #[test]
+    fn persisted_instruction_boundary_marks_follow_the_pruned_ledger() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
+        let current = persisted_zone_change_record(ObjectId(9_127), 19, 1);
+        state.zone_changes_this_turn.push_back(stale);
+        state.zone_changes_this_turn.push_back(current.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
+        state.instruction_boundary_marks = vec![1, 2];
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("stale ledger history is pruned")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+
+        assert_eq!(restored.zone_changes_this_turn.len(), 1);
+        assert_eq!(
+            restored.instruction_boundary_marks,
+            vec![1],
+            "the mark after the stale row is gone, the one after the current row stays"
+        );
+    }
+
+    /// CR 608.2c: a mark past the ledger, a mark that does not increase and a zero
+    /// mark are rejected rather than clamped: each would declare unfinished
+    /// entries complete and release them before their co-entrants settle.
+    #[test]
+    fn persisted_instruction_boundary_marks_outside_the_ledger_are_rejected() {
+        for marks in [vec![1_000_000], vec![2, 1], vec![1, 1], vec![0]] {
+            let error = restore_error(persisted_entry_hold_fixture(marks.clone()));
+            assert!(
+                error.contains("instruction_boundary_marks"),
+                "{marks:?}: {error}"
+            );
+        }
+        // Positive control: marks within the ledger restore. The fixture holds the entry at
+        // row 0, so both marks lie above a held entry and are withheld (CR 603.6a): a saved
+        // position is not proof that the held entry's instruction completed.
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(
+            persisted_entry_hold_fixture(vec![1, 2]),
+        )))
+        .expect("fixture serializes");
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("marks within the ledger restore")
+            .into_game_state()
+            .expect("checked restore");
+        assert_eq!(restored.instruction_boundary_marks, Vec::<usize>::new());
+        assert_eq!(restored.unsettled_entry_batch_events.len(), 1);
+    }
+
+    /// CR 603.6a + CR 400.7: the held entries are battlefield entries naming
+    /// distinct ledger rows of this turn; a duplicate would be collected twice on
+    /// release.
+    #[test]
+    fn persisted_entry_hold_rejects_duplicate_and_foreign_entries() {
+        let mut duplicate = persisted_entry_hold_fixture(Vec::new());
+        let held = duplicate.unsettled_entry_batch_events[0].clone();
+        duplicate.unsettled_entry_batch_events.push(held);
+        assert!(restore_error(duplicate).contains("holds one entry twice"));
+
+        // A ledger-backed event that is not a battlefield entry.
+        let mut not_an_entry = persisted_entry_hold_fixture(Vec::new());
+        let leaves = persisted_zone_change_record(ObjectId(9_144), 19, 2);
+        not_an_entry
+            .zone_changes_this_turn
+            .push_back(leaves.clone());
+        not_an_entry.unsettled_entry_batch_events = vec![persisted_zone_change_event(leaves)];
+        assert!(restore_error(not_an_entry).contains("only battlefield-entry events"));
+
+        // An entry of another turn.
+        let mut earlier_turn = persisted_entry_hold_fixture(Vec::new());
+        let earlier = persisted_entry_record(ObjectId(9_145), 0, 18);
+        earlier_turn.unsettled_entry_batch_events = vec![persisted_zone_change_event(earlier)];
+        let error = restore_error(earlier_turn);
+        assert!(
+            error.contains("another turn") || error.contains("ledger occurrence"),
+            "{error}"
+        );
+
+        // An event whose own origin disagrees with its record and ledger row: the trigger
+        // matcher reads the event's origin.
+        let mut forged_origin = persisted_entry_hold_fixture(Vec::new());
+        if let GameEvent::ZoneChanged { from, .. } =
+            &mut forged_origin.unsettled_entry_batch_events[0]
+        {
+            *from = Some(Zone::Graveyard);
+        }
+        assert!(restore_error(forged_origin).contains("disagrees with its own record"));
+
+        // An entry that names no ledger row.
+        let mut off_ledger = persisted_entry_hold_fixture(Vec::new());
+        off_ledger.unsettled_entry_batch_events = vec![persisted_zone_change_event(
+            persisted_entry_record(ObjectId(9_143), 7, 19),
+        )];
+        let error = restore_error(off_ledger);
+        assert!(
+            error.contains("outside the current ledger") || error.contains("ledger occurrence"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -62157,6 +62770,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -64072,6 +64686,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            from_outside_game: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
@@ -66882,6 +67497,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        library_reorder: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

@@ -480,7 +480,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Memory Theft
 - Memory Vampire
 - Mesmeric Fiend
-- Metalworker
 - Michelangelo's Technique
 - Midnight Arsonist
 - Mimeoplasm, Revered One

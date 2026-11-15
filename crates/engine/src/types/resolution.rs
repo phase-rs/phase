@@ -3630,6 +3630,45 @@ impl ResolutionStack {
         true
     }
 
+    /// CR 608.2c: The continuation that owns the later instructions of the
+    /// Attach-choice child that was the active top when `child_boundary` was
+    /// captured. The child keeps its slot while the selected Attach runs: every
+    /// frame its attach-time choices raise (the post-replacement frame, and a
+    /// second choice's parked continuation above it, Psychic Paper) is pushed
+    /// or inserted at or above `child_boundary`. Fails closed (`None`) unless
+    /// that slot still holds an Attach-choice child and the slot beneath it an
+    /// ability continuation.
+    ///
+    /// The marked-child check is a shape check, not an identity check, so the
+    /// depth is sound only when it was captured in the same synchronous call
+    /// that spends it; never store it or carry it across a pause.
+    pub fn ability_continuation_outside_attachment_choice_child_mut(
+        &mut self,
+        child_boundary: ChildStackDepth,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        // The child was the top when the depth was captured: it is still the
+        // top when nothing was raised above it, else directly beneath the
+        // first frame raised at the captured depth.
+        let child = if self.capture_child_boundary() == child_boundary {
+            self.frames.top()?
+        } else {
+            self.frames
+                .below(self.frames.slot_at_captured_depth(child_boundary)?)?
+        };
+        if !matches!(
+            self.frames.get(child),
+            Some(ResolutionFrame::AbilityContinuation(frame))
+                if frame.pending.attachment_choice.is_some()
+        ) {
+            return None;
+        }
+        let outer = self.frames.below(child)?;
+        match self.frames.get_mut(outer) {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
     /// Retires the exact empty post-replacement/Attach-choice pair at the
     /// active boundary.
     ///
@@ -4305,7 +4344,10 @@ impl ResolutionStack {
 /// of that event with the others (`co_entrants`, CR 614.4 + CR 614.12), each omitted when
 /// empty. Earlier versions decode them as empty, and their later members are checked against
 /// every permanent on the battlefield.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 13;
+/// Version 14 preserves the copy-entry continuation's BeforeCounters and
+/// ChoiceSettled stages. Earlier readers would silently drop those stages on
+/// the existing FinishCopyTargetChoiceEntry tag, so they must refuse this wire.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 14;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4350,6 +4392,10 @@ const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 /// Last wire version whose parked ChangeZone instruction actor was recorded
 /// in `controller` rather than an independent `performed_by` field.
 const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+
+/// Last wire version before copy-entry continuations retained their counter
+/// plan or settled-choice stage. Missing stages keep their legacy meaning.
+const LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION: u64 = 13;
 
 /// Bound random-result branches identify their v11 format, not unrelated
 /// features added to later full-state resolution versions.
@@ -5355,6 +5401,39 @@ impl ResolutionStateWire {
         Ok(value)
     }
 
+    fn decode_mode_for_version(
+        version: u64,
+        latest_supported_version: u64,
+    ) -> Result<GameStateDecodeMode, String> {
+        match version {
+            LEGACY_RESOLUTION_STATE_WIRE_VERSION => Ok(GameStateDecodeMode::ResolutionWireV1),
+            LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION => {
+                Ok(GameStateDecodeMode::ResolutionWireV2)
+            }
+            LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
+                Ok(GameStateDecodeMode::ResolutionWireV3)
+            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | 5
+            | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION
+            | RESOLUTION_STATE_WIRE_VERSION
+                if version <= latest_supported_version =>
+            {
+                Ok(GameStateDecodeMode::ResolutionWireV4)
+            }
+            _ => Err(format!(
+                "unsupported resolution_state_version {version}; expected 1..={latest_supported_version}"
+            )),
+        }
+    }
+
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
@@ -5391,30 +5470,7 @@ impl ResolutionStateWire {
                 })?
         };
 
-        let decode_mode = match version {
-            LEGACY_RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV1,
-            LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV2
-            }
-            LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV3
-            }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
-            | 5
-            | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION
-            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
-            _ => {
-                return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
-                ));
-            }
-        };
+        let decode_mode = Self::decode_mode_for_version(version, RESOLUTION_STATE_WIRE_VERSION)?;
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -7016,6 +7072,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -7381,6 +7438,7 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                library_reorder: None,
                 pending_return_result_producer: None,
                 logical_zone_change_group,
                 paused_current: None,
@@ -9176,6 +9234,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         let pending = PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -10565,6 +10624,36 @@ mod tests {
             "reach: a draw frame"
         );
         assert!(!wire.to_string().contains("\"dealer\""));
+    }
+
+    #[test]
+    fn copy_entry_resume_stages_require_a_version_the_previous_reader_refuses() {
+        // Version 13's reader accepts 1 through 13 before materializing state.
+        // Exercise that same admission gate with its historical ceiling: serde
+        // must never get a chance to discard an unsupported resume_stage.
+        const PREVIOUS_READER_VERSION: u64 = 13;
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            GameState::new_two_player(42),
+        ))
+        .expect("wire serializes");
+        let version = wire["resolution_state_version"].as_u64().unwrap();
+        assert_eq!(version, 14, "copy-entry stages need their own wire version");
+        let error = ResolutionStateWire::decode_mode_for_version(version, PREVIOUS_READER_VERSION)
+            .expect_err("the previous reader must refuse before state decoding or dispatch");
+        assert!(
+            error.contains("unsupported resolution_state_version 14"),
+            "{error}"
+        );
+        assert!(ResolutionStateWire::decode_mode_for_version(
+            PREVIOUS_READER_VERSION,
+            PREVIOUS_READER_VERSION,
+        )
+        .is_ok());
+
+        let mut legacy = wire;
+        legacy["resolution_state_version"] = Value::from(PREVIOUS_READER_VERSION);
+        serde_json::from_value::<ResolutionStateWire>(legacy)
+            .expect("the current reader still accepts version 12");
     }
 
     #[test]

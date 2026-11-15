@@ -45,8 +45,8 @@ use super::lower::{
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
     attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant,
-    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_modifier_rider,
-    chain_references_chosen_card, clone_would_transplant_gated_referent,
+    attach_land_enters_tapped_to_previous_play_from_exile, bind_cast_of_created_card_copy,
+    cast_cost_modifier_rider, chain_references_chosen_card, clone_would_transplant_gated_referent,
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
@@ -144,6 +144,39 @@ fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition
     }
     if let Some(else_ability) = def.else_ability.as_mut() {
         stamp_forward_result_on_battlefield_attach_return(else_ability);
+    }
+}
+
+/// CR 608.2c + CR 701.3d: "attach <attachment> to <host>. … unattach it" — the
+/// unattach anaphor names the object the Attach just attached, not the host
+/// the earlier instructions targeted. Stamp `forward_result` on an Attach whose
+/// immediate next instruction (directly or inside its delayed payload, Unexpected
+/// Request's "unattach it at the beginning of the next end step") unattaches a
+/// `ParentTarget`, so the runtime hands that instruction the attached object.
+fn stamp_forward_result_on_attach_for_unattach_anaphor(def: &mut AbilityDefinition) {
+    fn unattaches_parent_anaphor(def: &AbilityDefinition) -> bool {
+        match &*def.effect {
+            Effect::UnattachAll {
+                attachment: TargetFilter::ParentTarget,
+                ..
+            } => true,
+            Effect::CreateDelayedTrigger { effect, .. } => unattaches_parent_anaphor(effect),
+            _ => false,
+        }
+    }
+    if matches!(&*def.effect, Effect::Attach { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .is_some_and(unattaches_parent_anaphor)
+    {
+        def.forward_result = true;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(else_ability);
     }
 }
 
@@ -4507,6 +4540,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // ("If …, for each opponent, choose …. Destroy the chosen permanents.").
     relink_gated_tracked_set_consumers(&mut defs);
 
+    // CR 707.13 + CR 608.2c: "Create a copy of the card with the chosen name.
+    // You may cast the copy." — bind the cast to the copy this chain created
+    // before the fold below, which looks for a `CopySpell` head and must not see
+    // a rewritten one.
+    bind_cast_of_created_card_copy(&mut defs);
+
     // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
     // copy (CR 707.10). It creates a card copy in the source zone, then casts
     // that copy during resolution. Fold the two parsed imperative clauses into
@@ -4748,6 +4787,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // but a primary SelfRef names the creating source and cannot be rebound by
     // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
+    stamp_forward_result_on_attach_for_unattach_anaphor(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
     // sub-ability's bare "it" pronoun parses to the generic `ParentTarget`

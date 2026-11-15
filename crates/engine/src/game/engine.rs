@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    DigSource, DurationEvent, Effect, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
+    AbilityCondition, DigSource, DurationEvent, Effect, EffectKind, KeywordAction, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -18,15 +19,15 @@ use crate::types::actions::{
 use crate::types::events::ManaTapState;
 use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
-    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
-    DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, BatchCompletion,
+    CastOfferKind, CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree,
+    DistributionScope, DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PendingManaAbility,
+    PersistedRestoreError, PostReplacementDrainStack, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress,
+    StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -1799,6 +1800,11 @@ fn apply_action_boundary_core(
             };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+            // entering instruction still held by `triggers::settle_entry_batch_scan`:
+            // a handler that settled without reaching the pipeline has not had them
+            // checked, and they are checked before any player receives priority.
+            let settled_entry_batch = settled_entry_batch_is_due(state, &result);
             // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
             // completed on a route that never reached the pipeline (a spell cast during
             // a resolution, CR 608.2g, finishes its announcement here): the resolving
@@ -1810,6 +1816,7 @@ fn apply_action_boundary_core(
             if ((resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
+                || settled_entry_batch
                 || owed_spell_final_part_is_due
             {
                 if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
@@ -1865,6 +1872,20 @@ fn apply_action_boundary_core(
         committed_departure,
         follow_up_failure,
     })
+}
+
+/// CR 117.5 + CR 603.3b: a Priority result still holds entries of a completed
+/// entering instruction whose observers have not been checked. The state's wait
+/// is synchronized first, as for [`owed_spell_final_part_is_due`], because the
+/// entry gate reads it and the state's copy is only synchronized at
+/// `finish_action_boundary`.
+fn settled_entry_batch_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let holds_entries = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !state.unsettled_entry_batch_events.is_empty();
+    if holds_entries {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    holds_entries && triggers::settled_entry_batch_awaits_scan(state)
 }
 
 /// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window
@@ -2786,6 +2807,10 @@ fn finish_action_boundary_with_lifecycle(
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
     elide_middle_repetitions(&mut result.events);
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
@@ -9833,15 +9858,20 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
             _ => None,
         })
         .flatten()
-        .map(|occurrence| occurrence.object_id)
+        .copied()
         .collect::<HashSet<_>>();
 
     for event in events {
-        if let GameEvent::CardsRevealed { card_ids, .. } = event {
-            let unpublished = card_ids
+        // CR 400.7 + CR 701.20a/d: bind the publication to the occurrence the
+        // event disclosed, never to whatever object now holds that storage id.
+        // A card the same action reordered within its library afterwards is a
+        // new object nobody was shown, so it gets no public reveal or identity
+        // fact; the event's names keep the historical record.
+        if let GameEvent::CardsRevealed { occurrences, .. } = event {
+            let unpublished = occurrences
                 .iter()
-                .copied()
-                .filter(|card_id| !controller_reveals.contains(card_id))
+                .filter(|occurrence| !controller_reveals.contains(occurrence))
+                .filter_map(|&occurrence| state.disclosure_survivor(occurrence))
                 .collect::<Vec<_>>();
             state
                 .resolve_and_apply_information(
@@ -12842,7 +12872,7 @@ fn revoke_resolve_all_consent(
 /// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
 /// permission lingers on a successfully cast hit while it sits on the stack,
 /// so its mere presence is not proof the announcement is still running.
-fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+pub(super) fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
     if state.revealed_cards.is_empty() {
         return false;
     }
@@ -12931,46 +12961,206 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
         })
 }
 
+fn filter_operates_on_revealed_cards(state: &GameState, filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastRevealed
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => true,
+        TargetFilter::SpecificObject { id } => state.revealed_cards.contains(id),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| filter_operates_on_revealed_cards(state, f)),
+        TargetFilter::Not { filter } => filter_operates_on_revealed_cards(state, filter),
+        _ => false,
+    }
+}
+
+fn quantity_references_revealed(qty: &QuantityExpr) -> bool {
+    match qty {
+        QuantityExpr::Ref { qty } => matches!(
+            qty,
+            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+        ),
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => quantity_references_revealed(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_references_revealed),
+        _ => false,
+    }
+}
+
+fn condition_references_revealed(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::RevealedHasCardType { .. } => true,
+        AbilityCondition::ConditionInstead { inner } => condition_references_revealed(inner),
+        AbilityCondition::Not { condition } => condition_references_revealed(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_references_revealed)
+        }
+        _ => false,
+    }
+}
+
+fn effect_operates_on_revealed_cards(state: &GameState, effect: &Effect) -> bool {
+    if let Some(target) = effect.target_filter() {
+        if filter_operates_on_revealed_cards(state, target) {
+            return true;
+        }
+    }
+    match effect {
+        Effect::ChangeZoneAll { target, .. } => filter_operates_on_revealed_cards(state, target),
+        _ => false,
+    }
+}
+
+fn link_operates_on_revealed_cards(state: &GameState, link: &ResolvedAbility) -> bool {
+    if link.targets.iter().any(|t| match t {
+        TargetRef::Object(id) => state.revealed_cards.contains(id),
+        TargetRef::Player(_) => false,
+    }) {
+        return true;
+    }
+    if link
+        .condition
+        .as_ref()
+        .is_some_and(condition_references_revealed)
+    {
+        return true;
+    }
+    let mut quantity_found = false;
+    link.effect.for_each_quantity_expr(&mut |qty| {
+        if quantity_references_revealed(qty) {
+            quantity_found = true;
+        }
+    });
+    if quantity_found {
+        return true;
+    }
+    effect_operates_on_revealed_cards(state, &link.effect)
+}
+
+fn continuation_retains_revealed_cards(state: &GameState) -> bool {
+    state
+        .resolution_stack
+        .ability_continuations()
+        .any(|parked| {
+            super::triggers::any_reachable_link(&parked.chain, &|link| {
+                link_operates_on_revealed_cards(state, link)
+            })
+        })
+        || state.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) => {
+                batch
+                    .remaining
+                    .iter()
+                    .any(|id| state.revealed_cards.contains(id))
+                    || matches!(
+                        batch.completion,
+                        Some(BatchCompletion::RevealRestPile { .. })
+                    )
+                    || batch.library_reorder.is_some()
+            }
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().is_some_and(|p| {
+                p.remaining
+                    .iter()
+                    .any(|m| state.revealed_cards.contains(&m.object_id))
+            }),
+            _ => false,
+        })
+        || state.active_batch_delivery().is_some_and(|batch| {
+            batch
+                .remaining
+                .iter()
+                .any(|id| state.revealed_cards.contains(id))
+                || matches!(
+                    batch.completion,
+                    Some(BatchCompletion::RevealRestPile { .. })
+                )
+                || batch.library_reorder.is_some()
+        })
+}
+
+/// CR 701.20a: Whether the transient reveal set
+/// ([`GameState::revealed_cards`]) must survive the action now being applied
+/// because the pending prompt is a later step of the very instruction that
+/// revealed those cards. A revealed card "remains revealed for as long as
+/// necessary to complete the parts of the effect that card is relevant to", so
+/// the membership is kept while a prompt of that instruction is still open and
+/// dropped at the next boundary once none is.
+///
+/// The same list carries the reveal-"until" retirement paths (`zones.rs`
+/// `retire_reordered_library_reveals`): an owner-ordered placement must still
+/// find the pile it revealed when the owner's answer arrives (CR 701.20d).
+pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
+    // CR 701.20a: a reveal published while an instruction is resolving belongs
+    // to that resolution. It stays revealed while its own continuation frames
+    // still operate on the revealed cards (e.g. Charbelcher dealing damage and
+    // reordering library bottom across intervening Swans/Abundance choices).
+    // Bind reveal retention to the specific instruction that published it, not
+    // to any live resolution carrier, and clear it when that instruction completes.
+    if continuation_retains_revealed_cards(state) {
+        return true;
+    }
+    match &state.waiting_for {
+        WaitingFor::RevealChoice { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        // CR 701.20a + CR 608.2c: a reveal-dig's remainder split is a later
+        // pause in the SAME instruction — so its cards stay public across it
+        // exactly as they do across the keep selection above.
+        | WaitingFor::DigRestSplitChoice { .. }
+        // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through both
+        // the opponent's partition step and the controller's pile choice — the
+        // cards remain public while both players interact.
+        | WaitingFor::SeparatePilesChooseOpponent { .. }
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::SeparatePilesChoice { .. }
+        // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards stay
+        // in the library and remain public while the controller works through
+        // the same-named free-cast offers and the bottom-order step.
+        | WaitingFor::CastOffer {
+            kind: crate::types::game_state::CastOfferKind::Ripple { .. },
+            ..
+        }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::DigBottomOrder { .. } => true,
+        // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
+        // bottom of your library in any order" pauses for the pile's owner to
+        // arrange it, and the pile stays revealed until that arrangement is
+        // placed (Goblin Machinist, Erratic Mutation). Dropping the membership
+        // at this boundary would let the placement move a revealed card while
+        // the CR 701.20d retirement — which reads exactly this set — no longer
+        // finds it.
+        WaitingFor::EffectZoneChoice {
+            mass_library_order, ..
+        } => mass_library_order.is_some(),
+        // CR 800.4g: a substitute-arranger election is the same arrangement
+        // instruction's next prompt after the named arranger left (CR 608.2m),
+        // so it keeps the arrangement's reveal membership too.
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            purpose: crate::types::game_state::ZoneOpponentChooserPurpose::SubstituteArranger,
+            ..
+        } => state.pending_mass_library_order_choice.is_some(),
+        _ => false,
+    }
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
     action: GameAction,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
-    // Clear stale revealed_cards from the previous action.
-    // RevealTop reveals (e.g. Goblin Guide) are momentary — shown for one state update.
-    // RevealHand reveals (e.g. Thoughtseize) persist through the RevealChoice interaction.
-    // ManifestDread reveals persist through ManifestDreadChoice (cards come from WaitingFor).
-    // CR 701.20b: DigChoice reveals (reveal-dig, e.g. Satyr Wayfinder) persist through
-    // the selection — revealed cards remain public while the player chooses.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::RevealChoice { .. }
-            | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::DigChoice { .. }
-            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
-            // long as necessary to complete the parts of the effect that card
-            // is relevant to", and a reveal-dig's remainder split is a later
-            // pause in the SAME instruction — so its cards stay public across
-            // it exactly as they do across the keep selection above.
-            | WaitingFor::DigRestSplitChoice { .. }
-            // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
-            // both the opponent's partition step and the controller's pile
-            // choice — the cards remain public while both players interact.
-            | WaitingFor::SeparatePilesChooseOpponent { .. }
-            | WaitingFor::SeparatePilesPartition { .. }
-            | WaitingFor::SeparatePilesChoice { .. }
-            // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards
-            // stay in the library and remain public while the controller works
-            // through the same-named free-cast offers and the bottom-order step.
-            | WaitingFor::CastOffer {
-                kind: crate::types::game_state::CastOfferKind::Ripple { .. },
-                ..
-            }
-            | WaitingFor::RippleBottomOrder { .. }
-            | WaitingFor::RevealUntilBottomOrder { .. }
-            | WaitingFor::DigBottomOrder { .. }
-    ) && !ripple_resolution_cast_in_flight(state)
+    // Clear stale revealed_cards from the previous action, except while a
+    // pending prompt still owns the reveal (`transient_reveal_outlives_action_boundary`:
+    // RevealHand/Thoughtseize, reveal-digs, Fact or Fiction, Ripple, reveal-until
+    // bottom orders, owner-ordered library piles). RevealTop reveals (e.g.
+    // Goblin Guide) are momentary — shown for one state update.
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();
     }
@@ -16923,6 +17113,7 @@ fn apply_non_priority_pass_action(
             let pending = pending_effect.clone();
             let returned = *returned_id;
             let active_player = *player;
+            let action_event_start = events.len();
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -16966,6 +17157,18 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
+                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer (a token's or a
+                    // card's host choice) puts the Aura entrant onto the battlefield
+                    // (its entry tail was stashed behind the host prompt) and returns
+                    // without the post-action pipeline,
+                    // so its battlefield entries go to the entry gate here: held
+                    // while a co-entrant's host prompt is pending, matched once when
+                    // the last entrant has entered.
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                 }
             };
@@ -17401,6 +17604,7 @@ fn apply_non_priority_pass_action(
                 .unwrap_or_default();
             events.push(crate::types::events::GameEvent::CardsRevealed {
                 player: p,
+                occurrences: state.disclosed_occurrences(&[source]),
                 card_ids: vec![source],
                 card_names: vec![card_name],
             });
@@ -17595,6 +17799,7 @@ fn apply_non_priority_pass_action(
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+            let action_event_start = events.len();
             match engine_resolution_choices::handle_resolution_choice(
                 state,
                 waiting_for.clone(),
@@ -17602,14 +17807,32 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )? {
                 engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(waiting_for) => {
-                    if matches!(waiting_for, WaitingFor::Priority { .. })
-                        && state.game_end.is_none()
-                        && state.payment_transaction.is_none()
-                        && !state.payment_transaction_replay
-                        && state.resolving_stack_entry.is_none()
-                        && !triggers::is_pending_trigger_construction_active(state)
+                    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                        if state.game_end.is_none()
+                            && state.payment_transaction.is_none()
+                            && !state.payment_transaction_replay
+                            && state.resolving_stack_entry.is_none()
+                            && !triggers::is_pending_trigger_construction_active(state)
+                        {
+                            completed_resolution = carrier;
+                        }
+                    } else if state.pending_trigger.is_none()
+                        && state.pending_trigger_order.is_none()
                     {
-                        completed_resolution = carrier;
+                        // CR 603.6a + CR 614.12a: an answer that puts an entrant onto the
+                        // battlefield and stops on a co-entrant's prompt (a copied
+                        // "as this creature enters, choose …" answered before the next
+                        // token's copy offer) reaches no pipeline; its battlefield entries
+                        // go to the entry gate, as a replacement or copy-choice answer's do.
+                        // An answer that already collected its slice and drained it to a
+                        // trigger prompt (a pending trigger, or an ordering choice) has had
+                        // it checked, and the queued-context witnesses are gone by now.
+                        state.waiting_for = waiting_for.clone();
+                        triggers::park_entry_observer_triggers_if_paused(
+                            state,
+                            &mut events,
+                            action_event_start,
+                        );
                     }
                     waiting_for
                 }

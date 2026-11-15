@@ -204,7 +204,7 @@ fn run_clone_artillery_halo(halo_name: &str) -> (i32, i32) {
     };
     assert_eq!(player, P0, "the Halo controller names the card (CR 614.1c)");
     assert!(
-        matches!(choice_type, ChoiceType::CardName),
+        matches!(choice_type, ChoiceType::CardName { .. }),
         "expected ChoiceType::CardName, got {choice_type:?}"
     );
     runner.state_mut().all_card_names = Arc::from([halo_name.to_string()]);
