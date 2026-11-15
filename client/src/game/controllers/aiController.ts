@@ -1,6 +1,11 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import { profileForSeat, useLlmStore, type LlmState } from "../../stores/llmStore";
+import {
+  boundProfileForSeat,
+  profileForSeat,
+  useLlmStore,
+  type LlmState,
+} from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
 import { loadProviderCatalog } from "../../services/llm/catalog";
 import { reportLlmFailure } from "../../services/llm/diagnostics";
@@ -149,14 +154,13 @@ const LLM_THREAD_RESENDS = 1;
 /**
  * The provider settings an LLM seat's decisions are asked with, as one
  * comparable value: the endpoint of the profile bound to the seat (the
- * message-thread toggle included), or `null` when none is. Read without the
- * provider catalog, which a store listener cannot wait for, so a change counts
- * whether or not the profile is usable.
+ * message-thread toggle included), or `null` when none is. The profile is
+ * resolved as `profileForSeat` resolves it, but without the provider catalog,
+ * which a store listener cannot wait for, so a change counts whether or not
+ * the profile is usable.
  */
 function seatProviderSettings(state: LlmState, seatIndex: number): string | null {
-  const choice = state.seatBindings[seatIndex];
-  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
-  const profile = id ? state.profiles.find((candidate) => candidate.id === id) : undefined;
+  const profile = boundProfileForSeat(state, seatIndex);
   return profile ? JSON.stringify(endpointOf(profile)) : null;
 }
 

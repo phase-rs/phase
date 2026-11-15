@@ -455,22 +455,32 @@ export const useLlmStore = create<LlmState>()(
 );
 
 /**
- * The profile driving an AI seat, or `undefined` when the seat is heuristic.
+ * The profile bound to an AI seat, usable or not, or `undefined` when none is.
  *
  * The seat's own choice wins, including an explicit choice of the built-in
  * engine; only a seat the player never chose falls through to the default
- * opponent. This is the single authority the setup picker and the game loop
- * both read, so what the picker shows is what the game will do.
+ * opponent. It needs no provider catalog, so a store listener can resolve a
+ * seat the same way {@link profileForSeat} does.
+ */
+export function boundProfileForSeat(state: LlmState, seatIndex: number): LlmProfile | undefined {
+  const choice = state.seatBindings[seatIndex];
+  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
+  if (!id) return undefined;
+  return state.profiles.find((candidate) => candidate.id === id);
+}
+
+/**
+ * The profile driving an AI seat, or `undefined` when the seat is heuristic:
+ * the seat's bound profile ({@link boundProfileForSeat}), if it is usable.
+ * This is the single authority the setup picker and the game loop both read,
+ * so what the picker shows is what the game will do.
  */
 export function profileForSeat(
   state: LlmState,
   seatIndex: number,
   catalog: readonly LlmProviderCatalogEntry[],
 ): LlmProfile | undefined {
-  const choice = state.seatBindings[seatIndex];
-  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
-  if (!id) return undefined;
-  const profile = state.profiles.find((candidate) => candidate.id === id);
+  const profile = boundProfileForSeat(state, seatIndex);
   return isProfileUsable(profile, catalog) ? profile : undefined;
 }
 

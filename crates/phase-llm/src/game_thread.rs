@@ -56,8 +56,9 @@
 //!   replacement cannot have expired yet ([`ClockReading`]), is one the API
 //!   cannot store: its decisions are self-contained from then on, while any
 //!   other conversation still uses threads. When the clocks cannot rule the
-//!   expiry out, the conversation is recovered again instead. The seat remembers every conversation it lost or
-//!   could not store, so switching to another one and back changes neither.
+//!   expiry out, the conversation is recovered again instead. The seat
+//!   remembers every conversation it lost or could not store, so switching to
+//!   another one and back changes neither.
 //!
 //! A thread belongs to one seat of one game. Nothing in it reaches another seat
 //! or the shared game log. The owner of this memory clears it when a new game
@@ -187,11 +188,12 @@ impl Idle {
     /// Only positive evidence reads as [`Idle::WithinExpiry`]: both clocks
     /// moved forward, by amounts within [`CLOCK_AGREEMENT_MS`] of each other,
     /// and the larger, with that tolerance added, is still short of the
-    /// expiry. A sleep or a correction anywhere between the two readings, in
-    /// any of the awaits between them, leaves the clocks apart. The request
-    /// went out no earlier than it was built, and a loss is reported no
-    /// earlier than the API read the continue, so an interval the clocks agree
-    /// on errs long. Erring long costs one more create; erring short would end
+    /// expiry. A sleep anywhere between the two readings, in any of the awaits
+    /// between them, is counted by both clocks, or, where it stops the
+    /// monotonic clock, leaves them apart; a correction leaves them apart. The
+    /// request went out no earlier than it was built, and a loss is reported
+    /// no earlier than the API read the continue, so an interval the clocks
+    /// agree on errs long. Erring long costs one more create; erring short would end
     /// threading for a conversation the API can keep.
     ///
     /// Two clocks cannot see a discontinuity that moves both alike: a wall
