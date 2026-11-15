@@ -2920,9 +2920,8 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // `CounterRemoved` is deliberately NOT re-gated: a removal trigger has no
     // such consumer, and for `CounterRemoved` `batched` states the phrasing's
     // CR 603.2c granularity ("one or more" vs a singular counter), read by the
-    // per-recipient fold and by `counter_removal_fires_per_counter` in
-    // game/triggers.rs. Forcing it off would split an `Unimplemented` "one or
-    // more" removal trigger per counter.
+    // per-recipient fold in game/triggers.rs. Forcing it off would make an
+    // `Unimplemented` "one or more" removal trigger fire per removal event.
     //
     // Any non-`Unimplemented` effect keeps `def.batched = true`. At runtime, a
     // batched `CounterAdded` / `CounterRemoved` trigger fires once per recipient

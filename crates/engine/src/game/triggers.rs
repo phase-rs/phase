@@ -1581,8 +1581,7 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
 /// `lower_trigger_ir`); the removal mirror is "one or more [type] counters are
 /// removed from <subject>" (`try_parse_counter_removed`). The removal flag is
 /// never re-gated: it always states the phrasing's granularity, and the
-/// non-batched removal forms either split per counter
-/// (`counter_removal_fires_per_counter`) or fold once per batch
+/// thresholded "the last counter" form folds once per batch
 /// (`counter_removal_threshold_fires_once_per_recipient`). Under
 /// CR 603.2c a single event that places counters on
 /// several recipients "contains multiple occurrences", so the ability triggers
@@ -1609,25 +1608,6 @@ fn counter_event_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
             trig_def.mode,
             TriggerMode::CounterAdded | TriggerMode::CounterRemoved
         )
-}
-
-/// CR 603.2c + CR 122.1: a singular "Whenever a [type] counter is removed from
-/// <subject>" trigger fires once for EACH counter removed. One removal event
-/// that removes N counters contains N occurrences (Protean Hydra ruling: "If
-/// multiple +1/+1 counters are removed from Protean Hydra at once, its last
-/// ability will trigger that many times").
-///
-/// Excludes the batched "one or more" form (one firing per recipient, see
-/// `counter_event_fires_per_recipient`) and the thresholded "the last [type]
-/// counter" form (`counter_removal_threshold_fires_once_per_recipient`).
-/// `TriggerMode::CounterRemovedOnce` is a different mode and never reaches here.
-fn counter_removal_fires_per_counter(trig_def: &TriggerDefinition) -> bool {
-    trig_def.mode == TriggerMode::CounterRemoved
-        && !trig_def.batched
-        && trig_def
-            .counter_filter
-            .as_ref()
-            .is_none_or(|filter| filter.threshold.is_none())
 }
 
 /// CR 603.2c + CR 122.1 + CR 310.12b: "When the last [type] counter is removed from <subject>" (`threshold: Some(0)`)
@@ -1997,11 +1977,6 @@ fn occurrence_trigger_events(
             .into_iter()
             .collect(),
         ),
-        // CR 603.2c + CR 122.1: one removal event of N counters contains N
-        // occurrences of a singular "a [type] counter is removed" trigger.
-        TriggerMode::CounterRemoved if counter_removal_fires_per_counter(trig_def) => {
-            Some(split_counter_removed_per_counter(event))
-        }
         _ if m::listens_on_aggregate_combat_damage_done(trig_def)
             && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }) =>
         {
@@ -2282,28 +2257,6 @@ fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent
         matching_attacks,
         declaration_records_for_attackers(event, &matching_attackers),
     ))
-}
-
-/// CR 603.2c + CR 122.1: split one `CounterRemoved { count: N }` into N
-/// single-counter occurrences, one per counter removed, for the singular
-/// removal trigger class (`counter_removal_fires_per_counter`). Any other event
-/// passes through unchanged.
-fn split_counter_removed_per_counter(event: &GameEvent) -> Vec<GameEvent> {
-    let GameEvent::CounterRemoved {
-        object_id,
-        counter_type,
-        count,
-    } = event
-    else {
-        return vec![event.clone()];
-    };
-    (0..*count)
-        .map(|_| GameEvent::CounterRemoved {
-            object_id: *object_id,
-            counter_type: counter_type.clone(),
-            count: 1,
-        })
-        .collect()
 }
 
 fn contextual_batched_trigger_event(

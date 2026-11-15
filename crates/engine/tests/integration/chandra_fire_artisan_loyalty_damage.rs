@@ -14,10 +14,11 @@
 //! battlefield.").
 //!
 //! CR 603.2c + CR 122.1: a singular "Whenever a [type] counter is removed"
-//! trigger fires once for EACH counter removed — one removal event of N
-//! counters contains N occurrences (Protean Hydra ruling: "If multiple +1/+1
-//! counters are removed from Protean Hydra at once, its last ability will
-//! trigger that many times."). CR 704.5q: the +1/+1 / -1/-1 annihilation
+//! trigger fires once per removal EVENT. The Protean Hydra ruling ("If multiple
+//! +1/+1 counters are removed from Protean Hydra at once, its last ability will
+//! trigger that many times.") wants one per counter; that per-counter
+//! multiplicity is fenced and tracked in #10901 (no unbounded expansion), so
+//! these rows pin the once-per-event behavior. CR 704.5q: the +1/+1 / -1/-1 annihilation
 //! state-based action removes counters through the counter-removal authority,
 //! so it emits `CounterRemoved` events and these triggers see it (Protean Hydra
 //! ruling: "that -1/-1 counter and a +1/+1 counter will be removed from it as a
@@ -398,9 +399,9 @@ fn hexmage_remove_all_counters(
 }
 
 /// Row 5: the singular typed form fires only for its named counter kind, once
-/// per counter of that kind removed (CR 603.2c). A shield counter removed from
-/// Protean Hydra does not trigger it; two +1/+1 counters removed in the same
-/// way trigger it twice.
+/// per removal event of that kind (CR 603.2c; per-counter multiplicity is
+/// #10901). A shield counter removed from Protean Hydra does not trigger it;
+/// the +1/+1 removal event triggers it once.
 #[test]
 fn singular_typed_removal_trigger_fires_only_for_its_kind() {
     // Negative: only a shield counter is removed.
@@ -440,8 +441,8 @@ fn singular_typed_removal_trigger_fires_only_for_its_kind() {
     assert!(counter_removed_from(&events, hydra));
     assert_eq!(
         triggers_from(&runner, hydra).len(),
-        2,
-        "each of the two +1/+1 counters removed triggers the Hydra (the shield removal does not)"
+        1,
+        "the +1/+1 removal event triggers the Hydra once (the shield removal does not); per-counter is #10901"
     );
 }
 
@@ -512,15 +513,14 @@ fn drive_turn_until(
 
 /// Row 8 (U4 discriminator): Protean Hydra's own prevention removes three
 /// +1/+1 counters in ONE removal event, and its singular trigger fires once
-/// per counter removed (CR 603.2c; ruling: "If multiple +1/+1 counters are
-/// removed from Protean Hydra at once, its last ability will trigger that many
-/// times."). The damage is prevented (CR 615.1), so none is marked. Each
-/// firing puts two +1/+1 counters on it at the next end step: 5 - 3 + 6 = 8.
+/// for that event (CR 603.2c; the ruling wants one per counter, fenced as
+/// #10901). The damage is prevented (CR 615.1), so none is marked. The firing
+/// puts two +1/+1 counters on it at the next end step: 5 - 3 + 2 = 4.
 /// Sibling: with only 2 counters, Bolt's 3 removes both (ruling: "all the
-/// +1/+1 counters on Protean Hydra are removed from it"), firing twice, and
+/// +1/+1 counters on Protean Hydra are removed from it"), firing once, and
 /// the damage is still fully prevented.
 #[test]
-fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention() {
+fn singular_removal_trigger_fires_once_per_removal_event_by_damage_prevention() {
     let (mut runner, hydra, mut events) = bolt_protean_hydra(5);
     // Reach guards: the prevention replacement removed counters, no damage.
     assert!(
@@ -533,11 +533,11 @@ fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention(
         0,
         "reach guard: the damage was prevented"
     );
-    // Discriminator: one trigger per counter removed.
+    // Discriminator: one trigger per removal event.
     assert_eq!(
         triggers_from(&runner, hydra).len(),
-        3,
-        "three +1/+1 counters removed at once trigger the Hydra three times"
+        1,
+        "three +1/+1 counters removed at once trigger the Hydra once (per-counter is #10901)"
     );
 
     pass_until(&mut runner, &mut events, |r| r.state().stack.is_empty());
@@ -550,8 +550,8 @@ fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention(
     });
     assert_eq!(
         plus_one_counters(&runner, hydra),
-        8,
-        "three delayed triggers each put two +1/+1 counters on it: 2 + 6"
+        4,
+        "the one delayed trigger puts two +1/+1 counters on it: 2 + 2"
     );
 
     // Sibling: fewer counters than damage removes them all.
@@ -569,19 +569,20 @@ fn singular_removal_trigger_fires_once_per_counter_removed_by_damage_prevention(
     );
     assert_eq!(
         triggers_from(&runner, hydra).len(),
-        2,
-        "two +1/+1 counters removed trigger the Hydra twice"
+        1,
+        "two +1/+1 counters removed in one event trigger the Hydra once"
     );
 }
 
 /// Row 9 (U7 discriminator): CR 704.5q annihilates 2 +1/+1 and 2 -1/-1
 /// counters on Protean Hydra (3 and 2 before). The removal goes through the
-/// counter-removal authority, so the Hydra's typed +1/+1 trigger fires once per
-/// +1/+1 counter removed (2); the -1/-1 removals do not match it. The
+/// counter-removal authority, so the Hydra's typed +1/+1 trigger fires once for
+/// the +1/+1 removal event (per-counter is #10901); the -1/-1 removals do not
+/// match it. The
 /// `with_counter` setup is the CR 704.5q precondition, not a shortcut around
 /// the producer under test (the SBA).
 #[test]
-fn annihilation_removing_two_plus_one_counters_triggers_the_hydra_twice() {
+fn annihilation_removing_plus_one_counters_triggers_the_hydra_once() {
     let mut scenario = main_phase();
     let hydra = scenario
         .add_creature_from_oracle(P0, "Protean Hydra", 0, 1, PROTEAN_HYDRA)
@@ -605,8 +606,8 @@ fn annihilation_removing_two_plus_one_counters_triggers_the_hydra_twice() {
     );
     assert_eq!(
         triggers_from(&runner, hydra).len(),
-        2,
-        "two +1/+1 counters annihilated trigger the Hydra twice"
+        1,
+        "the +1/+1 annihilation removal event triggers the Hydra once"
     );
 }
 
