@@ -158,8 +158,17 @@ impl GameRng {
     }
 }
 
-fn default_game_number() -> u8 {
+/// The first game of a match: what a state or a log entry without a game
+/// number reads as.
+pub(super) fn default_game_number() -> u8 {
     1
+}
+
+/// Whether `game_number` is the first game's. A log entry leaves it off the
+/// wire then, so a single game and the first game of a match serialize as
+/// they did before entries named their game.
+pub(super) fn is_first_game(game_number: &u8) -> bool {
+    *game_number == default_game_number()
 }
 
 fn initial_delayed_trigger_instance_id() -> u64 {

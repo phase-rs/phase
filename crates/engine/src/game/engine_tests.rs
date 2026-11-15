@@ -83,6 +83,7 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
     GameLogEntry {
         seq,
+        game_number: 1,
         turn: 1,
         phase: Phase::PreCombatMain,
         category: LogCategory::Stack,
