@@ -12,9 +12,8 @@ use crate::game::replacement::{
 };
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, ControllerRef, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ObjectScope, ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
-    TypedFilter,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, FilterProp, ObjectScope,
+    ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
@@ -576,10 +575,35 @@ fn replacement_may_come_to_apply(
         return false;
     }
     let registry = replacement_registry();
-    let replaces = |kind: &ReplacementEvent, host: ObjectId, event: &ProposedEvent| {
+    let replaces_kind = |kind: &ReplacementEvent, host: ObjectId, event: &ProposedEvent| {
         registry
             .get(kind)
             .is_some_and(|handler| (handler.matcher)(event, host, board))
+    };
+    let replaces = |definition: &ReplacementDefinition, host: ObjectId, event: &ProposedEvent| {
+        if !replaces_kind(&definition.event, host, event) {
+            return false;
+        }
+        // Destination zone gate (CR 614.6)
+        if let (Some(dest), ProposedEvent::ZoneChange { to, .. }) =
+            (definition.destination_zone, event)
+        {
+            if *to != dest {
+                return false;
+            }
+        }
+        // Ownership gate on known objects (CR 108.3: card ownership is immutable)
+        if let Some(object_id) = event.affected_object_id() {
+            if let Some(object) = board.objects.get(&object_id) {
+                if let Some(valid_card) = &definition.valid_card {
+                    if !evaluate_ownership_filter(valid_card, host, object.owner, board, definition)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     };
     events.iter().any(|event| {
         // `instruction_writes` records only regeneration shields, each of
@@ -587,11 +611,11 @@ fn replacement_may_come_to_apply(
         written.replacements.iter().any(|kind| {
             event
                 .affected_object_id()
-                .is_some_and(|host| replaces(kind, host, event))
+                .is_some_and(|host| replaces_kind(kind, host, event))
         }) || active_replacements(board)
-            .any(|(_, object, definition)| replaces(&definition.event, object.id, event))
+            .any(|(_, object, definition)| replaces(definition, object.id, event))
             || live_floating_replacements(board)
-                .any(|(host, definition)| replaces(&definition.event, host, event))
+                .any(|(host, definition)| replaces(definition, host, event))
     })
 }
 
@@ -790,55 +814,27 @@ fn replacement_valid_card_admits_library_owner(
     evaluate_ownership_filter(valid_card, host, library_owner, board, definition)
 }
 
-/// Check if a `ControllerRef` admits the given `owner` as the owner of the
-/// affected card. This mirrors the logic in `filter::owned_axis_admits` (the
-/// single authority for `FilterProp::Owned` evaluation) but operates with the
-/// data available in stack reach: the replacement's host object (for
-/// host-relative refs like `You`) and the replacement definition's
-/// `source_controller` (for floating replacements where the host is the
-/// sentinel `ObjectId(0)`).
-fn controller_ref_admits_owner(
-    controller: &ControllerRef,
-    host: ObjectId,
-    card_owner: PlayerId,
-    board: &GameState,
-    definition: &ReplacementDefinition,
-) -> bool {
-    // Resolve the source controller for this replacement. For object-hosted
-    // replacements, the host object's controller is the source. For floating
-    // replacements (host == ObjectId(0)), the definition's `source_controller`
-    // carries the installer's controller.
-    let source_controller = board
-        .objects
-        .get(&host)
-        .map(|obj| obj.controller)
-        .or(definition.source_controller);
-
-    match controller {
-        // CR 109.5: "you" means the source controller.
-        ControllerRef::You => source_controller == Some(card_owner),
-        // CR 102.3: an opponent is a player not on the source controller's
-        // team. This arm admits any living player other than the source
-        // controller, matching `filter::owned_axis_admits`. This is a relation,
-        // not a single player — in multiplayer there are multiple opponents.
-        ControllerRef::Opponent => {
-            source_controller.is_some()
-                && source_controller != Some(card_owner)
-                && crate::game::players::is_alive(board, card_owner)
-        }
-        // Other controller refs are not relevant for ownership constraints on
-        // hidden library cards (they require event/ability context that stack
-        // reach doesn't have). Treat them as non-constraining.
-        _ => true,
-    }
-}
-
 fn evaluate_ownership_filter(
     filter: &TargetFilter,
     host: ObjectId,
     card_owner: PlayerId,
     board: &GameState,
     definition: &ReplacementDefinition,
+) -> bool {
+    let source_controller = board
+        .objects
+        .get(&host)
+        .map(|obj| obj.controller)
+        .or(definition.source_controller);
+    let source_ctx = crate::game::filter::SourceContext::for_controller(host, source_controller);
+    evaluate_ownership_filter_inner(filter, &source_ctx, card_owner, board)
+}
+
+fn evaluate_ownership_filter_inner(
+    filter: &TargetFilter,
+    source_ctx: &crate::game::filter::SourceContext<'_>,
+    card_owner: PlayerId,
+    board: &GameState,
 ) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => {
@@ -848,8 +844,9 @@ fn evaluate_ownership_filter(
             for prop in properties {
                 if let FilterProp::Owned { controller } = prop {
                     has_owned = true;
-                    if controller_ref_admits_owner(controller, host, card_owner, board, definition)
-                    {
+                    if crate::game::filter::owned_axis_admits(
+                        board, source_ctx, controller, card_owner,
+                    ) {
                         return true;
                     }
                 }
@@ -862,16 +859,16 @@ fn evaluate_ownership_filter(
             // All sub-filters must admit
             filters
                 .iter()
-                .all(|f| evaluate_ownership_filter(f, host, card_owner, board, definition))
+                .all(|f| evaluate_ownership_filter_inner(f, source_ctx, card_owner, board))
         }
         TargetFilter::Or { filters } => {
             // At least one sub-filter must admit
             filters
                 .iter()
-                .any(|f| evaluate_ownership_filter(f, host, card_owner, board, definition))
+                .any(|f| evaluate_ownership_filter_inner(f, source_ctx, card_owner, board))
         }
         TargetFilter::Not { filter } => {
-            !evaluate_ownership_filter(filter, host, card_owner, board, definition)
+            !evaluate_ownership_filter_inner(filter, source_ctx, card_owner, board)
         }
         TargetFilter::SelfRef => false, // Already excluded by caller
         _ => true, // Other filters don't constrain ownership for hidden library cards

@@ -9,6 +9,8 @@
 use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityKind, Effect, TargetRef};
+
+const P2: PlayerId = PlayerId(2);
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -774,27 +776,31 @@ fn cellar_door_stack_reach_reads_no_hidden_library_membership() {
 /// floating redirect of cards put into its activator's graveyard.
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
-/// Cellar Door on the stack targeting P1, whose bottom card is a creature,
+/// Cellar Door on the stack targeting `target_player`, whose bottom card is a creature,
 /// with P1's Magus of the Will on the battlefield. When `activate_magus`, P0
 /// first passes priority and P1 activates Magus, which resolves before P0
 /// activates Cellar Door. Returns the runner, Cellar Door, and the bottom card.
-fn stage_cellar_door_under_magus(activate_magus: bool) -> (GameRunner, ObjectId, ObjectId) {
+fn stage_cellar_door_under_magus(
+    activate_magus: bool,
+    target_player: TargetPlayer,
+) -> (GameRunner, ObjectId, ObjectId) {
     let mut magus = None;
-    let (mut runner, cellar_door, bottom, target) = stage_cellar_door_with(true, 1, |scenario| {
-        scenario.with_mana_pool(
-            P1,
-            vec![
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-                ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
-            ],
-        );
-        magus = Some(
-            scenario
-                .add_creature_from_oracle(P1, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
-                .id(),
-        );
-    });
+    let (mut runner, cellar_door, bottom, target) =
+        stage_cellar_door_with(true, target_player, |scenario| {
+            scenario.with_mana_pool(
+                P1,
+                vec![
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+                ],
+            );
+            magus = Some(
+                scenario
+                    .add_creature_from_oracle(P1, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+                    .id(),
+            );
+        });
     let magus = magus.expect("Magus of the Will is staged");
     if activate_magus {
         runner
@@ -887,37 +893,39 @@ fn stage_cellar_door_under_magus_targeting_controller(
     (runner, cellar_door, bottom)
 }
 
-/// CR 611.2a + CR 614.1a + CR 614.6: a resolved Magus of the Will leaves no
-/// permanent behind, only a floating redirect, yet it still exiles the card
-/// Cellar Door moves out of its activator's library. Stack reach reads that
-/// floating redirect as the live resolver does, so the move answers nothing;
-/// with Magus of the Will unactivated on the battlefield it acts on the chosen
-/// player and the card reaches the graveyard.
+/// CR 611.2a + CR 614.1a + CR 614.6 + CR 109.5: a resolved Magus of the Will leaves
+/// only a floating redirect of cards put into "your graveyard", where "you" is its
+/// activator (P1). An active P1 Magus therefore redirects cards Cellar Door moves
+/// out of P1's library to exile (reach is empty), but does NOT redirect cards
+/// Cellar Door moves out of P0's library to exile (reach is [P0], delivering to
+/// P0's graveyard).
 #[test]
-fn cellar_door_stack_reach_defers_to_a_floating_graveyard_redirect() {
+fn cellar_door_stack_reach_active_p1_magus_distinguishes_controller_from_opponent() {
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(|| {
-            for activate_magus in [false, true] {
+            for (target_player, activate_magus, reach, expected_zone) in [
+                // Magus active: P0 target delivers to graveyard, P1 target redirected to exile
+                (0, true, vec![TargetRef::Player(P0)], Zone::Graveyard),
+                (1, true, Vec::new(), Zone::Exile),
+                // Magus unactivated: both targets deliver to graveyard
+                (0, false, vec![TargetRef::Player(P0)], Zone::Graveyard),
+                (1, false, vec![TargetRef::Player(P1)], Zone::Graveyard),
+            ] {
                 let (mut runner, cellar_door, bottom) =
-                    stage_cellar_door_under_magus(activate_magus);
-                let (reach, zone) = if activate_magus {
-                    (Vec::new(), Zone::Exile)
-                } else {
-                    (vec![TargetRef::Player(P1)], Zone::Graveyard)
-                };
+                    stage_cellar_door_under_magus(activate_magus, target_player);
                 assert_eq!(
                     mill_node_reach(&runner, cellar_door),
                     reach,
-                    "Magus of the Will activated: {activate_magus}"
+                    "target_player: {target_player}, activate_magus: {activate_magus}"
                 );
 
                 // The live resolver agrees.
                 runner.advance_until_stack_empty();
                 assert_eq!(
                     runner.state().objects[&bottom].zone,
-                    zone,
-                    "Magus of the Will activated: {activate_magus}"
+                    expected_zone,
+                    "target_player: {target_player}, activate_magus: {activate_magus}"
                 );
                 assert!(runner.state().stack.is_empty());
                 assert!(matches!(
@@ -960,6 +968,106 @@ fn cellar_door_stack_reach_defers_to_floating_redirect_targeting_controller() {
                     runner.state().objects[&bottom].zone,
                     zone,
                     "Magus of the Will activated: {activate_magus}"
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the test thread must not panic");
+}
+
+/// Verbatim printed Oracle text (Scryfall): its static ability redirects cards
+/// put into an opponent's graveyard to exile.
+const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+
+/// Cellar Door on the stack in a three-player game, with P0 controlling Leyline
+/// of the Void and targeting `target`. Returns the runner, Cellar Door, and the
+/// target's bottom card.
+fn stage_cellar_door_under_three_player_leyline(
+    target: PlayerId,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.add_enchantment_from_oracle(P0, "Leyline of the Void", LEYLINE_OF_THE_VOID);
+    let cellar_door = scenario
+        .add_artifact_from_oracle(P0, "Cellar Door", CELLAR_DOOR)
+        .id();
+
+    scenario.add_creature_from_oracle(P0, "P0 Creature", 2, 2, "Grizzly Bears");
+    scenario.add_creature_from_oracle(P1, "P1 Creature", 2, 2, "Grizzly Bears");
+    scenario.add_creature_from_oracle(P2, "P2 Creature", 2, 2, "Grizzly Bears");
+
+    let bottom_p0 = scenario
+        .add_spell_to_library_top(P0, BOTTOM_CREATURE, true)
+        .as_creature()
+        .id();
+    let bottom_p1 = scenario
+        .add_spell_to_library_top(P1, BOTTOM_CREATURE, true)
+        .as_creature()
+        .id();
+    let bottom_p2 = scenario
+        .add_spell_to_library_top(P2, BOTTOM_CREATURE, true)
+        .as_creature()
+        .id();
+
+    let target_bottom = match target {
+        P0 => bottom_p0,
+        P1 => bottom_p1,
+        _ => bottom_p2,
+    };
+
+    let mut runner = scenario.build();
+    announce_cellar_door(&mut runner, cellar_door, target);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    (runner, cellar_door, target_bottom)
+}
+
+/// CR 102.3 + CR 614.6: In a three-player game, P0's opponents are P1 and P2.
+/// P0's Leyline of the Void ("an opponent's graveyard") must cover both P1 and
+/// P2 (delivering their bottom cards to exile and answering nothing in stack reach),
+/// while excluding P0 itself (delivering P0's bottom card to graveyard and
+/// answering P0 in stack reach).
+#[test]
+fn cellar_door_stack_reach_three_player_leyline_covers_opponents_and_excludes_controller() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for (target, reach, expected_zone) in [
+                (P0, vec![TargetRef::Player(P0)], Zone::Graveyard),
+                (P1, Vec::new(), Zone::Exile),
+                (P2, Vec::new(), Zone::Exile),
+            ] {
+                let (mut runner, cellar_door, bottom) =
+                    stage_cellar_door_under_three_player_leyline(target);
+                assert_eq!(
+                    mill_node_reach(&runner, cellar_door),
+                    reach,
+                    "Leyline of the Void targeting {target:?}"
+                );
+
+                // The live resolver agrees.
+                runner.advance_until_stack_empty();
+                assert_eq!(
+                    runner.state().objects[&bottom].zone,
+                    expected_zone,
+                    "Leyline of the Void targeting {target:?}"
                 );
                 assert!(runner.state().stack.is_empty());
                 assert!(matches!(
