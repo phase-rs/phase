@@ -756,7 +756,13 @@ fn prune_player_scope_bounce_carrier(state: &GameState, pending: &mut PendingPla
 pub(crate) fn reconcile_player_scope_bounce(
     state: &mut GameState,
 ) -> PlayerScopeBounceReconciliation {
-    let Some(mut pending) = state.pending_player_scope_choice.take() else {
+    // The carrier is shared with player-scope discards; only a return carrier
+    // is this reconciler's to prune (its picks are on the battlefield, a
+    // discard's are in hand).
+    let Some(mut pending) = state
+        .pending_player_scope_choice
+        .take_if(|pending| matches!(pending.ability.effect, Effect::Bounce { .. }))
+    else {
         return PlayerScopeBounceReconciliation::Unchanged;
     };
     let source_id = pending.ability.source_id;

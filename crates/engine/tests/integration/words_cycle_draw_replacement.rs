@@ -1183,20 +1183,26 @@ fn pending_discard_prompt(runner: &GameRunner) -> (PlayerId, Vec<ObjectId>) {
     }
 }
 
-/// Three players: P0 controls Words of Waste and the drawing artifact; P1 and
-/// P2 each hold `hands` cards. The Waste draw replacement is armed and P0's
-/// draw is taken, so the first opponent's discard choice is open.
-fn waste_table(hands: [usize; 2]) -> (GameRunner, ObjectId, [Vec<ObjectId>; 2]) {
-    let mut scenario = GameScenario::new_n_player(3, 7);
+/// `N + 1` players: P0 controls Words of Waste and Archivist ("{T}: Draw a
+/// card.", a 1/1 that has been under P0's control since the turn began); each
+/// opponent P1..PN holds its `hands` count of cards, and `extra` adds any
+/// further permanents. The Waste draw replacement is armed and P0's draw is
+/// taken, so the first opponent's discard choice is open.
+fn waste_table_with<const N: usize>(
+    hands: [usize; N],
+    extra: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, [Vec<ObjectId>; N]) {
+    let mut scenario = GameScenario::new_n_player(N as u8 + 1, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let library_top = scenario.add_card_to_library_top(P0, "P0 Library Top");
     let words = scenario
         .add_enchantment_from_oracle(P0, "Words of Waste", WORDS_OF_WASTE)
         .id();
     let drawer = scenario
-        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .add_creature_from_oracle(P0, "Archivist", 1, 1, DRAW_A_CARD)
         .id();
-    let mut hand_ids: [Vec<ObjectId>; 2] = [Vec::new(), Vec::new()];
+    extra(&mut scenario);
+    let mut hand_ids: [Vec<ObjectId>; N] = std::array::from_fn(|_| Vec::new());
     for (slot, count) in hands.into_iter().enumerate() {
         let player = PlayerId(slot as u8 + 1);
         for index in 0..count {
@@ -1215,6 +1221,11 @@ fn waste_table(hands: [usize; 2]) -> (GameRunner, ObjectId, [Vec<ObjectId>; 2]) 
     resolve_stack(&mut runner);
     draw_one(&mut runner, drawer);
     (runner, library_top, hand_ids)
+}
+
+/// Three players: P1 and P2 each hold their `hands` count of cards.
+fn waste_table(hands: [usize; 2]) -> (GameRunner, ObjectId, [Vec<ObjectId>; 2]) {
+    waste_table_with(hands, |_| {})
 }
 
 fn in_graveyard(runner: &GameRunner, object: ObjectId) -> bool {
@@ -1334,6 +1345,173 @@ fn words_of_waste_chooser_concedes_and_the_earlier_pick_still_discards() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+/// CR 104.3a + CR 800.4a + CR 101.4 + CR 701.9a: four players. P1 has chosen,
+/// and P3 (not yet asked) concedes while P2's prompt is open. P1's collected
+/// pick, still in P1's hand, stays collected across the departure; once P2
+/// answers, both survivors' picks are discarded together and P3 is never asked.
+///
+/// REVERT-FAILING: with the return-carrier reconciler pruning the shared
+/// carrier, P1's in-hand pick is dropped as "not on the battlefield" and stays
+/// in hand after P2 answers.
+#[test]
+fn words_of_waste_noncurrent_chooser_concedes_and_the_earlier_pick_still_discards() {
+    let (mut runner, library_top, [p1, p2, _]) = waste_table_with([2, 2, 2], |_| {});
+    let p3 = PlayerId(3);
+    let p1_pick = p1[0];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p1_pick],
+        })
+        .expect("P1's choice is accepted");
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, PlayerId(2), "reach-guard: P2 is choosing");
+    assert!(
+        runner
+            .state()
+            .pending_player_scope_choice
+            .as_ref()
+            .is_some_and(|carrier| carrier.remaining_players.contains(&p3)),
+        "reach-guard: P3 waits in the parked chooser queue before conceding"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: p3 })
+        .expect("P3 concedes while P2 is choosing");
+
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, PlayerId(2), "P2's open prompt still stands");
+    let carrier = runner
+        .state()
+        .pending_player_scope_choice
+        .as_ref()
+        .expect("the discard carrier is still open while P2 chooses");
+    assert!(
+        !carrier.remaining_players.contains(&p3),
+        "the departed seat leaves the parked chooser queue"
+    );
+    assert_eq!(
+        carrier.selections.len(),
+        1,
+        "P1's collected pick survives P3's departure"
+    );
+    assert!(in_hand(&runner, p1_pick), "the pick is not yet discarded");
+
+    let p2_pick = p2[1];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p2_pick],
+        })
+        .expect("P2's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(
+        in_graveyard(&runner, p1_pick),
+        "P1's collected pick discards"
+    );
+    assert!(in_graveyard(&runner, p2_pick), "P2's pick discards");
+    assert!(in_hand(&runner, p1[1]) && in_hand(&runner, p2[0]));
+    assert!(!in_hand(&runner, library_top), "the draw stays replaced");
+    assert!(runner.state().pending_player_scope_choice.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+}
+
+const LIBRARY_OF_LENG: &str = "You have no maximum hand size.\nIf an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.";
+
+/// CR 101.4 + CR 701.9a + CR 614.11a: P1 controls Library of Leng. Both
+/// opponents choose, then the collected discards are delivered; P1's discard
+/// pauses on Leng's optional replacement. Answering it with the option whose
+/// description is `answer` (Leng's replacement text, or "Decline") finishes
+/// the delivery and the replaced draw before priority. Returns the runner and
+/// P1's pick.
+fn waste_discard_paused_by_library_of_leng(answer: &str) -> (GameRunner, ObjectId) {
+    let (mut runner, library_top, [p1, p2]) = waste_table_with([2, 2], |scenario| {
+        scenario.add_artifact_from_oracle(P1, "Library of Leng", LIBRARY_OF_LENG);
+    });
+    let (p1_pick, p2_pick) = (p1[0], p2[1]);
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, P1, "reach-guard: P1 chooses first");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p1_pick],
+        })
+        .expect("P1's choice is accepted");
+    let (chooser, _) = pending_discard_prompt(&runner);
+    assert_eq!(chooser, PlayerId(2));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p2_pick],
+        })
+        .expect("P2's choice is accepted");
+
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the collected discard must pause on Library of Leng, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "Leng's controller makes the choice");
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.description == answer)
+        .unwrap_or_else(|| panic!("no {answer:?} option among {candidates:?}"));
+    assert!(
+        in_hand(&runner, p1_pick),
+        "P1's pick has not moved while the replacement choice is open"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the replacement choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_graveyard(&runner, p2_pick), "P2's pick discards");
+    assert!(in_hand(&runner, p1[1]) && in_hand(&runner, p2[0]));
+    assert!(
+        !in_hand(&runner, library_top),
+        "the draw stays replaced: P0 draws nothing"
+    );
+    assert!(
+        runner.state().pending_player_scope_choice.is_none(),
+        "no carrier is stranded once the replaced draw finishes"
+    );
+    assert!(runner.state().pending_discard_batch.is_none());
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    (runner, p1_pick)
+}
+
+/// Accepting Leng puts P1's discarded card on top of P1's library.
+///
+/// REVERT-FAILING (this and the declining sibling): if the delivery's
+/// replacement pause is reported as a completed discard, the parent draw's
+/// completion hands P0 priority over Leng's prompt, so P1 is never asked.
+#[test]
+fn words_of_waste_discard_paused_by_library_of_leng_accepted_goes_to_library_top() {
+    let leng_replacement = LIBRARY_OF_LENG.lines().last().expect("Leng has two lines");
+    let (runner, p1_pick) = waste_discard_paused_by_library_of_leng(leng_replacement);
+    assert_eq!(runner.state().objects[&p1_pick].zone, Zone::Library);
+    assert_eq!(
+        runner.state().players[1].library.front(),
+        Some(&p1_pick),
+        "the accepted card is on top of P1's library"
+    );
+}
+
+/// Declining Leng puts P1's discarded card into P1's graveyard.
+#[test]
+fn words_of_waste_discard_paused_by_library_of_leng_declined_goes_to_graveyard() {
+    let (runner, p1_pick) = waste_discard_paused_by_library_of_leng("Decline");
+    assert!(in_graveyard(&runner, p1_pick));
 }
 
 /// CR 504.1 + CR 805.4b + CR 614.11a: Words of Wind replaces the active
