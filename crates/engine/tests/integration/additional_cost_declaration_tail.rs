@@ -3271,8 +3271,7 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
             .add_enchantment_from_oracle(P0, "Ensoul Artifact", "Enchant artifact\nEnchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.")
             .with_subtypes(vec!["Aura"])
             .id();
-        let mut victims = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
-        victims.push(food);
+        let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
         scenario.add_enchantment_from_oracle(P0, "Darkest Hour", "All creatures are black.");
         scenario.add_enchantment_from_oracle(P1, "Humility", HUMILITY);
         if pizza {
@@ -3286,6 +3285,8 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
         let floating = if pizza { 2 } else { 3 };
         scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, floating)]));
         let mut runner = scenario.build();
+        // CR 111.10b: a Food token, controlled since the previous turn.
+        runner.state_mut().objects.get_mut(&food).unwrap().is_token = true;
         runner
             .state_mut()
             .objects
@@ -3345,13 +3346,15 @@ fn granted_self_sacrifice_surviving_humility_is_fenced() {
                 &mut runner,
                 demon,
                 &Answers {
-                    picks: victims.clone(),
+                    picks: vec![corpses[0], corpses[1], food],
                     ..ACCEPT_BOTH
                 },
             );
             assert_cast_completes(&runner, demon, &trail);
             assert_eq!((life(&runner), pool(&runner)), (14, 0));
-            assert!(victims.iter().all(|&v| zone(&runner, v) == Zone::Graveyard));
+            assert!(corpses.iter().all(|&c| zone(&runner, c) == Zone::Graveyard));
+            // CR 704.5d: the sacrificed Food token ceased to exist.
+            assert!(!runner.state().objects.contains_key(&food));
         }
     }
 }
@@ -3614,7 +3617,7 @@ fn add_krrik_grant(scenario: &mut GameScenario) {
     }
 }
 
-const PHYREXIAN_SCUTA: &str = "Kicker\u{2014}Pay 3 life. (You may pay 3 life in addition to any other costs as you cast this spell.)\nIf this creature was kicked, it enters with six +1/+1 counters on it.";
+const PHYREXIAN_SCUTA: &str = "Kicker\u{2014}Pay 3 life. (You may pay 3 life in addition to any other costs as you cast this spell.)\nIf this creature was kicked, it enters with two +1/+1 counters on it.";
 
 /// CR 119.4 + CR 601.2h: Phyrexian Scuta's kicker pays 3 life, and K'rrik pays
 /// its {B} with 2 more. At 4 life the kicker isn't offered and the cast pays
