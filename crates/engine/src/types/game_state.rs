@@ -39089,6 +39089,10 @@ impl GameState {
             resolving_continuation_attach_host: _,
             resolving_player_scope_tail: _,
             resolving_created_token_seats: _,
+            // Execution-local instruction scopes (buffer indices and an effect kind only),
+            // empty between actions and excluded from equality:
+            instruction_scopes: _,
+            last_closed_instruction: _,
             merged_card_component_route: _,
             leaving_game_departure: _,
             resolution_coin_flip: _,
