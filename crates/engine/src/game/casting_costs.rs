@@ -1712,7 +1712,7 @@ fn reserved_alternative_verdict(
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
     let reach = super::mana_sources::player_mana_ability_reach(state, player);
-    if reach.consumes_other {
+    if reach.other_objects == super::mana_sources::OtherObjectUse::Consumes {
         return ReservationVerdict::ConsumerFuelled;
     }
     let totals = super::casting::cast_mana_totals(
@@ -1740,8 +1740,9 @@ fn reserved_alternative_verdict(
     if legs.is_empty() {
         return ReservationVerdict::Witness;
     }
-    let mana_sources: HashSet<ObjectId> = if reach.uses_other
-        || reach.board_dependent
+    let mana_sources: HashSet<ObjectId> = if reach.other_objects
+        != super::mana_sources::OtherObjectUse::None
+        || reach.production == super::mana_sources::ProductionAmount::BoardDependent
         || state.layers_dirty.is_dirty()
         || super::casting::spell_tap_payment_mode(state, player, object_id).is_some()
     {
@@ -1831,6 +1832,23 @@ fn next_combination(cursor: &mut [usize], n: usize) -> bool {
     true
 }
 
+/// The search's necessary-condition probe: whether `cost` is payable for
+/// `object_id` by the castability authority with nothing held.
+#[cfg(feature = "test-support")]
+pub fn alternative_mana_payable_with_nothing_held(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    super::casting::reserved_assignment_payable(
+        state,
+        player,
+        object_id,
+        cost,
+        &super::casting::PaymentReservation::NONE,
+    )
+}
 /// The reservation search's verdict on `object_id`'s Oracle alternative, for
 /// tests that assert an offer the search left to the payment.
 #[cfg(feature = "test-support")]

@@ -243,11 +243,12 @@ pub use bracket_estimate::{
 // this exposes exactly those functions from it. The governing rule annotations
 // live on the function definitions in `casting_costs.rs`, not on this
 // visibility re-export.
-pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 #[cfg(feature = "test-support")]
 pub use casting_costs::{
-    oracle_alternative_reservation_verdict, ReservationVerdict, RESERVATION_PROBE_BUDGET,
+    alternative_mana_payable_with_nothing_held, oracle_alternative_reservation_verdict,
+    ReservationVerdict, RESERVATION_PROBE_BUDGET,
 };
+pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,

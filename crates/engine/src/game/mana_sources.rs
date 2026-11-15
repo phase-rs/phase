@@ -1410,17 +1410,32 @@ fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Sacrifice(_)))
 }
 
-/// CR 605.1a + CR 118.3: how the mana abilities a player controls reach objects
+/// CR 605.1a + CR 118.3: the most a player's mana abilities do with objects
 /// other than their own source, for holding objects for another leg of a cost.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ManaAbilityReach {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OtherObjectUse {
+    #[default]
+    None,
+    /// Some cost taps another object (Springleaf Drum).
+    Taps,
     /// Some cost sacrifices, exiles or returns another object (Ashnod's Altar,
     /// Krark-Clan Ironworks, Priest of Yawgmoth).
-    pub(crate) consumes_other: bool,
-    /// Some cost taps or consumes another object (adds Springleaf Drum).
-    pub(crate) uses_other: bool,
-    /// Some production amount reads the game state (Gaea's Cradle class).
-    pub(crate) board_dependent: bool,
+    Consumes,
+}
+
+/// CR 106.1: whether some mana ability's amount reads the game state (Gaea's
+/// Cradle class).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ProductionAmount {
+    #[default]
+    Fixed,
+    BoardDependent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ManaAbilityReach {
+    pub(crate) other_objects: OtherObjectUse,
+    pub(crate) production: ProductionAmount,
 }
 
 pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> ManaAbilityReach {
@@ -1442,20 +1457,26 @@ pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> 
             }
             _ => false,
         });
-        reach.consumes_other |= consumes;
-        reach.uses_other |= consumes
-            || cost_has_component(&ability.cost, |c| {
-                matches!(c, AbilityCost::TapCreatures { .. })
-            });
+        let other_objects = if consumes {
+            OtherObjectUse::Consumes
+        } else if cost_has_component(&ability.cost, |c| {
+            matches!(c, AbilityCost::TapCreatures { .. })
+        }) {
+            OtherObjectUse::Taps
+        } else {
+            OtherObjectUse::None
+        };
+        reach.other_objects = reach.other_objects.max(other_objects);
         if let Effect::Mana { produced, .. } = &*ability.effect {
             produced.for_each_quantity_expr(&mut |quantity| {
-                reach.board_dependent |= !matches!(quantity, QuantityExpr::Fixed { .. });
+                if !matches!(quantity, QuantityExpr::Fixed { .. }) {
+                    reach.production = ProductionAmount::BoardDependent;
+                }
             });
         }
     }
     reach
 }
-
 /// CR 605.3a + CR 701.21a: whether `object_id` has a mana ability `player` can
 /// activate now that pays by sacrificing that object itself (Gold; a granted
 /// "Sacrifice this land: Add {B}.").

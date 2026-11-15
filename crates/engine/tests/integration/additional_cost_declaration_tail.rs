@@ -3247,99 +3247,114 @@ fn humility_on_the_tapped_artifact_keeps_the_alternative() {
     assert!(runner.state().objects[&artifacts[0]].tapped);
 }
 
-/// Darksteel Citadel enchanted by Ensoul Artifact under Humility, then given
-/// Rain of Filth's "Sacrifice this land: Add {B}." (a later timestamp): the
-/// prohibition is gone and the self-sacrifice survives, so the Citadel can't
-/// be held; Zahid with {2}{U} can't be cast. Control: no Rain, {3}{U}.
+/// A Food token enchanted by Ensoul Artifact and made black by Darkest Hour, two
+/// black Walking Corpses, then Humility, then Ninja Pizza ("Foods you control
+/// have '{T}, Sacrifice this artifact: Add one mana of any color.'", a later
+/// timestamp), with Demon of Death's Gate under Trinisphere and {2}: the Food
+/// can't both be the third sacrifice and make the third mana, and Humility
+/// removed the prohibition that would hold it, so the fence refuses.
+/// Control: no Ninja Pizza, {3}.
 #[test]
 fn granted_self_sacrifice_surviving_humility_is_fenced() {
-    for rain in [true, false] {
+    for pizza in [true, false] {
         let mut scenario = board();
-        let citadel = scenario
-            .add_land_from_oracle(P0, "Darksteel Citadel", "Indestructible\n{T}: Add {C}.")
-            .as_artifact()
+        add_trinisphere(&mut scenario);
+        let food = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Food",
+                "{2}, {T}, Sacrifice this artifact: You gain 3 life.",
+            )
+            .with_subtypes(vec!["Food"])
             .id();
         let ensoul = scenario
             .add_enchantment_from_oracle(P0, "Ensoul Artifact", "Enchant artifact\nEnchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.")
             .with_subtypes(vec!["Aura"])
             .id();
+        let mut victims = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
+        victims.push(food);
+        scenario.add_enchantment_from_oracle(P0, "Darkest Hour", "All creatures are black.");
         scenario.add_enchantment_from_oracle(P1, "Humility", HUMILITY);
-        let rain_spell = scenario
-            .add_spell_to_hand_from_oracle(
+        if pizza {
+            scenario.add_enchantment_from_oracle(
                 P0,
-                "Rain of Filth",
-                true,
-                "Until end of turn, lands you control gain \"Sacrifice this land: Add {B}.\"",
-            )
-            .with_mana_cost(cost(0, &[ManaCostShard::Black]))
-            .id();
-        let zahid = add_zahid(&mut scenario);
-        let colorless = if rain { 2 } else { 3 };
-        scenario.with_mana_pool(
-            P0,
-            mana(&[
-                (ManaType::Black, 1),
-                (ManaType::Colorless, colorless),
-                (ManaType::Blue, 1),
-            ]),
-        );
+                "Ninja Pizza",
+                "Foods you control have \"{T}, Sacrifice this artifact: Add one mana of any color.\"",
+            );
+        }
+        let demon = add_demon(&mut scenario);
+        let floating = if pizza { 2 } else { 3 };
+        scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, floating)]));
         let mut runner = scenario.build();
         runner
             .state_mut()
             .objects
             .get_mut(&ensoul)
             .unwrap()
-            .attached_to = Some(engine::game::game_object::AttachTarget::Object(citadel));
+            .attached_to = Some(engine::game::game_object::AttachTarget::Object(food));
         runner
             .state_mut()
             .objects
-            .get_mut(&citadel)
+            .get_mut(&food)
             .unwrap()
             .attachments
             .push(ensoul);
         runner.state_mut().layers_dirty.mark_full();
-        if rain {
-            let trail = cast(&mut runner, rain_spell, &ACCEPT_BOTH);
-            assert_cast_completes(&runner, rain_spell, &trail);
-            runner.pass_both_players();
-        }
         engine::game::layers::flush_layers(runner.state_mut());
-        let citadel_mana: Vec<_> =
+        let food_obj = &runner.state().objects[&food];
+        assert!(
+            food_obj.card_types.core_types.contains(&CoreType::Creature)
+                && food_obj.color.contains(&ManaColor::Black),
+            "reach: the Food is a black creature"
+        );
+        assert!(
+            food_obj.static_definitions.iter_all().next().is_none(),
+            "reach: Humility removes statics, an injected prohibition included"
+        );
+        let food_mana =
             engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
                 .into_iter()
-                .filter(|s| s.source.object_id == citadel)
-                .collect();
-        assert!(
-            runner.state().objects[&citadel]
-                .card_types
-                .core_types
-                .contains(&CoreType::Creature),
-            "reach: the Citadel is a creature"
-        );
+                .filter(|s| s.source.object_id == food)
+                .count();
         assert_eq!(
-            citadel_mana.len(),
-            usize::from(rain),
-            "reach: only Rain's grant makes mana"
+            food_mana,
+            usize::from(pizza),
+            "reach: only Pizza's grant makes mana"
         );
 
-        if rain {
+        if pizza {
+            assert!(
+                engine::game::alternative_mana_payable_with_nothing_held(
+                    runner.state(),
+                    P0,
+                    demon,
+                    &ManaCost::generic(3)
+                ),
+                "reach: the floored {{3}} is payable with nothing held"
+            );
             assert_eq!(
-                verdict(&runner, zahid),
+                verdict(&runner, demon),
                 engine::game::ReservationVerdict::Rejected
             );
-            assert!(!offered(&runner, zahid));
-            let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
+            assert!(!offered(&runner, demon));
+            let trail = cast(&mut runner, demon, &ACCEPT_BOTH);
             assert!(trail.refused, "{:?}", trail.prompts);
-            assert_eq!((zone(&runner, zahid), pool(&runner)), (Zone::Hand, 3));
+            assert_eq!((zone(&runner, demon), life(&runner)), (Zone::Hand, 20));
         } else {
-            let trail = cast(&mut runner, zahid, &ACCEPT_BOTH);
-            assert_cast_completes(&runner, zahid, &trail);
-            assert!(runner.state().objects[&citadel].tapped);
-            assert_eq!(pool(&runner), 1, "Rain's {{B}} is left");
+            let trail = cast(
+                &mut runner,
+                demon,
+                &Answers {
+                    picks: victims.clone(),
+                    ..ACCEPT_BOTH
+                },
+            );
+            assert_cast_completes(&runner, demon, &trail);
+            assert_eq!((life(&runner), pool(&runner)), (14, 0));
+            assert!(victims.iter().all(|&v| zone(&runner, v) == Zone::Graveyard));
         }
     }
 }
-
 /// Everflowing Chalices cast for real with multikicker `kicks`, then Zahid
 /// with Defiler of Dreams: one Chalice is tapped for the leg, the other pays
 /// the {3}.
@@ -3484,49 +3499,62 @@ fn reservation_search_past_its_budget_keeps_the_offer() {
     assert_eq!(runner.waiting_for_kind(), "OptionalCostChoice");
 }
 
-/// CR 118.9a: Fist of Suns' grant and Bringer's own {W}{U}{B}{R}{G} are one
-/// election, offered once; As Foretold's {0} follows. Declining both reaches the
-/// printed cost, which can't be paid. Each Choice survives a save and reload.
+/// CR 118.9a: Bringer's own {W}{U}{B}{R}{G} and Fist of Suns' grant are one
+/// election, offered once; with As Foretold first in scan order, its {0}
+/// follows instead. Each Choice survives a save and reload; declining every
+/// one reaches the printed cost: {7}{B} with the Defiler, payable only from
+/// {W}{U}{B}{R}{G} and {3}.
 #[test]
 fn declining_every_alternative_reaches_the_printed_cost_once_each() {
-    let mut scenario = board();
-    add_defiler_of_flesh(&mut scenario);
-    let foretold = scenario
-        .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
-        .id();
-    scenario.with_counter(foretold, engine::types::counter::CounterType::Time, 9);
-    scenario.add_artifact_from_oracle(P0, "Fist of Suns", FIST_OF_SUNS);
-    let bringer = add_bringer(&mut scenario);
-    scenario.with_mana_pool(P0, mana(&WURG));
-    let mut runner = scenario.build();
-    let first = cast_action(&runner, bringer);
-    runner.act(first).expect("the cast starts");
-    runner
-        .act(GameAction::DecideOptionalCost { pay: true })
-        .expect("accept the Defiler");
+    for foretold in [true, false] {
+        let mut scenario = board();
+        add_defiler_of_flesh(&mut scenario);
+        if foretold {
+            let foretold = scenario
+                .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+                .id();
+            scenario.with_counter(foretold, engine::types::counter::CounterType::Time, 9);
+        }
+        scenario.add_artifact_from_oracle(P0, "Fist of Suns", FIST_OF_SUNS);
+        let bringer = add_bringer(&mut scenario);
+        let mut pool_kinds = WURG.to_vec();
+        if !foretold {
+            pool_kinds.extend([(ManaType::Black, 1), (ManaType::Colorless, 3)]);
+        }
+        scenario.with_mana_pool(P0, mana(&pool_kinds));
+        let mut runner = scenario.build();
+        let first = cast_action(&runner, bringer);
+        runner.act(first).expect("the cast starts");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("accept the Defiler");
 
-    let mut offers = Vec::new();
-    while let Some(offer) = offered_alternative(&runner) {
-        offers.push(offer);
-        runner = round_trip(&runner);
-        assert_eq!(offered_alternative(&runner), offers.last().cloned());
-        if runner
-            .act(GameAction::DecideOptionalCost { pay: false })
-            .is_err()
-        {
-            break;
+        let mut offers = Vec::new();
+        for _ in 0..4 {
+            let Some(offer) = offered_alternative(&runner) else {
+                break;
+            };
+            offers.push(offer);
+            runner = round_trip(&runner);
+            assert_eq!(offered_alternative(&runner), offers.last().cloned());
+            if runner
+                .act(GameAction::DecideOptionalCost { pay: false })
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        if foretold {
+            assert_eq!(offers, [wubrg_cost(), ManaCost::zero()]);
+            assert_eq!((zone(&runner, bringer), pool(&runner)), (Zone::Hand, 4));
+        } else {
+            assert_eq!(offers, [wubrg_cost()], "one election, offered once");
+            assert_eq!(zone(&runner, bringer), Zone::Stack);
+            assert_eq!((life(&runner), pool(&runner)), (18, 0));
         }
     }
-
-    assert_eq!(offers, [wubrg_cost(), ManaCost::zero()]);
-    assert_eq!(
-        zone(&runner, bringer),
-        Zone::Hand,
-        "the printed cost is unpayable"
-    );
-    assert_eq!(pool(&runner), 4);
 }
-
 /// CR 119.4 + CR 601.2h: Enslave targeting Terror of the Peaks costs 3 more
 /// life, the Defiler 2 and K'rrik's {B} 2: 7 life. At 5 it can't be cast; at 8
 /// it is, for exactly 7.
@@ -3536,11 +3564,7 @@ fn imposed_life_and_defiler_life_are_held_from_life_for_mana() {
         let mut scenario = board();
         scenario.with_life(P0, start);
         add_defiler_of_flesh(&mut scenario);
-        let krrik = parse_oracle_text(KRRIK_GRANT, "K'rrik", &[], &["Creature".into()], &[]);
-        let mut grant = scenario.add_creature(P0, "K'rrik, Son of Yawgmoth", 2, 2);
-        for s in krrik.statics {
-            grant.with_static_definition(s);
-        }
+        add_krrik_grant(&mut scenario);
         let terror = scenario
             .add_creature(P1, "Terror of the Peaks", 5, 4)
             .from_oracle_text_with_keywords(&["Flying"], TERROR_OF_THE_PEAKS)
@@ -3577,5 +3601,50 @@ fn imposed_life_and_defiler_life_are_held_from_life_for_mana() {
                 .is_err());
             assert_eq!((zone(&runner, enslave), life(&runner)), (Zone::Hand, 5));
         }
+    }
+}
+
+/// K'rrik, Son of Yawgmoth's "For each {B} in a cost, you may pay 2 life
+/// rather than pay that mana." on P0's battlefield.
+fn add_krrik_grant(scenario: &mut GameScenario) {
+    let krrik = parse_oracle_text(KRRIK_GRANT, "K'rrik", &[], &["Creature".into()], &[]);
+    let mut grant = scenario.add_creature(P0, "K'rrik, Son of Yawgmoth", 2, 2);
+    for s in krrik.statics {
+        grant.with_static_definition(s);
+    }
+}
+
+const PHYREXIAN_SCUTA: &str = "Kicker\u{2014}Pay 3 life. (You may pay 3 life in addition to any other costs as you cast this spell.)\nIf this creature was kicked, it enters with six +1/+1 counters on it.";
+
+/// CR 119.4 + CR 601.2h: Phyrexian Scuta's kicker pays 3 life, and K'rrik pays
+/// its {B} with 2 more. At 4 life the kicker isn't offered and the cast pays
+/// {3} and 2 life; at 6 it is, and the kicked cast leaves 1.
+#[test]
+fn kicker_life_is_held_from_life_for_mana() {
+    for (start, kicked) in [(4, false), (6, true)] {
+        let mut scenario = board();
+        scenario.with_life(P0, start);
+        add_krrik_grant(&mut scenario);
+        let scuta = scenario
+            .add_creature_to_hand(P0, "Phyrexian Scuta", 3, 3)
+            .with_mana_cost(cost(3, &[ManaCostShard::Black]))
+            .with_color(vec![ManaColor::Black])
+            .from_oracle_text_with_keywords(&["Kicker"], PHYREXIAN_SCUTA)
+            .id();
+        scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 3)]));
+        let mut runner = scenario.build();
+
+        let trail = cast(
+            &mut runner,
+            scuta,
+            &Answers {
+                optional: true,
+                ..ACCEPT_BOTH
+            },
+        );
+
+        assert_cast_completes(&runner, scuta, &trail);
+        assert_eq!(trail.count("OptionalCostChoice"), usize::from(kicked));
+        assert_eq!(life(&runner), if kicked { 1 } else { 2 });
     }
 }
