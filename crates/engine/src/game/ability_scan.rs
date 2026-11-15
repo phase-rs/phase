@@ -448,6 +448,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -7341,6 +7342,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // dynamic board read — no resolution-time axis.
+        grant_chain: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);

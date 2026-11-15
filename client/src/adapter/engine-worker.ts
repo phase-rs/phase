@@ -74,6 +74,7 @@ import {
   type AiActionProposal,
   type GameAction,
   type GameEvent,
+  type LlmClockReading,
 } from "./types";
 import type {
   InteractionPreviewRequest,
@@ -151,15 +152,19 @@ type EngineRequest =
       playerId: number;
       endpointJson: string;
       historyJson: string;
+      settingsRevision: number;
+      clock: LlmClockReading;
     }
   | {
       type: "getAiActionProposalFromLlmResponse";
       id: number;
       playerId: number;
       fingerprint: string;
+      threadTurn: number | null;
       provider: string;
       status: number;
       responseBody: string;
+      clock: LlmClockReading;
     }
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
@@ -737,6 +742,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             msg.playerId,
             msg.endpointJson,
             msg.historyJson,
+            msg.settingsRevision,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;
@@ -748,9 +756,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           getAiActionProposalFromLlmResponse(
             msg.playerId,
             msg.fingerprint,
+            msg.threadTurn,
             msg.provider,
             msg.status,
             msg.responseBody,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;
