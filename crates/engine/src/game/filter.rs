@@ -8814,7 +8814,9 @@ pub fn type_filter_matches(
     // CR 406.3a: A card exiled face down has no characteristics. The card is
     // still the object a linked effect refers to, so identity and zone
     // predicates (and `Card`/`Any`, which name no characteristic) keep
-    // matching; every card-type, supertype, and subtype read fails closed.
+    // matching; every card-type and subtype read in this type authority fails
+    // closed. (`FilterProp::HasSupertype`/`NotSupertype` are a separate
+    // property path and are not part of this fence.)
     // Negation and disjunction keep their ordinary truth tables over that
     // characteristic-free reading: "noncreature" matches, and a characteristic-
     // free disjunct can still match.
@@ -16046,7 +16048,7 @@ mod tests {
     }
 
     /// CR 406.3a: a card exiled face down has no characteristics, so every
-    /// characteristic test fails closed while identity/zone predicates still
+    /// type-line test in this type authority fails closed while identity/zone predicates still
     /// see the same card. The face-up control proves the status, not exile
     /// alone, is what hides the type line.
     #[test]
