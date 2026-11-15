@@ -1,0 +1,104 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Investigate"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          "Land"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever a land you control enters, investigate.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    },
+    {
+      "mode": "Sacrificed",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutCounter",
+          "counter_type": "P1P1",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "SelfRef"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          {
+            "Subtype": "Clue"
+          }
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever you sacrifice a Clue, put a +1/+1 counter on ~.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

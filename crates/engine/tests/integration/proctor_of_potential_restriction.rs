@@ -67,6 +67,7 @@ fn proctor_activation_refused_with_no_scry_or_surveil() {
             .act(GameAction::ActivateAbility {
                 source_id: proctor,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             })
             .is_err(),
         "the submit path must reject the activation too"

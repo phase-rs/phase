@@ -62,6 +62,8 @@ fn fixture(stolen: bool, replacement: bool) -> (GameRunner, ObjectId, ObjectId) 
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: engine::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -139,6 +141,7 @@ fn public_selected_two_count_cross_product_pays_once() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
             let first_choices = choices(&runner, source);
@@ -240,6 +243,7 @@ fn public_two_count_checked_restore_at_each_prompt() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         if restore_first {
@@ -271,6 +275,7 @@ fn public_replacement_pause_and_checked_restore_keep_selected_actor() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         runner
@@ -325,6 +330,7 @@ fn public_invalid_responses_preserve_full_state_then_valid_twin_pays() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
     assert_eq!(choices(&runner, source).len(), 2);
@@ -531,6 +537,7 @@ fn public_zero_and_positive_count_bounds_preserve_selected_payments() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         let WaitingFor::PayCost {
@@ -626,6 +633,7 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -778,6 +786,7 @@ fn distinct_sources_and_ability_indices_keep_separate_selected_payments() {
             .act(GameAction::ActivateAbility {
                 source_id: *source,
                 ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         for id in pair {
@@ -857,6 +866,7 @@ fn public_cost_prohibition_excludes_only_forbidden_permanents() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         let WaitingFor::PayCost {

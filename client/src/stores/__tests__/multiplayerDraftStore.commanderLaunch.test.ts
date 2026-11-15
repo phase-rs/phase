@@ -60,15 +60,46 @@ import { P2PDraftGuest } from "../../adapter/p2p-draft-guest";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
 import type { DraftPlayerView, SeatPublicView } from "../../adapter/draft-adapter";
 import type { CommanderSeatDecks, DraftDeckPayload } from "../../network/draftProtocol";
+import { usePreferencesStore } from "../preferencesStore";
+import type { PrintingEntry } from "../../services/scryfall";
+import type * as Scryfall from "../../services/scryfall";
+import type * as WasmModule from "../../adapter/wasm-adapter";
+import type { DeckPrinting } from "../../adapter/types";
+import type { SubmissionDeck } from "../../services/deckSubmission";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
+
+const artIo = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn(), bounds: vi.fn() }));
+vi.mock("../../services/scryfall", async (importOriginal) => ({
+  ...await importOriginal<typeof Scryfall>(),
+  getCardPrintings: artIo.printings,
+}));
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof WasmModule>(),
+  getSharedAdapter: () => ({ getCardFaceData: artIo.face, checkDeckPrintingsBounds: artIo.bounds }),
+}));
 
 let capturedHostEventHandler: ((event: unknown) => void) | null = null;
 
 const commanderSeatDecks = vi.fn<
   (view: DraftPlayerView, localSeat: number) => Promise<CommanderSeatDecks>
 >();
-const sendCommanderLaunches = vi.fn();
+const invitationsEmitted = vi.fn();
+const sendCommanderLaunches = vi.fn(async (
+  _view: DraftPlayerView,
+  _gameId: string,
+  _roomCode: string,
+  decks: CommanderSeatDecks,
+  installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+  signal: AbortSignal,
+) => {
+  signal.throwIfAborted();
+  for (const { seat, deck } of decks.engineSeatDecks) {
+    await installEngineSeat(seat, deck);
+    signal.throwIfAborted();
+  }
+  invitationsEmitted();
+});
 const boosterPackPoolForGame = vi.fn(async () => null as string[] | null);
 /**
  * The LOCAL-game payload, used only above the P2P seat ceiling.
@@ -382,6 +413,35 @@ vi.mock("../../game/controllers/gameLoopController", () => ({
 
 // ── Fixtures ───────────────────────────────────────────────────────────
 
+const artCatalog: PrintingEntry[] = ["aaa", "bbb", "ccc"].map((set, index) => ({
+  id: set, set, set_name: set, collector_number: `00${index + 1}`,
+  released_at: `200${index}-01-01`, border_color: "black", frame_effects: [],
+  full_art: false, faces: [],
+}));
+
+// The client's configured Promise library predates Promise.withResolvers.
+function held<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function hostArtPreferences() {
+  const chain = { type: "set" as const, setCode: "aaa", label: "A" };
+  const pin = { scryfallId: "aaa", setCode: "aaa", collectorNumber: "001" };
+  usePreferencesStore.setState({ artChain: [chain], artOverrides: { "Commander 0": pin } });
+  return { chain, pin };
+}
+
+function expectedArt(seat: number, set = "aaa", collector = "001"): DeckPrinting[] {
+  return [
+    { section: "main_deck", name: `Commander ${seat}`, count: 1, printing: { set_code: set, collector_number: collector } },
+    { section: "main_deck", name: `Spell ${seat}`, count: 1, printing: { set_code: set, collector_number: collector } },
+    { section: "sideboard", name: `Side ${seat}`, count: 1, printing: { set_code: set, collector_number: collector } },
+    { section: "commander", name: `Commander ${seat}`, count: 1, printing: { set_code: set, collector_number: collector } },
+  ];
+}
+
 function seat(index: number, isBot: boolean, connected = true): SeatPublicView {
   return {
     seat_index: index,
@@ -620,6 +680,10 @@ describe("multiplayerDraftStore Commander launch", () => {
     // late guard — see the comment there.
     await Promise.all([import("../../network/connection"), import("../../adapter/p2p-adapter")]);
     vi.clearAllMocks();
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    artIo.face.mockImplementation(async (name: string) => ({ scryfall_oracle_id: name }));
+    artIo.printings.mockResolvedValue(artCatalog);
+    artIo.bounds.mockResolvedValue(undefined);
     capturedHostEventHandler = null;
     capturedDraftGuestListener = null;
     capturedDraftGuestLeave = null;
@@ -691,14 +755,11 @@ describe("multiplayerDraftStore Commander launch", () => {
     expect(useMultiplayerDraftStore.getState().phase).toBe("complete");
 
     expect(sendCommanderLaunches).toHaveBeenCalledTimes(1);
-    const sendOrder = sendCommanderLaunches.mock.invocationCallOrder[0];
-    // THE axis: the launch is dispatched only after the LAST engine seat has
-    // claimed its index. Asserting merely that the send precedes
-    // `startPregameGame` does NOT discriminate this — a launch that sends
-    // BEFORE the mutations satisfies that too, and that ordering is the one
-    // that KICKS A REAL PLAYER: a guest invited early takes
-    // `firstWaitingSeat()` = 1, and the `SetKind` landing on that index
-    // invalidates its token ("Removed from the room by the host").
+    const sendOrder = invitationsEmitted.mock.invocationCallOrder[0];
+    // Wiring check only: the store's installer reaches `applySeatMutation` for
+    // every engine seat, and the game starts after the finalizer resolves.
+    // The fake orders installs before `invitationsEmitted`; the production
+    // ordering proof is commanderRoster R2 and the host finalization tests.
     const mutationOrders = transport.applySeatMutation.mock.invocationCallOrder;
     expect(mutationOrders).toHaveLength(3);
     expect(Math.max(...mutationOrders)).toBeLessThan(sendOrder);
@@ -812,6 +873,7 @@ describe("multiplayerDraftStore Commander launch", () => {
   it.each([7, 8])("launches a local game for a %i-seat pod over the peer-to-peer seat ceiling", async (seats) => {
     const pool = ["Cube A", "Cube A", "Undealt sentinel"];
     await installCompletedPod(commanderView(seats, { boosterPackPool: pool }));
+    hostArtPreferences();
 
     await useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
 
@@ -833,6 +895,12 @@ describe("multiplayerDraftStore Commander launch", () => {
     const payload = JSON.parse(sessionStorage.getItem(`phase:draft-deck:${gameId}`)!);
     expect(payload.booster_pack_pool).toEqual(pool);
     expect(payload.ai_decks).toEqual(Array.from({ length: seats - 2 }, (_, i) => deckFor(i + 2)));
+    expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`), "oversized Commander handoff stays name-only").toBe(JSON.stringify({
+      player: deckFor(0), opponent: deckFor(1),
+      ai_decks: Array.from({ length: seats - 2 }, (_, i) => deckFor(i + 2)),
+      draft_set_codes: ["CMR"], booster_pack_pool: pool,
+    }));
+    expect(artIo.face).not.toHaveBeenCalled();
     // No banner: this is a supported outcome, not a degraded one.
     expect(useMultiplayerDraftStore.getState().error).toBeNull();
     // NONE of the peer-to-peer bring-up is entered.
@@ -898,7 +966,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     const store = useMultiplayerDraftStore.getState();
     void store.launchCommanderGame(navigate);
     void store.launchCommanderGame(navigate); // same tick — the double-click
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     await store.launchCommanderGame(navigate); // and again, mid-park
 
@@ -1166,7 +1234,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     // parked on `roomFull` — the window Cancel exists for.
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     void useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     // PRECONDITION. `sendCommanderLaunches` is a stub here, so the host's own
     // seat-0 local emit never happens and `commanderLaunch` would never leave
@@ -1345,7 +1413,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     await useMultiplayerDraftStore.getState().leave(false);
     // IMMEDIATE and mechanism-naming, ahead of the await below: leaving must
@@ -1383,7 +1451,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     let releaseTerminate!: () => void;
     transport.terminateGame.mockImplementationOnce(
@@ -1436,7 +1504,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     const leaving = useMultiplayerDraftStore.getState().leave(false);
     let snapshot: Pick<ReturnType<typeof useMultiplayerDraftStore.getState>, "role" | "phase" | "view">;
@@ -1623,7 +1691,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     useMultiplayerDraftStore.setState({ view: secondView });
     commanderSeatDecks.mockResolvedValue(seatDecksFor(secondView, 0));
     const secondLaunch = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(2));
 
     let releaseTerminate!: () => void;
     transport.terminateGame.mockImplementationOnce(
@@ -3031,6 +3099,136 @@ describe("multiplayerDraftStore Commander launch", () => {
       expect((transport.hostRoomSignals[0] as AbortSignal | undefined)?.aborted).toBe(true);
       expect(await settle(started)).toBe("resolved:null");
       expect(transport.instances).toHaveLength(0);
+    });
+  });
+
+  describe("Commander owner printing at the adapter boundary (V10)", () => {
+    it("freezes one host snapshot for the host and every engine seat, never live launch decks", async () => {
+      const view = commanderView(5, { humanSeats: [1] });
+      await installCompletedPod(view);
+      const rawDecks = seatDecksFor(view);
+      commanderSeatDecks.mockResolvedValue(rawDecks);
+      const raw = JSON.stringify(rawDecks);
+      const { chain, pin } = hostArtPreferences();
+      const metadata = held<PrintingEntry[]>();
+      artIo.printings.mockReturnValue(metadata.promise);
+      const launching = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "ccc", label: "C" }], artOverrides: {} });
+      await vi.waitFor(() => expect(artIo.printings).toHaveBeenCalled());
+      chain.setCode = "bbb";
+      pin.scryfallId = "bbb";
+      metadata.resolve(artCatalog);
+      await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledOnce());
+      transport.instances[0].finish();
+      await launching;
+
+      // The constructor accepts unknown; this is the captured real store payload.
+      const payload = vi.mocked(P2PHostAdapter).mock.calls[0][0] as { player: SubmissionDeck };
+      expect(payload.player.printings, "Commander host owner rows").toEqual(expectedArt(0));
+      for (const seat of [2, 3, 4]) {
+        expect(transport.applySeatMutation, `Commander engine seat ${seat} owner rows`).toHaveBeenCalledWith({
+          type: "SetKind",
+          data: {
+            seatIndex: seat,
+            kind: { type: "Ai", data: {
+              difficulty: "Medium", deck: { type: "DeckList", data: { ...deckFor(seat), printings: expectedArt(seat) } },
+            } },
+          },
+        });
+      }
+      expect(JSON.stringify(sendCommanderLaunches.mock.calls[0][3]), "Commander launch decks stay name-only").toBe(raw);
+      expect(JSON.stringify(rawDecks), "Commander source decks stay name-only").toBe(raw);
+      expect(commanderSeatDecks).toHaveBeenCalledOnce();
+      expect(useGameStore.getState().adapter).toBe(useMultiplayerDraftStore.getState().matchAdapter);
+      expect(navigate).toHaveBeenCalledOnce();
+    });
+
+    it("guest selects its current C, not host A, before constructing and preserves the raw launch", async () => {
+      await installJoinedPod(commanderView(4, { humanSeats: [2] }));
+      hostArtPreferences();
+      const launch = commanderLaunchFor(2);
+      capturedDraftGuestListener?.({ type: "commanderLaunch", launch });
+      const raw = JSON.stringify(launch);
+      const chain = { type: "set" as const, setCode: "ccc", label: "C" };
+      usePreferencesStore.setState({ artChain: [chain], artOverrides: {} });
+      const metadata = held<PrintingEntry[]>();
+      artIo.printings.mockReturnValue(metadata.promise);
+      const joining = useMultiplayerDraftStore.getState().joinCommanderGame(navigate);
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "aaa", label: "A" }], artOverrides: {} });
+      await vi.waitFor(() => expect(artIo.printings).toHaveBeenCalled());
+      chain.setCode = "aaa";
+      metadata.resolve(artCatalog);
+      await joining;
+      // The constructor accepts unknown; this is the captured real store payload.
+      const payload = vi.mocked(P2PGuestAdapter).mock.calls[0][0] as { player: SubmissionDeck };
+      expect(payload.player.printings, "Commander guest owner C rows").toEqual(expectedArt(2, "ccc", "003"));
+      expect(Object.keys(payload)).toEqual(["player"]);
+      expect(JSON.stringify(launch), "Commander guest launch remains name-only").toBe(raw);
+      expect(JSON.stringify(useMultiplayerDraftStore.getState().commanderLaunch)).toBe(raw);
+      expect(useMultiplayerDraftStore.getState().commanderSeat).toBe(1);
+      expect(useMultiplayerDraftStore.getState().seatIndex).toBe(2);
+      expect(navigate).toHaveBeenCalledOnce();
+      expect(useGameStore.getState().adapter).toBe(useMultiplayerDraftStore.getState().matchAdapter);
+    });
+
+    it("cancel during host art preparation releases the room without constructing an adapter", async () => {
+      await installCompletedPod(commanderView(4));
+      hostArtPreferences();
+      const metadata = held<PrintingEntry[]>();
+      artIo.printings.mockReturnValue(metadata.promise);
+      const launching = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
+      await vi.waitFor(() => expect(artIo.printings).toHaveBeenCalled());
+      await useMultiplayerDraftStore.getState().cancelCommanderLaunch();
+      metadata.resolve(artCatalog);
+      await launching;
+      expect(P2PHostAdapter, "Commander cancellation blocks host construction").not.toHaveBeenCalled();
+      expect(transport.hostDestroy).toHaveBeenCalledOnce();
+      expect(transport.applySeatMutation).not.toHaveBeenCalled();
+      expect(sendCommanderLaunches).not.toHaveBeenCalled();
+      expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it.each(["leave", "reset"] as const)("%s during guest art preparation releases the peer without constructing an adapter", async (end) => {
+      await installJoinedPod(commanderView(4, { humanSeats: [2] }));
+      useMultiplayerDraftStore.setState({ commanderLaunch: commanderLaunchFor(2) });
+      hostArtPreferences();
+      const metadata = held<PrintingEntry[]>();
+      artIo.printings.mockReturnValue(metadata.promise);
+      const joining = useMultiplayerDraftStore.getState().joinCommanderGame(navigate);
+      await vi.waitFor(() => expect(artIo.printings).toHaveBeenCalled());
+      if (end === "leave") await useMultiplayerDraftStore.getState().leave();
+      else useMultiplayerDraftStore.getState().reset();
+      // Leaving releases the pod peer too; settling art must release the match peer.
+      const releasedPodPeers = transport.joinDestroyPeer.mock.calls.length;
+      metadata.resolve(artCatalog);
+      await joining;
+      expect(P2PGuestAdapter, "Commander cancellation blocks guest construction").not.toHaveBeenCalled();
+      expect(transport.joinDestroyPeer).toHaveBeenCalledTimes(releasedPodPeers + 1);
+      expect(navigate).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBeNull();
+    });
+
+    it.each([false, true])("classifies engine seats from the launch view read once the room is open (seat dropped=%s), not a roster that changes during booster preparation", async (dropped) => {
+      // Upstream #10459 moved the live/engine split to the host finalizer: the store reads the
+      // launch view once after the room opens and hands it on; a roster change during the
+      // independent booster await must not rewrite the seat decks already synthesized from it.
+      const launchRoster = commanderView(4, { humanSeats: [1], droppedSeats: dropped ? [1] : [] });
+      await installCompletedPod(launchRoster);
+      const source = held<string[] | null>();
+      boosterPackPoolForGame.mockReturnValueOnce(source.promise);
+      commanderSeatDecks.mockImplementation(async (view, seat) => seatDecksFor(view, seat));
+      const launching = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
+      await vi.waitFor(() => expect(boosterPackPoolForGame).toHaveBeenCalledOnce());
+      useMultiplayerDraftStore.setState({
+        view: commanderView(4, { humanSeats: [1], droppedSeats: dropped ? [] : [1] }),
+      });
+      source.resolve(["Undealt"]);
+      await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledOnce());
+      transport.instances[0].finish();
+      await launching;
+      expect(commanderSeatDecks, "seat decks come from the launch view").toHaveBeenCalledWith(launchRoster, 0);
+      expect(transport.applySeatMutation.mock.calls.map(([mutation]) => mutation.data.seatIndex)).toEqual(dropped ? [1, 2, 3] : [2, 3]);
+      expect(navigate).toHaveBeenCalledOnce();
     });
   });
 

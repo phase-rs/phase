@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Owner printings, correction to e1e92950: the display-only printing that record placed on LKISnapshot is carried instead by TriggerSourceContext (field printing, beside lki and printed_ref; CR 203.1/206.1), the one carrier whose printing is read (the stack row of a triggered ability whose source has left). LKISnapshot carries no printing and serializes as before this PR. An older server or peer silently drops the TriggerSourceContext printing, so that row loses the owner's chosen printing while the viewer's toggle says it is shown (silent capability loss; defaults alone do not establish compatibility)."
+}

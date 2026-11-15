@@ -4,7 +4,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, Effect, MassLibraryShuffleMode, PlayerFilter, QuantityExpr, TargetFilter,
+    AbilityKind, Effect, LibraryShuffleMode, PlayerFilter, QuantityExpr, TargetFilter,
 };
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::phase::Phase;
@@ -28,7 +28,7 @@ fn echo_of_eons_scopes_every_origin_shuffle_and_draw_to_each_player() {
             origin: Some(Zone::Hand),
             destination: Zone::Library,
             target: TargetFilter::ScopedPlayer,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));
@@ -39,7 +39,7 @@ fn echo_of_eons_scopes_every_origin_shuffle_and_draw_to_each_player() {
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
             target: TargetFilter::ScopedPlayer,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));

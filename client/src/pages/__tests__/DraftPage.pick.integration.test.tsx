@@ -21,6 +21,7 @@ const wasm = vi.hoisted(() => ({
   default: vi.fn(async () => undefined),
   start_quick_draft: vi.fn(),
   load_card_database: vi.fn(() => 0),
+  set_draft_pick_enhancements: vi.fn(),
   submit_pick: vi.fn(),
   submit_pick_with_draft_effect: vi.fn(),
   submit_deck: vi.fn(),

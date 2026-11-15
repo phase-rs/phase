@@ -144,6 +144,7 @@ fn copy_of_a_level_three_class_enters_at_level_one_and_can_level_up() {
             .act(GameAction::ActivateAbility {
                 source_id: copy,
                 ability_index: level_3,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             })
             .is_err(),
         "CR 716.2b: a copy of a level-3 Class must not start at level 3"

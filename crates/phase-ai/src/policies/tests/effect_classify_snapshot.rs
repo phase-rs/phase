@@ -27,6 +27,8 @@ use crate::policies::effect_classify::{effect_polarity, EffectPolarity};
 
 fn change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination,
         target: TargetFilter::Any,
@@ -128,6 +130,7 @@ fn harmful_classifications_unchanged() {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         }),
         EffectPolarity::Harmful
     );
@@ -210,6 +213,9 @@ fn contextual_classifications_unchanged() {
         Effect::SolveCase,
         Effect::HeistExile,
         Effect::ProcessRadCounters,
+        // CR 701.33: abandoning a scheme is Contextual (ongoing pressure vs.
+        // cycling to the next scheme is card-specific).
+        Effect::AbandonScheme,
     ] {
         assert_eq!(
             effect_polarity(&effect),

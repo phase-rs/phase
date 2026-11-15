@@ -57,6 +57,7 @@ fn shape_chittering_rats_ast() {
         ref target,
         ref count,
         ref position,
+        arranger: _,
     } = *sub.effect
     else {
         panic!(

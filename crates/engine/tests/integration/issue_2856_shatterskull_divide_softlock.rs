@@ -118,6 +118,108 @@ fn shatterskull_x1_offers_single_target_slot_no_softlock() {
     );
 }
 
+/// R2-F1 runtime non-regression (CR 601.2d vs CR 608.2d): with X = 6 the
+/// "instead" branch replaces the division with a `ParentTarget`-recipient node
+/// that still carries `distribute: Damage`. That node divides among ANNOUNCED
+/// targets — it must never be re-divided as a CR 608.2d resolution-time choice.
+/// Two targets, so a resolution-time pause could not hide behind a
+/// single-candidate auto-apply.
+#[test]
+fn shatterskull_x6_instead_division_is_not_rechosen_at_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let wall_a = scenario.add_creature(P1, "Wall A", 0, 20).id();
+    let wall_b = scenario.add_creature(P1, "Wall B", 0, 20).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shatterskull Smashing", false, SHATTERSKULL_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let card_id = CardId(spell.0);
+
+    // {X}{R}{R} at X = 6 → eight red mana.
+    scenario.with_mana_pool(P0, red_pool(8));
+
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast announcement should succeed");
+    drive_choose_x(&mut runner, 6);
+
+    // CR 601.2c + CR 601.2d: announce both targets, then the cast-time division.
+    let mut pending_targets = vec![wall_a, wall_b].into_iter();
+    for step in 0.. {
+        assert!(step < 6, "cast announcement must terminate");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                let target = pending_targets
+                    .next()
+                    .expect("at most two target slots are offered");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("ChooseTarget should succeed");
+            }
+            WaitingFor::DistributeAmong { .. } => {
+                runner
+                    .act(GameAction::DistributeAmong {
+                        distribution: vec![
+                            (TargetRef::Object(wall_a), 3),
+                            (TargetRef::Object(wall_b), 3),
+                        ],
+                    })
+                    .expect("the announced division is legal");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        pending_targets.next().is_none(),
+        "reach guard: both walls were announced as targets"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the spell is on the stack"
+    );
+
+    for step in 0.. {
+        assert!(step < 8, "resolution must terminate");
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "an announced division must never be re-chosen at resolution (step {step})"
+        );
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("PassPriority should succeed");
+    }
+
+    let damage_of = |id: ObjectId| runner.state().objects[&id].damage_marked;
+    assert!(
+        damage_of(wall_a) + damage_of(wall_b) > 6,
+        "reach guard: the X >= 6 swap fired (combined damage {} + {})",
+        damage_of(wall_a),
+        damage_of(wall_b)
+    );
+}
+
 fn drive_choose_x(runner: &mut GameRunner, x: u32) {
     for _ in 0..40 {
         match runner.state().waiting_for.clone() {

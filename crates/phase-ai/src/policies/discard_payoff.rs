@@ -232,6 +232,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }
@@ -264,6 +265,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
@@ -283,6 +285,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }

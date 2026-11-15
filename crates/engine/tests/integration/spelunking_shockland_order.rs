@@ -373,6 +373,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
                 incarnation: runner.state().objects[&source].incarnation,
             },
             grant: None,
+            actor: Default::default(),
         },
         source_name: "Search Rider".to_string(),
         description: "Exile it instead".to_string(),
@@ -390,6 +391,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: vec![candidate],
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
@@ -402,6 +404,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     let parked = engine::game::replacement::replacement_choice_waiting_for(P0, runner.state());
     runner.state_mut().waiting_for = parked;

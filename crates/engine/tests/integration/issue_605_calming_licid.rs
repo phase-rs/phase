@@ -29,6 +29,10 @@
 //! The second half of this file covers CR 116.2c — "You may pay {W} to end this
 //! effect" — across all THIRTEEN cards in that class (the 12 Aura-form Licids
 //! plus Flanking Licid), and CR 704.5p as a card-agnostic building block.
+//!
+//! The final section pins issue #604 — CR 303.4m: a creature-form Licid
+//! enchants nothing, so its own "Enchanted creature can't attack" does not stop
+//! it from attacking.
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
@@ -1595,4 +1599,193 @@ fn spell_restricted_mana_cannot_pay_a_termination_cost() {
         None,
         "the successful special-action payment must end the effect and detach the Licid"
     );
+}
+
+// ── Issue #604: a creature-form Licid can attack ─────────────────────────────
+//
+// CR 303.4m: "An ability of a permanent that refers to the 'enchanted [object
+// or player]' refers to whatever object or player that permanent is attached
+// to, even if the permanent with the ability isn't an Aura." A Licid in its
+// creature form is attached to nothing, so its own "Enchanted creature can't
+// attack" does not restrict the Licid itself. The declare-attackers check used
+// to treat ANY local `CantAttack` static as self-restricting, ignoring its
+// `affected` filter, so Calming Licid could never attack.
+// `combat::local_cant_attack_def_applies` now matches a scoped restriction's
+// `affected` filter against the creature (#5409); these tests pin that for the
+// creature-form Licids, on both the attack and the block side.
+
+use engine::types::statics::StaticMode;
+
+/// Reach guard: `id` carries a functioning scoped `mode` static — the
+/// "Enchanted creature can't ..." line parsed, so "it can still attack/block"
+/// is a real discrimination, not a parse gap.
+fn assert_scoped_static(runner: &GameRunner, id: ObjectId, mode: StaticMode) {
+    let defs = &runner.state().objects[&id].static_definitions;
+    assert!(
+        defs.as_slice()
+            .iter()
+            .any(|sd| sd.mode == mode && sd.affected.is_some()),
+        "reach guard: expected a scoped {mode:?} static, got {defs:?}"
+    );
+}
+
+#[test]
+fn creature_form_calming_licid_can_attack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let licid = scenario
+        .add_creature(P0, "Calming Licid", 2, 2)
+        .from_oracle_text(CALMING_LICID_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    assert_scoped_static(&runner, licid, StaticMode::CantAttack);
+    runner.advance_to_combat();
+
+    assert!(
+        engine::game::combat::get_valid_attacker_ids(runner.state()).contains(&licid),
+        "CR 508.1c + CR 303.4m: an unattached Licid enchants nothing, so its \
+         \"Enchanted creature can't attack\" must not stop the Licid itself"
+    );
+    runner
+        .declare_attackers(&[(licid, CombatAttackTarget::Player(P1))])
+        .expect("issue #604: the creature-form Calming Licid must be able to attack");
+}
+
+#[test]
+fn attached_calming_licid_still_stops_its_host_from_attacking() {
+    // Positive control: once the Licid IS attached, "enchanted creature" names
+    // its host and the restriction applies. P1 gets an unrestricted bystander so
+    // the declare-attackers prompt actually waits (with no eligible attacker the
+    // engine submits the empty declaration itself).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::White));
+    let licid = scenario
+        .add_creature(P0, "Calming Licid", 2, 2)
+        .from_oracle_text(CALMING_LICID_ORACLE)
+        .id();
+    let victim = scenario.add_creature(P1, "Colossal Dreadmaw", 7, 7).id();
+    let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.activate(licid, 0).target_object(victim).resolve();
+    runner.advance_to_end_step();
+    runner.advance_to_upkeep();
+    runner.advance_to_combat();
+
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "the victim's controller is attacking"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::DeclareAttackers { .. }
+        ),
+        "reach guard: P1 must be at the declare-attackers prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    let valid = engine::game::combat::get_valid_attacker_ids(runner.state());
+    assert!(
+        valid.contains(&bystander),
+        "reach guard: the unenchanted bystander is an eligible attacker: {valid:?}"
+    );
+    assert!(
+        !valid.contains(&victim),
+        "CR 508.1c + CR 303.4b: the creature the Licid enchants can't attack: {valid:?}"
+    );
+    assert!(
+        runner
+            .declare_attackers(&[(victim, CombatAttackTarget::Player(P0))])
+            .is_err(),
+        "CR 508.1c: declaring the enchanted creature as an attacker must be rejected"
+    );
+    runner
+        .declare_attackers(&[(bystander, CombatAttackTarget::Player(P0))])
+        .expect("paired control: the unenchanted bystander may attack");
+}
+
+#[test]
+fn creature_form_convulsing_licid_can_block() {
+    // The block-side sibling: "Enchanted creature can't block" on an unattached
+    // Licid enchants nothing (CR 303.4m), so the Licid itself may block.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let licid = scenario
+        .add_creature(P1, "Convulsing Licid", 2, 2)
+        .from_oracle_text(CONVULSING_LICID_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    assert_scoped_static(&runner, licid, StaticMode::CantBlock);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, CombatAttackTarget::Player(P1))])
+        .expect("declare attackers");
+    for _ in 0..8 {
+        if runner.waiting_for_kind() == "DeclareBlockers" {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority into the declare-blockers step");
+    }
+    assert_eq!(
+        runner.waiting_for_kind(),
+        "DeclareBlockers",
+        "reach guard: P1 must be at the declare-blockers prompt"
+    );
+    runner
+        .declare_blockers(&[(licid, attacker)])
+        .expect("CR 509.1b + CR 303.4m: the creature-form Convulsing Licid must be able to block");
+}
+
+#[test]
+fn attached_convulsing_licid_still_stops_its_host_from_blocking() {
+    // Positive control for the block side: once the Licid IS attached,
+    // "Enchanted creature can't block" names its host and the restriction
+    // applies. P1 gets an unrestricted bystander so the block is a real choice.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Red));
+    let licid = scenario
+        .add_creature(P0, "Convulsing Licid", 2, 2)
+        .from_oracle_text(CONVULSING_LICID_ORACLE)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let victim = scenario.add_creature(P1, "Colossal Dreadmaw", 7, 7).id();
+    let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.activate(licid, 0).target_object(victim).resolve();
+    assert_eq!(
+        runner.state().objects[&licid].attached_to,
+        Some(AttachTarget::Object(victim)),
+        "reach guard: the Convulsing Licid must enchant the victim"
+    );
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, CombatAttackTarget::Player(P1))])
+        .expect("declare attackers");
+    for _ in 0..8 {
+        if runner.waiting_for_kind() == "DeclareBlockers" {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority into the declare-blockers step");
+    }
+    assert_eq!(
+        runner.waiting_for_kind(),
+        "DeclareBlockers",
+        "reach guard: P1 must be at the declare-blockers prompt"
+    );
+    assert!(
+        runner.declare_blockers(&[(victim, attacker)]).is_err(),
+        "CR 509.1b + CR 303.4b: the creature the Licid enchants can't block"
+    );
+    runner
+        .declare_blockers(&[(bystander, attacker)])
+        .expect("paired control: the unenchanted bystander may block");
 }

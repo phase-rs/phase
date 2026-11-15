@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ResolutionCastFacePolicy gains play_mode (Play admits a spell//land MDFC land face during resolution, CR 701.18b/712.12); an older peer drops it and treats a Play election as Cast"
+}

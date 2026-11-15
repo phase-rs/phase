@@ -86,7 +86,13 @@ pub fn resolve(
         up_to: false,
         kept_destination: None,
         rest_destination: None,
-        // A bare card choice moves no remainder, so it never splits one.
+        // CR 701.20e + CR 608.2c: choosing a card names a card and moves nothing
+        // (`Effect::ChooseCard` has no zone move, and neither side of this choice
+        // names a destination), so the cards that were not chosen stay exactly
+        // where they were read from. `Route`'s `None` → graveyard default would
+        // turn a card choice over the library, hand, exile or battlefield into a
+        // mass mill/discard of every other candidate.
+        rest_remainder: crate::types::ability::DigRestRemainder::StayInLibrary,
         rest_split_top_count: None,
         rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
@@ -108,6 +114,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::TargetFilter;
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -180,6 +187,103 @@ mod tests {
 
         // Should not set DigChoice with empty zone
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 701.20e + CR 608.2c: `Effect::ChooseCard` names a card from a list and
+    /// moves nothing. The candidates that were not chosen must therefore never be
+    /// routed anywhere — under the `Route` graveyard default a bare card choice
+    /// over the library, hand, exile or battlefield would mill/discard every other
+    /// candidate.
+    ///
+    /// The selection is submitted through the production resolution-choice
+    /// reducer, because the choice state is only half the claim: the FAILURE this
+    /// test prevents happens when the answer is applied, and a prompt-only
+    /// assertion would pass even if the unchosen candidate were milled.
+    #[test]
+    fn test_choose_card_never_routes_the_unselected_cards() {
+        let mut state = GameState::new_two_player(42);
+        let chosen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        let unchosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![chosen, unchosen]
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseCard {
+                choices: vec!["Library".to_string()],
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let waiting_for = match &state.waiting_for {
+            WaitingFor::DigChoice {
+                cards,
+                kept_destination,
+                rest_destination,
+                rest_remainder,
+                ..
+            } => {
+                assert_eq!(*cards, vec![chosen, unchosen]);
+                assert_eq!(*kept_destination, None);
+                assert_eq!(*rest_destination, None);
+                assert_eq!(
+                    *rest_remainder,
+                    crate::types::ability::DigRestRemainder::StayInLibrary,
+                    "CR 701.20e: a card choice moves nothing, so the rest of the \
+                     candidates must stay where they are"
+                );
+                state.waiting_for.clone()
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        };
+
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+            &mut events,
+        )
+        .expect("naming one of the offered cards must be accepted");
+
+        // CR 701.20e: neither candidate changed zone. The chosen card is only
+        // NAMED; the unchosen one must not be routed by the graveyard default.
+        assert_eq!(state.objects[&chosen].zone, Zone::Library);
+        assert_eq!(state.objects[&unchosen].zone, Zone::Library);
+        assert!(
+            state.players[0].library.iter().any(|id| *id == chosen),
+            "the chosen card stays in the library"
+        );
+        assert!(
+            state.players[0].library.iter().any(|id| *id == unchosen),
+            "the unchosen card must stay in the library, got {:?}",
+            state.players[0].library
+        );
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "a card choice moves nothing, got {:?}",
+            state.players[0].graveyard
+        );
     }
 
     #[test]

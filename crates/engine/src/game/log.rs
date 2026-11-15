@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::game::combat::AttackTarget;
+use crate::game::match_flow::game_on_board;
 use crate::game::planechase::PlanarDieFace;
 use crate::types::ability::{AbilityTag, TargetRef};
+use crate::types::contest::{ContestKind, ContestOutcome, ContestResult};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackObjectClass, ZoneChangeRecord};
 use crate::types::identifiers::ObjectId;
@@ -13,20 +15,28 @@ use crate::types::log::{
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolved_commands::{ResolvedRulesCommand, RulesExecutionNodeRef};
+use crate::types::resolved_commands::{PlayerLeaveMove, ResolvedRulesJournal};
 use crate::types::stickers::StickerKind;
 use crate::types::zones::Zone;
 
 /// Resolve a batch of events into structured log entries.
 /// Events that could leak hidden information are tagged for an explicit diagnostic opt-in.
+///
+/// `after` is the state the batch left: every caller passes it, and every
+/// entry is read from it, its game included. `before` is the state the batch
+/// began from where the caller keeps one (the contest hosts pass the stepped
+/// state for both), and seeds the turn, the phase and ability-source names.
 pub fn resolve_log_entries(
     events: &[GameEvent],
     before: &GameState,
     after: &GameState,
 ) -> Vec<GameLogEntry> {
-    let has_game_start = events
-        .iter()
-        .any(|event| matches!(event, GameEvent::GameStarted));
+    let has_game_start = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. }
+        )
+    });
     let mut cursor = if has_game_start {
         LogCursor::pregame()
     } else {
@@ -37,6 +47,13 @@ pub fn resolve_log_entries(
     };
 
     let batch = BatchIndex::new(events, after);
+    // The game the batch's entries belong to: the one whose position the
+    // batch left. A batch never spans two games: the one that ends a game
+    // leaves the match between games, where the next game waits on the
+    // sideboarding and begins with an action of its own. So the state the
+    // batch left names the right game at both ends, including a contest
+    // settle, whose host passes that state as `before` too.
+    let game_number = game_on_board(after);
     events
         .iter()
         .enumerate()
@@ -52,6 +69,7 @@ pub fn resolve_log_entries(
                 name_at_event_time(&mut segments, &batch, index + 1);
                 (!segments.is_empty()).then(|| GameLogEntry {
                     seq: 0, // Assigned by frontend
+                    game_number,
                     turn: cursor.turn,
                     phase: cursor.phase,
                     category: categorize(event),
@@ -169,35 +187,16 @@ struct BatchIndex<'a> {
     moves: HashMap<ObjectId, Vec<BatchMove<'a>>>,
     turn_starts: Vec<usize>,
     eliminations: Vec<(usize, PlayerId)>,
-    /// The event carries no incarnation, so the turn zone-change index tells repeated
-    /// identical moves apart.
-    player_leave_moves: HashSet<(ObjectId, Zone, Zone, usize)>,
+    journal: &'a ResolvedRulesJournal,
 }
 
 impl<'a> BatchIndex<'a> {
-    fn new(events: &'a [GameEvent], state: &GameState) -> Self {
+    fn new(events: &'a [GameEvent], state: &'a GameState) -> Self {
         let mut batch = Self {
             moves: HashMap::new(),
             turn_starts: Vec::new(),
             eliminations: Vec::new(),
-            player_leave_moves: state
-                .resolved_rules_journal
-                .entries()
-                .iter()
-                .filter_map(|entry| match entry.command.as_ref() {
-                    Some(ResolvedRulesCommand::ZoneChange(command))
-                        if matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_)) =>
-                    {
-                        Some((
-                            command.object.object_id,
-                            command.from,
-                            command.to,
-                            command.turn_zone_change_index,
-                        ))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            journal: &state.resolved_rules_journal,
         };
         for (position, event) in events.iter().enumerate() {
             match event {
@@ -308,12 +307,12 @@ fn is_player_leave_move(events: &[GameEvent], index: usize, batch: &BatchIndex) 
                     player_id == record.owner && (index..turn_start).contains(&position)
                 })
         }
-        None => batch.player_leave_moves.contains(&(
-            *object_id,
-            *from,
-            *to,
-            record.turn_zone_change_index,
-        )),
+        None => batch.journal.records_player_leave_move(&PlayerLeaveMove {
+            object_id: *object_id,
+            from: *from,
+            to: *to,
+            turn_zone_change_index: record.turn_zone_change_index,
+        }),
     }
 }
 
@@ -351,7 +350,9 @@ impl LogCursor {
 
     fn apply(&mut self, event: &GameEvent) {
         match event {
-            GameEvent::GameStarted => *self = Self::pregame(),
+            GameEvent::GameStarted | GameEvent::StartingPlayerContest { .. } => {
+                *self = Self::pregame()
+            }
             GameEvent::TurnStarted { turn_number, .. } => {
                 self.turn = *turn_number;
                 self.phase = Phase::Untap;
@@ -394,6 +395,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CreatureDestroyed { .. }
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::TokenCreated { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
         | GameEvent::AbilityActivated { .. }
@@ -419,7 +421,8 @@ fn importance(event: &GameEvent) -> LogImportance {
         // dungeon), so the timeline is the only place a player learns which room
         // they landed in and what it does.
         | GameEvent::RoomEntered { .. }
-        | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::ShortcutRepetition { .. } => LogImportance::Context,
         // A countered spell or prevented damage is the decisive outcome of an
         // otherwise-visible action, so Timeline must not make that outcome
         // disappear behind the Details view.
@@ -496,6 +499,10 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::RoomDoorUnlocked { .. }
@@ -524,6 +531,9 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::PlayerPerformedAction { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. } => LogImportance::Detail,
     }
@@ -538,6 +548,7 @@ fn tone(event: &GameEvent) -> LogTone {
         GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
         GameEvent::TokenCreated { .. }
         | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::MonarchChanged { .. }
@@ -570,12 +581,19 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DieRolled { .. }
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
         | GameEvent::Waterbend { .. }
         | GameEvent::Clash { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. } => LogTone::Informational,
         // CR 701.17a + CR 701.17c: never narrated, because the paired `ZoneChanged`
@@ -621,6 +639,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::CounterAdded { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
@@ -826,6 +845,18 @@ fn num(n: i32) -> LogSegment {
     LogSegment::Number(n)
 }
 
+/// CR 107.1 + CR 107.1c + CR 122.1: no rule caps a count (game numbers are
+/// integers; a player may have any number of counters on a permanent or
+/// choose any number); the engine stores it as `u32`. A count that fits
+/// `i32` stays a `Number` chip; a larger count is carried exactly as text
+/// rather than saturated or wrapped, so the log never misreports the amount.
+fn exact_u32_segment(n: u32) -> LogSegment {
+    match i32::try_from(n) {
+        Ok(n) => num(n),
+        Err(_) => LogSegment::Text(n.to_string()),
+    }
+}
+
 fn phase_label(phase: Phase) -> &'static str {
     match phase {
         Phase::Untap => "Untap step",
@@ -908,6 +939,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
         // with GameOver under `Game` rather than object-state `State`.
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
         // CR 103.1: grouped with the setup event MulliganStarted under `Game`
@@ -1012,6 +1044,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::SpeedChanged { .. } | GameEvent::ArmyAmassed { .. } => LogCategory::Special,
 
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
+        GameEvent::CardCopyCreated { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
@@ -1038,6 +1071,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::DieRolled { .. }
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::Firebend { .. }
@@ -1067,6 +1104,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::ContraptionCranked { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
+        | GameEvent::CardNamed { .. }
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::XValueChosen { .. } => LogCategory::Special,
@@ -1100,8 +1140,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text(phase_label(*phase))]
         }
 
+        // CR 117.3d: `player_id` is the player who *receives* priority after
+        // the previous holder passed, not the passer.
         GameEvent::PriorityPassed { player_id } => {
-            vec![player_seg(state, *player_id), text(" passes priority")]
+            vec![text("Priority passes to "), player_seg(state, *player_id)]
         }
 
         GameEvent::PlayerPerformedAction {
@@ -1230,7 +1272,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
         ],
 
-        GameEvent::CreatureExerted { object_id } => {
+        GameEvent::CreatureExerted { object_id, .. } => {
             vec![card_seg(state, *object_id), text(" is exerted")]
         }
 
@@ -1383,7 +1425,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 }
                 segments.push(player_seg(state, *player));
                 segments.push(text(" "));
-                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+                segments.push(exact_u32_segment(*value));
             }
             segments
         }
@@ -1547,13 +1589,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segs
         }
 
-        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
         GameEvent::AttackerBecameBlockedByEffect { attacker } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
-        // CR 509.3d: a disambiguated single blocker/attacker pair from a
-        // per-blocker filtered blocks-or-becomes-blocked firing.
+        // CR 509.3d: an attacker-side entering-blocker relationship or a
+        // disambiguated per-blocker filtered firing carries this exact pair.
         GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
             vec![
                 card_seg(state, *blocker),
@@ -1657,7 +1699,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             // not surfaced).
             ..
         } => vec![
-            num(*count as i32),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1683,7 +1725,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             counter_type,
             count,
         } => vec![
-            num(*count as i32),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1811,6 +1853,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             },
         ],
 
+        // CR 707.13: a copy created from a name, not a conjure — the log must not
+        // call it one, or the player reads a permanent card where there is a copy
+        // CR 704.5e is about to sweep.
+        GameEvent::CardCopyCreated { object_id, name } => vec![
+            text("Copy created: "),
+            LogSegment::CardName {
+                name: name.clone(),
+                object_id: *object_id,
+            },
+        ],
+
         GameEvent::CreatureDestroyed { object_id, .. } => {
             vec![card_seg(state, *object_id), text(" is destroyed")]
         }
@@ -1828,6 +1881,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             old_controller,
             new_controller,
+            evidence: _,
         } => vec![
             card_seg(state, *object_id),
             text(" changed controller from "),
@@ -1880,7 +1934,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // round-by-round detail lives in the structured event for the UI.
         GameEvent::StartingPlayerContest { winner, .. } => vec![
             player_seg(state, *winner),
-            text(" wins the roll to take the first turn"),
+            text(" wins the roll and chooses who takes the first turn"),
         ],
 
         GameEvent::GameOver { winner } => match winner {
@@ -1897,6 +1951,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::ResolutionHalted { .. } => {
             vec![text("Resolution halted — possible mandatory loop")]
         }
+
+        // CR 732.2a: engine-authored raw text, like `ResolutionHalted` above.
+        GameEvent::ShortcutRepetition {
+            controller,
+            repetition,
+        } => vec![
+            player_seg(state, *controller),
+            text(" repeats the loop — repetition "),
+            num(crate::game::arithmetic::u32_to_i32_saturating(*repetition)),
+        ],
 
         GameEvent::MonarchChanged { player_id } => {
             vec![player_seg(state, *player_id), text(" becomes the monarch")]
@@ -1952,6 +2016,27 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" flips a coin: "),
             text(if *won { "wins" } else { "loses" }),
+        ],
+
+        // Un-card actions (no CR entry): narrate the gestures and spoken phrases.
+        GameEvent::UnTellPerformed { player, tell } => vec![
+            player_seg(state, *player),
+            text(&format!(" {}", tell.log_phrase())),
+        ],
+
+        GameEvent::PhraseSaid { player, phrase } => vec![
+            player_seg(state, *player),
+            text(&format!(" says \"{phrase}\"")),
+        ],
+
+        GameEvent::GotchaSaid { player, .. } => {
+            vec![player_seg(state, *player), text(" says \"Gotcha!\"")]
+        }
+
+        GameEvent::ObjectTouched { player, object_id } => vec![
+            player_seg(state, *player),
+            text(" touches "),
+            card_seg(state, *object_id),
         ],
 
         GameEvent::RingTemptsYou { player_id, .. } => {
@@ -2118,7 +2203,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" stationed by "),
             card_seg(state, *creature_id),
             text(" (+"),
-            num(*counters_added as i32),
+            exact_u32_segment(*counters_added),
             text(" charge)"),
         ],
         GameEvent::Saddled {
@@ -2237,6 +2322,40 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&sprocket.to_string()),
         ],
         GameEvent::Clash { .. } => vec![text("Clash")],
+        // CR 608.2d: a card name chosen as the spell or ability resolves is public
+        // information, so the log states the name itself.
+        GameEvent::CardNamed {
+            player_id,
+            source_id,
+            name,
+        } => {
+            let mut segments = vec![player_seg(state, *player_id), text(" names ")];
+            segments.push(text(name));
+            if let Some(source_id) = source_id {
+                segments.push(text(" for "));
+                segments.push(card_seg(state, *source_id));
+            }
+            segments
+        }
+        GameEvent::PhysicalContestStarted { kind, participants } => vec![
+            player_seg(state, participants[0]),
+            text(" and "),
+            player_seg(state, participants[1]),
+            text(match kind {
+                ContestKind::Staring => " begin a staring contest",
+                ContestKind::BreathHolding => " begin a breath-holding contest",
+            }),
+        ],
+        GameEvent::PhysicalContestResolved { result, .. } => match result {
+            ContestResult::Outcome(ContestOutcome::Decided { winner, .. }) => {
+                vec![player_seg(state, *winner), text(" wins the contest")]
+            }
+            ContestResult::Outcome(ContestOutcome::Tie) => {
+                vec![text("The contest ends in a tie; nothing happens")]
+            }
+            ContestResult::Cancelled(_) => vec![text("The contest was cancelled; nothing happens")],
+        },
+
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]
         }
@@ -2323,11 +2442,15 @@ mod tests {
 
     use super::*;
     use crate::game::engine::{
-        start_game, start_game_skip_mulligan, start_game_with_starting_player,
+        apply, start_game, start_game_skip_mulligan, start_game_with_starting_player,
     };
     use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
     use crate::types::game_state::StackEntryKind;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
+    use crate::types::match_config::{MatchConfig, MatchPhase, MatchType};
+    use crate::types::resolved_commands::RulesExecutionNodeRef;
 
     /// CR 701.17a + CR 701.17c: the paired `ZoneChanged` names the milled card, so the
     /// trigger-facing mill event is dropped rather than narrated twice.
@@ -2975,7 +3098,9 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");
@@ -3168,6 +3293,29 @@ mod tests {
             .iter()
             .flat_map(|entry| &entry.segments)
             .any(|segment| matches!(segment, LogSegment::Text(text) if text == " deals ")));
+    }
+
+    #[test]
+    fn priority_passed_names_the_receiving_player() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PriorityPassed {
+                player_id: PlayerId(1),
+            }],
+            &state,
+            &state,
+        );
+        let segments: Vec<&LogSegment> = entries.iter().flat_map(|e| &e.segments).collect();
+        assert!(
+            matches!(segments.first(), Some(LogSegment::Text(t)) if t == "Priority passes to ")
+        );
+        assert!(matches!(
+            segments.get(1),
+            Some(LogSegment::PlayerName { player_id, .. }) if *player_id == PlayerId(1)
+        ));
+        assert!(!segments
+            .iter()
+            .any(|s| matches!(s, LogSegment::Text(t) if t.contains("passes priority"))));
     }
 
     #[test]
@@ -3391,28 +3539,117 @@ mod tests {
     }
 
     #[test]
-    fn start_game_log_entries_reset_hostile_context_before_turn_one() {
+    fn start_game_log_entries_reset_hostile_context_at_the_choice() {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 99;
         state.phase = Phase::End;
 
         let result = start_game(&mut state);
 
+        // CR 103.1: the start batch is the contest alone; it resets the log
+        // cursor like a game-start batch despite the hostile turn-99 context.
         assert!(matches!(
             result.events.as_slice(),
+            [GameEvent::StartingPlayerContest { .. }]
+        ));
+        assert_eq!(result.log_entries[0].turn, 0);
+        assert_eq!(result.log_entries[0].phase, Phase::Untap);
+        assert_eq!(
+            result.log_entries[0].segments.last(),
+            Some(&LogSegment::Text(
+                " wins the roll and chooses who takes the first turn".to_string()
+            ))
+        );
+
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let answer = apply(
+            &mut state,
+            chooser,
+            GameAction::ChooseStartingPlayer { player: chooser },
+        )
+        .expect("the chooser elects to play first");
+
+        assert!(matches!(
+            answer.events.as_slice(),
             [
-                GameEvent::StartingPlayerContest { .. },
                 GameEvent::GameStarted,
                 GameEvent::TurnStarted { turn_number: 1, .. },
                 ..
             ]
         ));
-        assert_eq!(result.log_entries[0].turn, 0);
-        assert_eq!(result.log_entries[0].phase, Phase::Untap);
-        assert_eq!(result.log_entries[1].turn, 0);
-        assert_eq!(result.log_entries[1].phase, Phase::Untap);
-        assert_eq!(result.log_entries[2].turn, 1);
-        assert_eq!(result.log_entries[2].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[0].turn, 0);
+        assert_eq!(answer.log_entries[0].phase, Phase::Untap);
+        assert_eq!(answer.log_entries[1].turn, 1);
+        assert_eq!(answer.log_entries[1].phase, Phase::Untap);
+    }
+
+    /// CR 104.3a: a player can concede at any time, so a game of a
+    /// best-of-three can end at its CR 103.1 starting-player choice, before
+    /// any turn begins. The batch that ends it leaves the match already
+    /// numbering the next game, and its entries are still the game's that
+    /// ended. CR 100.6a: the game that decides the match keeps its own
+    /// number, and so do its entries.
+    #[test]
+    fn a_game_conceded_at_its_starting_player_choice_logs_its_end_in_that_game() {
+        let concede_at_the_choice = |game_number: u8, p1_wins: u8| {
+            let mut state = GameState::new_two_player(42);
+            state.set_match_config(MatchConfig {
+                match_type: MatchType::Bo3,
+                ..MatchConfig::default()
+            });
+            state.game_number = game_number;
+            state.match_score.p1_wins = p1_wins;
+            start_game(&mut state);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ChooseStartingPlayer { .. }),
+                "the game rests at its starting-player choice: {:?}",
+                state.waiting_for
+            );
+            let conceded = apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::Concede {
+                    player_id: PlayerId(0),
+                },
+            )
+            .expect("a player can concede at the starting-player choice");
+            (state, conceded.log_entries)
+        };
+        let logs_a_game_over = |entries: &[GameLogEntry]| {
+            entries.iter().any(|entry| {
+                entry.segments.iter().any(|segment| {
+                    matches!(segment, LogSegment::Text(text) if text.starts_with("Game over — "))
+                })
+            })
+        };
+
+        // Game one ends, and the match has already numbered game two.
+        let (state, entries) = concede_at_the_choice(1, 0);
+        assert_eq!(state.match_phase, MatchPhase::BetweenGames);
+        assert_eq!(state.game_number, 2);
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|entry| entry.turn == 0), "{entries:?}");
+        assert!(logs_a_game_over(&entries), "{entries:?}");
+        assert!(
+            entries.iter().all(|entry| entry.game_number == 1),
+            "game one's end is logged in game one: {entries:?}"
+        );
+
+        // P1 already won game one, so conceding game two decides the match.
+        let (state, entries) = concede_at_the_choice(2, 1);
+        assert_eq!(state.match_phase, MatchPhase::Completed);
+        assert_eq!(state.game_number, 2);
+        assert!(!entries.is_empty());
+        assert!(logs_a_game_over(&entries), "{entries:?}");
+        assert!(
+            entries.iter().all(|entry| entry.game_number == 2),
+            "the deciding game's end is logged in that game: {entries:?}"
+        );
     }
 
     #[test]
@@ -3451,6 +3688,7 @@ mod tests {
     fn roundtrip_serialization() {
         let entry = GameLogEntry {
             seq: 0,
+            game_number: 2,
             turn: 1,
             phase: crate::types::phase::Phase::PreCombatMain,
             category: LogCategory::Stack,
@@ -3463,6 +3701,7 @@ mod tests {
             ],
             presentation: Default::default(),
         };
+        assert_eq!(serde_json::to_value(&entry).unwrap()["game_number"], 2);
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: GameLogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, deserialized);
@@ -3473,7 +3712,12 @@ mod tests {
         let json = r#"{"seq":1,"turn":1,"phase":"Untap","category":"Game","segments":[{"type":"Text","value":"Game started"}]}"#;
         let entry: GameLogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.presentation, LogPresentation::default());
+        assert_eq!(entry.game_number, 1);
         let serialized = serde_json::to_value(&entry).unwrap();
+        assert!(
+            serialized.get("game_number").is_none(),
+            "a first-game entry serializes as it did before the field"
+        );
         assert_eq!(serialized["presentation"]["importance"], "Detail");
     }
 
@@ -3518,6 +3762,7 @@ mod tests {
                 owner: record.owner,
                 rebound_from: None,
                 entry_timestamp: None,
+                retained_sticker_timestamps: None,
                 turn_zone_change_index: record.turn_zone_change_index,
                 zone_change_record: (**record).clone(),
                 cause,
@@ -3923,6 +4168,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -3946,7 +4192,111 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert_eq!(lines(&[mana]), 0);
+    }
+}
+
+#[cfg(test)]
+mod counter_count_log_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
+
+    fn charge() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    fn relic(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Astral Cornucopia".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 107.1 + CR 122.1: a count above `i32::MAX` logs its exact value as
+    /// text, never saturated to `i32::MAX` nor wrapped negative; a count that
+    /// fits `i32` stays a `Number`.
+    #[test]
+    fn counter_counts_past_i32_max_log_exactly() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let removed = |count: u32| GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count,
+        };
+        let segments = format_segments(&removed(1 << 31), &state);
+        assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
+        assert_eq!(segments[3], text(" counters removed from "));
+
+        // Boundary: `i32::MAX` is still a `Number`; one more is exact text.
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32), &state)[0],
+            LogSegment::Number(i32::MAX)
+        );
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32 + 1), &state)[0],
+            LogSegment::Text("2147483648".into())
+        );
+
+        let added = GameEvent::CounterAdded {
+            object_id: id,
+            counter_type: charge(),
+            count: u32::MAX,
+            actor: PlayerId(0),
+        };
+        let segments = format_segments(&added, &state);
+        assert_eq!(segments[0], LogSegment::Text("4294967295".into()));
+        assert_eq!(segments[3], text(" counters on "));
+
+        let stationed = GameEvent::Stationed {
+            spacecraft_id: id,
+            creature_id: id,
+            counters_added: 1 << 31,
+        };
+        let segments = format_segments(&stationed, &state);
+        assert_eq!(segments[4], LogSegment::Text("2147483648".into()));
+    }
+
+    /// CR 107.1c: a revealed "any number" choice above `i32::MAX` logs its
+    /// exact value; a small number in the same reveal stays a `Number`.
+    #[test]
+    fn chosen_numbers_past_i32_max_log_exactly() {
+        let state = GameState::new_two_player(7);
+        let revealed = GameEvent::ChosenNumbersRevealed {
+            numbers: vec![(PlayerId(0), 3_000_000_000), (PlayerId(1), 7)],
+        };
+        let segments = format_segments(&revealed, &state);
+        assert_eq!(segments[3], LogSegment::Text("3000000000".into()));
+        assert_eq!(segments[7], LogSegment::Number(7));
+    }
+
+    #[test]
+    fn small_counter_counts_log_unchanged() {
+        let mut state = GameState::new_two_player(7);
+        let id = relic(&mut state);
+        let three = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 3,
+        };
+        let segments = format_segments(&three, &state);
+        assert_eq!(segments[0], LogSegment::Number(3));
+        assert_eq!(segments[3], text(" counters removed from "));
+        let one = GameEvent::CounterRemoved {
+            object_id: id,
+            counter_type: charge(),
+            count: 1,
+        };
+        assert_eq!(
+            format_segments(&one, &state)[3],
+            text(" counter removed from ")
+        );
     }
 }

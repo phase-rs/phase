@@ -39,7 +39,7 @@ function hasAmbiguousCost(shards: string[]): boolean {
 }
 
 export function ManaPaymentUI() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -54,6 +54,13 @@ export function ManaPaymentUI() {
     : null;
   const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
+  // CR 601.2g + CR 605.3a: the engine publishes a manual mana ability's payment
+  // window to its payer only; an automatic window has no view and is paid by
+  // board taps alone.
+  const manaAbilityPayment = isManaAbilityPayment
+    ? gameState?.derived?.mana_ability_payment ?? null
+    : null;
+  const selectsPoolUnits = isManaPayment || manaAbilityPayment != null;
 
   // CR 702.51a: the bottom-anchored convoke panel can sit on top of the very
   // creatures the player must tap to pay. The DialogHost peek affordance lets
@@ -79,6 +86,9 @@ export function ManaPaymentUI() {
   // any frontend cost computation.
   const costShards = useMemo(() => {
     if (!gameState) return null;
+    // Checked first: an outer spell's `pending_cast` persists while a mana
+    // ability activated to pay it has its own window open.
+    if (manaAbilityPayment) return manaCostToShards(manaAbilityPayment.cost);
     if (gameState.pending_cast) {
       // Activated-ability mana payment: prefer `activation_cost` when present.
       // The engine reuses PendingCast for both spell casts and activated abilities;
@@ -102,10 +112,11 @@ export function ManaPaymentUI() {
       return manaCostToShards(sourceObj.mana_cost);
     }
     return null;
-  }, [gameState, isManaPayment, isPhyrexianPayment, spellObjectId]);
+  }, [gameState, isManaPayment, isPhyrexianPayment, manaAbilityPayment, spellObjectId]);
 
   const cardName = useMemo(() => {
     if (!gameState) return null;
+    if (manaAbilityPayment) return gameState.objects[manaAbilityPayment.source_id]?.name ?? null;
     if (isPhyrexianPayment && spellObjectId != null) {
       return gameState.objects[spellObjectId]?.name ?? null;
     }
@@ -119,7 +130,7 @@ export function ManaPaymentUI() {
       return gameState.objects[topEntry.source_id]?.name ?? null;
     }
     return null;
-  }, [gameState, isManaPayment, isPhyrexianPayment, spellObjectId]);
+  }, [gameState, isManaPayment, isPhyrexianPayment, manaAbilityPayment, spellObjectId]);
 
   const isAmbiguous = costShards != null && hasAmbiguousCost(costShards);
 
@@ -203,13 +214,19 @@ export function ManaPaymentUI() {
     return remaining ? manaCostToShards(remaining) : null;
   }, [gameState]);
 
-  // CR 118.3a: the engine records player-directed pins on `pending_cast`.
-  // The frontend is a pure mirror — it renders the engine's pin set and the
-  // individual pool units, and dispatches Spend/UnspendPoolMana on click. It
-  // computes no eligibility (the engine accepts or rejects each pin).
+  // CR 118.3a: the engine records player-directed pins on `pending_cast`, or
+  // on the manual mana ability whose window is open. The frontend is a pure
+  // mirror — it renders the engine's pin set and the individual pool units, and
+  // dispatches Spend/UnspendPoolMana on click. It computes no eligibility (the
+  // engine accepts or rejects each pin).
   const pinnedPipIds = useMemo(
-    () => new Set(gameState?.pending_cast?.pinned_pool_units ?? []),
-    [gameState],
+    () =>
+      new Set(
+        manaAbilityPayment?.pinned_pool_units ??
+          gameState?.pending_cast?.pinned_pool_units ??
+          [],
+      ),
+    [gameState, manaAbilityPayment],
   );
 
   const pinUnit = useCallback(
@@ -320,9 +337,10 @@ export function ManaPaymentUI() {
   // stack display, not an interactive panel.
   if (!isAnyPayment || !player || !canAct) return null;
 
-  // CR 605.3a + CR 117.1d: a mana ability's payment window is paid only by board
-  // taps, so it shows the prompt and the cancel that withdraws the activation.
-  if (isManaAbilityPayment) {
+  // CR 605.3a + CR 117.1d: an automatic mana ability's payment window is paid
+  // only by board taps, so it shows the prompt and the cancel that withdraws the
+  // activation.
+  if (isManaAbilityPayment && !manaAbilityPayment) {
     return (
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4">
         <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
@@ -568,7 +586,7 @@ export function ManaPaymentUI() {
               </div>
             )}
 
-            {paymentGroups.length > 0 && !isManaPayment && (
+            {paymentGroups.length > 0 && !selectsPoolUnits && (
               <div className="flex flex-wrap items-center justify-center gap-1.5">
                 {paymentGroups.map((group) => (
                   <ManaChip key={group.key} group={group} count={group.pipIds.length} />
@@ -576,7 +594,7 @@ export function ManaPaymentUI() {
               </div>
             )}
 
-            {paymentGroups.length > 0 && isManaPayment && (
+            {paymentGroups.length > 0 && selectsPoolUnits && (
               <>
                 <div>
                   <p className="mb-1 text-center text-[11px] text-gray-500">

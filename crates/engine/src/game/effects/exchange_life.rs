@@ -95,6 +95,21 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.12g: the player gains or loses the difference to reach the stat's
+    // previous value (a gain/loss, not a set). Compute it BEFORE the stat side
+    // is written: a difference the engine cannot represent must fail the whole
+    // exchange with no partial mutation (the open ingress window records it;
+    // the action boundary then rejects and restores).
+    let Some(diff) = super::life::life_total_difference(
+        state,
+        player_id,
+        stat_value,
+        old_life,
+        "exchange life total with stat",
+    ) else {
+        return Ok(());
+    };
+
     // CR 613.4b: Set the source's exchanged stat to the player's previous life
     // total via an indefinite (Duration::Permanent) layer-7b continuous effect.
     let modification = match stat {
@@ -117,13 +132,12 @@ pub fn resolve(
         None,
     );
 
-    // CR 701.12g: the player gains or loses the difference to reach the stat's
-    // previous value (a gain/loss, not a set). The helpers re-check CR
-    // 119.7/119.8 and route through the replacement pipeline.
-    let diff = stat_value - old_life;
+    // CR 701.12g + CR 119.7/CR 119.8: the helpers re-check the life-change
+    // prohibitions and route through the replacement pipeline.
     let deferred = match diff.signum() {
         1 => apply_life_gain(state, player_id, diff as u32, events).err(),
-        -1 => apply_life_loss(state, player_id, (-diff) as u32, events).err(),
+        // `unsigned_abs`: the difference may be `i32::MIN`.
+        -1 => apply_life_loss(state, player_id, diff.unsigned_abs(), events).err(),
         _ => None,
     };
     if deferred.is_some() {

@@ -1,14 +1,16 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useMemo } from "react";
 
+import type { CardPrinting } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
-function RevealCard({ card }: { card: { name: string; oracleId?: string; faceName?: string } }) {
+function RevealCard({ card }: { card: { name: string; oracleId?: string; faceName?: string; ownerPrinting?: CardPrinting | null } }) {
   const { src, advanceFailedSource } = useCardImage(card.name, {
     size: "small",
     oracleId: card.oracleId,
     faceName: card.faceName,
+    ownerPrinting: card.ownerPrinting,
   });
 
   return (
@@ -70,7 +72,7 @@ export function RevealOverlay() {
       for (const id of player.library ?? []) libraryIds.add(id);
     }
 
-    const cards: { id: number; name: string; oracleId?: string; faceName?: string }[] = [];
+    const cards: { id: number; name: string; oracleId?: string; faceName?: string; ownerPrinting?: CardPrinting | null }[] = [];
     for (const id of ids) {
       if (!libraryIds.has(id)) continue;
       const obj = gameState.objects[id];
@@ -82,6 +84,7 @@ export function RevealOverlay() {
           name: obj.name,
           oracleId: obj.printed_ref?.oracle_id,
           faceName: obj.printed_ref?.face_name,
+          ownerPrinting: obj.printing,
         });
       }
     }

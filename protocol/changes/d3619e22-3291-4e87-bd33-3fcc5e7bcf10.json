@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ChoiceType::CardName gains a closed-domain struct form {options, distinctness}; new Effect::CreateCardCopyByName, EffectKind::CreateCardCopyByName and GameEvent::CardCopyCreated; GameState gains named_card_name_this_resolution, GameObject gains created_outside_game and SpellCastRecord gains from_outside_game (Garth One-Eye, CR 707.13)"
+}

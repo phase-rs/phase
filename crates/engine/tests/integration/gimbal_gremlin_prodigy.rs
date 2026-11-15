@@ -15,12 +15,22 @@
 //! "differently named <type-phrase>" template and emits
 //! `QuantityRef::ObjectCountDistinct { filter, qualities: [Name] }`. The
 //! runtime resolver in `game::quantity` already deduplicates objects by name
-//! (CR 201.2 + CR 603.4), so the spawned Gremlin enters with one counter per
+//! (CR 201.2 + CR 603.4), so the spawned Gremlin receives one counter per
 //! distinctly-named artifact token its controller controls.
 //!
+//! The Gremlin is created first and the counters are put on it afterwards, so
+//! X is determined once the token exists and counts the new Gremlin itself:
+//! with no other artifact token, Gimbal makes a 1/1 that survives.
+//!
 //! CR references (verified against docs/MagicCompRules.txt):
-//!   - CR 122.6a: "If an object enters the battlefield with counters on it ...
-//!     the object's controller puts those counters on it."
+//!   - CR 608.2c: the instructions are followed in the order written — create
+//!     the token, then put X +1/+1 counters on it.
+//!   - CR 608.2h: X is determined only once, when the counter instruction is
+//!     applied (after the token exists).
+//!   - CR 122.1: the counters are placed on the token already on the
+//!     battlefield.
+//!   - CR 111.4: the creating effect names the token, so a same-named artifact
+//!     token already in play does not add a second name.
 //!   - CR 201.2: a name is an object characteristic.
 //!   - CR 513.1a: "At the beginning of [your] end step" triggers fire at the
 //!     start of the end step.
@@ -152,10 +162,10 @@ fn p1p1_counters(obj: &GameObject) -> u32 {
 }
 
 /// Core regression: three distinct-named artifact tokens (Treasure, Food,
-/// Clue) plus a duplicate Treasure → distinct-name count = 3. The spawned
-/// Gremlin must enter with exactly 3 +1/+1 counters, not the pre-fix count
-/// (which was the total permanent count regardless of artifact-token
-/// identity).
+/// Clue) plus a duplicate Treasure, plus the new Gremlin itself → distinct-name
+/// count = 4. The spawned Gremlin must receive exactly 4 +1/+1 counters, not
+/// the pre-fix count (which was the total permanent count regardless of
+/// artifact-token identity).
 #[test]
 fn gimbal_spawns_gremlin_with_distinct_named_artifact_token_count() {
     let mut scenario = GameScenario::new();
@@ -179,17 +189,18 @@ fn gimbal_spawns_gremlin_with_distinct_named_artifact_token_count() {
     let gremlin = find_spawned_gremlin(&runner);
     assert_eq!(
         p1p1_counters(gremlin),
-        3,
-        "Gimbal's Gremlin must enter with exactly 3 +1/+1 counters — one per \
-         differently named artifact token P0 controls (Treasure, Food, Clue; \
-         the duplicate Treasure does not contribute again per CR 201.2)"
+        4,
+        "Gimbal's Gremlin must receive exactly 4 +1/+1 counters — one per \
+         differently named artifact token P0 controls (Treasure, Food, Clue and \
+         the new Gremlin; the duplicate Treasure does not contribute again per \
+         CR 201.2)"
     );
 }
 
-/// Single artifact token → exactly 1 counter. Discriminates the fix from any
-/// "always 1" fallback regression.
+/// Single artifact token plus the new Gremlin → exactly 2 counters.
+/// Discriminates the fix from any "always 1" fallback regression.
 #[test]
-fn gimbal_one_artifact_token_gives_one_counter() {
+fn gimbal_one_artifact_token_gives_two_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -204,16 +215,16 @@ fn gimbal_one_artifact_token_gives_one_counter() {
     let gremlin = find_spawned_gremlin(&runner);
     assert_eq!(
         p1p1_counters(gremlin),
-        1,
-        "exactly one artifact token (Treasure) under P0's control must \
-         produce exactly one +1/+1 counter on the spawned Gremlin"
+        2,
+        "one artifact token (Treasure) under P0's control plus the new Gremlin \
+         must produce exactly two +1/+1 counters on the spawned Gremlin"
     );
 }
 
 /// Nontoken artifacts must not contribute. P0 controls Gimbal plus an
 /// Artifact creature that is *not* a token; the filter carries
 /// `FilterProp::Token` so the nontoken artifact is excluded. The lone
-/// artifact token contributes the only tally.
+/// artifact token and the new Gremlin are the only tallies.
 #[test]
 fn gimbal_excludes_nontoken_artifacts_and_opponent_tokens() {
     let mut scenario = GameScenario::new();
@@ -239,9 +250,52 @@ fn gimbal_excludes_nontoken_artifacts_and_opponent_tokens() {
     let gremlin = find_spawned_gremlin(&runner);
     assert_eq!(
         p1p1_counters(gremlin),
-        1,
-        "only P0's artifact tokens count — the nontoken artifact creature \
-         (FilterProp::Token) and the opponent-controlled token \
-         (ControllerRef::You) are both excluded"
+        2,
+        "only P0's artifact tokens count (the Treasure and the new Gremlin) — \
+         the nontoken artifact creature (FilterProp::Token) and the \
+         opponent-controlled token (ControllerRef::You) are both excluded"
     );
+}
+
+/// CR 608.2c + CR 608.2h + CR 704.5f: with no other artifact token, X counts
+/// only the new Gremlin, so Gimbal makes a 1/1 that survives state-based
+/// actions instead of a 0/0 that dies.
+#[test]
+fn gimbal_alone_makes_a_surviving_one_one_gremlin() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Gimbal, Gremlin Prodigy", 4, 4, GIMBAL);
+    let mut runner = scenario.build();
+
+    advance_until_end_step_trigger_resolved(&mut runner);
+
+    // Reach-guard: the Gremlin is on the battlefield.
+    let gremlin = find_spawned_gremlin(&runner);
+    assert_eq!(p1p1_counters(gremlin), 1);
+    assert_eq!((gremlin.power, gremlin.toughness), (Some(1), Some(1)));
+}
+
+/// CR 111.4 + CR 201.2: a pre-existing artifact token with the same name as
+/// the new Gremlin is not a second name — the count is 1, not 2.
+#[test]
+fn gimbal_same_named_artifact_token_counts_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Gimbal, Gremlin Prodigy", 4, 4, GIMBAL);
+    let earlier = place_artifact_token(&mut scenario, "Gremlin");
+    let mut runner = scenario.build();
+    mark_as_tokens(&mut runner, &[earlier]);
+
+    advance_until_end_step_trigger_resolved(&mut runner);
+
+    let state = runner.state();
+    let spawned: Vec<&GameObject> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.is_token && obj.name == "Gremlin" && obj.id != earlier)
+        .collect();
+    // Reach-guard: the trigger made exactly one new Gremlin.
+    assert_eq!(spawned.len(), 1, "exactly one new Gremlin");
+    assert_eq!(p1p1_counters(spawned[0]), 1);
 }

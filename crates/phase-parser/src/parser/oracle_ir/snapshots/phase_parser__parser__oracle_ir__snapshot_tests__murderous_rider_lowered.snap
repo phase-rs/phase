@@ -1,0 +1,76 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Lifelink"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Lifelink",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutAtLibraryPosition",
+          "target": {
+            "type": "ParentTarget"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "position": {
+            "type": "Bottom"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ dies, put it on the bottom of its owner's library.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

@@ -4,7 +4,9 @@
 # rather than leaving refactor-to-combinators for review.
 #
 # Existing non-combinator code in the parser is frozen in amber — this check
-# only flags *newly added* offending lines in the diff.
+# only flags *newly added* offending lines in the diff. A line moved within the
+# gate's view (its scope minus SCOPE_EXCLUDES) is not added; the added-line set
+# comes from scripts/lib/added-lines.py.
 #
 # Six forbidden pattern families:
 #   (A) String-method dispatch: .strip_prefix / .contains("...") / .split_once
@@ -27,6 +29,10 @@
 #       the name-is-a-category-key contract the coverage report depends on.
 #       Match-arm destructuring (`Effect::Unimplemented { name, .. } =>`) is
 #       not flagged.
+#   (H) Whole-production-tree residue syntax ceilings, before diff-only exits.
+#       Selected helper tuple bindings/projections/whole-result drops and exact
+#       TargetFilter defaults; not proof against arbitrary unread-text loss.
+#       See scripts/residue-ratchet.txt for baseline and tightening policy.
 #
 # Exempt: lines (or the line immediately above) with
 #     // allow-noncombinator: <reason>
@@ -50,6 +56,11 @@
 #                         two apart while `Gate A PASS head=<sha> base=<sha>`
 #                         stays where contributor tooling reads it.
 #   1  Gate A/G FAIL    - violations found.
+#   1  SUITE RED        - the added-line helper's own test suite
+#                         (scripts/lib/added_lines_tests.py) failed; no verdict.
+#   2  INSTRUMENT FAILURE - the added-line helper could not read the diff
+#                         (scripts/lib/added-lines.py), or the family D
+#                         detector's stderr file could not be created; no verdict.
 #   3  CANNOT ANSWER    - the window itself is unknowable: base == head AND the
 #                         index holds nothing in scope, so nothing at all was
 #                         read. Not a failure - the same meaning exit 3 carries
@@ -59,11 +70,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CROSS_PRODUCT_DETECTOR="$SCRIPT_DIR/lib/detect-cross-product-alts.py"
+# shellcheck source=scripts/lib/added-lines.sh
+. "$SCRIPT_DIR/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 BASE_SHA="$(git rev-parse "$BASE")"
 HEAD_SHA="$(git rev-parse HEAD)"
-SCOPE='crates/engine/src/parser'
+# When parser code moves to a new location, append that path here and keep the
+# old one listed: the old path's deletions are what exempt the moved lines.
+SCOPE=(crates/engine/src/parser crates/engine/src/types/text_grammar.rs crates/phase-ast/src/types/text_grammar.rs crates/phase-parser/src/parser)
 
 # When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
 # was provided and BASE == HEAD), only check staged changes to avoid flagging
@@ -118,7 +133,7 @@ fi
 # so the anchor is exact. Full-line comments are excluded so that prose NAMING a
 # permissive symbol is not miscounted as a call.
 # ---------------------------------------------------------------------------
-ORACLE_RS='crates/engine/src/parser/oracle.rs'
+ORACLE_RS='crates/phase-parser/src/parser/oracle.rs'
 PERMISSIVE_SYMS='parse_granted_keyword_fragment|extract_granted_keyword_list'
 # Pre-rename spellings. These must not come back under any name, in any context.
 LEGACY_SYMS='parse_keyword_from_oracle|extract_keyword_line'
@@ -174,6 +189,44 @@ if [ "$arch_fail" -ne 0 ]; then
     exit 1
 fi
 printf 'Gate G PASS (router/grant architecture: strict router vs permissive grant boundary intact)\n'
+
+# (H) Selected helper-result discard syntax: whole-tree, snapshot-owned ceiling.
+# Use the executing tooling; never execute arbitrary staged detector code.
+RESIDUE_DETECTOR="$SCRIPT_DIR/lib/detect-residue-discards.py"
+RESIDUE_TESTS="$SCRIPT_DIR/lib/detect_residue_discards_tests.py"
+RESIDUE_LEDGER="$SCRIPT_DIR/residue-ratchet.txt"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Gate H FAIL: python3 is required for the residue census." >&2
+    exit 1
+fi
+for required in "$RESIDUE_DETECTOR" "$RESIDUE_TESTS"; do
+    if [ ! -f "$required" ]; then
+        echo "Gate H FAIL: required residue gate file missing: $required" >&2
+        exit 1
+    fi
+done
+# Ledger availability belongs to the selected snapshot, not another worker's
+# unstaged filesystem. The detector checks the index blob in cached mode.
+if [ "$DIFF_MODE" != "--cached" ] && [ ! -f "$RESIDUE_LEDGER" ]; then
+    echo "Gate H FAIL: required residue gate file missing: $RESIDUE_LEDGER" >&2
+    exit 1
+fi
+if ! residue_tests_output="$(python3 -B "$RESIDUE_TESTS" 2>&1)"; then
+    echo "Gate H FAIL: residue detector self-tests failed; repair the detector before proceeding." >&2
+    printf '%s\n' "$residue_tests_output" >&2
+    exit 1
+fi
+if [ "$DIFF_MODE" = "--cached" ]; then
+    python3 -B "$RESIDUE_DETECTOR" --check --index
+else
+    python3 -B "$RESIDUE_DETECTOR" --check
+fi
+
+# The added-line helper's own suite, like Gate H's above, runs before the
+# diff-only exits below: CI runs no separate step for it, so a change that
+# touches only the helper is still tested by this gate. Section (A0) then
+# reuses the pass instead of running the suite again.
+added_lines_check_suite
 
 # ---------------------------------------------------------------------------
 # DO NOT "harden" families (A), (B), (E), (F) by filtering them through the
@@ -251,27 +304,17 @@ report_verbatim_eq=""
 report_unimpl=""
 
 # Filter a per-file candidate list against the allow-noncombinator escape
-# hatch. Reads candidate lines (each prefixed by '+') on stdin, prints the
-# unfiltered text to stdout. Args: $1 = file path.
+# hatch, on the candidate's own line or the line above it. Args: $1 = file path,
+# $2 = `<line>\t<content>` records. Prints the unannotated content.
 filter_allow_noncombinator() {
-    local file="$1"
-    local candidates="$2"
-    local added=""
-    while IFS= read -r diff_line; do
-        [ -z "$diff_line" ] && continue
-        local text="${diff_line#*+}"
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-noncombinator'; then
-                continue
-            fi
-        fi
-        # Same-line annotation also exempts.
-        if echo "$text" | grep -q 'allow-noncombinator'; then
-            continue
+    local file="$1" candidates="$2" added="" rec ln text prev
+    while IFS= read -r rec; do
+        [ -z "$rec" ] && continue
+        ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
+        case "$text" in *allow-noncombinator*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
+            case "$prev" in *allow-noncombinator*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -287,7 +330,7 @@ filter_allow_noncombinator() {
 # parent module file is still fully scanned, including any inline test fixtures.
 SCOPE_EXCLUDES=(':(exclude)**/*.md' ':(exclude)**/tests.rs' ':(exclude)**/*_tests.rs')
 
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
 
 # EMPTY SCAN SET. (#8503)
 #
@@ -309,7 +352,7 @@ if [ -z "$files" ]; then
         # Pre-commit hook. The scan window IS the commit being created, so an
         # empty scope is a real answer: this commit stages no parser files.
         # PASS, with a SKIPPED line naming what was empty.
-        printf 'Gate A SKIPPED (pre-commit: no staged files under %s)\n' "$SCOPE"
+        printf 'Gate A SKIPPED (pre-commit: no staged files under %s)\n' "${SCOPE[*]}"
         printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
         exit 0
     fi
@@ -318,13 +361,13 @@ if [ -z "$files" ]; then
         # the honest report is that the gate cannot answer - not that the tree
         # is clean. Exit 3 is this repo's "cannot answer", per
         # scripts/tilt-wait.sh; it is not a failure verdict.
-        unexamined=$( { git diff --name-only -- "$SCOPE" "${SCOPE_EXCLUDES[@]}"; \
-                        git ls-files --others --exclude-standard -- "$SCOPE"; } 2>/dev/null \
+        unexamined=$( { git diff --name-only -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"; \
+                        git ls-files --others --exclude-standard -- "${SCOPE[@]}"; } 2>/dev/null \
                       | sort -u || true )
         {
             echo "Gate A CANNOT ANSWER: nothing was scanned."
             echo "  base == head ($HEAD_SHA), so the diff range is empty, and the"
-            echo "  index holds no files under $SCOPE. This run read zero lines; it"
+            echo "  index holds no files under ${SCOPE[*]}. This run read zero lines; it"
             echo "  cannot tell clean parser work from parser work it never saw."
             if [ -n "$unexamined" ]; then
                 echo "  Unexamined parser files ARE present in this working tree:"
@@ -341,7 +384,7 @@ if [ -z "$files" ]; then
     # gate did look at all of it, so this is a real PASS over a knowable window;
     # the SKIPPED line above it says the range held nothing in scope.
     printf 'Gate A SKIPPED (no files under %s changed in %s..%s)\n' \
-        "$SCOPE" "$BASE_SHA" "$HEAD_SHA"
+        "${SCOPE[*]}" "$BASE_SHA" "$HEAD_SHA"
     printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
     exit 0
 fi
@@ -355,7 +398,7 @@ if [ -n "$DIFF_MODE" ]; then
 else
     scanned_window="working tree vs $BASE_SHA"
 fi
-printf 'Gate A: scanned %s file(s) under %s (%s).\n' "$scanned_count" "$SCOPE" "$scanned_window"
+printf 'Gate A: scanned %s file(s) under %s (%s).\n' "$scanned_count" "${SCOPE[*]}" "$scanned_window"
 
 # (D0) Family (D)'s own seam suite, ahead of the scan it protects — the same
 # shape as section (B0) of check-engine-authorities.sh, and for the same reason.
@@ -377,17 +420,22 @@ if ! python3 "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >/dev/null 2>&
     exit 1
 fi
 
+# (A0) The genuinely-added line set, computed once over the whole view rather
+# than per file, because a move pairs lines across files.
+added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
+
 while IFS= read -r file; do
     [ -f "$file" ] || continue
 
-    # Pull all added lines once (without line-number prefix) for reuse.
-    diff_added=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
-    if [ -z "$diff_added" ]; then
+    # This file's genuinely-added records; `kept` drops blank and `+`-leading content.
+    file_added=$(added_lines_for "$file")
+    kept=$(printf '%s\n' "$file_added" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
         continue
     fi
 
     # (A) String-method dispatch.
-    methods_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_METHODS" || true)
+    methods_hits=$(added_lines_grep "$kept" "$FORBIDDEN_METHODS") || exit 2
     methods_clean=$(filter_allow_noncombinator "$file" "$methods_hits")
     if [ -n "$methods_clean" ]; then
         report_methods="${report_methods}
@@ -400,7 +448,7 @@ while IFS= read -r file; do
     fi
 
     # (B) Match-arm string-literal patterns.
-    match_arm_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_MATCH_ARM" || true)
+    match_arm_hits=$(added_lines_grep "$kept" "$FORBIDDEN_MATCH_ARM") || exit 2
     match_arm_clean=$(filter_allow_noncombinator "$file" "$match_arm_hits")
     if [ -n "$match_arm_clean" ]; then
         report_match_arm="${report_match_arm}
@@ -414,7 +462,7 @@ while IFS= read -r file; do
 
     # (C) Chained if-let-tag. Count occurrences in this file's added lines;
     # 2+ is the anti-pattern. Single occurrences are fine (and common).
-    iflet_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$IFLET_TAG_PATTERN" || true)
+    iflet_hits=$(added_lines_grep "$kept" "$IFLET_TAG_PATTERN") || exit 2
     iflet_clean=$(filter_allow_noncombinator "$file" "$iflet_hits")
     iflet_count=0
     if [ -n "$iflet_clean" ]; then
@@ -431,7 +479,7 @@ while IFS= read -r file; do
     fi
 
     # (E) Verbatim-sentence equality comparisons.
-    verbatim_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_VERBATIM_EQ" || true)
+    verbatim_hits=$(added_lines_grep "$kept" "$FORBIDDEN_VERBATIM_EQ") || exit 2
     verbatim_clean=$(filter_allow_noncombinator "$file" "$verbatim_hits")
     if [ -n "$verbatim_clean" ]; then
         report_verbatim_eq="${report_verbatim_eq}
@@ -444,7 +492,7 @@ while IFS= read -r file; do
     fi
 
     # (F) Hand-constructed Effect::Unimplemented literals.
-    unimpl_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_UNIMPL_LITERAL" || true)
+    unimpl_hits=$(added_lines_grep "$kept" "$FORBIDDEN_UNIMPL_LITERAL") || exit 2
     unimpl_clean=$(filter_allow_noncombinator "$file" "$unimpl_hits")
     if [ -n "$unimpl_clean" ]; then
         report_unimpl="${report_unimpl}
@@ -456,17 +504,36 @@ while IFS= read -r file; do
         FAIL=1
     fi
 
-    # (D) Un-factored cross-product alt. Multi-line structural check: feed the
-    # unified=0 diff for this file to the Python detector, which maps added
+    # (D) Un-factored cross-product alt. Multi-line structural check: feed this
+    # file's genuinely-added records to the Python detector, which maps added
     # lines onto post-image `alt` blocks and flags those with >=4 tag arms
     # sharing a long common prefix AND suffix. Skipped (not failed) if python3
     # is unavailable, so the gate degrades gracefully outside CI.
     if command -v python3 >/dev/null 2>&1 && [ -f "$CROSS_PRODUCT_DETECTOR" ]; then
-        crossprod_hits=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" \
-            | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>/dev/null || true)
-        if [ -n "$crossprod_hits" ]; then
-            report_crossprod="${report_crossprod}
+        # A non-zero detector exit is an INSTRUMENT error, not "no findings":
+        # treating it as a pass is how family D lost every check silently (an
+        # import error, a malformed record). Exit 0 with empty output is the only
+        # "clean" answer; anything else fails the gate with the detector's own
+        # diagnostic, named against the file it was scanning.
+        detector_err="$(mktemp "${TMPDIR:-/tmp}/crossprod-detector.XXXXXX")" || {
+            echo "ERROR: cannot create a temp file for the family D detector's stderr:" >&2
+            echo "       TMPDIR=${TMPDIR:-/tmp}" >&2
+            exit 2
+        }
+        if crossprod_hits=$(printf '%s\n' "$file_added" \
+            | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>"$detector_err"); then
+            rm -f "$detector_err"
+            if [ -n "$crossprod_hits" ]; then
+                report_crossprod="${report_crossprod}
 ${crossprod_hits}"
+                FAIL=1
+            fi
+        else
+            detector_rc=$?
+            report_crossprod="${report_crossprod}
+  ${file}: family D cross-product detector failed (exit ${detector_rc}):
+$(sed 's/^/    /' "$detector_err")"
+            rm -f "$detector_err"
             FAIL=1
         fi
     fi
@@ -479,7 +546,7 @@ ERROR: New parser code violates the nom-combinator mandate.
 The parser mandate (CLAUDE.md) requires nom combinators for ALL parsing
 dispatch. Copy-paste-ready patterns for every common shape are in:
 
-    crates/engine/src/parser/oracle_nom/PATTERNS.md
+    crates/phase-parser/src/parser/oracle_nom/PATTERNS.md
 
 EOF
 

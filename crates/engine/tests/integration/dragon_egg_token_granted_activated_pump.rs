@@ -157,6 +157,7 @@ fn dragon_egg_token_activation_pays_red_and_pumps_until_end_of_turn() {
         .act(GameAction::ActivateAbility {
             source_id: token,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the activation is accepted");
     for _ in 0..8 {

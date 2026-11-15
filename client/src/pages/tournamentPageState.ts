@@ -29,6 +29,7 @@
  * a wire union.
  */
 
+import type { ParseKeys } from "i18next";
 import type {
   MatchArity,
   PairingOutcome,
@@ -259,9 +260,9 @@ export interface TiebreakCell {
    */
   readonly id: string;
   /** Full catalog key for the column header, e.g. `"standings.tiebreaks.headToHead.gameWinPct"`. */
-  readonly labelKey: string;
+  readonly labelKey: ParseKeys<"tournament">;
   /** Full catalog key for the header's `title` attribute. */
-  readonly titleKey: string;
+  readonly titleKey: ParseKeys<"tournament">;
   /** Server-computed. Never re-derived here. */
   readonly value: number;
   readonly format: "percent" | "points";

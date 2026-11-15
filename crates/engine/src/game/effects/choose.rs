@@ -27,12 +27,13 @@ pub fn resolve(
     // NOTE: a random `Effect::Choose` (`selection: Random`) is resolved upstream
     // in `resolve_ability_chain` via `resolve_random_in_chain` and never reaches
     // this interactive resolver, so `selection` is intentionally ignored here.
-    let (choice_type, persist) = match &ability.effect {
+    let (choice_type, persist, chooser_ref) = match &ability.effect {
         Effect::Choose {
             choice_type,
             persist,
+            chooser,
             ..
-        } => (choice_type.clone(), *persist),
+        } => (choice_type.clone(), *persist, chooser.clone()),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected Choose effect".to_string(),
@@ -40,11 +41,39 @@ pub fn resolve(
         }
     };
 
+    // CR 608.2d + CR 109.4: resolve WHO chooses. `You` (the default) is the
+    // ability controller — the historic behavior. A targeted chooser
+    // (`TargetPlayer` / `TargetOpponent`) reads the announced target via the
+    // shared `controller_ref_player` authority (same read as the filter twin).
+    let Some(choosing_player) = crate::game::filter::controller_ref_player(
+        state,
+        ability.source_id,
+        Some(ability.controller),
+        Some(ability),
+        &chooser_ref,
+    ) else {
+        // CR 609.3: no eligible chooser (e.g. the targeted player left the
+        // game) — the choice does nothing, mirroring the empty-options path
+        // below and `OpponentGuess`'s missing-guesser no-op. No label is
+        // bound, so `ChosenLabelIs` gates downstream read an empty
+        // resolution slot and neither branch fires (fail-closed at
+        // resolution).
+        state.cost_payment_failed_flag = true;
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    };
+
     let options = compute_options(
         state,
         &choice_type,
-        ability.controller,
+        choosing_player,
         ability.source_id,
+        ability.trigger_source.as_ref(),
+        ability.source_incarnation,
         &ability.chosen_players,
     );
 
@@ -77,7 +106,7 @@ pub fn resolve(
     register_exact_named_choice_source(state, source.as_ref());
 
     state.waiting_for = WaitingFor::NamedChoice {
-        player: ability.controller,
+        player: choosing_player,
         // CR 107.1a/b: publish the free-entry contract alongside the choice it
         // belongs to, so a client never has to re-derive it from `choice_type`.
         free_entry: choice_type.free_entry(),
@@ -126,6 +155,10 @@ pub(crate) fn resolve_random_in_chain(
             choice_type,
             persist,
             selection: TargetSelectionMode::Random,
+            // Random: the game picks uniformly — no player is prompted, so the
+            // chooser is irrelevant here (mirrors the interactive path below,
+            // which resolves it).
+            chooser: _,
         } => (choice_type.clone(), *persist),
         _ => return false,
     };
@@ -135,6 +168,8 @@ pub(crate) fn resolve_random_in_chain(
         &choice_type,
         ability.controller,
         ability.source_id,
+        ability.trigger_source.as_ref(),
+        ability.source_incarnation,
         &ability.chosen_players,
     );
 
@@ -176,7 +211,11 @@ pub(crate) fn resolve_random_in_chain(
         source.as_mut(),
         persist_player,
     ) {
-        ability.update_trigger_source_context_in_resolution_segment(context);
+        if matches!(choice_type, ChoiceType::CardName { .. }) {
+            ability.update_trigger_source_context_through_chain(context);
+        } else {
+            ability.update_trigger_source_context_in_resolution_segment(context);
+        }
     }
     // CR 101.4 + CR 608.2d: mirror the interactive answer handler so a
     // game-selected number is readable per-player too (CR 608.2d override — the
@@ -255,9 +294,32 @@ pub(crate) fn bind_named_choice(
     if let Some(ChoiceValue::Color(color)) = ChoiceValue::from_choice(choice_type, choice) {
         state.named_color_this_resolution = Some(color);
     }
+    // CR 607.2d + CR 608.2c: "that label" later in this resolution names this
+    // answer, whether or not the chooser persists it (self-or-others scheme
+    // branch gates). Gated on the LABELED choice type — a Word/Artist answer
+    // also decodes to `ChoiceValue::Label` but names no anchor word.
+    if matches!(choice_type, ChoiceType::Labeled { .. }) {
+        state.named_label_this_resolution = Some(choice.to_string());
+    }
+    // CR 201.4 + CR 608.2c: "the card with the chosen name" later in this
+    // resolution names this answer, whether or not the source is still there
+    // to persist it.
+    if matches!(choice_type, ChoiceType::CardName { .. }) {
+        state.named_card_name_this_resolution = Some(choice.to_string());
+    }
     let updated_context = source.as_deref_mut().and_then(|source| {
         let context = source.context.as_mut()?;
         if !choice_type.is_resolution_scoped_card_predicate_choice() {
+            // CR 608.2d + CR 201.2a: the resolution context answers "the name
+            // announced while applying THIS effect", so a fresh naming replaces
+            // the snapshot's earlier answers (a recast spell's prior casts).
+            // The source object's own history is untouched (CR 607.2d readers).
+            if matches!(choice_type, ChoiceType::CardName { .. }) {
+                context
+                    .lki
+                    .chosen_attributes
+                    .retain(|attribute| !matches!(attribute, ChosenAttribute::CardName(_)));
+            }
             apply_choice_attributes(&mut context.lki.chosen_attributes, choice_type, choice);
         }
         Some(context.clone())
@@ -327,7 +389,7 @@ pub(crate) fn bind_named_choice(
                 // may have run before the choice was made — re-run.
                 if matches!(
                     choice_type,
-                    ChoiceType::CardName
+                    ChoiceType::CardName { .. }
                         | ChoiceType::CreatureType { .. }
                         | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
@@ -650,6 +712,59 @@ fn apply_choice_attributes(
     destination.extend(attrs);
 }
 
+/// CR 608.2d + CR 400.7: the card names this choice's source has already
+/// committed ("a card name that hasn't been chosen"), read from the source
+/// incarnation the ability was made for — never from a later object that merely
+/// shares its storage id. CR 113.7a: an ability whose source has left still
+/// resolves, and that incarnation's earlier choices are still illegal options;
+/// CR 400.7: a source that blinked back is a NEW object with no history, so its
+/// empty history must not stand in for the old one's.
+///
+/// Authority order: a latched trigger source decides its own incarnation
+/// ([`TriggerSourceContext::source_read`]); an activated ability's captured
+/// `source_incarnation` reads the live object only while it is still that
+/// incarnation, else that incarnation's exit last-known information
+/// (`exit_lki_for_incarnation`). Only an ability with no captured incarnation
+/// (an as-enters choice, which has no stack entry) reads the live battlefield
+/// object.
+fn source_chosen_card_names(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    source_incarnation: Option<u64>,
+) -> Vec<String> {
+    use crate::types::game_state::TriggerSourceRead;
+    let attributes: &[ChosenAttribute] = match (trigger_source, source_incarnation) {
+        (Some(ctx), _) => match ctx.source_read(state) {
+            TriggerSourceRead::ExactLive(object) => &object.chosen_attributes,
+            TriggerSourceRead::Latched(ctx) => &ctx.lki.chosen_attributes,
+        },
+        (None, Some(incarnation)) => state
+            .objects
+            .get(&source_id)
+            .filter(|object| object.incarnation == incarnation)
+            .map(|object| object.chosen_attributes.as_slice())
+            .or_else(|| {
+                crate::game::filter::exit_lki_for_incarnation(state, source_id, incarnation)
+                    .map(|lki| lki.chosen_attributes.as_slice())
+            })
+            .unwrap_or_default(),
+        (None, None) => state
+            .objects
+            .get(&source_id)
+            .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
+            .map(|object| object.chosen_attributes.as_slice())
+            .unwrap_or_default(),
+    };
+    attributes
+        .iter()
+        .filter_map(|attribute| match attribute {
+            ChosenAttribute::CardName(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 const FALLBACK_CREATURE_TYPES: &[&str] = &[
     "Human",
     "Elf",
@@ -716,7 +831,7 @@ pub(crate) fn as_enters_choice_options(
     controller: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Option<Vec<String>> {
-    let options = compute_options(state, choice_type, controller, source_id, &[]);
+    let options = compute_options(state, choice_type, controller, source_id, None, None, &[]);
     named_choice_is_possible(choice_type, &options).then_some(options)
 }
 
@@ -734,11 +849,18 @@ pub(crate) fn as_enters_choice_options(
 /// `DistinctFromPriorChoices` narrows the eligible set below what the card
 /// asks for, the options list is empty and the choice (and its dependent
 /// effect) does nothing — the standard empty-options path.
+/// CR 608.2d: `choosing_player` is the resolved `Choose::chooser` — the player
+/// who announces this choice — not necessarily the ability controller. Only
+/// the chooser-relative arms (`Opponent`, restricted `Player`) read it; every
+/// other arm is perspective-free. Callers with a controller-only choice pass
+/// `ability.controller` unchanged.
 fn compute_options(
     state: &GameState,
     choice_type: &ChoiceType,
-    controller: PlayerId,
+    choosing_player: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    source_incarnation: Option<u64>,
     already_chosen: &[PlayerId],
 ) -> Vec<String> {
     match choice_type {
@@ -774,9 +896,46 @@ fn compute_options(
             .into_iter()
             .map(|card_type| card_type.to_string())
             .collect(),
-        // CardName options are provided by the frontend from its local card database.
-        // The engine sends an empty list to avoid serializing 30k+ names every state update.
-        ChoiceType::CardName => Vec::new(),
+        // CR 201.4: the OPEN prompt's options are provided by the frontend from its
+        // local card database. The engine sends an empty list to avoid serializing
+        // 30k+ names every state update.
+        //
+        // A CLOSED, Oracle-listed domain is the opposite case: it is small, it is
+        // printed on the card, and the engine is the only place that knows it, so
+        // the engine enumerates it here in printed order.
+        //
+        // CR 608.2d + "...that hasn't been chosen": each successive COMMIT excludes
+        // names already committed on this source across prior resolutions. Chosen
+        // names persist as `ChosenAttribute::CardName` (bind_named_choice when
+        // persist), so the legal domain is the printed list minus that history.
+        // Exhausting it leaves an empty list → `choose::resolve` sets
+        // `cost_payment_failed_flag` and no-ops, which is exactly Garth One-Eye
+        // after all six names have been used (CR 609.3: the impossible choice does
+        // as much as possible, which is nothing).
+        //
+        // BOUNDARY: source-global subtraction, mirroring the `NumberRange` arm
+        // below. Safe for the current pool — a card with a
+        // `DistinctFromSourceHistory` name choice AND a separate persisting name
+        // choice on the same source would need a per-choice tag.
+        ChoiceType::CardName {
+            options,
+            distinctness,
+        } => match distinctness {
+            crate::types::ability::NameDistinctness::Repeatable => options.clone(),
+            crate::types::ability::NameDistinctness::DistinctFromSourceHistory => {
+                let used =
+                    source_chosen_card_names(state, source_id, trigger_source, source_incarnation);
+                options
+                    .iter()
+                    .filter(|name| {
+                        !used
+                            .iter()
+                            .any(|chosen| chosen.eq_ignore_ascii_case(name.as_str()))
+                    })
+                    .cloned()
+                    .collect()
+            }
+        },
         ChoiceType::NumberRange {
             min,
             max,
@@ -849,7 +1008,7 @@ fn compute_options(
         ChoiceType::Opponent {
             restriction,
             distinctness,
-        } => players::choosable_opponents(state, controller)
+        } => players::choosable_opponents(state, choosing_player)
             .iter()
             .filter(|id| {
                 *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
@@ -857,7 +1016,7 @@ fn compute_options(
             })
             .filter(|id| {
                 restriction.as_ref().is_none_or(|filter| {
-                    super::matches_player_scope(state, **id, filter, controller, source_id)
+                    super::matches_player_scope(state, **id, filter, choosing_player, source_id)
                 })
             })
             .map(|id| id.0.to_string())
@@ -999,6 +1158,7 @@ mod tests {
     fn make_choose_ability(choice_type: ChoiceType) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type,
                 persist: false,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -1056,7 +1216,7 @@ mod tests {
 
         // POSITIVE: `CardName` is a LAST-match (`.rev()`) read, so its history
         // must survive.
-        let name_choice = ChoiceType::CardName;
+        let name_choice = ChoiceType::card_name();
         let mut names = Vec::new();
         apply_choice_attributes(&mut names, &name_choice, "Shock");
         apply_choice_attributes(&mut names, &name_choice, "Bolt");
@@ -1505,7 +1665,7 @@ mod tests {
     #[test]
     fn choose_card_name_sends_empty_options() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardName);
+        let ability = make_choose_ability(ChoiceType::card_name());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -1516,7 +1676,7 @@ mod tests {
                 options,
                 ..
             } => {
-                assert_eq!(*choice_type, ChoiceType::CardName);
+                assert_eq!(*choice_type, ChoiceType::card_name());
                 assert!(options.is_empty());
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
@@ -1547,6 +1707,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::NumberRange {
                     min: 0,
                     max: Some(5),
@@ -1594,7 +1755,7 @@ mod tests {
             distinctness: crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
         };
         assert_eq!(
-            compute_options(&state, &distinct, PlayerId(0), source_id, &[]),
+            compute_options(&state, &distinct, PlayerId(0), source_id, None, None, &[]),
             vec!["1", "3", "5"],
             "committed 2 and 4 are excluded"
         );
@@ -1606,7 +1767,7 @@ mod tests {
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         };
         assert_eq!(
-            compute_options(&state, &repeatable, PlayerId(0), source_id, &[]),
+            compute_options(&state, &repeatable, PlayerId(0), source_id, None, None, &[]),
             vec!["1", "2", "3", "4", "5"],
             "Repeatable ignores source history"
         );
@@ -1617,6 +1778,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: vec!["Left".to_string(), "Right".to_string()],
                 },
@@ -1652,6 +1814,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::CardPredicateGuess {
                     options: ChoiceType::land_or_nonland_card_predicate_options(),
                 },
@@ -1966,7 +2129,7 @@ mod tests {
         // impossible. The no-op short-circuit must NOT fire here — the prompt
         // still goes up so the player can name a card.
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardName);
+        let ability = make_choose_ability(ChoiceType::card_name());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(
@@ -2024,6 +2187,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::player(),
                 persist: false,
                 selection: TargetSelectionMode::Random,
@@ -2064,6 +2228,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::card_type_from(vec![CoreType::Artifact]),
                 persist: true,
                 selection: TargetSelectionMode::Random,
@@ -2157,6 +2322,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect("activate the keyword-choice ability");
             runner.advance_until_stack_empty();
