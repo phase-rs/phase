@@ -10470,6 +10470,14 @@ pub(crate) fn collect_completed_entry_instruction(
     }
     let completed_through = state.completed_instruction_ledger_len();
     let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    // An occurrence another collector already claimed (the paused copy-token handoff queues the
+    // committed entries of a batch) is matched once, by its claimant.
+    let unclaimed = unclaimed_trigger_events_from(
+        events,
+        0,
+        TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
     let mut scan = held;
     let mut claims = Vec::new();
     for (index, event) in events.iter().enumerate() {
@@ -10480,6 +10488,7 @@ pub(crate) fn collect_completed_entry_instruction(
         if turn == state.turn_number
             && (first_row..completed_through).contains(&row)
             && !held_keys.contains(&key)
+            && unclaimed.positions.contains(&index)
         {
             scan.push(event.clone());
             claims.push(ConsumedTriggerEventOccurrence {
@@ -10759,7 +10768,13 @@ pub(crate) fn collect_paused_exit_triggers(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    collect_paused_exit_triggers_matching(state, events, event_start, |_| true);
+    collect_paused_exit_triggers_matching(
+        state,
+        events,
+        event_start,
+        |_| true,
+        ObserverCollection::Direct,
+    );
 }
 
 /// CR 603.2c: collect only the occurrences selected by an exit's owner, keeping
@@ -10770,8 +10785,9 @@ pub(crate) fn collect_paused_exit_triggers_matching(
     events: &[GameEvent],
     event_start: usize,
     matches: impl Fn(&GameEvent) -> bool,
+    collection: ObserverCollection,
 ) {
-    collect_unclaimed_ordinary_observers(state, events, event_start, &matches);
+    collect_unclaimed_ordinary_observers_matching(state, events, event_start, &matches, collection);
     collect_unclaimed_delayed_observers(state, events, event_start, &matches);
 }
 
@@ -10826,7 +10842,7 @@ fn collect_unclaimed_ordinary_observers(
 
 /// How [`collect_unclaimed_ordinary_observers_matching`] queues what it collects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ObserverCollection {
+pub(crate) enum ObserverCollection {
     /// Matched now, as every paused exit inside a payment is.
     Direct,
     /// CR 603.6a: battlefield entries pass [`settle_entry_batch_scan`] first, so an entry
@@ -10868,7 +10884,6 @@ fn collect_unclaimed_ordinary_observers_matching(
             event,
             GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
         ) || retained.contains(event)
-            || !keep(event)
         {
             return false;
         }
