@@ -1206,6 +1206,23 @@ pub enum NumberDistinctness {
     DistinctFromSourceHistory,
 }
 
+/// CR 608.2d: whether a "choose a card name" instruction must exclude names
+/// already committed on this source ("...that hasn't been chosen" — a name
+/// chosen before is no longer a legal option), or repeats are legal.
+/// Parse-detected; static; serialized only when non-default so the existing
+/// `CardName` card-data stays byte-stable. Mirrors `NumberDistinctness`'s axis on
+/// the sibling `NumberRange` choice — the same Oracle cue on a different domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NameDistinctness {
+    /// The default for the entire existing `CardName` pool — repeats allowed.
+    /// Pithing Needle may name the same card on a second copy of itself.
+    #[default]
+    Repeatable,
+    /// Each commit must differ from every prior `ChosenAttribute::CardName` on
+    /// the source (Garth One-Eye: "a card name that hasn't been chosen").
+    DistinctFromSourceHistory,
+}
+
 /// CR 608.2c: whether a "choose a player"/"choose an opponent" instruction
 /// must exclude players already chosen earlier in the SAME resolution, or is
 /// an independent pick that may repeat an earlier choice. Parse-detected;
@@ -1255,7 +1272,21 @@ pub enum ChoiceType {
     CardType {
         options: Vec<CoreType>,
     },
-    CardName,
+    /// CR 201.4: A choice of a card name. `options`, when EMPTY, is the open
+    /// form — any name in the Oracle card reference is nameable (Pithing Needle,
+    /// Meddling Mage), so the engine enumerates nothing and the client supplies
+    /// the domain from its own card database (see `compute_options`). Non-empty
+    /// options are an explicit Oracle-listed closed domain in printed order
+    /// (Garth One-Eye's "from among Disenchant, Braingeyser, Terror, Shivan
+    /// Dragon, Regrowth, and Black Lotus"), which the engine DOES enumerate and
+    /// enforce — a closed domain that still accepted an arbitrary name would not
+    /// be a domain.
+    CardName {
+        options: Vec<String>,
+        /// CR 608.2d: distinctness requirement, parse-detected from "that hasn't
+        /// been chosen". Default `Repeatable` for every pre-existing card.
+        distinctness: NameDistinctness,
+    },
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
     /// CR 107.1a/b + CR 608.2d: choose a number from `min` up to `max`.
     ///
@@ -1438,6 +1469,24 @@ impl ChoiceType {
         Self::CardType { options }
     }
 
+    /// The open "choose a card name" prompt (CR 201.4) — any card name in the
+    /// Oracle card reference, with the domain supplied by the client.
+    pub fn card_name() -> Self {
+        Self::CardName {
+            options: Vec::new(),
+            distinctness: NameDistinctness::Repeatable,
+        }
+    }
+
+    /// Card-name choice restricted to an explicit Oracle-listed closed domain,
+    /// in printed order, with its distinctness requirement (CR 608.2d).
+    pub fn card_name_from(options: Vec<String>, distinctness: NameDistinctness) -> Self {
+        Self::CardName {
+            options,
+            distinctness,
+        }
+    }
+
     /// The authoritative legal domain for a `CardType` prompt. Empty options
     /// are the generic engine policy; non-empty options are already exact.
     pub fn legal_card_type_options(options: &[CoreType]) -> Vec<CoreType> {
@@ -1501,7 +1550,10 @@ impl ChoiceType {
     /// dependent instruction ("discards a card with that name") reads it from
     /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
+        matches!(
+            self,
+            Self::CardPredicateGuess { .. } | Self::CardName { .. }
+        )
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -1529,8 +1581,14 @@ impl ChoiceType {
     pub fn options_supplied_by_player(&self) -> bool {
         matches!(
             self,
-            Self::CardName
-                | Self::Word
+            // CR 201.4: only the OPEN card-name prompt has no enumerable domain.
+            // A closed Oracle-listed one (Garth One-Eye) is enumerated by the
+            // engine, so an empty list there IS the impossible choice CR 609.3
+            // turns into a no-op.
+            Self::CardName { options, .. } if options.is_empty()
+        ) || matches!(
+            self,
+            Self::Word
                 | Self::Artist
                 // CR 107.1a/b: an unbounded number choice cannot be enumerated,
                 // so the player supplies the value. Bounded ranges keep their
@@ -1645,7 +1703,32 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
-            Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
+            // Serialize the open, default-distinctness form as the legacy unit
+            // variant "CardName" so existing Pithing Needle/Meddling Mage
+            // card-data JSON stays byte-stable; only emit the struct form when a
+            // closed domain and/or a non-default `distinctness` is present.
+            Self::CardName {
+                options,
+                distinctness,
+            } => {
+                let non_default_distinctness = *distinctness != NameDistinctness::Repeatable;
+                if options.is_empty() && !non_default_distinctness {
+                    serializer.serialize_unit_variant("ChoiceType", 5, "CardName")
+                } else {
+                    let field_count = 1 + usize::from(non_default_distinctness);
+                    let mut variant = serializer.serialize_struct_variant(
+                        "ChoiceType",
+                        5,
+                        "CardName",
+                        field_count,
+                    )?;
+                    variant.serialize_field("options", options)?;
+                    if non_default_distinctness {
+                        variant.serialize_field("distinctness", distinctness)?;
+                    }
+                    variant.end()
+                }
+            }
             Self::NumberRange {
                 min,
                 max,
@@ -1805,6 +1888,12 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default)]
                 excluded: Vec<CoreType>,
             },
+            CardName {
+                #[serde(default)]
+                options: Vec<String>,
+                #[serde(default)]
+                distinctness: NameDistinctness,
+            },
             NumberRange {
                 min: u32,
                 /// CR 107.1a/b: absent = no maximum. A bounded range keeps
@@ -1858,7 +1947,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
                 "CardType" => Ok(Self::card_type()),
-                "CardName" => Ok(Self::CardName),
+                "CardName" => Ok(Self::card_name()),
                 "LandType" => Ok(Self::LandType),
                 "Opponent" => Ok(Self::opponent()),
                 "Player" => Ok(Self::player()),
@@ -1885,6 +1974,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             ChoiceTypeRepr::Data(data) => match data {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
+                ChoiceTypeData::CardName {
+                    options,
+                    distinctness,
+                } => Ok(Self::card_name_from(options, distinctness)),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { options, excluded } => {
                     if !options.is_empty() && !excluded.is_empty() {
@@ -3147,7 +3240,7 @@ impl ChoiceValue {
                     .then_some(Self::CardType(core_type))
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
-            ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+            ChoiceType::CardName { .. } => Some(Self::CardName(value.to_string())),
             ChoiceType::NumberRange { .. } => value.parse::<u32>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
@@ -11555,6 +11648,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -16350,6 +16444,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -16658,6 +16753,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -26625,6 +26721,31 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_players: Option<PlayerFilter>,
     },
+    /// CR 707.13: Create a copy of a card defined by NAME rather than by an object
+    /// to be copied (Garth One-Eye). The copy's characteristics come from the
+    /// Oracle card reference — here `state.card_face_registry` — because the
+    /// named card need not exist in any zone, deck or graveyard.
+    ///
+    /// Distinct from `CastCopyOfCard` (and every other copy producer) on the axis
+    /// that matters: those copy an OBJECT in the game and read its copiable
+    /// values. `Conjure` is the wrong home too: that is a digital-only keyword
+    /// action whose product is a real card, and this product is a COPY, which
+    /// CR 704.5e removes from any zone but the stack and the battlefield.
+    ///
+    /// The created objects are published to `state.last_created_token_ids`, the
+    /// same-chain "it" referent every object producer uses, so a following
+    /// "you may cast the copy" binds to them via `TargetFilter::LastCreated`.
+    CreateCardCopyByName {
+        /// `None` = the name chosen on this source (CR 201.4; the
+        /// `ChosenAttribute::CardName` a preceding `Effect::Choose` committed) —
+        /// "the card with the chosen name". `Some(name)` is a literal printed
+        /// name, for a future "create a copy of a card named X".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// How many copies to create. Defaults to one.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
     /// modification to the matched cards that persists for the rest of the game
     /// and follows each card across all zones — a permanent edit to the card,
@@ -31280,6 +31401,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -31532,6 +31654,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -32114,6 +32237,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32600,6 +32724,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32938,6 +33063,10 @@ impl Effect {
             // rather than cited.
             Effect::Conjure { destination, .. }
             | Effect::DraftFromSpellbook { destination, .. } => *destination == Zone::Library,
+
+            // CR 707.13: a copy defined by name comes from the Oracle card
+            // reference, never from or into a library.
+            Effect::CreateCardCopyByName { .. } => false,
 
             // ---------- Reasoned FALSE: library-adjacent but not a move ----------
 
@@ -33352,6 +33481,7 @@ impl Effect {
             // conjures the drafted card) assign the referent to the card they
             // just made, including after a paused draft choice resumes.
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::DraftFromSpellbook { .. }
             // CR 707.2: token copies made by a batch or per-player resolver,
             // which republish every token they created.
@@ -34023,6 +34153,9 @@ macro_rules! define_effect_quantity_walk {
             // Each conjured card's count — and the optional dynamic library
             // slot — resolve during conjure resolution
             // (`game/effects/conjure.rs`).
+            // CR 707.13: the copy count resolves during resolution
+            // (`game/effects/create_card_copy_by_name.rs`).
+            Effect::CreateCardCopyByName { count, .. } => f(count),
             Effect::Conjure {
                 cards,
                 library_position,
@@ -34683,6 +34816,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -34719,6 +34853,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -34991,6 +35127,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -35500,6 +35638,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::BecomeBlocked { .. } => "BecomeBlocked",
         Effect::Conjure { .. } => "Conjure",
+        Effect::CreateCardCopyByName { .. } => "CreateCardCopyByName",
         Effect::Intensify { .. } => "Intensify",
         Effect::ApplyPerpetual { .. } => "ApplyPerpetual",
         Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
@@ -35758,6 +35897,7 @@ pub enum EffectKind {
     RemoveFromCombat,
     BecomeBlocked,
     Conjure,
+    CreateCardCopyByName,
     Intensify,
     ApplyPerpetual,
     DraftFromSpellbook,
@@ -36054,6 +36194,7 @@ impl From<&Effect> for EffectKind {
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::BecomeBlocked { .. } => EffectKind::BecomeBlocked,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::CreateCardCopyByName { .. } => EffectKind::CreateCardCopyByName,
             Effect::Intensify { .. } => EffectKind::Intensify,
             Effect::ApplyPerpetual { .. } => EffectKind::ApplyPerpetual,
             Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
@@ -40606,6 +40747,23 @@ impl OriginConstraint {
             OriginConstraint::Equals(z) => from == &Some(*z),
             OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
             OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
+    }
+
+    /// CR 601.2a + CR 400.11: Does a spell cast from `origin` satisfy this
+    /// cast-origin constraint? `origin = None` is a cast from OUTSIDE the game
+    /// (CR 707.13: the copy Garth One-Eye creates), where "outside the game is not
+    /// a zone" (CR 400.11). Unlike [`Self::matches_from`], where `None` is "no
+    /// prior zone" and fails every negative constraint, an outside-the-game cast
+    /// IS a cast from somewhere other than any named zone: it satisfies
+    /// `NotEquals(z)` ("from anywhere other than your hand") for every `z`, and
+    /// fails `Equals` and `OneOf`.
+    pub fn matches_cast_origin(&self, origin: Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => origin == Some(*z),
+            OriginConstraint::NotEquals(z) => origin != Some(*z),
+            OriginConstraint::OneOf(zs) => origin.is_some_and(|o| zs.contains(&o)),
         }
     }
 }

@@ -1272,6 +1272,17 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
         }
     }
 
+    /// CR 601.2a + CR 707.13: whether the source was cast from OUTSIDE the game,
+    /// so its `cast_from_zone` stamp is only a staging zone. A latched snapshot
+    /// answers `false`: an outside-the-game copy ceases to exist (CR 704.5e) when
+    /// it leaves the stack or battlefield, so no departed incarnation is read.
+    pub fn cast_from_outside_game(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.created_outside_game,
+            Self::Latched(_) => false,
+        }
+    }
+
     pub fn played_from_zone(self) -> Option<Zone> {
         match self {
             Self::ExactLive(object) => object.played_from_zone,
@@ -1492,6 +1503,11 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 601.2a + CR 707.13 + CR 400.11: the spell was cast from OUTSIDE the game
+    /// (the copy Garth One-Eye creates), so `from_zone` holds only its staging
+    /// zone and every "cast from [zone]" predicate over this record must be false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_outside_game: bool,
     /// CR 702.185c: The alternative-cast variant chosen when this spell was
     /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
     /// conditions ("a spell was warped this turn") can answer after the spell
@@ -1565,6 +1581,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             has_adventure: false,
             from_zone: Zone::Hand,
+            from_outside_game: false,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
@@ -8277,6 +8294,29 @@ pub struct PendingTokenEventDelivery {
     pub source_id: ObjectId,
 }
 
+/// CR 614.12a + CR 607.2d: counter evaluation held until an acquired entry
+/// choice has bound its answer. `None` exceptions retains the meld-only policy;
+/// `Some` retains the merged placement policy, including an empty exception list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyEntryPendingCounters {
+    pub exceptions: Option<Vec<ContinuousModification>>,
+    pub replay_entry_events: bool,
+}
+
+/// CR 707.5 + CR 614.12a: remaining work for a copied as-enters choice.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyEntryResumeStage {
+    /// Counters have settled and the tail still offers the acquired choice:
+    /// the order when no counter reads it, and the meaning of a save that
+    /// predates this field.
+    #[default]
+    ChoiceOwedAfterCounters,
+    /// The acquired choice is answered; counters have settled.
+    ChoiceSettled,
+    /// The acquired choice paused before counter evaluation.
+    BeforeCounters(Box<CopyEntryPendingCounters>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -8433,9 +8473,10 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary or liminal-token interactive
-    /// enter-as-copy entry after its merged counter placement settles. Never
-    /// minted by Meld. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: resume an interactive enter-as-copy entry after
+    /// its acquired choice or merged counter placement settles. Meld uses this
+    /// only before counters; its own completion still owns the post-counter tail.
+    /// The incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
@@ -8450,12 +8491,16 @@ pub enum PendingCounterPostAction {
     ///   + CR 616.1; this is not a leaf-reference layer.
     ///
     /// Serialized surface: PendingEffectResolved::post_actions on the existing
-    /// resolution-state frame wire, exactly like ContinueProliferateActions
-    /// and ContinuePlayerScopeSacrifice. Backward compatible, not forward
-    /// compatible: older builds cannot load a save containing this new tag.
-    /// Same one-way contract; no game protocol or resolution-state wire bump.
+    /// resolution-state frame wire. Version 14 protects the new resume stages:
+    /// older readers reject that version before decoding or dispatching state,
+    /// rather than silently ignoring `resume_stage` on this existing tag.
+    /// Legacy saves without the field retain ChoiceOwedAfterCounters semantics.
+    /// Full-game and P2P protocol versions move together for this state change.
     FinishCopyTargetChoiceEntry {
         entrant: ObjectIncarnationRef,
+        /// Missing on legacy saves that still owe the acquired choice.
+        #[serde(default)]
+        resume_stage: CopyEntryResumeStage,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -25096,6 +25141,14 @@ declare_game_state! {
     // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 111.1 + CR 614.12: the tokens the copy-token resolution whose owner frame is off the
+    /// resolution stack (drained inline, or held by a compound token event's delivery) has
+    /// already created; they enter in one event with the token being created now (Clone Legion
+    /// ruling 2015-02-25). `None` when the owner is parked; its frame is read instead
+    /// (`token_copy::copy_token_co_entrants`). Published only by
+    /// `token_copy::publish_committed_copy_tokens`; never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_copy_token_resolution_tokens: Option<Vec<ObjectId>>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -27108,6 +27161,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_label_this_resolution: Option<String>,
 
+    /// CR 201.4 + CR 608.2c: the card name the current resolution's most recent
+    /// card-name choice named ("the card with the chosen name", Garth One-Eye).
+    /// Unlike the source's `ChosenAttribute::CardName` history, this answers
+    /// what THIS resolution chose: an impossible choice (an exhausted closed
+    /// domain, CR 609.3) leaves it `None`, and it is written even when the
+    /// source has left its zone (CR 113.7a: the ability still resolves).
+    /// Cleared at every top-level resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_card_name_this_resolution: Option<String>,
+
     /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
     /// PutSticker instruction placed ("that sticker"). Cleared at every
     /// top-level resolution and at the start of every PutSticker instruction,
@@ -27206,6 +27269,15 @@ declare_game_state! {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+    /// CR 608.2c: how many times a look/reveal instruction has published its
+    /// result into `last_revealed_ids` (`effects::record_revealed_result`).
+    /// A resolving instruction compares the count before and after its own
+    /// step to tell its exact result, an empty one included, apart from an
+    /// earlier producer's entry still in the ledger. Only ever compared within
+    /// one synchronous step, so it is never serialized and is not part of
+    /// state equality (a monotonic tally would break AI-search dedup).
+    #[serde(skip)]
+    pub(crate) revealed_publications: u64,
 
     /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
@@ -35450,6 +35522,7 @@ impl GameState {
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
+            active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
@@ -35694,6 +35767,7 @@ impl GameState {
             chosen_color_this_resolution: None,
             named_color_this_resolution: None,
             named_label_this_resolution: None,
+            named_card_name_this_resolution: None,
             placed_sticker_this_resolution: None,
             noted_numbers_this_resolution: Vec::new(),
             last_chosen_damage_source: None,
@@ -35707,6 +35781,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            revealed_publications: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -36892,6 +36967,7 @@ impl GameState {
         self.chosen_color_this_resolution.hash(&mut h);
         self.named_color_this_resolution.hash(&mut h);
         self.named_label_this_resolution.hash(&mut h);
+        self.named_card_name_this_resolution.hash(&mut h);
         // CR 608.2c: "that sticker" can change what a following instruction
         // reads (phase-2 quantity), so distinct live values must not share a
         // loop pre-filter fingerprint.
@@ -37665,6 +37741,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -38031,6 +38108,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -38207,6 +38285,7 @@ impl GameState {
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
+                | GameEvent::CardCopyCreated { .. }
                 | GameEvent::CreatureDestroyed { .. }
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
@@ -39173,6 +39252,8 @@ impl GameState {
             ability_onset_record: _,
             active_payment_pins: _,
             active_rules_execution_node: _,
+            // A synchronous-window `ObjectId` list, never serialized and never compared.
+            active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
             active_paid_resolution_offer_tail: _,
@@ -39373,6 +39454,7 @@ impl GameState {
             chosen_color_this_resolution: _,
             named_color_this_resolution: _,
             named_label_this_resolution: _,
+            named_card_name_this_resolution: _,
             placed_sticker_this_resolution: _,
             noted_numbers_this_resolution: _,
             last_chosen_damage_source: _,
@@ -39386,6 +39468,7 @@ impl GameState {
             log_player_names: _,
             last_created_token_ids: _,
             last_revealed_ids: _,
+            revealed_publications: _,
             last_parent_target_missing_reason: _,
             private_look_ids: _,
             private_look_player: _,
@@ -40979,6 +41062,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
+        active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
@@ -41244,6 +41328,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chosen_color_this_resolution: _,
         named_color_this_resolution: _,
         named_label_this_resolution: _,
+        named_card_name_this_resolution: _,
         placed_sticker_this_resolution: _,
         noted_numbers_this_resolution: _,
         last_chosen_damage_source: _,
@@ -41257,6 +41342,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
+        revealed_publications: _,
         last_parent_target_missing_reason: _,
         private_look_ids: _,
         private_look_player: _,
@@ -41952,6 +42038,7 @@ impl PartialEq for GameState {
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.named_color_this_resolution == other.named_color_this_resolution
             && self.named_label_this_resolution == other.named_label_this_resolution
+            && self.named_card_name_this_resolution == other.named_card_name_this_resolution
             && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.noted_numbers_this_resolution == other.noted_numbers_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
@@ -43560,6 +43647,30 @@ mod tests {
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
     use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
+
+    #[test]
+    fn copy_entry_resume_stage_defaults_to_legacy_choice_owed() {
+        let action = PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant: ObjectIncarnationRef {
+                object_id: ObjectId(42),
+                incarnation: LEGACY_INCARNATION,
+            },
+            resume_stage: CopyEntryResumeStage::ChoiceSettled,
+        };
+        let mut json = serde_json::to_value(action).unwrap();
+        json["FinishCopyTargetChoiceEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resume_stage");
+        let restored: PendingCounterPostAction = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            restored,
+            PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                resume_stage: CopyEntryResumeStage::ChoiceOwedAfterCounters,
+                ..
+            }
+        ));
+    }
 
     fn exact_destination() -> EntryAttackDestination {
         EntryAttackDestination::Exact {
@@ -63585,6 +63696,7 @@ mod tests {
             was_kicked: false,
             spell_object_id: None,
             prepared_copy_source: None,
+            from_outside_game: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

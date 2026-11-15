@@ -4918,6 +4918,7 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -13066,6 +13067,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             },
             crate::types::SpellCastRecord {
@@ -13082,6 +13084,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             },
         ]),
@@ -31906,6 +31909,7 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -32026,6 +32030,7 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -32106,6 +32111,7 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -53792,6 +53798,7 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]
         .into(),

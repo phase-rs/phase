@@ -111,6 +111,7 @@ pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_boon;
+pub mod create_card_copy_by_name;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
@@ -5625,6 +5626,8 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         Effect::Encore => false,
         // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
         Effect::ChooseFromZone { .. } => false,
+        // CR 707.13: the copy is created to be cast, never onto the battlefield.
+        Effect::CreateCardCopyByName { .. } => false,
         // not a co-entry ContinuationStep: abandoning turns a scheme face
         // down (or returns it to the scheme deck), never onto the battlefield.
         Effect::AbandonScheme => false,
@@ -6491,6 +6494,7 @@ impl MovedObjectsSource {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -6974,6 +6978,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -7245,6 +7250,7 @@ fn node_with_entry_modifications(
         | Effect::CombineHost { .. }
         | Effect::CompletePlayerAction { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Connive { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::CopySpell { .. }
@@ -9814,6 +9820,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -9878,8 +9885,9 @@ fn pt_value_is_fixed(value: &PtValue) -> bool {
 /// own, so it refers to nothing beyond its mode, its modifications and its
 /// `affected` filter, which each caller audits. The one classification of
 /// every field of `StaticDefinition`: a new field is a compile error until it
-/// is classified.
-fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
+/// is classified. `host_zones` are the zones the static's host functions from
+/// by rule, so declaring them states no zone scope of the static's own.
+fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) -> bool {
     let StaticDefinition {
         // Audited by each caller.
         mode: _,
@@ -9904,7 +9912,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && per_player_condition.is_none()
         && affected_zone.is_none()
         && effect_zone.is_none()
-        && active_zones.is_empty()
+        && active_zones.iter().all(|zone| host_zones.contains(zone))
         && !characteristic_defining
         && attack_defended.is_none()
         && source_controller.is_none()
@@ -9928,7 +9936,7 @@ fn static_grant_referent(static_ability: &StaticDefinition) -> Option<&TargetFil
                 ContinuousModification::AddStaticMode { mode } if static_mode_names_no_referent(mode)
             )
         })
-        && static_binds_nothing(static_ability);
+        && static_binds_nothing(static_ability, &[]);
     if referent_free {
         static_ability.affected.as_ref()
     } else {
@@ -9958,7 +9966,9 @@ fn static_mode_names_no_referent(mode: &StaticMode) -> bool {
 fn emblem_static_names_no_referent(static_ability: &StaticDefinition) -> bool {
     matches!(static_ability.mode, StaticMode::NoMaximumHandSize)
         && static_ability.modifications.is_empty()
-        && static_binds_nothing(static_ability)
+        // CR 114.4: an emblem's statics function in the command zone; declaring it
+        // (parser + grant_emblem) names the emblem's own zone, not a scope.
+        && static_binds_nothing(static_ability, &[Zone::Command])
 }
 
 /// CR 608.2c + CR 400.7: whether the object or player `filter` names exists
@@ -10671,6 +10681,8 @@ fn effect_fields_read_filter_population(
             };
             recipient_reads || attacker_restriction.as_ref().is_some_and(has_filter)
         }
+        // CR 707.13: a name, not a filter.
+        Effect::CreateCardCopyByName { .. } => false,
         Effect::Conjure {
             cards,
             library_players,
@@ -11221,7 +11233,7 @@ fn choice_type_reads_filter_population(
         | ChoiceType::OddOrEven
         | ChoiceType::BasicLandType
         | ChoiceType::CardType { .. }
-        | ChoiceType::CardName
+        | ChoiceType::CardName { .. }
         | ChoiceType::NumberRange { .. }
         | ChoiceType::Labeled { .. }
         | ChoiceType::LandType
@@ -12813,6 +12825,22 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
         | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
+}
+
+/// CR 118.12 + CR 701.20e + CR 608.2c: whether `sub` is a resolution-time
+/// payment ("you may pay 2 life") whose immediate continuation acts on the
+/// card the preceding look produced through a bare `ParentTarget` ("If you do,
+/// put it into that player's graveyard"). The payment itself takes no object,
+/// while the look's result is bound directly to the gated consumer.
+fn payment_gates_look_result_consumer(sub: &ResolvedAbility) -> bool {
+    matches!(sub.effect, Effect::PayCost { .. })
+        && sub.sub_ability.as_deref().is_some_and(|consumer| {
+            consumer.targets.is_empty()
+                && matches!(
+                    target_filter_for_last_revealed_sub(&consumer.effect),
+                    Some(TargetFilter::ParentTarget)
+                )
+        })
 }
 
 fn inject_last_revealed_targets(
@@ -15043,6 +15071,9 @@ fn resolve_legacy_effect(
         }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
+        Effect::CreateCardCopyByName { .. } => {
+            create_card_copy_by_name::resolve(state, ability, events)
+        }
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
@@ -17750,7 +17781,18 @@ pub(crate) fn publish_fresh_tracked_set(
 /// sees an earlier producer's cards.
 pub(crate) fn publish_reveal_result(state: &mut GameState, ids: Vec<ObjectId>) {
     publish_fresh_tracked_set(state, ids.clone());
+    record_revealed_result(state, ids);
+}
+
+/// CR 608.2c + CR 701.20: the single writer through which a look/reveal
+/// instruction records the cards it looked at or revealed into
+/// `last_revealed_ids`. Counting each publication lets the chain walker tell
+/// the resolving instruction's own result, an empty one included, apart from
+/// an earlier instruction's entry that a producer which found nothing left in
+/// place (`revealed_publications`).
+pub(crate) fn record_revealed_result(state: &mut GameState, ids: Vec<ObjectId>) {
     state.last_revealed_ids = ids;
+    state.revealed_publications += 1;
 }
 
 /// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
@@ -18702,6 +18744,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // eligible.
             if matches!(target, TargetFilter::ParentTarget)
                 && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+            // CR 608.2d: the same for "cast the copy / the card it created" when
+            // the creating instruction created nothing (Garth One-Eye after its
+            // name domain is exhausted, CR 609.3): the created referent is empty,
+            // so there is nothing the option could cast.
+            if matches!(target, TargetFilter::LastCreated)
+                && state.last_created_token_ids.is_empty()
             {
                 return true;
             }
@@ -23488,6 +23539,8 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // recycled self-or-others scheme's fresh answer must not inherit the label
     // an earlier resolution named.
     state.named_label_this_resolution = None;
+    // CR 201.4 + CR 608.2c: nor a prior resolution's chosen card name.
+    state.named_card_name_this_resolution = None;
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
@@ -25682,6 +25735,9 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: and the reveal-ledger publication count, so a look/reveal
+    // instruction's own result is told apart from an earlier one's entry.
+    let revealed_publications_before = state.revealed_publications;
     // CR 608.2c: the population the instruction selects, read before it acts,
     // for a following reference to it.
     let selection_before = if resolution_next_needs_tracked_set(state, ability) {
@@ -28137,6 +28193,50 @@ fn resolve_chain_body(
             stamp_parent_target_iteration_members(&mut sub_with_targets);
             progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
         } else if sub.targets.is_empty()
+            && effect_writes_last_revealed_ids(&ability.effect)
+            && payment_gates_look_result_consumer(sub)
+        {
+            // CR 701.20e + CR 608.2c + CR 400.7: a resolution-time payment
+            // between a look and the move it gates takes no object of its own,
+            // yet the move's "it" still names the looked-at card (Wand of
+            // Denial: "Look at the top card of target player's library. If it's
+            // a nonland card, you may pay 2 life. If you do, put it into that
+            // player's graveyard."). "It" is exactly what THIS instruction
+            // produced: the ledger only if this step published into it, else
+            // nothing (CR 609.3), never an earlier instruction's entry nor an
+            // object target the instruction merely inherited.
+            let produced: Vec<ObjectId> =
+                if state.revealed_publications != revealed_publications_before {
+                    state.last_revealed_ids.clone()
+                } else {
+                    Vec::new()
+                };
+            let result = ForwardedResultContext::from_object_ids(state, &produced);
+            // CR 118.12 + CR 119.4: the payment's own inputs are untouched. It
+            // inherits exactly the occurrences and pins any other empty child
+            // would, so a cost that reads an inherited target ("life equal to
+            // that creature's mana value") still prices against it. The
+            // produced card is not the payment's binding; it rides separately,
+            // to the gated move alone.
+            let mut payment = sub.as_ref().clone();
+            payment.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
+            apply_parent_chain_context(
+                &mut payment,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            // Bind the result onto the gated move itself, pinned to the
+            // incarnations produced, so it rides the payment through its
+            // optional prompt and is never replaced by the payment's inherited
+            // targets at the payment's hand-off. A completed-but-empty
+            // `Some([])` result makes that hand-off prune the move instead.
+            if let Some(consumer) = payment.sub_ability.as_deref_mut() {
+                consumer.context.forwarded_result_context = Some(Box::new(result));
+                bind_forwarded_result_targets_for_legacy_effect(consumer);
+            }
+            progress = resolve_ability_chain_step(state, &payment, events, depth + 1)?;
+        } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::Draw { .. })
             && matches!(sub.effect, Effect::Reveal { .. })
@@ -29809,10 +29909,19 @@ pub(crate) fn evaluate_condition(
         // `cast_from_zone == None` → false (CR 707.10: a copy of a spell isn't
         // cast; CR 400.7: a new object has no cast provenance). Mirrors the
         // `StaticCondition::WasCast` evaluator at layers.rs.
-        AbilityCondition::WasCast { zone } => ability
-            .context
-            .cast_from_zone
-            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
+        // CR 601.2a + CR 707.13: a cast from outside the game (the source object
+        // is the resolving spell or its permanent) satisfies a bare "was cast" but
+        // no named origin zone.
+        AbilityCondition::WasCast { zone } => {
+            let from_outside_game = state
+                .objects
+                .get(&ability.source_id)
+                .is_some_and(|source| source.created_outside_game);
+            ability
+                .context
+                .cast_from_zone
+                .is_some_and(|cz| zone.is_none_or(|z| !from_outside_game && cz == z))
+        }
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).

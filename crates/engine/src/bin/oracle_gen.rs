@@ -644,6 +644,24 @@ fn insert_face_with_priority(
     }
 }
 
+/// CR 707.13 + CR 709.3c: gap every copy-by-name clause whose names the export
+/// cannot materialize as whole single-faced cards (see
+/// `database::name_copy_gate`). A single-faced export entry carries no `layout`.
+fn gate_unmaterializable_name_copies_in_export(face_index: &mut BTreeMap<String, CardExportEntry>) {
+    let single_faced: HashSet<String> = face_index
+        .iter()
+        .filter(|(_, entry)| entry.layout.is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for entry in face_index.values_mut() {
+        engine::database::name_copy_gate::gate_unmaterializable_name_copies(
+            &mut entry.face,
+            &is_single_faced_card,
+        );
+    }
+}
+
 fn build_export_layout(
     faces: &[AtomicCard],
     oracle_id: Option<String>,
@@ -1593,6 +1611,7 @@ fn main() {
         );
     }
 
+    gate_unmaterializable_name_copies_in_export(&mut face_index);
     let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
     let stamped = misparses.stamp_all(
         face_index
@@ -2387,6 +2406,226 @@ mod tests {
             bracket_signals: BracketSignals::default(),
             trace_input: None,
         }
+    }
+
+    /// Interrogation Robot's PRINTED Oracle text (card-data.json), verbatim.
+    const ROBOT_ORACLE: &str = "{T}, Discard a card: Choose a card name that hasn't been chosen among Who, What, When, Where, and Why. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs. Who//What//When//Where//Why is a split card from Unhinged.)";
+    /// Garth One-Eye's PRINTED Oracle text (card-data.json), verbatim.
+    const GARTH_ORACLE: &str = "{T}: Choose a card name that hasn't been chosen from among Disenchant, Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs.)";
+    const ROBOT_NAMES: [&str; 5] = ["who", "what", "when", "where", "why"];
+    const GARTH_NAMES: [&str; 6] = [
+        "disenchant",
+        "braingeyser",
+        "terror",
+        "shivan dragon",
+        "regrowth",
+        "black lotus",
+    ];
+
+    fn export_face_with(text: &str, name: &str) -> CardFace {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        CardFace {
+            name: name.to_string(),
+            abilities: parsed.abilities,
+            ..Default::default()
+        }
+    }
+
+    /// Every effect of every ability chain a face carries, in chain order.
+    fn export_chain_effects(face: &CardFace) -> Vec<engine::types::ability::Effect> {
+        let mut out = Vec::new();
+        for ability in &face.abilities {
+            let mut node = Some(ability);
+            while let Some(def) = node {
+                out.push((*def.effect).clone());
+                node = def.sub_ability.as_deref();
+            }
+        }
+        out
+    }
+
+    fn is_name_copy(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CreateCardCopyByName { .. }
+        )
+    }
+
+    fn is_copy_cast(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CastFromZone {
+                target: engine::types::ability::TargetFilter::LastCreated,
+                ..
+            }
+        )
+    }
+
+    /// The specific gap the export gate records for a copy clause or its cast.
+    fn is_name_copy_gap(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::Unimplemented { name, .. }
+                if name == engine::database::name_copy_gate::GAP_NAME
+        )
+    }
+
+    /// The whole export-gate regression. `mutate_robot` lets a counter-probe drop a
+    /// Robot node during "parsing"; `robot_names_are_split` makes the Robot's
+    /// domain materializable, so its nodes survive export.
+    ///
+    /// Both Robot nodes (the copy creation and the dependent cast) are asserted
+    /// PRESENT before the gate, so a parser regression that drops either cannot
+    /// leave the post-gate "absent" check vacuously green; after the gate each is
+    /// asserted to be the specific gap, and the full Garth chain must survive.
+    fn check_export_gate(mutate_robot: impl FnOnce(&mut CardFace), robot_names_are_split: bool) {
+        use engine::types::ability::{AbilityCost, ChoiceType, Effect};
+
+        let mut robot = make_entry("o-robot", &["TST"], None);
+        robot.face = export_face_with(ROBOT_ORACLE, "Interrogation Robot");
+        mutate_robot(&mut robot.face);
+        let mut garth = make_entry("o-garth", &["TST"], None);
+        garth.face = export_face_with(GARTH_ORACLE, "Garth One-Eye");
+
+        // The printed activation cost is {T}, Discard a card.
+        let robot_cost = robot
+            .face
+            .abilities
+            .first()
+            .and_then(|ability| ability.cost.as_ref())
+            .expect("the Robot's printed activation has a cost");
+        assert!(
+            matches!(
+                robot_cost,
+                AbilityCost::Composite { costs }
+                    if costs.iter().any(|c| matches!(c, AbilityCost::Tap))
+                        && costs.iter().any(|c| matches!(c, AbilityCost::Discard { .. }))
+            ),
+            "the printed cost is {{T}}, Discard a card: {robot_cost:?}"
+        );
+
+        // Both Robot nodes exist before the gate runs.
+        let robot_before = export_chain_effects(&robot.face);
+        assert_eq!(
+            robot_before.iter().filter(|e| is_name_copy(e)).count(),
+            1,
+            "the Robot parses its copy clause: {robot_before:?}"
+        );
+        assert_eq!(
+            robot_before.iter().filter(|e| is_copy_cast(e)).count(),
+            1,
+            "the Robot parses its dependent cast: {robot_before:?}"
+        );
+        let garth_before = export_chain_effects(&garth.face);
+        assert_eq!(garth_before.iter().filter(|e| is_name_copy(e)).count(), 1);
+        assert_eq!(garth_before.iter().filter(|e| is_copy_cast(e)).count(), 1);
+
+        let robot_layout = robot_names_are_split.then_some("split");
+        let mut face_index = BTreeMap::from([
+            ("interrogation robot".to_string(), robot),
+            ("garth one-eye".to_string(), garth),
+        ]);
+        for name in ROBOT_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], robot_layout),
+            );
+        }
+        for name in GARTH_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], None),
+            );
+        }
+
+        gate_unmaterializable_name_copies_in_export(&mut face_index);
+
+        // CR 707.13 + CR 709.4a: the split-half domain is gapped. The copy clause
+        // and the cast are each the specific gap, and neither original survives.
+        let robot_after = export_chain_effects(&face_index["interrogation robot"].face);
+        assert!(
+            !robot_after
+                .iter()
+                .any(|e| is_name_copy(e) || is_copy_cast(e)),
+            "neither Robot node survives export: {robot_after:?}"
+        );
+        assert_eq!(
+            robot_after.iter().filter(|e| is_name_copy_gap(e)).count(),
+            2,
+            "the copy and its cast are each the specific gap: {robot_after:?}"
+        );
+
+        // A single-faced domain keeps its whole chain: the closed six-name choice,
+        // the copy, and its cast.
+        let garth_after = export_chain_effects(&face_index["garth one-eye"].face);
+        assert_eq!(
+            garth_after, garth_before,
+            "the Garth chain is untouched by the gate"
+        );
+        assert!(
+            garth_after.iter().any(|e| matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName { options, .. },
+                    ..
+                } if options.len() == 6
+            )),
+            "Garth keeps its six-name closed domain: {garth_after:?}"
+        );
+        assert!(garth_after.iter().any(is_name_copy));
+        assert!(garth_after.iter().any(is_copy_cast));
+        assert!(!garth_after.iter().any(is_name_copy_gap));
+    }
+
+    /// Replace the Robot's chain node matching `pick` with a stand-in parse gap, as a
+    /// parser regression that stops recognizing that clause would.
+    fn drop_robot_node(face: &mut CardFace, pick: fn(&engine::types::ability::Effect) -> bool) {
+        let mut node = face.abilities.first_mut();
+        while let Some(def) = node {
+            if pick(&def.effect) {
+                *def.effect =
+                    engine::types::ability::Effect::unimplemented("parser_regression", "");
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
+    }
+
+    /// CR 707.13 + CR 709.4a: the export-side gate. A copy-by-name domain that
+    /// names split halves (`layout: Some("split")`) or names the export does
+    /// not hold is gapped, copy clause and cast clause alike; one naming only
+    /// single-faced entries (`layout: None`) is left supported.
+    #[test]
+    fn export_gate_gaps_copy_by_name_of_split_halves_only() {
+        check_export_gate(|_| {}, true);
+    }
+
+    /// Counter-probe: a parser regression that drops the Robot's copy clause fails
+    /// the pre-gate presence check instead of passing vacuously.
+    #[test]
+    #[should_panic(expected = "the Robot parses its copy clause")]
+    fn export_gate_test_fails_when_the_robot_copy_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_name_copy), true);
+    }
+
+    /// Counter-probe: likewise for the dependent cast.
+    #[test]
+    #[should_panic(expected = "the Robot parses its dependent cast")]
+    fn export_gate_test_fails_when_the_robot_cast_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_copy_cast), true);
+    }
+
+    /// Counter-probe: a Robot whose nodes SURVIVE export (a materializable domain,
+    /// i.e. the gate not gapping them) fails the post-gate check.
+    #[test]
+    #[should_panic(expected = "neither Robot node survives export")]
+    fn export_gate_test_fails_when_the_robot_nodes_survive_export() {
+        check_export_gate(|_| {}, false);
     }
 
     #[test]

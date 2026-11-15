@@ -14717,7 +14717,7 @@ fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -25601,7 +25601,7 @@ fn petrified_hamlet_full_parse() {
         matches!(
             *trig_exec.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 persist: true,
                 ..
             }
