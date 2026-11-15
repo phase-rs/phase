@@ -1354,11 +1354,20 @@ fn granted_index(
     matches[0]
 }
 
+/// The land Harrow's additional cost sacrifices on the Q7 board.
+#[derive(Clone, Copy)]
+enum HarrowSacrifice {
+    /// Ramunap Ruins, the first provider: every later grant shifts down.
+    Ruins,
+    /// Wastes, the last provider: the Ruins grants keep their indices.
+    Wastes,
+}
+
 /// Q7: Manascape Refractors A and B; the providers enter Ramunap Ruins →
 /// Island → Forest → Wastes. A makes two {R} with its copy of the Ruins
-/// ability (Twiddle untaps it between), Harrow is announced with `sacrificed`
-/// as its additional cost, the Forest pays {G}, and A's two reds are pinned.
-fn refractor_harrow_board(sacrifice_ruins: bool) -> RefractorHarrow {
+/// ability (Twiddle untaps it between), Harrow is announced sacrificing
+/// `sacrifice`, the Forest pays {G}, and A's two reds are pinned.
+fn refractor_harrow_board(sacrifice: HarrowSacrifice) -> RefractorHarrow {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
     let refractor_a = sc
@@ -1427,7 +1436,10 @@ fn refractor_harrow_board(sacrifice_ruins: bool) -> RefractorHarrow {
     );
     act(&mut runner, ruins_red(refractor_a));
 
-    let sacrificed = if sacrifice_ruins { ruins } else { wastes };
+    let sacrificed = match sacrifice {
+        HarrowSacrifice::Ruins => ruins,
+        HarrowSacrifice::Wastes => wastes,
+    };
     cast_to_payment(
         &mut runner,
         harrow,
@@ -1468,7 +1480,7 @@ fn refractor_harrow_board(sacrifice_ruins: bool) -> RefractorHarrow {
 /// certificate would defer no longer exists (CR 605.3a).
 #[test]
 fn refractor_ability_index_renamed_by_the_finisher_refuses_deferral() {
-    let board = refractor_harrow_board(true);
+    let board = refractor_harrow_board(HarrowSacrifice::Ruins);
     let state = board.runner.state();
     let b_red = GameAction::ActivateAbility {
         source_id: board.refractor_b,
@@ -1540,7 +1552,7 @@ fn refractor_ability_index_renamed_by_the_finisher_refuses_deferral() {
 /// red ability keeps its index on Refractor B and B's extra red is a surplus.
 #[test]
 fn refractor_ability_index_kept_by_the_finisher_is_surplus() {
-    let board = refractor_harrow_board(false);
+    let board = refractor_harrow_board(HarrowSacrifice::Wastes);
     let state = board.runner.state();
     let without = finalizes_in_one_step(state, &GameAction::PassPriority)
         .expect("reach: a pass finalizes Harrow");
