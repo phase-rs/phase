@@ -53,6 +53,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: engine::types::ability::EffectScope::Single,
         },
     );
     let mut trigger = TriggerDefinition::new(TriggerMode::Phase)

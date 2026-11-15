@@ -54,22 +54,23 @@ use super::lower::{
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
-    gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
-    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
+    gate_reflexive_rider_on_declined_optional_target, inherit_this_way_cause_from_antecedent,
+    is_exile_until_cast_bottom_cleanup, is_land_enters_tapped_rider,
+    is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
-    patch_self_ref_head_tap_anaphor, rebind_zone_changed_this_way_pronoun_to_moved_object,
-    relink_gated_token_referent_consumers, relink_gated_tracked_set_consumers,
-    resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
-    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
-    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
-    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
-    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
-    timed_clause_sub_chain,
+    patch_self_ref_head_tap_anaphor, rebind_revealed_card_type_pronoun_to_moved_object,
+    rebind_zone_changed_this_way_pronoun_to_moved_object, relink_gated_token_referent_consumers,
+    relink_gated_tracked_set_consumers, resolve_populated_token_anaphors,
+    resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
+    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
+    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
+    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
+    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
+    thread_chosen_damage_source_into_oneshot_effects, timed_clause_sub_chain,
 };
 use super::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, def_bears_retargetable_copy,
@@ -2274,7 +2275,23 @@ fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
+    assemble_effect_chain_with_provenance(ir).value
+}
+
+pub(crate) fn assemble_effect_chain_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let mut history_transport =
+        crate::parser::oracle_ir::history_provenance::HistoryTransport::default();
+    // Declare every committed occurrence, including a clause a later fold removes.
+    // An untransported producer stays explicitly dangling instead of losing its record.
+    for clause in &ir.clauses {
+        for pending in &clause.parsed.history {
+            history_transport.capture(pending.committed(clause.id), None);
+        }
+    }
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -3761,6 +3778,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         for current in &mut current_defs {
             apply_where_x_ability_expression(current, clause_ir.where_x_binding());
         }
+        // Bind the declared producer before delayed wrapping and spine linking move it.
+        // A compound follower may have become a separate current_defs entry.
+        for pending in &clause_ir.parsed.history {
+            let mut path = pending.locator.clone().unwrap_or_default();
+            let index = if clause_sub.is_some()
+                && path.0.first()
+                    == Some(
+                        &crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                    ) {
+                path.0.remove(0);
+                1
+            } else {
+                0
+            };
+            let producer = pending
+                .locator
+                .as_ref()
+                .and_then(|_| current_defs.get(index).and_then(|def| path.resolve(def)));
+            history_transport.capture(pending.committed(clause_ir.id), producer);
+        }
 
         // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
         // surface phrase "that source's controller" lowers to
@@ -4448,6 +4485,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
     resolve_those_tokens_anaphors(&mut defs);
     resolve_populated_unsuspect_anaphors(&mut defs);
+    inherit_this_way_cause_from_antecedent(&mut defs);
 
     // CR 701.36a + CR 603.7c: Resolve "the token created this way …" and the
     // "sacrifice it" anaphors that follow a token-creating effect (Populate,
@@ -4719,6 +4757,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // moved object instead, and do so before `oracle_trigger::lower_trigger_ir`
     // can otherwise blindly lift that same `ParentTarget` to `TriggeringSource`.
     rebind_zone_changed_this_way_pronoun_to_moved_object(&mut result);
+    // CR 608.2c: a leading "If it's a [type] card" rider on a single-card
+    // library-edge move names the moved card. Bare "it" lowers to `ParentTarget`,
+    // which a `Mill` head cannot resolve. Rebind it before trigger lowering can
+    // lift that sentinel to `TriggeringSource` (Grenzo, Dungeon Warden).
+    rebind_revealed_card_type_pronoun_to_moved_object(&mut result);
     // CR 603.7a + CR 608.2c + CR 702.170c: fold the exile-instead "If you do,
     // ..." continuation (Feather's return-to-hand, Lilah's become-plotted) onto
     // the exile-resolving carrier's typed `on_exile` rider so the consequence is
@@ -4829,7 +4872,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // Temporal Pilgrim -12 follow-up), so no object target is announced.
     refuse_unsupported_target_opponent_choice(&mut result);
 
-    result
+    history_transport.finish(result)
 }
 
 fn refuse_unsupported_target_opponent_choice(def: &mut AbilityDefinition) {

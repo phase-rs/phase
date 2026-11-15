@@ -2797,6 +2797,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // reaches `strip_temporal_prefix` instead of splitting at the comma
         // (Fortune, Loyal Steed: "at end of combat, exile it and …").
         tag("at end of combat"),
+        // CR 603.7a: "At this turn's next end of combat, …" (Gaze of the Gorgon). Keep the
+        // deferred body attached so it reaches `strip_temporal_prefix`.
+        tag("at this turn's next end of combat"),
         tag("for as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
@@ -3229,6 +3232,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("at the beginning of the next "),
         tag("at the beginning of your next "),
         tag("at the end of "),
+        // CR 603.7a: "At this turn's next end of combat, …" — the same prefix
+        // `starts_prefix_clause` keeps whole, so a bare "and" inside the deferred
+        // body stays with it (Triton Tactics: "… and it doesn't untap …").
+        tag("at this turn's next end of combat"),
     ))
     .parse(trimmed)
     .is_ok()
@@ -14089,6 +14096,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield tapped.",
@@ -14185,6 +14193,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may put an artifact, creature, or land card from among the milled cards into your hand.",
@@ -14222,6 +14231,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may return a permanent card from among them to your hand.",
@@ -14253,6 +14263,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return a card milled this way to your hand.",
@@ -14285,6 +14296,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 6 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return any number of creature cards milled this way to your hand.",
@@ -14693,6 +14705,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 6 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -14764,6 +14777,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -15295,6 +15309,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield face down.",
@@ -18455,6 +18470,7 @@ mod loyalty_symbol_clause_start_tests {
                     counter_type: Some(CounterType::Loyalty),
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 }
             ),
             "{def:#?}"
