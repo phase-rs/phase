@@ -4973,6 +4973,70 @@ mod tests {
         );
     }
 
+    /// CR 603.7a + CR 608.2c (Faramir, Prince of Ithilien — "At the beginning
+    /// of that player's next end step"): a `ChosenPlayer` binding with no
+    /// chosen player at that index is a malformed chain and must FAIL CLOSED
+    /// with an error in every build — never a controller fallback (which
+    /// would fire the delayed body on the wrong player's turn) or a silent
+    /// drop (which would swallow the trigger in release while debug tests
+    /// pass).
+    ///
+    /// Faramir's verbatim Oracle ("At the beginning of your end step, choose
+    /// an opponent. At the beginning of that player's next end step, ...")
+    /// always records the choice, so no printed card drives this arm — like
+    /// the over-fire-guard pin above, a hand-built ability is the honest
+    /// instrument for the refusal path, not a shortcut.
+    ///
+    /// Revert-to-red: replacing the `None` arm with a fallback or a silent
+    /// `Ok` lets this resolve succeed and the first assertion fails.
+    #[test]
+    fn chosen_player_binding_without_choice_fails_closed() {
+        let mut state = GameState::new_two_player(42);
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        // `chosen_players` is empty: no "choose an opponent" answer exists for
+        // index 0 to resolve against.
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer {
+                        index: 0,
+                    },
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        assert!(
+            ability.chosen_players.is_empty(),
+            "reach: the fixture must carry no chosen player"
+        );
+        let mut events = Vec::new();
+        let outcome = resolve(&mut state, &ability, &mut events);
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::types::ability::EffectError::InvalidParam(_))
+            ),
+            "a ChosenPlayer binding with no chosen player must fail closed, got {outcome:?}"
+        );
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "no delayed trigger may be installed for a malformed binding"
+        );
+    }
+
     /// CR 513.2 + CR 603.7a: the parser's symbolic `TurnGate::AfterCreationTurn`
     /// (Kav Landseeker "the end step on your next turn") must be stamped to
     /// `TurnGate::After(creation_turn)` at resolve time, so the runtime matcher

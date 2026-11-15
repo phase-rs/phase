@@ -4556,20 +4556,28 @@ impl ResolvedAbility {
     }
 
     /// CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
-    /// source incarnation over this entire ability chain WITHOUT touching the
-    /// actor. Unlike [`Self::set_trigger_source_recursive`], this never
-    /// writes `controller` / `original_controller`: for an activated ability
-    /// the controller is the activating player (CR 602.2a), not the source's
-    /// live controller, so every `Controller`-relative consumer keeps the
-    /// activator binding while `source_id` / `source_incarnation` /
-    /// `trigger_source` carry the announcement-time incarnation (exit-LKI
-    /// preferred after departure, CR 400.7).
-    pub fn set_departure_pin_recursive(&mut self, source: TriggerSourceContext) {
-        self.source_id = source.identity.reference.object_id;
-        self.source_incarnation = Some(source.identity.reference.incarnation);
-        self.trigger_source = Some(source.clone());
+    /// source identity over this entire ability chain WITHOUT building
+    /// triggered provenance. Each node keeps its announcement-epoch
+    /// incarnation in `announced_source_incarnation` (the epoch the source had
+    /// before any cost was paid, CR 601.2h). `source_incarnation` is left
+    /// alone so the stack-push boundary stamps the post-cost epoch (stack.rs),
+    /// and `trigger_source` is left alone so `trigger_source.is_some()`
+    /// proxies keep their pre-pin activated arm (the `ability_utils` carrier
+    /// contract: activated carriers supply only incarnation epochs, never a
+    /// trigger latch). Plot never stack-pushes, so its `source_incarnation`
+    /// remains `None` and the `is_none_or` fail-open holds. Unlike
+    /// [`Self::set_trigger_source_recursive`], this never writes `controller`
+    /// / `original_controller`: for an activated ability the controller is the
+    /// activating player (CR 602.2a), so every `Controller`-relative consumer
+    /// keeps the activator binding. An existing `announced_source_incarnation`
+    /// capture is never overwritten: the earliest announcement wins.
+    pub fn set_departure_pin_recursive(&mut self, source_id: ObjectId, incarnation: u64) {
+        self.source_id = source_id;
+        if self.announced_source_incarnation.is_none() {
+            self.announced_source_incarnation = Some(incarnation);
+        }
         for (_, child) in self.child_links_mut() {
-            child.set_departure_pin_recursive(source.clone());
+            child.set_departure_pin_recursive(source_id, incarnation);
         }
     }
 
@@ -5071,9 +5079,10 @@ impl ResolvedAbility {
 
     /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
     /// activation's announcement — before any cost is paid — to this ability
-    /// and every continuation branch. Called only by
-    /// `casting::record_activation_announcement`; stack placement and trigger
-    /// creation never touch it.
+    /// and every continuation branch. Called by
+    /// `casting::record_activation_announcement` and by the activation-time
+    /// departure pin (`set_departure_pin_recursive`); stack placement and
+    /// trigger creation never touch it.
     pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.announced_source_incarnation = incarnation;
         for (_, child) in self.child_links_mut() {

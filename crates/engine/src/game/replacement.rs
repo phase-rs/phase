@@ -4304,7 +4304,9 @@ fn draw_replacement_count(
             // #3305) are resolved via the post-replacement continuation after
             // the count-modified draw executes.
             let resolved = match qty {
-                QuantityExpr::Fixed { value } => value.saturating_mul(*count as i32),
+                QuantityExpr::Fixed { value } => {
+                    value.saturating_mul(u32_to_i32_saturating(*count))
+                }
                 _ => resolve_event_replacement_quantity(qty, *count)?,
             };
             Some(resolved.max(0) as u32)

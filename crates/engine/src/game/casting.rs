@@ -30863,16 +30863,21 @@ fn activate_with_cost_carrier(
     // `else_ability`, and other typed fields survive into resolution
     // (issue #310 — same root cause as the spell-cast path).
     let mut resolved = build_resolved_from_def(&ability_def, source_id, player);
-    // CR 113.7a + CR 602.2a + CR 608.2h: pin the activation-time source
-    // incarnation at announcement via the trigger path's latch producer — the
-    // only producer until now, so an activated damage ability always took
-    // `damage_context_for_subject`'s `None` arm (a live read of whatever object
-    // now sits at the storage id). The existing `Some` arms do the right thing:
-    // `ExactLive` while the source is still that incarnation, the
-    // exit-LKI-preferred snapshot after it departs (CR 400.7).
+    // CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    // source identity (id + announcement incarnation) over the whole chain.
+    // This deliberately does NOT build a `TriggerSourceContext`: activated
+    // carriers supply only their incarnation epochs — pre-cost
+    // `announced_source_incarnation` (here) and post-cost `source_incarnation`
+    // (stamped at the stack-push boundary, stack.rs) — never `trigger_source`
+    // (the `ability_utils` carrier contract). The damage authority reads the
+    // pinned incarnation when the source has departed (CR 608.2h); every
+    // `trigger_source.is_some()` proxy keeps its pre-pin activated arm.
+    // `source_incarnation` is left `None` here so the stack push stamps the
+    // post-cost epoch; plot never pushes, so it stays `None` there and the
+    // `is_none_or` fail-open holds.
     if let Some(source) = state.objects.get(&source_id) {
-        let latch = super::triggers::trigger_source_context_for_latch(state, source);
-        resolved.set_departure_pin_recursive(latch);
+        let incarnation = source.incarnation;
+        resolved.set_departure_pin_recursive(source_id, incarnation);
     }
     // CR 602.2b -> CR 601.2b: activating an ability follows the spell-announcement rules
     // 601.2b-i identically, so a text-defined, announce-locked X ("where X is <count> as

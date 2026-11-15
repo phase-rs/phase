@@ -1901,6 +1901,13 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
         ability.source_id,
         ability.controller,
         ability.trigger_source.as_ref(),
+        // CR 608.2h + CR 400.7: the pinned announcement epoch first (pre-cost,
+        // the epoch the damage source had as the ability was announced), the
+        // post-cost stack-push epoch second. Plot never stack-pushes, so a
+        // plotted grant carries only the announcement epoch.
+        ability
+            .announced_source_incarnation
+            .or(ability.source_incarnation),
     )
 }
 
@@ -1909,52 +1916,97 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
 /// through this with the parent latch filtered to the member (see
 /// [`trigger_latch_for_member`]), so batch-time and resume-time reads use the
 /// same inputs and can never disagree.
+/// CR 608.2h + CR 400.7: the live read of the exact observed incarnation.
+/// Shared by the trigger-latch `ExactLive` arm and the activated
+/// pinned-incarnation read so both agree by construction.
+fn exact_live_damage_context(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> DamageContext {
+    let mut ctx = DamageContext::from_source(state, obj.id)
+        .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
+    ctx.source_name = Some(obj.name.clone());
+    ctx
+}
+
+/// CR 608.2h + CR 400.7: the departed-source read — the captured observation,
+/// not the object now occupying the id, supplies the source's
+/// characteristics. Prefers the exact-incarnation exit snapshot over the
+/// capture-time snapshot. Shared by the trigger-latch `Latched` arm and the
+/// activated pinned-incarnation read so batch-time and resume-time reads use
+/// the same inputs and can never disagree.
+fn latched_damage_context(
+    subject_id: ObjectId,
+    incarnation: u64,
+    lki: &crate::types::game_state::LKISnapshot,
+) -> DamageContext {
+    // allow-raw-authority: reading characteristic snapshot from departed-source LKI
+    let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
+    let mut ctx = DamageContext::fallback(subject_id, lki.controller);
+    ctx.source_incarnation = Some(incarnation);
+    ctx.source_name = Some(lki.name.clone());
+    ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+    ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
+    ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
+    ctx.has_wither = has_keyword(KeywordKind::Wither);
+    ctx.has_infect = has_keyword(KeywordKind::Infect);
+    ctx.combat_damage_poison = lki
+        .keywords
+        .iter()
+        .map(|k| match k {
+            Keyword::Toxic(n) => *n,
+            _ => 0,
+        })
+        .sum();
+    ctx
+}
+
 fn damage_context_for_subject(
     state: &GameState,
     subject_id: ObjectId,
     controller: PlayerId,
     trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    pinned_incarnation: Option<u64>,
 ) -> DamageContext {
     let source_read = trigger_source.map(|source| source.source_read(state));
 
     match source_read {
-        Some(TriggerSourceRead::ExactLive(obj)) => {
-            let mut ctx = DamageContext::from_source(state, obj.id)
-                .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
-            ctx.source_name = Some(obj.name.clone());
-            ctx
-        }
+        Some(TriggerSourceRead::ExactLive(obj)) => exact_live_damage_context(state, obj),
         Some(TriggerSourceRead::Latched(latched)) => {
-            // CR 608.2h + CR 400.7: the captured observation, not the object now
-            // occupying the id, supplies the source's characteristics. Prefer
-            // the exact-incarnation exit snapshot over the trigger-time snapshot.
+            // CR 608.2h + CR 400.7: prefer the exact-incarnation exit snapshot
+            // over the trigger-time snapshot.
             let exit = crate::game::filter::exit_lki_for_incarnation(
                 state,
                 latched.identity.reference.object_id,
                 latched.identity.reference.incarnation,
             );
-            let lki = exit.unwrap_or(&latched.lki);
-            // allow-raw-authority: reading characteristic snapshot from departed-source LKI
-            let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
-            let mut ctx = DamageContext::fallback(subject_id, lki.controller);
-            ctx.source_incarnation = Some(latched.identity.reference.incarnation);
-            ctx.source_name = Some(lki.name.clone());
-            ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
-            ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
-            ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
-            ctx.has_wither = has_keyword(KeywordKind::Wither);
-            ctx.has_infect = has_keyword(KeywordKind::Infect);
-            ctx.combat_damage_poison = lki
-                .keywords
-                .iter()
-                .map(|k| match k {
-                    Keyword::Toxic(n) => *n,
-                    _ => 0,
-                })
-                .sum();
-            ctx
+            latched_damage_context(
+                subject_id,
+                latched.identity.reference.incarnation,
+                exit.unwrap_or(&latched.lki),
+            )
         }
         None => {
+            // CR 608.2h + CR 400.7: an activated ability's pinned incarnation.
+            // While the source is still that incarnation the live object
+            // answers (the pre-pin `None`-arm behavior, exact). Once it
+            // departs, the pinned incarnation's exit last-known information
+            // answers — the same read the `Latched` arm performs. With no
+            // surviving exit record (a hidden-zone departure records none)
+            // the incarnation cannot be affirmed and the read degrades to the
+            // live fallback, exactly where the old `None` regime did.
+            if let Some(pinned) = pinned_incarnation {
+                if let Some(obj) = state.objects.get(&subject_id) {
+                    if obj.incarnation == pinned {
+                        return exact_live_damage_context(state, obj);
+                    }
+                }
+                if let Some(lki) =
+                    crate::game::filter::exit_lki_for_incarnation(state, subject_id, pinned)
+                {
+                    return latched_damage_context(subject_id, pinned, lki);
+                }
+            }
             let mut ctx = DamageContext::from_source(state, subject_id)
                 .unwrap_or_else(|| DamageContext::fallback(subject_id, controller));
             if ctx.source_name.is_none() {
@@ -1991,7 +2043,10 @@ fn member_damage_context(
     trigger_source: &Option<crate::types::game_state::TriggerSourceContext>,
 ) -> DamageContext {
     let latch = trigger_latch_for_member(trigger_source, member_id);
-    damage_context_for_subject(state, member_id, controller, latch.as_ref())
+    // CR 120.1: each-source batch members are target objects, not the ability
+    // source — no announcement epoch of their own travels here, so no pinned
+    // read applies; `None` preserves today's live-or-latch behavior exactly.
+    damage_context_for_subject(state, member_id, controller, latch.as_ref(), None)
 }
 
 /// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,

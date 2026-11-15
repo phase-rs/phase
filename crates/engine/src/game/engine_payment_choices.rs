@@ -3214,16 +3214,33 @@ pub(super) fn resume_ward_sacrifice_payment(
             if remaining > 1 {
                 // CR 118.3: same bar-aware re-derivation as the live
                 // re-prompt — the pause window can grant bars too.
-                let eligible = permanents
+                let eligible: Vec<ObjectId> = permanents
                     .into_iter()
                     .filter(|&id| {
                         id != sacrificed
-                            && state.objects.contains_key(&id)
+                            // CR 701.21a: only battlefield permanents can be
+                            // sacrificed — the offer leg scans `battlefield`,
+                            // while this snapshot predates leaves, so re-check
+                            // the zone (a row that left for the graveyard
+                            // still keys `objects`).
+                            && state
+                                .objects
+                                .get(&id)
+                                .is_some_and(|obj| obj.zone == Zone::Battlefield)
                             && !crate::game::static_abilities::object_cant_be_sacrificed_by(
                                 state, player, id,
                             )
                     })
                     .collect();
+                // CR 118.3 + CR 601.2h: the pause window can also shrink the
+                // pool BELOW the still-owed count (leaves, bars) — installing
+                // the prompt then strands the payer at an unsatisfiable
+                // choice. Take the decline path (fail the Ward cost) instead.
+                if eligible.len() < (remaining - 1) as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ));
+                }
                 state.waiting_for = WaitingFor::WardSacrificeChoice {
                     player,
                     permanents: eligible,
@@ -3589,6 +3606,38 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "The selected permanent can't be sacrificed by this player".to_string(),
             ));
         }
+        // CR 118.3 + CR 601.2h + CR 702.21a (Ward atomicity): pre-validate
+        // the FULL remaining set before committing ANY sacrifice. A
+        // 2-remaining Ward whose second permanent is already barred (or gone)
+        // fails here with nothing spent, instead of stranding the first
+        // sacrifice at a later `ActionNotAllowed`. `payment_transaction`
+        // spans only Composite PayCost, so no replay restores a Ward
+        // sacrifice committed mid-round-trip — the only atomic seam is to
+        // refuse the first spend. Bars granted DURING the spend (replacement
+        // pause) still strand; that window is owned by the resume shortfall
+        // check below, not restorable here.
+        if remaining > 1 {
+            let payable_others = permanents
+                .iter()
+                .filter(|&id| {
+                    *id != chosen[0]
+                        // CR 701.21a: only battlefield permanents can be
+                        // sacrificed (see the resume re-derivation above).
+                        && state
+                            .objects
+                            .get(id)
+                            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, *id,
+                        )
+                })
+                .count();
+            if payable_others < (remaining - 1) as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
+        }
 
         // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
         // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
@@ -3629,12 +3678,27 @@ pub(super) fn handle_ward_sacrifice_choice(
                 .into_iter()
                 .filter(|&id| {
                     id != chosen[0]
-                        && state.objects.contains_key(&id)
+                        // CR 701.21a: only battlefield permanents can be
+                        // sacrificed (see the resume re-derivation above).
+                        && state
+                            .objects
+                            .get(&id)
+                            .is_some_and(|obj| obj.zone == Zone::Battlefield)
                         && !crate::game::static_abilities::object_cant_be_sacrificed_by(
                             state, player, id,
                         )
                 })
                 .collect();
+            // CR 118.3 + CR 601.2h: the spend (or a replacement post-effect
+            // it ran) can shrink the pool BELOW the still-owed count —
+            // installing the prompt then strands the payer at an
+            // unsatisfiable choice. Take the decline path (fail the Ward
+            // cost) instead.
+            if eligible.len() < (remaining - 1) as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             state.waiting_for = WaitingFor::WardSacrificeChoice {
                 player,
                 permanents: eligible,
@@ -7691,6 +7755,263 @@ mod tests {
                     if chosen.as_slice() == [life.clone()] && remaining_choices.is_empty()
             ),
             "the prompt must advance to the second round with the payable pick recorded, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Ulamog, the Defiler (verbatim MTGJSON Oracle) — the 2-remaining Ward
+    /// shape every test below drives: "Ward—Sacrifice two permanents."
+    const ULAMOG_WARD_ORACLE: &str = "When you cast this spell, target opponent exiles the top half of their library, rounded up.\nWard\u{2014}Sacrifice two permanents.\nUlamog enters with a number of +1/+1 counters on it equal to the greatest mana value among cards in exile.\nUlamog has annihilator X, where X is the number of +1/+1 counters on it.";
+    /// Hithlain Rope (verbatim MTGJSON Oracle) — the object-level bar source:
+    /// "This artifact can't be sacrificed."
+    const HITHLAIN_ROPE_ORACLE: &str = "This artifact can't be sacrificed.\n{1}, {T}: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. The player to your right gains control of this artifact.\n{2}, {T}: Draw a card. The player to your right gains control of this artifact.";
+
+    /// Reach-guard: Ulamog's verbatim Oracle parses to the Ward Sacrifice-2
+    /// shape the fixtures below stand in for.
+    fn assert_ulamog_parses_to_ward_sacrifice_two() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::keywords::WardCost;
+        let doc = parse_oracle_text(
+            ULAMOG_WARD_ORACLE,
+            "Ulamog, the Defiler",
+            &["Ward".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string()],
+        );
+        assert!(
+            doc.extracted_keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Ward(WardCost::Sacrifice { count: 2, .. })
+            )),
+            "reach: Ulamog's verbatim Oracle must parse to Ward Sacrifice-2, got {:?}",
+            doc.extracted_keywords
+        );
+    }
+
+    fn ward_rock(state: &mut GameState, name: &str, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.controller = PlayerId(0);
+        obj.card_types.core_types.push(CoreType::Creature);
+        id
+    }
+
+    fn ward_two_pending(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(gain_life(4), vec![], source, PlayerId(0))
+    }
+
+    fn ward_two_prompt(state: &mut GameState, permanents: Vec<ObjectId>, pending: ResolvedAbility) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 2,
+            min_total_power: None,
+        };
+    }
+
+    /// The bar the production static parser derives from Hithlain Rope's
+    /// verbatim printed line, granted on `victim`.
+    fn grant_rope_bar(state: &mut GameState, victim: ObjectId) {
+        use crate::parser::oracle::parse_oracle_text;
+        let doc = parse_oracle_text(HITHLAIN_ROPE_ORACLE, "Hithlain Rope", &[], &[], &[]);
+        assert!(
+            doc.statics.iter().any(|def| {
+                def.mode == crate::types::statics::StaticMode::Other("CantBeSacrificed".to_string())
+            }),
+            "reach: Hithlain Rope's verbatim Oracle must parse to a CantBeSacrificed static"
+        );
+        let obj = state.objects.get_mut(&victim).unwrap();
+        for def in doc.statics {
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            crate::game::static_abilities::object_cant_be_sacrificed_by(state, PlayerId(0), victim),
+            "reach: the granted bar must read through the live-bar authority"
+        );
+    }
+
+    /// CR 118.3 + CR 601.2h: a pool that shrinks below the still-owed count
+    /// takes the decline path — never an unsatisfiable prompt.
+    ///
+    /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
+    /// rock_b]; rock_b leaves the battlefield before the payer submits
+    /// rock_a. The Ward cost fails (`ActionNotAllowed`) with rock_a still on
+    /// the battlefield, and no `WardSacrificeChoice` re-prompt is installed.
+    /// The fully-payable control completes both sacrifices.
+    ///
+    /// Revert-to-red: deleting the shortfall checks (and the pre-validation)
+    /// installs `WardSacrificeChoice { remaining: 1, permanents: [] }` — an
+    /// unsatisfiable prompt — and the first assertion fails.
+    #[test]
+    fn ward_reprompt_declines_when_pool_shrinks_below_remaining() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Shrunk leg: rock_b leaves before rock_a is submitted.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
+            "a pool shrunk below remaining-1 must decline, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when the Ward cost is unpayable"
+        );
+        assert!(
+            !matches!(
+                &state.waiting_for,
+                WaitingFor::WardSacrificeChoice { remaining: 1, .. }
+            ),
+            "no unsatisfiable re-prompt may be installed, got {:?}",
+            state.waiting_for
+        );
+
+        // Control: the fully-payable Ward completes both sacrifices.
+        let mut control = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut control, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut control, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut control, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = control.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_a], &mut events);
+        match outcome {
+            Ok(WaitingFor::WardSacrificeChoice {
+                permanents,
+                remaining: 1,
+                ..
+            }) => assert_eq!(
+                permanents,
+                vec![rock_b],
+                "the re-prompt must offer only the remaining permanent"
+            ),
+            other => panic!("a payable first sacrifice must re-prompt, got {other:?}"),
+        }
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_b], &mut events)
+            .expect("the second sacrifice must complete the Ward");
+        assert_eq!(control.objects[&rock_a].zone, Zone::Graveyard);
+        assert_eq!(control.objects[&rock_b].zone, Zone::Graveyard);
+    }
+
+    /// CR 118.3 + CR 601.2h + CR 702.21a (Ward atomicity): the full remaining
+    /// set is pre-validated before ANY sacrifice is committed.
+    ///
+    /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
+    /// rock_b]; rock_b carries Hithlain Rope's "can't be sacrificed" bar.
+    /// Submitting rock_a fails (`ActionNotAllowed`) with BOTH permanents
+    /// still on the battlefield — the first sacrifice is not stranded by the
+    /// later failure. The fully-payable mixed control (no bar) pays in full.
+    ///
+    /// Revert-to-red: deleting the pre-validation spends rock_a, installs
+    /// the re-prompt, and the battlefield assertion fails.
+    #[test]
+    fn ward_sequential_sacrifice_prevalidates_full_remaining_set_before_spending() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Barred leg: rock_b carries the bar (granted post-offer, pre-submit).
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        grant_rope_bar(&mut state, rock_b);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
+            "a Ward whose second permanent is barred must fail before spending, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "the first permanent must still be on the battlefield"
+        );
+        assert_eq!(
+            state.objects[&rock_b].zone,
+            Zone::Battlefield,
+            "the barred permanent must still be on the battlefield"
+        );
+
+        // Mixed control: both permanents payable, no bar — pays in full.
+        let mut control = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut control, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut control, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut control, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_a], &mut events)
+            .expect("the first sacrifice of a fully-payable Ward must succeed");
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_b], &mut events)
+            .expect("the second sacrifice of a fully-payable Ward must succeed");
+        assert_eq!(control.objects[&rock_a].zone, Zone::Graveyard);
+        assert_eq!(control.objects[&rock_b].zone, Zone::Graveyard);
+    }
+
+    /// CR 118.3 + CR 601.2h: the replacement-pause resume takes the same
+    /// decline path when its window shrinks the pool below the still-owed
+    /// count — no unsatisfiable re-prompt.
+    ///
+    /// A Sequential resume owed one more sacrifice (`remaining: 2`, rock_a
+    /// spent pre-pause) whose survivor rock_b leaves during the pause fails
+    /// the resume instead of installing `WardSacrificeChoice { remaining: 1,
+    /// permanents: [] }`.
+    ///
+    /// Revert-to-red: deleting the resume shortfall check installs the empty
+    /// prompt and the first assertion fails.
+    #[test]
+    fn ward_sequential_resume_declines_when_pause_window_shrinks_pool() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_a, Zone::Graveyard, &mut events);
+        // The pause window leaves the survivor too.
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::Sequential {
+                permanents: vec![rock_a, rock_b],
+                sacrificed: rock_a,
+                remaining: 2,
+            },
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::ActionNotAllowed(_))),
+            "a resume whose pool shrank below remaining-1 must decline, got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no unsatisfiable re-prompt may be installed, got {:?}",
             state.waiting_for
         );
     }
