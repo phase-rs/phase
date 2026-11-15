@@ -10380,18 +10380,27 @@ fn resolve_self_enters_under_controller(
 }
 
 /// CR 614.12 + CR 707.5 + CR 702.26b: the board a copy-target-choice entrant's acquired
-/// "enters with" / "as enters" abilities are read on: the live, copied board with the tokens
-/// entering in the same event absent (they don't exist yet as it enters). Borrowed (the
-/// live board) when it has no co-entrant on the battlefield, so card entries, placed
-/// tokens and lone tokens read exactly as before.
+/// "enters with" / "as enters" abilities are read on: the live, copied board with the
+/// permanents entering in the same event absent (they don't exist yet as it enters, so
+/// their continuous effects, a co-entering Humility's ability removal included, have not
+/// begun). Those are the tokens of the entrant's own batch plus every permanent absent
+/// from the active pre-entry snapshot, the one authority for what entered together.
+/// Borrowed (the live board) when it has no co-entrant on the battlefield, so card
+/// entries, placed tokens and lone tokens read exactly as before.
 pub(super) fn copy_entry_board(
     state: &GameState,
     entrant: ObjectId,
 ) -> std::borrow::Cow<'_, GameState> {
-    crate::game::filter::pre_entry_board(
-        state,
-        &crate::game::effects::token_copy::entering_token_co_entrants(state, entrant),
-    )
+    let mut co_entrants =
+        crate::game::effects::token_copy::entering_token_co_entrants(state, entrant);
+    if let Some(snapshot) = state.active_pre_entry_battlefield_snapshot() {
+        for id in crate::game::engine_replacement::pre_entry_co_entrants(state, snapshot) {
+            if id != entrant && !co_entrants.contains(&id) {
+                co_entrants.push(id);
+            }
+        }
+    }
+    crate::game::filter::pre_entry_board(state, &co_entrants)
 }
 
 /// CR 614.12a + CR 707.5: applicability and selection read the same donors

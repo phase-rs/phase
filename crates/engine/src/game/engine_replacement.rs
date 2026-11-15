@@ -217,6 +217,21 @@ pub(crate) fn pre_entry_snapshot_for_entry(
     .then(|| state.battlefield.iter().copied().collect())
 }
 
+/// CR 614.12 + CR 614.1c: the permanents that entered in the active simultaneous
+/// entry — on the battlefield now, absent from its pre-entry `snapshot`. They have
+/// no continuous effect yet for an entrant's own entry replacements.
+pub(crate) fn pre_entry_co_entrants(
+    state: &GameState,
+    snapshot: &HashSet<ObjectId>,
+) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !snapshot.contains(id))
+        .collect()
+}
+
 /// CR 614.12 + CR 614.1c + CR 613.1: the battlefield as the rules saw it before
 /// the active simultaneous entry, as a detached scratch state — what an
 /// entering permanent's own replacement counts ("for each +1/+1 counter among
@@ -237,12 +252,7 @@ pub(crate) fn pre_entry_rules_view(
     state: &GameState,
     snapshot: &HashSet<ObjectId>,
 ) -> Option<GameState> {
-    let co_entrants: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| !snapshot.contains(id))
-        .collect();
+    let co_entrants = pre_entry_co_entrants(state, snapshot);
     if co_entrants.is_empty() {
         return None;
     }

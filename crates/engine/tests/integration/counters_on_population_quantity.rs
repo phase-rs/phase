@@ -1091,6 +1091,131 @@ fn copied_acolyte_counts_a_permanent_an_existing_march_made_a_creature() {
     }
 }
 
+const HUMILITY: &str = "All creatures lose all abilities and have base power and toughness 1/1.";
+
+/// A Genesis Ultimatum Dig whose Clone copies a pre-existing Ascendant Acolyte
+/// (one +1/+1 counter). Humility is either delivered by the same Dig
+/// (`humility_in_batch`) or already on the battlefield. `second` is the other
+/// member of the batch: Humility itself, or a plain Bear.
+fn humility_copy_board(humility_in_batch: bool) -> AcolyteCopyBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let existing_acolyte = scenario
+        .add_creature_from_oracle(P0, "Ascendant Acolyte", 1, 1, ASCENDANT_ACOLYTE)
+        .id();
+    scenario.with_counter(existing_acolyte, CounterType::Plus1Plus1, 1);
+    if !humility_in_batch {
+        scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+    }
+    let mut b = scenario.add_creature_to_graveyard(P0, "Clone", 0, 0);
+    b.from_oracle_text(CLONE);
+    let clone = b.id();
+    let second = if humility_in_batch {
+        let mut b = scenario.add_creature_to_graveyard(P0, "Humility", 0, 0);
+        b.as_enchantment().from_oracle_text(HUMILITY);
+        b.id()
+    } else {
+        scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .id()
+    };
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+        .with_mana_cost(ManaCost::default())
+        .id();
+    AcolyteCopyBoard {
+        runner: scenario.build(),
+        spell,
+        existing_acolyte,
+        ozolith: existing_acolyte,
+        clone,
+        second,
+    }
+}
+
+/// CR 614.12 + CR 707.5: Genesis Ultimatum puts Clone (copying an Ascendant
+/// Acolyte that has one +1/+1 counter) and Humility onto the battlefield
+/// together. Which replacement effects apply to the entering copy, and the
+/// counters its "for each +1/+1 counter among other creatures you control"
+/// replacement adds, are decided from the copy's characteristics as it would
+/// exist on the battlefield with only the continuous effects of objects already
+/// there. A co-entering Humility is not there yet, so it has not removed the
+/// copy's replacement: the copy enters with the pre-existing Acolyte's one
+/// counter in both delivery orders (the layers then apply Humility to it).
+#[test]
+fn copied_acolyte_keeps_its_entry_counters_when_humility_co_enters() {
+    for clone_first in [true, false] {
+        let board = humility_copy_board(true);
+        let order = if clone_first {
+            [board.clone, board.second]
+        } else {
+            [board.second, board.clone]
+        };
+        let label = format!("clone_first={clone_first}");
+        let run = run_genesis_dig(
+            board.runner,
+            board.spell,
+            &order,
+            &[],
+            Some(board.existing_acolyte),
+        );
+        assert!(run.paused, "Clone's copy choice paused the batch ({label})");
+        let state = run.runner.state();
+        assert_eq!(
+            state.objects[&board.clone].name, "Ascendant Acolyte",
+            "{label}"
+        );
+        assert_eq!(
+            state.objects[&board.second].zone,
+            Zone::Battlefield,
+            "{label}"
+        );
+        assert_eq!(
+            counters(&run.runner, board.clone, &CounterType::Plus1Plus1),
+            1,
+            "Humility had no effect yet when the copy's replacement applied ({label})"
+        );
+        assert!(
+            state.active_pre_entry_battlefield_snapshot().is_none()
+                && state.resolution_stack.is_empty(),
+            "{label}"
+        );
+    }
+}
+
+/// Control: with Humility ALREADY on the battlefield, the entering copy has lost
+/// its replacement as it would exist there, so it enters with no counters.
+#[test]
+fn copied_acolyte_enters_without_counters_under_an_existing_humility() {
+    for clone_first in [true, false] {
+        let board = humility_copy_board(false);
+        let order = if clone_first {
+            [board.clone, board.second]
+        } else {
+            [board.second, board.clone]
+        };
+        let label = format!("clone_first={clone_first}");
+        let run = run_genesis_dig(
+            board.runner,
+            board.spell,
+            &order,
+            &[],
+            Some(board.existing_acolyte),
+        );
+        assert!(run.paused, "{label}");
+        let state = run.runner.state();
+        assert_eq!(
+            state.objects[&board.clone].name, "Ascendant Acolyte",
+            "{label}"
+        );
+        assert_eq!(
+            counters(&run.runner, board.clone, &CounterType::Plus1Plus1),
+            0,
+            "an existing Humility strips the copied replacement ({label})"
+        );
+    }
+}
+
 /// The object-count class of the same read: a co-entrant is not "another
 /// creature you control" for an as-enters count.
 #[test]

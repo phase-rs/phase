@@ -686,7 +686,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             toughness,
             target,
         } => match mode {
-            ScanMode::Conservative => Axes::CONSERVATIVE,
+            // CR 608.2h + CR 400.7: every axis stays fail-closed; only the
+            // source-counter dependency is read from the pump's own fields.
+            ScanMode::Conservative => pump_payload_source_counters(
+                scan_pt_value(power, mode)
+                    .or(scan_pt_value(toughness, mode))
+                    .or(scan_target_filter(target, target_ctx, mode)),
+            ),
             ScanMode::LoopFirewall => {
                 let mut acc = Axes::NONE;
                 acc = acc.or(scan_pt_value(power, mode));
@@ -886,7 +892,19 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::PumpAll { .. } => Axes::CONSERVATIVE,
+        // CR 608.2h + CR 400.7: the recipient set is a live population, so every
+        // axis stays fail-closed, but the source-counter dependency is exactly
+        // what the pump's own amounts and recipient filter read ("for each lore
+        // counter among Sagas you control" names no source).
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+        } => pump_payload_source_counters(
+            scan_pt_value(power, mode)
+                .or(scan_pt_value(toughness, mode))
+                .or(scan_target_filter(target, target_ctx, mode)),
+        ),
         Effect::DamageAll {
             amount,
             target,
@@ -6783,6 +6801,18 @@ pub(crate) fn modification_grants_growing_cost_keyword(m: &ContinuousModificatio
 
 /// A token's `power`/`toughness` (CR 208). A dynamic `Quantity` P/T reads its
 /// `QuantityExpr`; a fixed or `*`-placeholder P/T reads nothing here.
+/// CR 608.2h + CR 400.7: a pump's classification — fail-closed on every axis
+/// except `source_counters`, which is whatever its own payload (amounts and
+/// recipient filter) reads. A pump never reads its source's counters unless a
+/// payload field names them, so a departed source's counter map is position
+/// only for the pumps whose payload does.
+fn pump_payload_source_counters(payload: Axes) -> Axes {
+    Axes {
+        source_counters: payload.source_counters,
+        ..Axes::CONSERVATIVE
+    }
+}
+
 fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes {
     match pt {
         PtValue::Fixed(_) => Axes::NONE,
@@ -7620,8 +7650,9 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // (grown_objects_are_inert==true) yet the census read still escalates ⇒ only the
         // sibling veto catches it. Pinned EXACTLY by `census_tag_set_is_exactly_enumerated`.
         // Defense-in-depth: PumpAll/DamageEachPlayer/ChangeZoneAll are census-
-        // tagged even though their scan_effect arm is CONSERVATIVE/non-scanning today, so a
-        // future descent into their mass filter cannot silently relax.
+        // tagged even though their scan_effect arm is CONSERVATIVE on every axis a
+        // loop consumer reads (PumpAll descends only to derive `source_counters`),
+        // so a future descent into their mass filter cannot silently relax.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::CounterAll { .. }

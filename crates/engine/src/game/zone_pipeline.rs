@@ -1449,6 +1449,7 @@ pub(crate) fn move_objects_simultaneously_settling_then(
     });
     let parking = if pre_entry_battlefield.is_some() {
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: logical_zone_change_group.clone(),
             paused_current: None,
             remaining: Vec::new(),
@@ -8805,6 +8806,7 @@ mod library_reorder_carrier_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         assert!(
             state.active_batch_delivery().is_some(),
@@ -8974,6 +8976,7 @@ mod library_reorder_carrier_tests {
             attempted: vec![pile.b, pile.a],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
