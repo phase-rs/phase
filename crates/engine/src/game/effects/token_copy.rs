@@ -984,7 +984,31 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     // 303.4f/g projection below can be built while `state` is borrowed.
     let all_creature_types = state.all_creature_types.clone();
 
+    // CR 614.12: one pre-event board per uninterrupted batch. Future tokens have no
+    // object on this board. Refresh extends the absent prefix and updates live history
+    // reads; only history-dependent residents can need another board layer pass.
+    // A pause drops it; non-entry side effects conservatively invalidate it below.
+    let mut entry_board: Option<crate::game::filter::TokenEntryBatchBoard> = None;
+    let mut entry_events_start = events.len();
+
     for index in 0..final_count {
+        if events[entry_events_start..]
+            .iter()
+            .any(|event| match event {
+                GameEvent::TokenCreated { object_id, .. }
+                | GameEvent::CounterAdded { object_id, .. } => !created_ids.contains(object_id),
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: None,
+                    to: Zone::Battlefield,
+                    ..
+                } => !created_ids.contains(object_id),
+                _ => true,
+            })
+        {
+            entry_board = None;
+        }
+        entry_events_start = events.len();
         // CR 508.4: this token's own destination, selected by its creation
         // ordinal within the batch.
         let attack_destination = attack_request.for_entrant(created_ids.len() - prefix_len);
@@ -1059,7 +1083,28 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 enter_with_choices: None,
                 applied: std::collections::HashSet::new(),
             };
-            match crate::game::replacement::replace_event(state, proposed, events) {
+            let has_own_entry_replacements = state
+                .liminal_entries
+                .get(&token_id)
+                .is_some_and(|entry| !entry.object.projected().replacement_definitions.is_empty());
+            if has_own_entry_replacements && entry_board.is_none() {
+                let absent = copy_token_co_entrants(state, token_id, &created_ids);
+                entry_board = Some(crate::game::filter::TokenEntryBatchBoard::new(
+                    state, &absent,
+                ));
+            }
+            if let Some(board) = entry_board.as_mut() {
+                board.refresh(
+                    state,
+                    &copy_token_co_entrants(state, token_id, &created_ids),
+                );
+            }
+            match crate::game::replacement::replace_event_on_entry_board(
+                state,
+                proposed,
+                events,
+                entry_board.as_ref().map(|cached| cached.board()),
+            ) {
                 crate::game::replacement::ReplacementResult::Execute(event) => {
                     if state.has_post_replacement_drain() {
                         if let Some(waiting_for) =
@@ -1216,11 +1261,17 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 .as_ref()
                 .filter(|_| !own_entries.is_empty())
                 .and_then(|body| {
-                    crate::game::filter::BattlefieldEntrantProjection::for_placed_token(
-                        state,
-                        token_id,
+                    let board = entry_board.get_or_insert_with(|| {
+                        let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+                        absent.push(token_id);
+                        crate::game::filter::TokenEntryBatchBoard::new(state, &absent)
+                    });
+                    let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+                    absent.push(token_id);
+                    board.refresh(state, &absent);
+                    crate::game::filter::BattlefieldEntrantProjection::token_on_pre_entry_board(
+                        std::borrow::Cow::Borrowed(board.board()),
                         body,
-                        &copy_token_co_entrants(state, token_id, &created_ids),
                     )
                 });
             intrinsic

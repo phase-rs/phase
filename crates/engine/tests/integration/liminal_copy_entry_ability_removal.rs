@@ -3343,3 +3343,46 @@ fn clone_legion_copied_minion_payment_is_doubled_by_a_resident_throne() {
         "copied Minion payment, resident Throne",
     );
 }
+
+/// CR 614.12: each doubled copy reads the same pre-event board. More copies
+/// require entrant layer passes, but must not rebuild that board per token.
+#[test]
+fn clone_legion_doubled_batches_reuse_pre_entry_board() {
+    use engine::game::filter::{reset_token_entry_projection_work, token_entry_projection_work};
+
+    for doublers in [1, 2, 3] {
+        let (runner, _) = clone_legion_carried(
+            &[TRISKELION_DONOR; 3],
+            |scenario| {
+                for _ in 0..doublers {
+                    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+                }
+            },
+            |_| reset_token_entry_projection_work(),
+            PauseCarry::Live,
+            &Script::default(),
+            |_, _| {},
+        );
+        assert_settled(&runner, "projection work budget");
+        let tokens = battlefield_tokens(&runner, TRISKELION_NAME);
+        let count = 3 * (1 << doublers);
+        assert_eq!(tokens.len(), count, "all doubled copies were created");
+        assert!(tokens.iter().all(|id| plus_counters(&runner, *id) == 3));
+        let work = token_entry_projection_work();
+        assert_eq!(work.projections, count, "each entrant was projected");
+        assert_eq!(
+            work.pre_entry_state_clones, 3,
+            "one pre-entry clone per batch"
+        );
+        assert_eq!(
+            work.projection_state_clones, count,
+            "one scratch clone per entrant"
+        );
+        assert_eq!(
+            work.pre_entry_boards, 3,
+            "one board per donor batch: {work:?}"
+        );
+        assert_eq!(work.pre_entry_layer_passes, 3, "one board flush per batch");
+        eprintln!("{doublers} Parallel Lives: {count} tokens, {work:?}");
+    }
+}
