@@ -479,7 +479,7 @@ fn wand_payment_priced_by_target_mana_value() -> AbilityDefinition {
     let Effect::PayCost {
         cost: AbilityCost::PayLife { amount },
         ..
-    } = &mut pay.effect
+    } = pay.effect.as_mut()
     else {
         panic!("Wand's payment is a life payment, got {:?}", pay.effect);
     };
@@ -491,20 +491,38 @@ fn wand_payment_priced_by_target_mana_value() -> AbilityDefinition {
     pay
 }
 
-/// Target creature A (mana value 4) -> `producer` -> the repriced payment and
-/// move. Returns the runner after the payment was accepted, with A's id and
-/// the probe's id.
-fn activate_priced_probe(producer: Effect) -> (GameRunner, ObjectId, ObjectId) {
+/// What the priced probe left behind once its payment was accepted.
+struct PricedBoard {
+    runner: GameRunner,
+    /// Creature A (mana value 4), the activation's declared target.
+    inherited: ObjectId,
+    /// The probe artifact (the ability's source, B).
+    probe: ObjectId,
+    /// The nonland card staged on top of P0's library.
+    library_top: ObjectId,
+}
+
+/// Target creature A (mana value 4) -> each of `producers` in order -> the
+/// repriced payment and move. P0's library holds one nonland card, so a
+/// producer may reveal it into the ledger ahead of a later one.
+fn activate_priced_probe(producers: Vec<Effect>) -> PricedBoard {
     use engine::types::mana::ManaCost;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let library_top = scenario.add_card_to_library_top(P0, "Earlier Reveal");
     let inherited = {
         let mut builder = scenario.add_creature(P1, "Inherited Target", 2, 2);
         builder.with_mana_cost(ManaCost::generic(4));
         builder.id()
     };
-    let mut produce = AbilityDefinition::new(AbilityKind::Spell, producer);
-    produce.sub_ability = Some(Box::new(wand_payment_priced_by_target_mana_value()));
+    let chain = producers.into_iter().rev().fold(
+        wand_payment_priced_by_target_mana_value(),
+        |next, producer| {
+            let mut node = AbilityDefinition::new(AbilityKind::Spell, producer);
+            node.sub_ability = Some(Box::new(next));
+            node
+        },
+    );
     let mut ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::TargetOnly {
@@ -512,7 +530,7 @@ fn activate_priced_probe(producer: Effect) -> (GameRunner, ObjectId, ObjectId) {
         },
     )
     .cost(AbilityCost::Tap);
-    ability.sub_ability = Some(Box::new(produce));
+    ability.sub_ability = Some(Box::new(chain));
     let probe = {
         let mut builder = scenario.add_artifact_from_oracle(P0, "Probe", "");
         builder.with_ability_definition(ability);
@@ -525,7 +543,12 @@ fn activate_priced_probe(producer: Effect) -> (GameRunner, ObjectId, ObjectId) {
         "precondition: the inherited target has mana value 4"
     );
     activate_probe_and_pay(&mut runner, probe, Some(inherited));
-    (runner, inherited, probe)
+    PricedBoard {
+        runner,
+        inherited,
+        probe,
+        library_top,
+    }
 }
 
 /// CR 118.12 + CR 119.4 + CR 608.2c: the payment keeps the object target it
@@ -535,49 +558,64 @@ fn activate_priced_probe(producer: Effect) -> (GameRunner, ObjectId, ObjectId) {
 /// payment stripped of A would), B moves to the graveyard, A stays put.
 #[test]
 fn payment_priced_by_an_inherited_target_still_moves_only_the_produced_card() {
-    let (runner, inherited, probe) = activate_priced_probe(Effect::Reveal {
+    let board = activate_priced_probe(vec![Effect::Reveal {
         target: TargetFilter::SelfRef,
-    });
-    let state = runner.state();
+    }]);
+    let state = board.runner.state();
     assert_eq!(
         state.last_revealed_ids,
-        vec![probe],
+        vec![board.probe],
         "reach guard: the reveal produced the source"
     );
     assert_eq!(
         state.players[P0.0 as usize].life, 15,
         "P0 paid 4 life (A's mana value) and the trailing guard took 1"
     );
-    assert_eq!(state.objects[&probe].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&board.probe].zone, Zone::Graveyard);
     assert_eq!(
         state.players[P0.0 as usize]
             .graveyard
             .iter()
             .collect::<Vec<_>>(),
-        vec![&probe],
+        vec![&board.probe],
         "only the revealed source moved"
     );
     assert_eq!(
-        state.objects[&inherited].zone,
+        state.objects[&board.inherited].zone,
         Zone::Battlefield,
         "the payment's inherited target is not the move's referent"
     );
     assert!(state.players[P1.0 as usize].graveyard.is_empty());
+    assert_eq!(state.objects[&board.library_top].zone, Zone::Library);
 }
 
-/// CR 608.2c + CR 609.3: the same payment after a producer that yielded nothing.
-/// Chain: target creature A (mana value 4) -> turn the (already face-up) source
-/// face up -> pay life equal to A's mana value -> move "it". P0 still pays
-/// exactly 4, and the move has no referent: neither A (the payment's own
-/// binding) nor the source moves.
+/// CR 608.2c + CR 609.3: the same payment after a producer that yielded
+/// nothing, with an earlier reveal's nonland card still in the ledger (which
+/// is what lets Wand's "If it's a nonland card" gate offer the payment). Chain:
+/// target creature A (mana value 4) -> reveal P0's top card E -> turn the
+/// (already face-up) source face up -> pay life equal to A's mana value ->
+/// move "it". P0 still pays exactly 4, and the move has no referent: neither
+/// A (the payment's own binding), nor E (the stale ledger entry), nor the
+/// source moves.
 #[test]
 fn payment_priced_by_an_inherited_target_after_an_empty_producer_moves_nothing() {
-    let (runner, inherited, probe) = activate_priced_probe(Effect::TurnFaceUp {
-        target: TargetFilter::SelfRef,
-    });
-    let state = runner.state();
+    let board = activate_priced_probe(vec![
+        Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        },
+        Effect::TurnFaceUp {
+            target: TargetFilter::SelfRef,
+        },
+    ]);
+    let state = board.runner.state();
+    assert_eq!(
+        state.last_revealed_ids,
+        vec![board.library_top],
+        "reach guard: the earlier reveal's card is still in the ledger"
+    );
     assert!(
-        !state.objects[&probe].face_down,
+        !state.objects[&board.probe].face_down,
         "the source was already face up, so turning it up produced nothing"
     );
     assert_eq!(
@@ -585,11 +623,16 @@ fn payment_priced_by_an_inherited_target_after_an_empty_producer_moves_nothing()
         "P0 paid 4 life (A's mana value) and the trailing guard took 1"
     );
     assert_eq!(
-        state.objects[&inherited].zone,
+        state.objects[&board.inherited].zone,
         Zone::Battlefield,
         "the payment's inherited target must not become the move's referent"
     );
-    assert_eq!(state.objects[&probe].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&board.library_top].zone, Zone::Library);
+    assert_eq!(
+        state.players[P0.0 as usize].library.front(),
+        Some(&board.library_top)
+    );
+    assert_eq!(state.objects[&board.probe].zone, Zone::Battlefield);
     assert!(state.players[P0.0 as usize].graveyard.is_empty());
     assert!(state.players[P1.0 as usize].graveyard.is_empty());
 }
