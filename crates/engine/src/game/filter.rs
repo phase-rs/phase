@@ -5721,6 +5721,7 @@ impl BattlefieldEntrantProjection {
         let mut events = Vec::new();
         for (host, origin) in earlier {
             // CR 400.7: the zone-move primitive, on the detached copy only.
+            // allow-raw-zone: rebuilds the pre-event board on a discarded projection clone, not a gameplay zone event.
             crate::game::zones::move_to_zone(&mut board, host, origin, &mut events);
         }
         // The moves back are not zone changes of the game: keep the copy's ledger as it was.
