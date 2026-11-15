@@ -2617,13 +2617,12 @@ mod tests {
     /// no `display_source` key anywhere. The expectation is computed through
     /// `horde_token_image_ref` (the repair's own authority), never re-typed.
     ///
-    /// Discrimination: reverting the ref-recovery half of the repair leaves
-    /// the projected graveyard Event carrying the typo'd ref, so the
-    /// corrected-ref equality on the first viewer snapshot flips; the
-    /// predicate-level test above stays green in that scenario because its
-    /// fixture bypasses this path. Every concealment assertion pairs with a
-    /// positive reach-guard (revealed pre-serialize; corrected ref exposed
-    /// post-restore).
+    /// Reverting ref recovery leaves the graveyard Event carrying the typo'd
+    /// ref, so the corrected-ref equality on the first viewer snapshot fails.
+    /// The test above exercises shared rehydration directly. This test
+    /// exercises a serialized restore and its first viewer projection. Every
+    /// concealment assertion pairs with a positive reach guard (revealed before
+    /// serialization and corrected ref exposed after restore).
     #[test]
     fn production_restore_repairs_revealed_smackdown_ref_for_first_viewer_snapshot() {
         use crate::game::deck_loading::{
