@@ -2002,8 +2002,11 @@ fn settle_mirrorworks_copy(runner: &mut GameRunner) {
 ///
 /// Historical-filter treatment (chosen, asserted here): the persisted `affected`
 /// filter is NOT re-derived, so the restored rule binds exactly what the
-/// released engine bound; cards in graveyards stay targetable by Raise Dead,
-/// as they were in the saved game.
+/// released engine bound (the copy itself); cards in graveyards stay
+/// targetable by Raise Dead, as they were in the saved game. Rationale (the
+/// decoder in `phase-ast` `deserialize_static_mode_fwd`): a saved token's
+/// characteristics are serialized copiable values (CR 707.2), so migration
+/// restores the executable mode without rewriting the subject.
 #[test]
 fn released_save_of_mirrorworks_copy_restores_executable_restriction() {
     let db = crate::support::shared_card_db().expect("the checked-in fixture contains the cards");
@@ -2080,7 +2083,9 @@ fn released_save_of_mirrorworks_copy_restores_executable_restriction() {
         token_obj.static_definitions
     );
 
-    let mut runner = GameRunner::from_state(restored);
+    // Each probe starts from the restored state: a sole legal target is
+    // auto-selected and would leave the spell on the stack.
+    let mut runner = GameRunner::from_state(restored.clone());
     let legal = cast_legal_targets(&mut runner, P1, naturalize);
     assert!(
         legal.contains(&mirrorworks),
@@ -2090,6 +2095,7 @@ fn released_save_of_mirrorworks_copy_restores_executable_restriction() {
         !legal.contains(&token),
         "the restored copy keeps its executable restriction: {legal:?}"
     );
+    let mut runner = GameRunner::from_state(restored);
     let graveyard_legal = cast_legal_targets(&mut runner, P1, raise_dead);
     assert!(
         graveyard_legal.contains(&dead_bear),
