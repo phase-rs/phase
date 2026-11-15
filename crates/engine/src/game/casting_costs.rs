@@ -19,13 +19,13 @@ use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, Red
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
-    CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
-    CounterRemoveChoice, DeferredHandDiscardCost, DeferredSpellSacrifice, DistributionUnit,
-    FinalizePrePaymentChecks, GameState, ManaAbilityCostParent, ManaAbilityResume,
-    PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CastTimingRoute, CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume,
+    CounterCostChoice, CounterRemoveChoice, DeferredHandDiscardCost, DeferredSpellSacrifice,
+    DistributionUnit, FinalizePrePaymentChecks, GameState, ManaAbilityCostParent,
+    ManaAbilityResume, PausedCounterCostRemoval, PayCostKind, PendingCast,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidSpellFinalization,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -742,6 +742,7 @@ fn next_offered_alternative_cost(
         state,
         player,
         pending.object_id,
+        pending.casting_variant,
         pending.cast_timing_permission,
         pending.casting_permission_index,
         AltCostTerms::settled(&pending.accepted_cost_reductions),
@@ -795,24 +796,15 @@ fn apply_required_alternative_cost(
     alt_cost: PayableSpellAlternativeCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pending.alternative_cost_election =
-        crate::types::game_state::SpellAlternativeCostElection::Accepted;
-    pending.ability.context.alternative_mana_cost_paid = true;
     // CR 118.9 + CR 601.2b: no Choice is answered on this route, so the grant
-    // source is stamped for finalize to consume its per-turn slot.
-    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
-    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
-    // CR 118.9 + CR 601.2f: the alternative replaces the mana cost, so its mana
-    // part ({0} when it has none) is the base the cast's total is determined
-    // from (modifiers and reductions, floors last); its other legs ride the
-    // tail as the cast's residual.
-    let (alt_mana, residual) = super::casting::split_alt_cost_components(&alt_cost.cost);
-    pending.base_cost = Some(alt_mana.unwrap_or_else(ManaCost::zero));
-    pending.cost = super::casting::recompute_pending_mana_total(
+    // source is stamped for finalize to consume its per-turn slot; the other
+    // legs ride the tail as the cast's residual.
+    let residual = record_elected_alternative_cost(
         state,
         player,
-        &pending,
-        pending.ability.chosen_x,
+        &mut pending,
+        &alt_cost.cost,
+        alt_cost.once_per_turn_source,
     );
     continue_cost_declarations(
         state,
@@ -835,31 +827,52 @@ fn apply_only_payable_alternative_cost(
     alt_cost: PayableSpellAlternativeCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pending.alternative_cost_election =
-        crate::types::game_state::SpellAlternativeCostElection::Accepted;
-    pending.ability.context.alternative_mana_cost_paid = true;
-    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
-    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
-    match alt_cost.cost {
-        AbilityCost::Mana { cost: alt_mana } => {
-            pending.base_cost = Some(alt_mana);
-            pending.cost = super::casting::recompute_pending_mana_total(
-                state,
-                player,
-                &pending,
-                pending.ability.chosen_x,
-            );
-            finish_pending_cost_or_cast(state, player, pending, events)
-        }
-        cost => pay_additional_cost_with_source(
+    match record_elected_alternative_cost(
+        state,
+        player,
+        &mut pending,
+        &alt_cost.cost,
+        alt_cost.once_per_turn_source,
+    ) {
+        None => finish_pending_cost_or_cast(state, player, pending, events),
+        Some(residual) => pay_additional_cost_with_source(
             state,
             player,
-            cost,
+            residual,
             SpellCostSource::Other,
             pending,
             events,
         ),
     }
+}
+
+/// CR 601.2b + CR 118.9d: marks `pending` as cast with its alternative cost, whose mana component
+/// is the base additional costs and cost increases apply to. Returns the alternative's other
+/// legs, which the cast pays as its residual.
+pub(super) fn record_elected_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    alternative: &AbilityCost,
+    once_per_turn_source: Option<ObjectId>,
+) -> Option<AbilityCost> {
+    pending.alternative_cost_election =
+        crate::types::game_state::SpellAlternativeCostElection::Accepted;
+    pending.ability.context.alternative_mana_cost_paid = true;
+    pending.ability.context.alt_cost_grant_source = once_per_turn_source;
+    pending.alt_cost_grant_source = once_per_turn_source;
+    // CR 118.9 + CR 601.2f: the alternative replaces the mana cost, so its mana
+    // part ({0} when it has none) is the base the cast's total is determined
+    // from (modifiers and reductions, floors last).
+    let (alt_mana, residual) = super::casting::split_alt_cost_components(alternative);
+    pending.base_cost = Some(alt_mana.unwrap_or_else(ManaCost::zero));
+    pending.cost = super::casting::recompute_pending_mana_total(
+        state,
+        player,
+        pending,
+        pending.ability.chosen_x,
+    );
+    residual
 }
 
 pub(crate) fn handle_decide_additional_cost(
@@ -975,7 +988,7 @@ pub(crate) fn handle_decide_additional_cost(
     // a `ReduceCost { condition: AdditionalCostPaid }` static only applies once
     // `additional_cost_paid` is set.
     let mut optional_cost_paid = false;
-    let mut alternative_base_override = None;
+    let mut elected_alternative: Option<AbilityCost> = None;
     let mut recompute_choice_cost = false;
 
     let cost_to_pay = match additional_cost {
@@ -1015,28 +1028,15 @@ pub(crate) fn handle_decide_additional_cost(
                     ability
                         .context
                         .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
-                } else if matches!(preferred, AbilityCost::Mana { .. }) {
-                    // CR 118.9: Spellcasting-option alternative mana costs are not
-                    // additional costs; gate riders via `alternative_mana_cost_paid`.
-                    ability.context.alternative_mana_cost_paid = true;
                 }
                 let is_spell_alternative_choice = answers_alternative_cost;
                 if is_spell_alternative_choice {
-                    ability.context.alternative_mana_cost_paid = true;
-                    // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
-                    // alternative cost records the source on the ability context so
-                    // finalize_cast consumes its per-turn slot. Declining (below)
-                    // leaves it `None` — the printed cost was paid, nothing spent.
-                    ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
-                    // CR 118.9 + CR 601.2f: the alternative replaces the mana
-                    // cost: its mana part ({0} when it has none) becomes the
-                    // base the total is determined from, so the board's
-                    // modifiers and an accepted Defiler's reduction apply to it
-                    // (CR 118.9d), and its other legs are paid with the total.
-                    let (alt_mana, residual) = super::casting::split_alt_cost_components(preferred);
-                    alternative_base_override = Some(alt_mana.unwrap_or_else(ManaCost::zero));
-                    recompute_choice_cost = true;
-                    residual
+                    // CR 118.9 + CR 601.2f: the elected alternative's mana part
+                    // becomes the base (recorded below), so the board's modifiers
+                    // and an accepted Defiler's reduction apply to it (CR 118.9d);
+                    // its other legs are paid with the total.
+                    elected_alternative = Some(preferred.clone());
+                    super::casting::split_alt_cost_components(preferred).1
                 } else {
                     Some(preferred.clone())
                 }
@@ -1075,8 +1075,9 @@ pub(crate) fn handle_decide_additional_cost(
         updated_pending.additional_cost_flow = None;
         updated_pending.additional_cost_decided = true;
     }
-    if let Some(base) = alternative_base_override {
-        updated_pending.base_cost = Some(base);
+    if let Some(alternative) = elected_alternative.as_ref() {
+        let source = updated_pending.alt_cost_grant_source;
+        record_elected_alternative_cost(state, player, &mut updated_pending, alternative, source);
     }
     if recompute_choice_cost {
         updated_pending.cost = super::casting::recompute_pending_mana_total(
@@ -1290,7 +1291,8 @@ fn select_offered_alternative_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    cast_timing_permission: Option<CastTimingPermission>,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingRoute>,
     casting_permission_index: Option<CastingPermissionIndex>,
     terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
@@ -1298,6 +1300,7 @@ fn select_offered_alternative_cost(
         state,
         player,
         object_id,
+        casting_variant,
         cast_timing_permission,
         casting_permission_index,
         terms,
@@ -1313,14 +1316,21 @@ fn offered_alternative_costs(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    cast_timing_permission: Option<CastTimingPermission>,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingRoute>,
     casting_permission_index: Option<CastingPermissionIndex>,
     terms: AltCostTerms<'_>,
 ) -> Vec<PayableSpellAlternativeCost> {
     cast_timing_permission
-        .and_then(|permission| {
+        .filter(|route| *route == CastTimingRoute::AlternativeCost)
+        .and_then(|_| {
             payable_spell_alternative_cost_for_timing_with(
-                state, player, object_id, permission, terms,
+                state,
+                player,
+                object_id,
+                casting_variant,
+                CastTimingPermission::AsThoughHadFlash,
+                terms,
             )
         })
         .map(|timing| vec![timing])
@@ -1572,12 +1582,14 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
 ) -> Option<PayableSpellAlternativeCost> {
     payable_spell_alternative_cost_for_timing_with(
         state,
         player,
         object_id,
+        casting_variant,
         timing_permission,
         AltCostTerms::ANNOUNCED,
     )
@@ -1587,24 +1599,45 @@ pub(super) fn payable_spell_alternative_cost_for_timing_with(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
     terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
-    let obj = state.objects.get(&object_id)?;
-    if obj.zone != Zone::Hand || obj.controller != player {
-        return None;
-    }
-
-    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    if granted.timing_permission != Some(timing_permission) {
-        return None;
-    }
+    let granted = spell_alternative_cost_for_timing(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        timing_permission,
+    )?;
     spell_alternative_cost_is_payable(state, player, object_id, &granted.cost, None, terms)
         .then_some(PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
             once_per_turn_source: granted.once_per_turn_source,
         })
+}
+
+/// The alternative cost granted to this hand cast together with
+/// `timing_permission`, whether or not it is still payable.
+pub(super) fn spell_alternative_cost_for_timing(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+    timing_permission: CastTimingPermission,
+) -> Option<super::casting::GrantedSpellAlternativeCost> {
+    // CR 118.9a + CR 601.3c: the timing comes only with the granted alternative cost, which a
+    // method that is itself an alternative cost can't add.
+    if casting_variant.uses_alternative_cost() {
+        return None;
+    }
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Hand || obj.controller != player {
+        return None;
+    }
+    super::casting::granted_spell_alternative_cost(state, player, object_id)
+        .filter(|granted| granted.timing_permission == Some(timing_permission))
 }
 
 /// CR 118.9 + CR 601.2f + CR 601.2h: whether an Oracle alternative cost can be
@@ -2151,7 +2184,6 @@ pub(crate) fn finish_pending_cost_or_cast(
     {
         pending.alternative_cost_election =
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
-        pending.ability.context.alternative_mana_cost_paid = true;
     }
     // CR 118.9 + CR 601.2b: the alternative-cost arm offered an alternative and
     // handed the cast's declarations to `continue_cost_declarations`, which
@@ -6948,6 +6980,7 @@ pub(crate) fn handle_exile_for_cost(
     expected: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     finish_exile_selection_for_cost(
@@ -6957,6 +6990,9 @@ pub(crate) fn handle_exile_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        paid_cost
+            .and_then(super::casting::find_non_self_exile)
+            .and_then(|(_, _, filter)| filter),
         None,
         events,
         "card(s)",
@@ -6993,6 +7029,7 @@ pub(crate) fn handle_exile_any_number_for_cost(
     maximum: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     finish_exile_selection_for_cost(
@@ -7002,6 +7039,9 @@ pub(crate) fn handle_exile_any_number_for_cost(
         (0, maximum),
         legal_cards,
         chosen,
+        paid_cost
+            .and_then(exile_any_number_effect_cost_parts)
+            .map(|(_, filter)| filter),
         Some(ThisWayCause::Exiled),
         events,
         "card(s)",
@@ -7052,6 +7092,7 @@ pub(crate) fn handle_exile_permanent_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        filter.as_ref(),
         None,
         events,
         "permanent(s)",
@@ -7085,36 +7126,6 @@ pub(crate) fn handle_exile_permanent_for_cost(
     )
 }
 
-/// CR 107.3a + CR 118.9: whether this cast pays its own alternative cost and
-/// that cost exiles a card "with mana value X" (the Shoals), so X is the exiled
-/// card's mana value rather than an announced value. Read off the card's own
-/// alternative cost, not off the cast's mana total, which an accepted
-/// alternative re-bases (CR 601.2f).
-fn accepted_alternative_defines_x_by_exiled_mana_value(
-    state: &GameState,
-    pending: &PendingCast,
-) -> bool {
-    fn exiles_by_x_mana_value(cost: &AbilityCost) -> bool {
-        match cost {
-            AbilityCost::Exile {
-                filter: Some(filter),
-                ..
-            } => super::cost_payability::target_filter_has_x_mana_value_constraint(filter),
-            AbilityCost::Composite { costs } => costs.iter().any(exiles_by_x_mana_value),
-            _ => false,
-        }
-    }
-    pending.alternative_cost_election
-        == crate::types::game_state::SpellAlternativeCostElection::Accepted
-        && state.objects.get(&pending.object_id).is_some_and(|spell| {
-            cost_has_x(&spell.mana_cost)
-                && spell.casting_options.iter().any(|option| {
-                    option.kind == SpellCastingOptionKind::AlternativeCost
-                        && option.cost.as_ref().is_some_and(exiles_by_x_mana_value)
-                })
-        })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn finish_exile_selection_for_cost(
     state: &mut GameState,
@@ -7123,6 +7134,7 @@ fn finish_exile_selection_for_cost(
     bounds: (usize, usize),
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_filter: Option<&TargetFilter>,
     this_way_cause: Option<ThisWayCause>,
     events: &mut Vec<GameEvent>,
     object_label: &str,
@@ -7181,11 +7193,10 @@ fn finish_exile_selection_for_cost(
     );
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
-            // CR 107.3a + CR 118.9: Shoal-style alternative costs ("exile a
-            // [color] card with mana value X") define X from the pitched card's
-            // mana value rather than a prior announcement.
+            // CR 107.3c: X comes from a pitched card only when the paid cost's own filter defines X.
             if pending.ability.chosen_x.is_none()
-                && accepted_alternative_defines_x_by_exiled_mana_value(state, &pending)
+                && paid_filter
+                    .is_some_and(super::cost_payability::target_filter_has_x_mana_value_constraint)
             {
                 // CR 202.3d + CR 709.4b: the pitched card is exiled from hand
                 // (off the stack), so a split card defines X from its combined
@@ -7365,6 +7376,7 @@ pub(crate) fn handle_exile_materials_for_cost(
         bounds,
         legal_cards,
         chosen,
+        Some(&materials),
         None,
         events,
         "material(s)",
@@ -9240,7 +9252,7 @@ pub(super) fn check_additional_cost_or_pay(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
@@ -9404,7 +9416,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     modal: crate::types::ability::ModalChoice,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
@@ -9469,7 +9481,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -9560,7 +9572,7 @@ pub(super) fn begin_keyword_queue_before_targets(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -9596,7 +9608,7 @@ pub(super) fn begin_optional_cost_before_targets(
     cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -9650,7 +9662,7 @@ pub(super) fn begin_required_cost_before_targets(
     cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -9854,7 +9866,7 @@ pub(super) fn committed_required_cast_cost(
 /// object-level permission in exile (ExileWithAltAbilityCost / PlayFromExile) or on
 /// the top of the library (Bolas's Citadel). Single-authority extraction for the
 /// additional-cost authority.
-fn elected_cast_alternative_ability_cost(
+pub(super) fn elected_cast_alternative_ability_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -10023,7 +10035,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -10061,12 +10073,12 @@ fn check_additional_cost_or_pay_with_kept_cost(
     player: PlayerId,
     object_id: ObjectId,
     card_id: CardId,
-    mut ability: ResolvedAbility,
+    ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -10088,7 +10100,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
     {
         lock.alternative_cost_election =
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
-        ability.context.alternative_mana_cost_paid = true;
     }
 
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
@@ -10101,16 +10112,10 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // resources for an illegal cast. We perform the same check again at
     // `finalize_cast_with_phyrexian_choices` so the canonical terminus is
     // closed even for flows that bypass this entry point.
-    // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
-    // cast (marker not yet set at this pre-payment additional-cost seam) so a
-    // value-keyed granted Flash is not dropped on the front half.
-    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+    // CR 601.3d + CR 601.6: only when the spell's own option is the route the cast was proposed under.
+    if cast_timing_permission == Some(CastTimingRoute::SpellOption)
         && !super::restrictions::target_dependent_flash_permission_satisfied(
-            state,
-            player,
-            object_id,
-            &ability,
-            casting_variant == CastingVariant::Fuse,
+            state, object_id, &ability,
         )
     {
         let pending_for_cancel = pending_cast_keeping(
@@ -10279,9 +10284,16 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // cost. Reuse the existing `AdditionalCost::Choice` prompt shape: accepting
     // pays the alternative cost, declining pays the printed mana cost as the
     // fallback branch.
-    if casting_variant == CastingVariant::Normal
-        && lock.alternative_cost_election
-            == crate::types::game_state::SpellAlternativeCostElection::Undecided
+    // CR 118.9a: never over a cast whose method or permission already elected one.
+    if lock.alternative_cost_election
+        == crate::types::game_state::SpellAlternativeCostElection::Undecided
+        && !super::casting::cast_has_elected_alternative_cost(
+            state,
+            player,
+            object_id,
+            casting_permission_index,
+            casting_variant,
+        )?
     {
         // CR 601.2b: the cast's declarations are ahead (every route below
         // reaches `continue_cost_declarations`), so a matching Defiler that
@@ -10290,6 +10302,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
             state,
             player,
             object_id,
+            casting_variant,
             cast_timing_permission,
             casting_permission_index,
             AltCostTerms::announced(&lock.accepted),
@@ -10330,8 +10343,9 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 pending.deferred_required_additional_cost =
                     required_cost_from_additional(deferred_required.clone());
             }
-            let alt_cost_required_for_timing = cast_timing_permission.is_some()
-                && alt_cost.timing_permission == cast_timing_permission;
+            let alt_cost_required_for_timing = cast_timing_permission
+                == Some(CastTimingRoute::AlternativeCost)
+                && alt_cost.timing_permission == Some(CastTimingPermission::AsThoughHadFlash);
             // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
             // cost the alternative is the only way to cast the card, so there
             // is nothing to choose; nor is there when the alternative's grant
@@ -10834,9 +10848,9 @@ fn flash_timing_non_mana_additional_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
 ) -> Option<AdditionalCost> {
-    if cast_timing_permission != Some(CastTimingPermission::AsThoughHadFlash) {
+    if cast_timing_permission != Some(CastTimingRoute::SpellOption) {
         return None;
     }
     state
@@ -12419,8 +12433,10 @@ fn pay_additional_cost_with_source(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell {
+                resume: CostResume::SpellCost {
                     spell: Box::new(pending),
+                    cost: Box::new(cost.clone()),
+                    source: cost_source,
                 },
             });
         }
@@ -13894,7 +13910,7 @@ pub(super) fn pay_and_push_with_lock(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -14009,7 +14025,7 @@ pub(super) fn pay_and_push_adventure(
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
@@ -14187,7 +14203,7 @@ fn finalize_cast_pre_payment_checks(
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
@@ -14211,14 +14227,10 @@ fn finalize_cast_pre_payment_checks(
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
     // via a `SpellCastingOption` whose `condition` is target-dependent (e.g.,
     // Timely Ward), targets must satisfy that condition before costs are paid.
-    // CR 702.102b: fuse-project the real-flash short-circuit for fused split casts.
-    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+    // CR 601.3d + CR 601.6: only when the spell's own option is the route the cast was proposed under.
+    if cast_timing_permission == Some(CastTimingRoute::SpellOption)
         && !super::restrictions::target_dependent_flash_permission_satisfied(
-            state,
-            player,
-            object_id,
-            ability,
-            casting_variant == CastingVariant::Fuse,
+            state, object_id, ability,
         )
     {
         let pending_for_cancel =
@@ -14352,7 +14364,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     origin_zone: Zone,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
@@ -14458,7 +14470,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
     casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     origin_zone: Zone,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     mana_resume: Option<&ManaAbilityResume>,
@@ -14848,9 +14860,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 .clone_from(&additional_cost_payments);
         }
     }
-    if let Some(permission) = cast_timing_permission {
+    if let Some(route) = cast_timing_permission {
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            obj.cast_timing_permission = Some((permission, state.turn_number));
+            obj.cast_timing_permission = Some((route.permission(), state.turn_number));
         }
     }
 
@@ -15058,23 +15070,35 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // authorizing source is embedded in `casting_variant`; register the pending
     // ETB counter on the same object so it enters carrying the counter.
     //
-    // CR 601.2b + CR 614.1c: a graveyard cast applies the counter of the
+    // CR 601.2a + CR 614.1c: a graveyard cast applies the riders of the
     // permission it was announced under, as latched then: the grant's source
     // "doesn't need to stay under your control throughout that process"
-    // (Intrepid Paleontologist ruling), so a source sacrificed mid-payment
-    // still gives its counter. A cast that latched none reads it now.
-    let static_perm_etb_counter = match &graveyard_permission_latch {
-        Some(latch) => latch.enters_with_counter.clone(),
-        None => super::casting::selected_static_permission_enters_with_counter(
+    // (Intrepid Paleontologist / Edgar, Master Machinist rulings), so a source
+    // sacrificed mid-payment still gives its riders. A cast that latched none
+    // reads them now, through the one entry-rider authority.
+    let static_perm_entry_riders = match &graveyard_permission_latch {
+        Some(latch) => super::casting::CastPermissionEntryRiders {
+            counter: latch.enters_with_counter.clone(),
+            enter_tapped: latch.enter_tapped,
+        },
+        None => super::casting::selected_static_permission_entry_riders(
             state,
             player,
             &permission_authority,
         ),
     };
-    if let Some(counter_type) = static_perm_etb_counter {
+    if let Some(counter_type) = static_perm_entry_riders.counter {
         state
             .pending_etb_counters
             .push((object_id, counter_type, 1));
+    }
+    // CR 614.1d + CR 607.1c: "If you cast a spell this way, that artifact
+    // enters tapped" (Edgar, Master Machinist) — recorded on the spell itself,
+    // which `replacement::find_applicable_replacements` offers as a CR 616.1
+    // candidate when it resolves onto the battlefield. Stack-scoped: cleared at
+    // every Stack exit and on a copy (CR 707.10).
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_permission_enter_tapped = static_perm_entry_riders.enter_tapped;
     }
 
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
@@ -20508,6 +20532,7 @@ mod tests {
                         graveyard_destination_replacement: None,
                         extra_cost: None,
                         enters_with_counter: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         required_cast_keyword: None,
                         pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                         cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -28281,6 +28306,7 @@ mod tests {
             1,
             &[blue_a, blue_b],
             &[blue_a, blue_b],
+            None,
             &mut events,
         );
         assert!(
@@ -28389,6 +28415,7 @@ mod tests {
             1,
             &[blue],
             &[red],
+            None,
             &mut events,
         );
         assert!(
@@ -29619,7 +29646,7 @@ library in a random order.";
     // The Dig resolver reads `QuantityRef::ManaSpentToCast { SelfObject, Total }`
     // which resolves via `obj.mana_spent_to_cast_amount` on the spell object.
     // If the payment-write seam fails to stamp that field, the count resolves
-    // to 0 and the Dig silently no-ops (CR 401.5 clamp → early return).
+    // to 0 and the Dig silently no-ops (zero-count early return).
     //
     // This test drives the REAL cast pipeline (`CastSpell` → mana payment →
     // stack resolution → `DigChoice`) to discriminate a payment-write defect

@@ -56,6 +56,7 @@ fn mill() -> Effect {
         count: q(1),
         target: declared(),
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }
 }
 

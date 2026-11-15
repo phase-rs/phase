@@ -671,7 +671,7 @@ pub(super) fn handle_tribute_choice(
     waiting_for: WaitingFor,
     accept: bool,
     events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::TributeChoice {
         player,
         source_id,
@@ -685,7 +685,7 @@ pub(super) fn handle_tribute_choice(
     };
 
     if accept && !effects::tribute::apply_paid(state, player, source_id, count, events) {
-        return Ok(action_result(events, state.waiting_for.clone()));
+        return Ok(state.waiting_for.clone());
     } else if !accept {
         effects::tribute::apply_declined(state, source_id);
     }
@@ -694,7 +694,7 @@ pub(super) fn handle_tribute_choice(
     // the persisted TributeOutcome when its intervening-if condition is checked.
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
-    Ok(action_result(events, state.waiting_for.clone()))
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 118.12a: Resolve the player's choice between sub-costs of a disjunctive

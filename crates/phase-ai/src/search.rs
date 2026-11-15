@@ -9185,6 +9185,7 @@ mod tests {
                     },
                     target: TargetFilter::Player,
                     destination: Zone::Graveyard,
+                    position: engine::types::ability::LibraryPosition::Top,
                 },
             ),
         ];
@@ -17254,6 +17255,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
@@ -18266,6 +18268,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_in_exile: engine::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
+                with_entry_effect: None,
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: Vec::new(),
                 count_param: 0,
