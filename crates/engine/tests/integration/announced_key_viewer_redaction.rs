@@ -29,8 +29,8 @@ use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect};
 use engine::types::ability_visit::{granter_symbols, DefinitionNode};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, ManaChoice, ManaChoiceContext, ManaChoicePrompt, PendingCast, StackEntryKind,
-    WaitingFor,
+    CastPaymentMode, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    PendingCast, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -983,5 +983,369 @@ fn paused_granted_mana_snapshot_projects_no_hidden_lineage() {
     assert!(
         runner.state().stack.is_empty(),
         "the stack must be empty after the inline activation"
+    );
+}
+
+/// CR 400.2 + CR 605.3a + CR 605.3b + CR 613.1f: nested paused mana
+/// abilities project no hidden provider lineage in EITHER snapshot.
+///
+/// Board: Kraj gains the counter-bearing Brigid's X-mana ability AND the
+/// counter-bearing Skyshroud Elf's abilities; two Quicksilvers snapshot
+/// Kraj's stamped donations into transient grants. Both donors move to hand
+/// (hidden) while the duration-bound grants stay live. Activating the first
+/// Quicksilver's granted "{1}: Add {R} or {W}" with an empty pool opens the
+/// payment window; activating the second Quicksilver's granted Brigid
+/// ability inside that window pauses at the color prompt with the outer
+/// pending nested in the resume chain (`ManaAbilityManaPayment`). Opponent
+/// and unseated projections must carry neither hidden id anywhere in the
+/// prompt carrier (a whole-carrier serialized scan plus per-snapshot
+/// node-axis scans), while authority keeps both clones and the stack
+/// completes (inner Green pays the outer {1}, outer answers Red).
+///
+/// Revert detector: skipping the snapshot walk makes the projection scans
+/// fail; dropping an authoritative clone fails the trusted-state assertions.
+#[test]
+fn nested_paused_granted_mana_snapshots_project_no_hidden_lineage() {
+    const QUICKSILVER_NESTED: &str =
+        "{U}: This creature gains all activated abilities of target creature until end of turn.";
+    let Some(db) = shared_card_db() else { return };
+    fn is_brigid_mana(def: &AbilityDefinition) -> bool {
+        def.description
+            .as_deref()
+            .is_some_and(|text| text.contains("Add X"))
+    }
+    fn is_elf_costed_mana(def: &AbilityDefinition) -> bool {
+        def.description
+            .as_deref()
+            .is_some_and(|text| text.contains("Add {R} or {W}"))
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kraj = scenario
+        .add_creature_from_oracle(P0, "Experiment Kraj", 4, 6, KRAJ)
+        .id();
+    let brigid = scenario
+        .add_creature_from_oracle(P0, "Brigid, Doun's Mind", 2, 3, BRIGID_TEXT)
+        .id();
+    let elf = scenario.add_real_card(P0, "Skyshroud Elf", Zone::Battlefield, db);
+    let qa = scenario
+        .add_creature_from_oracle(P0, "Quicksilver Elemental", 2, 2, QUICKSILVER_NESTED)
+        .id();
+    let qb = scenario
+        .add_creature_from_oracle(P0, "Quicksilver Elemental", 2, 2, QUICKSILVER_NESTED)
+        .id();
+    scenario.add_creature(P0, "Other Creature A", 1, 1);
+    scenario.add_creature(P0, "Other Creature B", 1, 1);
+    scenario.with_counter(brigid, engine::types::counter::CounterType::Plus1Plus1, 1);
+    scenario.with_counter(elf, engine::types::counter::CounterType::Plus1Plus1, 1);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    relayer(runner.state_mut());
+
+    // Reach-guards: Kraj holds both stamped donations.
+    let brigid_stamp = stamp_of(runner.state(), brigid);
+    let elf_stamp = stamp_of(runner.state(), elf);
+    let kraj_brigid: Vec<&AbilityDefinition> = runner.state().objects[&kraj]
+        .abilities
+        .iter()
+        .filter(|def| is_brigid_mana(def))
+        .collect();
+    assert_eq!(
+        kraj_brigid.len(),
+        1,
+        "Kraj holds exactly Brigid's donated mana ability"
+    );
+    assert_eq!(
+        kraj_brigid[0].granting_object,
+        Some(brigid_stamp),
+        "the live Brigid donation stamps Brigid"
+    );
+    let kraj_elf: Vec<&AbilityDefinition> = runner.state().objects[&kraj]
+        .abilities
+        .iter()
+        .filter(|def| is_elf_costed_mana(def))
+        .collect();
+    assert_eq!(
+        kraj_elf.len(),
+        1,
+        "Kraj holds exactly the Elf's costed mana ability"
+    );
+    assert_eq!(
+        kraj_elf[0].granting_object,
+        Some(elf_stamp),
+        "the live Elf donation stamps the Elf"
+    );
+
+    // Both Quicksilvers snapshot Kraj's stamped abilities.
+    for q in [qa, qb] {
+        let gain = runner.state().objects[&q]
+            .abilities
+            .iter()
+            .position(|ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::GainActivatedAbilitiesOfTarget { .. }
+                )
+            })
+            .expect("Quicksilver's {U} ability");
+        runner.activate(q, gain).target_object(kraj).resolve();
+        runner.advance_until_stack_empty();
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "reach-guard: both {{U}} payments left the pool empty, so the outer {{1}} opens a window"
+    );
+
+    // Both donors move to hand (hidden) while the duration-bound grants live.
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), brigid, Zone::Hand, &mut events);
+    move_to_zone(runner.state_mut(), elf, Zone::Hand, &mut events);
+    assert_eq!(
+        runner.state().objects[&brigid].zone,
+        Zone::Hand,
+        "reach-guard: Brigid is hidden from the opponent"
+    );
+    assert_eq!(
+        runner.state().objects[&elf].zone,
+        Zone::Hand,
+        "reach-guard: the Elf is hidden from the opponent"
+    );
+
+    // The outer (costed) and inner (pausing) granted copies name their hidden
+    // providers in the head stamp or the chain.
+    let outer_idx = runner.state().objects[&qa]
+        .abilities
+        .iter()
+        .position(is_elf_costed_mana)
+        .expect("QA's granted Elf ability");
+    let outer_live = &runner.state().objects[&qa].abilities[outer_idx];
+    assert!(
+        outer_live.granting_object == Some(elf_stamp)
+            || outer_live.grant_chain.contains(&elf_stamp),
+        "reach-guard: the live outer copy names the Elf"
+    );
+    let inner_idx = runner.state().objects[&qb]
+        .abilities
+        .iter()
+        .position(is_brigid_mana)
+        .expect("QB's granted Brigid ability");
+    let inner_live = &runner.state().objects[&qb].abilities[inner_idx];
+    assert!(
+        inner_live.granting_object == Some(brigid_stamp)
+            || inner_live.grant_chain.contains(&brigid_stamp),
+        "reach-guard: the live inner copy names Brigid"
+    );
+
+    // Open the outer payment window (Manual: no auto-tap covers the {1}),
+    // then activate the inner ability inside it.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: qa,
+            ability_index: outer_idx,
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("activating the granted costed ability must succeed");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaAbilityManaPayment { .. } | WaitingFor::ManaPayment { .. }
+        ),
+        "reach-guard: the unpaid outer {{1}} opens a payment window, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: qb,
+            ability_index: inner_idx,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating the inner ability inside the window must succeed");
+    let WaitingFor::ChooseManaColor {
+        choice, context, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the inner color-choice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(choice, ManaChoicePrompt::SingleColor { .. }),
+        "reach-guard: the inner AnyOneColor production offers a color choice"
+    );
+    let ManaChoiceContext::ManaAbility(inner) = context else {
+        panic!("the color prompt must retain the paused inner ability");
+    };
+    // The nesting reach-guard: the outer pending rides the inner resume.
+    let ManaAbilityResume::ManaAbilityManaPayment {
+        pending_mana_ability: outer,
+    } = &inner.resume
+    else {
+        panic!(
+            "the inner resume must nest the outer pending, got {:?}",
+            inner.resume
+        );
+    };
+    let inner_snapshot = inner
+        .ability_snapshot
+        .as_ref()
+        .expect("reach-guard: the inner pause snapshots its definition");
+    let outer_snapshot = outer
+        .ability_snapshot
+        .as_ref()
+        .expect("reach-guard: the nested outer pause snapshots its definition");
+    assert!(
+        !snapshot_lineage_hits(inner_snapshot, brigid).is_empty(),
+        "reach-guard: the authoritative inner snapshot names Brigid"
+    );
+    assert!(
+        !snapshot_lineage_hits(outer_snapshot, elf).is_empty(),
+        "reach-guard: the authoritative outer snapshot names the Elf"
+    );
+    // Whole-carrier serialized reach-guards: both hidden ids ride the prompt.
+    let raw = serde_json::to_string(&runner.state().waiting_for).expect("serializes");
+    for (label, id) in [("Brigid", brigid), ("Elf", elf)] {
+        let marker = format!("\"object_id\":{}", id.0);
+        assert!(
+            raw.contains(&format!("{marker},")) || raw.contains(&format!("{marker}}}")),
+            "reach-guard: the serialized authoritative carrier names hidden {label}"
+        );
+    }
+
+    for viewer in [P1, unseated()] {
+        let filtered = filter_state_for_viewer(runner.state(), viewer);
+        let WaitingFor::ChooseManaColor { context, .. } = &filtered.waiting_for else {
+            panic!(
+                "{viewer:?} must see the same color prompt, got {:?}",
+                filtered.waiting_for
+            );
+        };
+        let ManaChoiceContext::ManaAbility(inner) = context else {
+            panic!("{viewer:?} must see the paused inner ability");
+        };
+        let ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability: outer,
+        } = &inner.resume
+        else {
+            panic!("{viewer:?} must see the nested outer pending");
+        };
+        for (label, snapshot, hidden) in [
+            ("inner", &inner.ability_snapshot, brigid),
+            ("outer", &outer.ability_snapshot, elf),
+        ] {
+            let snapshot = snapshot
+                .as_ref()
+                .expect("the viewer still sees the snapshot itself");
+            assert!(
+                snapshot_lineage_hits(snapshot, hidden).is_empty(),
+                "{viewer:?} sees {label} snapshot lineage naming its hidden provider"
+            );
+        }
+        // The whole projected carrier names neither hidden id anywhere.
+        let projected = serde_json::to_string(&filtered.waiting_for).expect("serializes");
+        for (label, id) in [("Brigid", brigid), ("Elf", elf)] {
+            let marker = format!("\"object_id\":{}", id.0);
+            assert!(
+                !projected.contains(&format!("{marker},"))
+                    && !projected.contains(&format!("{marker}}}")),
+                "{viewer:?} sees hidden {label} anywhere in the prompt carrier"
+            );
+        }
+    }
+
+    // Trusted save/restore retains both stamped snapshots.
+    let round_tripped: engine::types::game_state::GameState =
+        serde_json::from_str(&serde_json::to_string(runner.state()).expect("serializes"))
+            .expect("deserializes");
+    let WaitingFor::ChooseManaColor { context, .. } = &round_tripped.waiting_for else {
+        panic!(
+            "the round-tripped halt must be the color prompt, got {:?}",
+            round_tripped.waiting_for
+        );
+    };
+    let ManaChoiceContext::ManaAbility(inner) = context else {
+        panic!("the round-tripped prompt must retain the paused inner ability");
+    };
+    assert!(
+        !snapshot_lineage_hits(
+            inner
+                .ability_snapshot
+                .as_ref()
+                .expect("save/restore must retain the inner snapshot"),
+            brigid
+        )
+        .is_empty(),
+        "save/restore must retain the inner snapshot's hidden lineage"
+    );
+
+    // Complete the inner prompt; the outer window resumes and its {1} pays
+    // from the produced mana, then the outer production choice follows.
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("submitting the Green color choice must succeed");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaAbilityManaPayment { .. } | WaitingFor::PayManaAbilityMana { .. }
+        ),
+        "the outer window must resume after the inner completes, got {:?}",
+        runner.state().waiting_for
+    );
+    // No more activations to make: passing priority spends the floating pool
+    // mana into the outer {1} and the outer production choice follows.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("passing priority must spend the pool into the outer cost");
+    let WaitingFor::ChooseManaColor {
+        choice, context, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the outer production choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(choice, ManaChoicePrompt::SingleColor { .. }),
+        "the outer Add {{R}} or {{W}} offers a color choice"
+    );
+    let ManaChoiceContext::ManaAbility(_) = context else {
+        panic!("the outer prompt must retain the paused outer ability");
+    };
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        })
+        .expect("submitting the Red color choice must succeed");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        pool.count_color(ManaType::Green),
+        3,
+        "X = 4 Green minus the outer {{1}} leaves three Green"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::Red),
+        1,
+        "the outer production yields one Red"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "both activations must complete, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the inline activations"
     );
 }
