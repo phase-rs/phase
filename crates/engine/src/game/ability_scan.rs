@@ -6799,8 +6799,6 @@ pub(crate) fn modification_grants_growing_cost_keyword(m: &ContinuousModificatio
 // touches them, so `LoopDetectionMode::Off` is byte-identical by construction.
 // ---------------------------------------------------------------------------
 
-/// A token's `power`/`toughness` (CR 208). A dynamic `Quantity` P/T reads its
-/// `QuantityExpr`; a fixed or `*`-placeholder P/T reads nothing here.
 /// CR 608.2h + CR 400.7: a pump's classification — fail-closed on every axis
 /// except `source_counters`, which is whatever its own payload (amounts and
 /// recipient filter) reads. A pump never reads its source's counters unless a
@@ -6813,6 +6811,8 @@ fn pump_payload_source_counters(payload: Axes) -> Axes {
     }
 }
 
+/// A token's `power`/`toughness` (CR 208). A dynamic `Quantity` P/T reads its
+/// `QuantityExpr`; a fixed or `*`-placeholder P/T reads nothing here.
 fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes {
     match pt {
         PtValue::Fixed(_) => Axes::NONE,
