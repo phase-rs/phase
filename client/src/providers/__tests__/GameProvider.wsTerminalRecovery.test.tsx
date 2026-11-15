@@ -10,6 +10,11 @@ import { saveWsSession, loadWsSession, WS_SESSION_TTL_MS, type WsSessionData } f
 import {
   commitFullTerminalDelivery, loadFullTerminalDelivery, type FullTerminalDelivery,
 } from "../../services/fullTerminalResult";
+import {
+  clearGame,
+  loadActiveGame,
+  saveActiveGame,
+} from "../../services/gamePersistence";
 
 // Real Provider, ordinary WebSocketAdapter, raw terminal helpers, localStorage
 // and IndexedDB. The fake server only controls wire replies/transport failures.
@@ -285,12 +290,75 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
   });
 
   it.each(["saved", "bootstrap", "live"] as const)("control: %s ACK succeeds on the retained endpoint and tuple", async (path) => {
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
     await startTerminalPath(path);
     expect(requests).toContainEqual({ url: session.serverUrl, message: {
       type: "AckTerminalDelivery", data: { delivery_id: delivery.deliveryId, credential: delivery.credential },
     } });
     await waitFor(() => expect(loadWsSession()).toBeNull());
+    await waitFor(() => expect(loadActiveGame()).toBeNull());
     expect(successfulAckResponses).toBe(1);
+  });
+
+  it.each([
+    ["the completed game's pointer", null],
+    ["a replacement pointer for another game", { id: "rematch", mode: "online" as const, difficulty: "" }],
+  ])("releases %s on matching acknowledgement after navigation and keeps replacement", async (_desc, replacement) => {
+    ackOutcome = "pending";
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    const mounted = await startTerminalPath("live");
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Unmount before ACK arrives to model navigation away from the game page.
+    mounted.unmount();
+    expect(pendingAcks).toHaveLength(1);
+
+    if (replacement) {
+      saveActiveGame(replacement);
+    }
+
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
+
+    if (replacement) {
+      expect(loadActiveGame()).toEqual(replacement);
+    } else {
+      await waitFor(() => expect(loadActiveGame()).toBeNull());
+      expect(loadWsSession()).toBeNull();
+    }
+  });
+
+  it("keeps the online pointer across display cleanup and failed ACK, and reopening retries", async () => {
+    ackOutcome = "pending";
+    saveActiveGame({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    const mounted = await startTerminalPath("live");
+    // Display cleanup (clearGame) must not delete the online pointer.
+    await act(async () => { await clearGame("ws-terminal-recovery"); });
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Unmount before ACK lands to model navigation to Home.
+    mounted.unmount();
+
+    // Reject the pending ACK (failed ACK).
+    await act(async () => {
+      pendingAcks[0].onerror?.();
+    });
+
+    // Pointer is preserved on failed ACK.
+    expect(loadActiveGame()).toEqual({ id: "ws-terminal-recovery", mode: "online", difficulty: "" });
+    expect(loadWsSession()).toMatchObject({ fullKey: session.fullKey, terminalOnly: true });
+
+    // Reopen without gameplay connection retries ACK.
+    ackOutcome = "success";
+    const reopened = mountProvider();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({
+      type: "terminalDelivery", delivery: { ...delivery, finalView: undefined },
+    }));
+    await waitFor(() => expect(loadActiveGame()).toBeNull());
+    expect(loadWsSession()).toBeNull();
   });
 
   it.each([

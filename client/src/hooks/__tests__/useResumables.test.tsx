@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useResumables } from "../useResumables";
 import {
-  clearActiveGame,
+  clearOnlineSession,
   loadActiveGame,
   saveActiveGame,
   type ActiveGameMeta,
@@ -70,7 +70,7 @@ describe("useResumables — retained results", () => {
   });
 
   it("removes the retained action once the acknowledgement clears the pointer", async () => {
-    saveWsSession({
+    const session: WsSessionData = {
       gameCode: "ONLIN2",
       playerId: 1,
       playerToken: "token",
@@ -78,14 +78,15 @@ describe("useResumables — retained results", () => {
       serverUrl: "wss://example.test/ws",
       timestamp: Date.now(),
       terminalOnly: true,
-    });
+    };
+    saveWsSession(session);
     saveActiveGame({ id: "online-acknowledged", mode: "online", difficulty: "Medium" });
 
     const { result } = renderResumables();
     await waitFor(() => expect(result.current.resumables.retainedResult?.id).toBe("online-acknowledged"));
 
-    // The successful ACK releases the pointer through the production writer.
-    act(() => clearActiveGame());
+    // The successful ACK releases the pointer through the production session owner.
+    act(() => clearOnlineSession("online-acknowledged", session));
     await waitFor(() => expect(result.current.resumables.retainedResult).toBeNull());
 
     act(() => result.current.resumables.viewRetainedResult());

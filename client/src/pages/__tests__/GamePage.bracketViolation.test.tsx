@@ -2069,7 +2069,15 @@ describe("GamePage — rematch preserves the format the game was played with", (
             deliveryId: "del-malf",
             credential: "cred-malf",
             display: { winner: 0, reason: "Commander victory" },
-            finalView: {} as never,
+            finalView: {
+              ...gameStateFactory.withPlayers(
+                { id: 0, life: 20 },
+                { id: 1, life: 20 },
+              ).build({
+                waiting_for: { type: "GameOver", data: { winner: 0 } },
+              }),
+              stack: [null],
+            } as never,
           },
         });
       });

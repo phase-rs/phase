@@ -8834,6 +8834,13 @@ describe("P2PHostAdapter — native withheld delivery", () => {
     const token = (pid: number) => `withheld-native-${pid}`;
     const finalView = (pid: number) => ({
       ...remoteState(`final view ${pid}`),
+      players: [
+        { id: 0, life: 20 },
+        { id: 1, life: 20 },
+      ],
+      battlefield: [],
+      stack: [],
+      exile: [],
       waiting_for: { type: "GameOver", data: { winner: 0 } },
       filteredFor: pid,
     }) as unknown as GameState;

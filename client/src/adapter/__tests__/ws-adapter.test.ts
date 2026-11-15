@@ -1466,6 +1466,26 @@ describe("WebSocketAdapter", () => {
           },
         },
       }],
+      ["a delivery with an invalid nested stack entry", {
+        type: "TerminalResult",
+        data: {
+          delivery: {
+            ...nativeDelivery,
+            finalView: {
+              players: [{ id: 0, life: 20 }],
+              objects: {},
+              battlefield: [],
+              stack: [null],
+              exile: [],
+              turn_number: 1,
+              active_player: 0,
+              priority_player: 0,
+              phase: "PreCombatMain",
+              waiting_for: { type: "GameOver", data: { winner: 0 } },
+            },
+          },
+        },
+      }],
       ["another generation's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } } } }],
       ["another game's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } } } }],
     ])("leaves the live session's error and reconnect paths intact after %s", async (_case, frame) => {

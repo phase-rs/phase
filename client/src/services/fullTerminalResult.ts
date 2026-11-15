@@ -48,6 +48,16 @@ function isTerminalPlayerRecord(value: unknown): boolean {
     && (value.is_eliminated === undefined || typeof value.is_eliminated === "boolean");
 }
 
+/** A stack entry the board renders: stack entry identity and controller. */
+function isTerminalStackEntry(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return typeof value.id === "number" && Number.isInteger(value.id);
+}
+
+function isObjectId(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
 /**
  * Validates the final Full state a terminal delivery carries: the typed player
  * records the result screen labels and the top-level collections GamePage
@@ -68,8 +78,11 @@ export function isValidFinalView(value: unknown): value is GameState {
     && typeof state.priority_player === "number"
     && typeof state.phase === "string"
     && Array.isArray(state.battlefield)
+    && state.battlefield.every(isObjectId)
     && Array.isArray(state.stack)
+    && state.stack.every(isTerminalStackEntry)
     && Array.isArray(state.exile)
+    && state.exile.every(isObjectId)
     && isObjectRecord(state.objects)
     && isObjectRecord(waitingFor)
     && typeof waitingFor.type === "string";

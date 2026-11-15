@@ -11,7 +11,12 @@ import type {
 import { isCustomGameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
-import type { FullSessionKey } from "./multiplayerSession";
+import {
+  clearWsSession,
+  matchesStoredWsSession,
+  type FullSessionKey,
+  type WsSessionIdentity,
+} from "./multiplayerSession";
 import { sameFullSessionKey } from "./fullSessionKey";
 import type { P2PSessionKey } from "./p2pSession";
 import { isValidP2PTerminalResult, type P2PTerminalResult } from "./p2pTerminalResult";
@@ -645,12 +650,15 @@ export function activeGamePointerToken(): string | null {
  * cleanup awaited storage — for another game, or for this game ID with a new
  * session — is a replacement and survives. A native pointer is owned solely by
  * native terminal persistence and is released only by `clearNativeSoloSession`,
- * with its session identity checked, once its session has ended.
+ * with its session identity checked, once its session has ended. An online
+ * pointer is owned solely by online session persistence and is released only by
+ * `clearOnlineSession`, with its session identity checked, once its session has
+ * ended.
  */
 function ownsActiveGame(gameId: string, startedWith: string | null): boolean {
   if (startedWith === null || activeGamePointerToken() !== startedWith) return false;
   const active = loadActiveGame();
-  return active?.id === gameId && active.nativeSession === undefined;
+  return active?.id === gameId && active.mode !== "online" && active.nativeSession === undefined;
 }
 
 function holdsNativeSoloSession(
@@ -686,6 +694,19 @@ export function markNativeSoloSessionTerminal(
 export function clearNativeSoloSession(gameId: string, expected: NativeSoloSessionIdentity): void {
   try {
     if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** Removes this game's online pointer after its session has ended. A pointer
+ *  for any other game or session is a replacement and is kept. */
+export function clearOnlineSession(gameId: string, expected?: WsSessionIdentity): void {
+  try {
+    if (expected && !matchesStoredWsSession(expected)) return;
+    clearWsSession(expected);
+    const active = loadActiveGame();
+    if (active?.id === gameId && active.mode === "online") clearActiveGame();
   } catch {
     /* storage denied */
   }

@@ -64,9 +64,9 @@ export function loadWsSession(): WsSessionData | null {
   }
 }
 
-type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
+export type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
 
-function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
+export function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
   const current = loadWsSession();
   return current !== null
     && current.serverUrl === expected.serverUrl

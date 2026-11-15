@@ -25,6 +25,7 @@ import {
   clearGame,
   clearGameStrict,
   clearNativeSoloSession,
+  clearOnlineSession,
   listFullTerminalCleanupStrict,
   markNativeSoloSessionTerminal,
   loadGame,
@@ -41,6 +42,7 @@ import {
   saveP2PHostSession,
   saveActiveGame,
 } from "../gamePersistence";
+import { saveWsSession, type WsSessionData } from "../multiplayerSession";
 import type { FullTerminalCleanupObligation } from "../gamePersistence";
 
 function fixtureState(): GameState {
@@ -554,6 +556,40 @@ describe("game persistence", () => {
       saveActiveGame(pointer);
       markNativeSoloSessionTerminal("native-game", session);
       clearNativeSoloSession("native-game", session);
+      expect(stored()).toBeNull();
+    });
+
+    it.each(clears)("%s leaves an online session pointer to online session persistence", async (_name, clear) => {
+      const onlinePointer = { id: "online-game", mode: "online" as const, difficulty: "" };
+      saveActiveGame(onlinePointer);
+      await clear("online-game");
+      expect(stored()).toEqual(onlinePointer);
+    });
+
+    it("clears an online session and its pointer only when matching identity", () => {
+      const wsSession: WsSessionData = {
+        gameCode: "ONLINE",
+        playerId: 1,
+        playerToken: "token-1",
+        fullKey: { game_code: "ONLINE", generation: 1 },
+        serverUrl: "wss://example.test/ws",
+        timestamp: Date.now(),
+        terminalOnly: true,
+      };
+      saveWsSession(wsSession);
+      const onlinePointer = { id: "ONLINE", mode: "online" as const, difficulty: "" };
+      saveActiveGame(onlinePointer);
+
+      // Mismatched session identity does not clear the pointer or stored wsSession
+      clearOnlineSession("ONLINE", {
+        serverUrl: "wss://other.test/ws",
+        playerToken: "token-1",
+        fullKey: { game_code: "ONLINE", generation: 1 },
+      });
+      expect(stored()).toEqual(onlinePointer);
+
+      // Matching identity clears both
+      clearOnlineSession("ONLINE", wsSession);
       expect(stored()).toBeNull();
     });
   });

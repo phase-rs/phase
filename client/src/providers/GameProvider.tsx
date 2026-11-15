@@ -62,6 +62,7 @@ import {
   clearFullTerminalCleanupStrict,
   clearGameStrict,
   clearNativeSoloSession,
+  clearOnlineSession,
   loadFullTerminalCleanupStrict,
   loadGameStrict,
   markNativeSoloSessionTerminal,
@@ -69,7 +70,7 @@ import {
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
-import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
+import { loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { recoverFullTerminal } from "../services/fullTerminalRecovery";
 import { detectServerUrl } from "../services/serverDetection";
 import {
@@ -1474,7 +1475,7 @@ export function GameProvider({
               unreadableMessage: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
               retainTerminalRoute: () =>
                 saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession),
-              releaseTerminalRoute: () => clearWsSession(reconnectSession),
+              releaseTerminalRoute: () => clearOnlineSession(gameId, reconnectSession),
             },
           );
           if (outcome === "settled") return;
@@ -1508,7 +1509,25 @@ export function GameProvider({
           useMultiplayerStore.getState().displayName || "Player",
         );
 
-        let adapterSession: ReturnType<typeof loadWsSession> = null;
+        // The identity this online game's pointer holds. The adapter decides
+        // when the session becomes terminal-only and when it ends; this listener
+        // is owned by the adapter's persistent session lifecycle and survives
+        // unmount while terminal cleanup is pending.
+        let adapterSession: ReturnType<typeof loadWsSession> = reconnectSession ?? null;
+        wsAdapter.onEvent((event) => {
+          if (event.type === "sessionChanged") {
+            if (event.session) {
+              const previousSession = adapterSession;
+              adapterSession = event.session;
+              saveWsSession(event.session, event.session.terminalOnly
+                ? previousSession ?? event.session : undefined);
+            } else if (adapterSession) {
+              clearOnlineSession(gameId, adapterSession);
+              adapterSession = null;
+            }
+          }
+        });
+
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
@@ -1530,17 +1549,6 @@ export function GameProvider({
           }
           if (event.type === "latencyChanged") {
             useMultiplayerStore.getState().setLatency(event.latencyMs);
-          }
-          if (event.type === "sessionChanged") {
-            if (event.session) {
-              const previousSession = adapterSession;
-              adapterSession = event.session;
-              saveWsSession(event.session, event.session.terminalOnly
-                ? previousSession ?? event.session : undefined);
-            } else if (adapterSession) {
-              clearWsSession(adapterSession);
-              adapterSession = null;
-            }
           }
           if (event.type === "stateChanged") {
             // Ensure adapter is set before animating so state updates land correctly

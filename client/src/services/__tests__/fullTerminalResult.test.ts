@@ -104,10 +104,47 @@ describe("full terminal result persistence", () => {
       phase: "PreCombatMain",
       waiting_for: { type: "GameOver", data: { winner: 0 } },
     })).toBe(true);
+    expect(isValidFinalView({
+      players: [{ id: 0, life: 20, is_eliminated: false }, { id: 1, life: 0, is_eliminated: true }],
+      objects: {},
+      battlefield: [1],
+      stack: [{ id: 10 }],
+      exile: [2],
+      turn_number: 12,
+      active_player: 0,
+      priority_player: 0,
+      phase: "PreCombatMain",
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    })).toBe(true);
+    // Malformed nested entries across stack, battlefield, and exile are rejected.
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [null],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{}],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      stack: [{ id: "not-a-number" }],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      battlefield: [null],
+    })).toBe(false);
+    expect(isValidFinalView({
+      ...finalView,
+      exile: ["bad-id"],
+    })).toBe(false);
     expect(isValidFinalView(finalView)).toBe(true);
     expect(isValidFullTerminalDelivery({
       ...delivery,
       finalView: { ...finalView, players: [{ id: 0, life: "12" }] } as never,
+    })).toBe(false);
+    expect(isValidFullTerminalDelivery({
+      ...delivery,
+      finalView: { ...finalView, stack: [null] } as never,
     })).toBe(false);
     await expect(loadFullTerminalDelivery(delivery.key)).resolves.toBeNull();
     await expect(commitFullTerminalDelivery(legacySnapshot as never)).resolves.toBe(false);
