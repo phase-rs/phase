@@ -16,6 +16,44 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let targets = resolve_animate_targets(state, ability);
+
+    let duration = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
+
+    let modifications = animate_modifications(state, ability);
+
+    // Register a TransientContinuousEffect per target so the layer system handles
+    // ordering and cleanup automatically.
+    for obj_id in targets {
+        if !state.objects.contains_key(&obj_id) {
+            return Err(EffectError::ObjectNotFound(obj_id));
+        }
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            ability.controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            modifications.clone(),
+            None,
+        );
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+/// CR 613.1: the layer-appropriate modifications an `Animate` instruction applies to each
+/// object it animates — the single list shared by [`resolve`] and the CR 611.2e with-entry
+/// carrier (`effects::with_entry_effect`), so the two cannot diverge.
+pub(crate) fn animate_modifications(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<ContinuousModification> {
     let (power, toughness, types_list, remove_types_list, kw_list) = match &ability.effect {
         Effect::Animate {
             power,
@@ -33,10 +71,6 @@ pub fn resolve(
         ),
         _ => (None, None, [].as_slice(), [].as_slice(), [].as_slice()),
     };
-
-    let targets = resolve_animate_targets(state, ability);
-
-    let duration = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
     // CR 613.1: Build layer-appropriate modifications instead of direct mutation.
     let mut modifications = Vec::new();
@@ -98,29 +132,7 @@ pub fn resolve(
         });
     }
 
-    // Register a TransientContinuousEffect per target so the layer system handles
-    // ordering and cleanup automatically.
-    for obj_id in targets {
-        if !state.objects.contains_key(&obj_id) {
-            return Err(EffectError::ObjectNotFound(obj_id));
-        }
-        state.add_transient_continuous_effect(
-            ability.source_id,
-            ability.controller,
-            duration.clone(),
-            TargetFilter::SpecificObject { id: obj_id },
-            modifications.clone(),
-            None,
-        );
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
+    modifications
 }
 
 /// CR 613.4b + CR 608.2h: Build the layer-7b base-P/T set modification for a
@@ -229,6 +241,76 @@ mod tests {
             .contains(&ContinuousModification::AddSubtype {
                 subtype: "Beast".to_string()
             }));
+    }
+
+    /// CR 611.2e + CR 613.1: parity — `resolve` installs exactly the shared
+    /// `animate_modifications` list, the list the with-entry carrier carries.
+    /// The Enduring cycle's "It's an enchantment. (It's not a creature.)" (CR
+    /// 205.1a), and a P/T + subtype + keyword animation.
+    #[test]
+    fn resolve_installs_exactly_the_shared_animate_modifications() {
+        let enduring = Effect::Animate {
+            power: None,
+            toughness: None,
+            types: vec!["Enchantment".to_string()],
+            remove_types: vec!["Creature".to_string()],
+            keywords: vec![],
+            target: TargetFilter::None,
+        };
+        let spirit = Effect::Animate {
+            power: Some(PtValue::Fixed(1)),
+            toughness: Some(PtValue::Fixed(1)),
+            types: vec!["Spirit".to_string()],
+            remove_types: vec![],
+            keywords: vec![crate::types::keywords::Keyword::Flying],
+            target: TargetFilter::None,
+        };
+        for (effect, expected) in [
+            (
+                enduring,
+                vec![
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Enchantment,
+                    },
+                    ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    },
+                ],
+            ),
+            (
+                spirit,
+                vec![
+                    ContinuousModification::SetPower { value: 1 },
+                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Spirit".to_string(),
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Flying,
+                    },
+                ],
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let obj_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Enduring Innocence".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(effect, vec![], obj_id, PlayerId(0));
+            let built = animate_modifications(&state, &ability);
+            assert_eq!(built, expected);
+
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert_eq!(state.transient_continuous_effects.len(), 1);
+            assert_eq!(
+                state.transient_continuous_effects[0].modifications, built,
+                "resolve must install exactly the shared modification list"
+            );
+        }
     }
 
     #[test]

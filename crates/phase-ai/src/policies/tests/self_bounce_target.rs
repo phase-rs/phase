@@ -212,6 +212,7 @@ fn eval(
             track_exiled_by_source: false,
             face_down_in_exile: ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,

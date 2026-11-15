@@ -30,7 +30,10 @@ use crate::types::format::EntryOwnership;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{
+    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, ProposedEvent,
+    WithEntryEffect,
+};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -838,7 +841,7 @@ pub(crate) fn move_object(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    move_object_with_terminal(state, req, events).into_zone_move_result()
+    move_object_with_terminal(state, req, &[], events).into_zone_move_result()
 }
 
 #[cfg(feature = "test-support")]
@@ -890,6 +893,9 @@ pub(crate) fn zone_move_is_primitive_noop(
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
+    // CR 614.4 + CR 614.12: the announced members of the entry event this move belongs to
+    // (`LogicalZoneChangeGroup::announced_members`); `&[]` for a lone move.
+    event_members: &[ObjectIncarnationRef],
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&req.object_id) else {
@@ -1264,6 +1270,9 @@ pub(crate) fn move_object_with_terminal(
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
         req.face_down_in_exile,
+        // No request-route producer carries a with-entry effect.
+        None,
+        event_members,
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
@@ -1518,7 +1527,12 @@ fn deliver_batch(
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
-        match move_object_with_terminal(state, req, events) {
+        match move_object_with_terminal(
+            state,
+            req,
+            logical_zone_change_group.announced_members(),
+            events,
+        ) {
             ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -1832,7 +1846,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     events,
                 )
                 .expect("completed batch drain owns every terminal zone-change outcome");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                crate::game::triggers::sync_logical_zone_change_simultaneity_stamps(
                     &logical_zone_change_group,
                     &mut deferred_events,
                 );
@@ -2149,12 +2163,18 @@ pub(crate) fn deliver(
 /// Returns an aggregated `(CounterType, count)` list so multiple active sources
 /// stack additively (CR 616.1f: repeat the replacement process until none apply).
 /// The caller folds this through the shared `apply_etb_counters` resolver.
+///
+/// When the entry carries a simultaneous "is/has" effect (`with_entry_effect`), the
+/// entrant is read with it applied through one projection, built at most once and only
+/// when a functioning static is read.
 fn enters_with_additional_counters_for_entry(
     state: &GameState,
     object_id: ObjectId,
     static_defs: &[(ObjectId, StaticDefinition)],
+    with_entry_effect: Option<&WithEntryEffect>,
 ) -> Vec<(CounterType, u32)> {
     let mut additional: Vec<(CounterType, u32)> = Vec::new();
+    let carried_projection = std::cell::OnceCell::new();
     for (source_id, def) in static_defs {
         let Some(source_obj) = state.objects.get(source_id) else {
             continue;
@@ -2172,15 +2192,33 @@ fn enters_with_additional_counters_for_entry(
         // CR 109.5: evaluate the "you control" + Other/Legendary/Nontoken filter
         // with the static's source as the context anchor.
         let ctx = crate::game::filter::FilterContext::from_source(state, source_obj.id);
-        // CR 614.12: an entrant whose as-enters choices were made before it
-        // entered is matched as it exists with its own statics applied — the
-        // layer pass hasn't run on it yet — when that's proven for this filter.
-        let projected = crate::game::filter::EntryProjection::delivered(state, object_id, affected);
-        let matches = match projected.as_ref() {
-            Some(entrant) => {
-                crate::game::filter::matches_target_filter_on_object(state, entrant, affected, &ctx)
+        // CR 614.12 + CR 611.2e + CR 614.1c: an entry whose resolution applies a
+        // simultaneous "is/has" effect is matched with that effect applied.
+        let carried = carried_projection
+            .get_or_init(|| {
+                with_entry_effect.and_then(|effect| {
+                    crate::game::filter::BattlefieldEntrantProjection::entered(
+                        state, object_id, effect,
+                    )
+                })
+            })
+            .as_ref();
+        let matches = if let Some(projection) = carried {
+            projection.matches(affected, &ctx)
+        } else {
+            // CR 614.12: an entrant whose as-enters choices were made before it
+            // entered is matched as it exists with its own statics applied — the
+            // layer pass hasn't run on it yet — when that's proven for this filter.
+            let projected =
+                crate::game::filter::EntryProjection::delivered(state, object_id, affected);
+            match projected.as_ref() {
+                Some(entrant) => crate::game::filter::matches_target_filter_on_object(
+                    state, entrant, affected, &ctx,
+                ),
+                None => {
+                    crate::game::filter::matches_target_filter(state, object_id, affected, &ctx)
+                }
             }
-            None => crate::game::filter::matches_target_filter(state, object_id, affected, &ctx),
         };
         if matches {
             additional.push((counter_type.clone(), *count));
@@ -3717,6 +3755,103 @@ pub(crate) fn apply_face_down_entry_profile(
     }
 }
 
+/// CR 708.3 + CR 400.4a: the preflight of a face-down battlefield entry, before the move. The
+/// object is turned face down before it enters, so the instant/sorcery entry guard inside
+/// `zones::move_to_zone`, which reads only `face_down`, admits a face-down instant or sorcery
+/// card (a manifested or cloaked spell card enters as a 2/2 creature, CR 701.40a / CR 701.58a),
+/// and the origin-exit LKI and the zone-change record the move captures carry no printing.
+/// Returns the prior `face_down` flag, so a rejected entry can roll back the flag (only the
+/// flag); `None` when the object does not exist. The single authority shared by delivery and
+/// the CR 614.12 projection (`filter::BattlefieldEntrantProjection`).
+pub(crate) fn turn_face_down_before_battlefield_entry(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Option<bool> {
+    let obj = state.objects.get_mut(&object_id)?;
+    let prior_face_down = obj.face_down;
+    obj.face_down = true;
+    obj.conceal_printing();
+    Some(prior_face_down)
+}
+
+/// CR 708.3 + CR 608.2c + CR 614.12a + CR 707.2: what a battlefield entry installs on the new
+/// object right after the move, from what the entry event carries: the face-down profile
+/// (turned face down before it enters) and, right after it, the chain-referent publish its
+/// intent asks for, the as-enters choices made before it entered, and an enter-as-copy payload.
+/// The single authority shared by delivery and the CR 614.12 projection
+/// (`filter::BattlefieldEntrantProjection`).
+pub(crate) fn install_battlefield_entry_characteristics(
+    state: &mut GameState,
+    object_id: ObjectId,
+    face_down_profile: Option<&FaceDownProfile>,
+    chain_referent: crate::types::zones::ChainReferentIntent,
+    enter_with_choices: Option<&crate::types::proposed_event::EntryChoices>,
+    enter_as_copy: Option<&crate::types::proposed_event::CopyTokenSpec>,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(profile) = face_down_profile {
+        apply_face_down_entry_profile(state, object_id, profile);
+    }
+    // CR 608.2c: a permanent the instruction just produced is the
+    // chain's most-recent created referent, so a following "it" / "that
+    // creature" anaphor (`TargetFilter::LastCreated`) binds to it —
+    // "manifest dread, then attach this Equipment to that creature"
+    // (#7531).
+    //
+    // Keyed on the intent the REQUEST carried, not on any property of
+    // the entrant: two effects can deliver an identical face-down
+    // permanent and only one of them be the producer the sentence
+    // refers back to. Published here rather than at the producing
+    // effect so the synchronous arm, the manifest-dread continuation
+    // and the CR 616.1 parked-entry resume all reach it — the intent
+    // rides the parked event with the rest of the request — and only
+    // once the entry has actually settled (the caller's `entered_battlefield`
+    // gate), so a `CantEnterBattlefieldFrom` rejection publishes nothing.
+    if chain_referent.publishes() {
+        crate::game::morph::publish_face_down_entry_referent(state, object_id);
+    }
+    // CR 614.12a + CR 400.7: the entrant's as-enters choices were made
+    // before it entered and rode the event; install them on the new object
+    // (its `chosen_attributes` were reset as it entered) before ETB counters
+    // and triggers observe it. CR 613.1: they can gate layer effects.
+    if let Some(choices) = enter_with_choices {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.chosen_attributes.extend(choices.0.iter().cloned());
+        }
+        crate::game::layers::mark_layers_full(state);
+    }
+    // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
+    // selected its copy source before this delivery and carried those
+    // copiable values on the proposed event. Install the copy effect before
+    // ETB counters/triggers run so the permanent is observed as the copied
+    // object as it enters, without overwriting its printed/base identity.
+    if let Some(copy) = enter_as_copy {
+        let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
+            source_id: copy.source_id,
+            controller: copy.controller,
+            // CR 400.7 + CR 611.2b: this effect applies to the
+            // entering permanent, not to the copied object (which can
+            // be absent by the time this replacement is delivered,
+            // e.g. Mystic Reflection's resolved source).
+            duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
+            duration: copy.sacrifice_at.clone().unwrap_or(Duration::Permanent),
+            values: (*copy.values).clone(),
+            // The recipient keeps its own base (Clone is a 0/0
+            // Shapeshifter underneath), so it rides the source's
+            // captured descriptor — or the legacy live-field search
+            // when the source had none — exactly like the exact refs.
+            // Created copy-tokens never pass through here; their
+            // descriptor is derived by the creation injectors.
+            display: copy.display.clone(),
+            additional_modifications: copy.additional_modifications.clone(),
+            effect_kind: EffectKind::BecomeCopy,
+        };
+        let _ = crate::game::effects::become_copy::apply_precomputed_copy_values(
+            state, object_id, payload, events,
+        );
+    }
+}
+
 /// CR 730.3e (second clause) + CR 730.2d + CR 614.6: compute the card-component
 /// routing override for a merged permanent's leave.
 ///
@@ -3888,9 +4023,13 @@ pub(crate) fn deliver_replaced_zone_change(
         ownership_actor,
         library_shuffle,
         applied,
+        with_entry_effect,
+        co_entrants,
         ..
     } = event
     {
+        // CR 611.2e + CR 614.12: the own-abilities view of the carried with-entry effect.
+        let entrant_abilities = EntrantAbilities::of(with_entry_effect.as_deref());
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
             entry.replacement_applied = applied.clone();
         }
@@ -3961,17 +4100,20 @@ pub(crate) fn deliver_replaced_zone_change(
             .flatten()
         });
 
-        // CR 614.1c: Static replacement effects that modify how an object enters
-        // must already be functioning before that object enters. Snapshot the
-        // definitions before `move_to_zone` so a newly-entered permanent cannot
-        // retroactively supply its own replacement effect.
+        // CR 614.1d + CR 614.4: a static that modifies how objects enter is a replacement
+        // effect, and it must already exist before the event. Snapshot the definitions before
+        // `move_to_zone`, so a newly-entered permanent cannot retroactively supply its own,
+        // and skip a member delivered earlier in this same event (Deanna Troi returned with the
+        // entrant by one Ever After).
         let enters_with_additional_counter_statics: Vec<_> = if to == Zone::Battlefield {
             crate::game::functioning_abilities::game_active_statics(state)
-                .filter(|(_, def)| {
+                .filter(|(source_obj, def)| {
                     matches!(
                         def.mode,
                         crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
-                    )
+                    ) && !co_entrants
+                        .as_deref()
+                        .is_some_and(|co_entrants| co_entrants.entered_earlier(source_obj))
                 })
                 .map(|(source_obj, def)| (source_obj.id, def.clone()))
                 .collect()
@@ -4059,19 +4201,10 @@ pub(crate) fn deliver_replaced_zone_change(
         // origin zone.
         let face_down_preflight = to == Zone::Battlefield && face_down_profile.is_some();
         let prior_face_down = if face_down_preflight {
-            state.objects.get(&object_id).map(|obj| obj.face_down)
+            turn_face_down_before_battlefield_entry(state, object_id)
         } else {
             None
         };
-        if face_down_preflight {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.face_down = true;
-                // CR 708.3: turned face down before it enters, so the origin-exit LKI and the
-                // zone-change record `move_to_zone` captures next carry no printing. A rejected
-                // entry rolls back only the flag.
-                obj.conceal_printing();
-            }
-        }
         // pod-lab loop-3 Q5: tracks whether this delivery took the plain,
         // non-merge, non-library-placement `move_to_zone` branch — the ONLY
         // branch whose own internal dirty-mark decision (see the carve-out
@@ -4300,38 +4433,20 @@ pub(crate) fn deliver_replaced_zone_change(
         // in its origin zone, and applying the face-down profile there would morph
         // a card that never moved (CR 614.1d). Combined with the preflight rollback
         // above, a blocked manifest/morph leaves the card fully unchanged.
+        //
+        // The face-down profile, the chain-referent publish, the as-enters choices and an
+        // enter-as-copy payload are installed by the single authority shared with the CR 614.12
+        // projection (`filter::BattlefieldEntrantProjection`).
         if entered_battlefield {
-            if let Some(profile) = &face_down_profile {
-                apply_face_down_entry_profile(state, object_id, profile);
-            }
-            // CR 608.2c: a permanent the instruction just produced is the
-            // chain's most-recent created referent, so a following "it" / "that
-            // creature" anaphor (`TargetFilter::LastCreated`) binds to it —
-            // "manifest dread, then attach this Equipment to that creature"
-            // (#7531).
-            //
-            // Keyed on the intent the REQUEST carried, not on any property of
-            // the entrant: two effects can deliver an identical face-down
-            // permanent and only one of them be the producer the sentence
-            // refers back to. Published here rather than at the producing
-            // effect so the synchronous arm, the manifest-dread continuation
-            // and the CR 616.1 parked-entry resume all reach it — the intent
-            // rides the parked event with the rest of the request — and only
-            // once the entry has actually settled (`entered_battlefield`), so a
-            // `CantEnterBattlefieldFrom` rejection publishes nothing.
-            if chain_referent.publishes() {
-                crate::game::morph::publish_face_down_entry_referent(state, object_id);
-            }
-        }
-        // CR 614.12a + CR 400.7: the entrant's as-enters choices were made
-        // before it entered and rode the event; install them on the new object
-        // (its `chosen_attributes` were reset as it entered) before ETB counters
-        // and triggers observe it. CR 613.1: they can gate layer effects.
-        if let (true, Some(choices)) = (entered_battlefield, enter_with_choices) {
-            if let Some(object) = state.objects.get_mut(&object_id) {
-                object.chosen_attributes.extend(choices.0);
-            }
-            crate::game::layers::mark_layers_full(state);
+            install_battlefield_entry_characteristics(
+                state,
+                object_id,
+                face_down_profile.as_deref(),
+                chain_referent,
+                enter_with_choices.as_deref(),
+                enter_as_copy.as_deref(),
+                events,
+            );
         }
         // CR 614.1c + CR 611.2a + CR 616.1: install every "and with …" entry
         // grant the applied replacements folded onto this event, in
@@ -4341,7 +4456,8 @@ pub(crate) fn deliver_replaced_zone_change(
         // same-entry riders. Gated on a battlefield arrival like the counters
         // below; a redirected entry drops its grants with them.
         if entered_battlefield {
-            for grant in &enter_with_grants {
+            let grants = EnterWithGrants::of(&enter_with_grants);
+            for grant in grants {
                 // The source-as-SelfRef hook, mirroring the drain's Template
                 // dispatch: the grant binds the entering object.
                 let resolved = crate::game::ability_utils::build_resolved_from_def_with_targets(
@@ -4362,41 +4478,8 @@ pub(crate) fn deliver_replaced_zone_change(
                     debug_assert!(false, "entry-grant install must not prompt: {prompt:?}");
                 }
             }
-            if !enter_with_grants.is_empty() {
+            if !grants.is_empty() {
                 crate::game::layers::mark_layers_full(state);
-            }
-        }
-        // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
-        // selected its copy source before this delivery and carried those
-        // copiable values on the proposed event. Install the copy effect before
-        // ETB counters/triggers run so the permanent is observed as the copied
-        // object as it enters, without overwriting its printed/base identity.
-        if entered_battlefield {
-            if let Some(copy) = enter_as_copy {
-                let copy = *copy;
-                let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
-                    source_id: copy.source_id,
-                    controller: copy.controller,
-                    // CR 400.7 + CR 611.2b: this effect applies to the
-                    // entering permanent, not to the copied object (which can
-                    // be absent by the time this replacement is delivered,
-                    // e.g. Mystic Reflection's resolved source).
-                    duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
-                    duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
-                    values: *copy.values,
-                    // The recipient keeps its own base (Clone is a 0/0
-                    // Shapeshifter underneath), so it rides the source's
-                    // captured descriptor — or the legacy live-field search
-                    // when the source had none — exactly like the exact refs.
-                    // Created copy-tokens never pass through here; their
-                    // descriptor is derived by the creation injectors.
-                    display: copy.display,
-                    additional_modifications: copy.additional_modifications,
-                    effect_kind: EffectKind::BecomeCopy,
-                };
-                let _ = crate::game::effects::become_copy::apply_precomputed_copy_values(
-                    state, object_id, payload, events,
-                );
             }
         }
         // CR 712.14a: A permanent put onto the battlefield transformed enters back face up.
@@ -4481,6 +4564,24 @@ pub(crate) fn deliver_replaced_zone_change(
         // modify: the object gets none of these counters, and its
         // `pending_etb_counters` are not consumed.
         if entered_battlefield {
+            // CR 306.5c + CR 310.4c + CR 704.5i: the entrant's intrinsic loyalty/defense
+            // ability was removed with its entry (the gate in
+            // `seed_intrinsic_entry_counters`), so it enters with no such counters and its
+            // loyalty/defense is 0; a present zero entry is the counter-tracked 0 the CR 613.1
+            // re-derive reads (Xu-Ifit returning Grist, the Hunger Tide).
+            if !entrant_abilities.own_abilities_apply() {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    let withheld = crate::game::printed_cards::intrinsic_face_entry_counters(
+                        obj.printed_loyalty,
+                        obj.loyalty,
+                        None,
+                        obj.defense,
+                    );
+                    for (kind, _) in withheld {
+                        obj.counters.entry(kind).or_insert(0);
+                    }
+                }
+            }
             let mut counters_to_apply = enter_with_counters;
             // CR 614.1c + CR 122.1: Apply additional counters from continuous
             // "[scope] creatures you control enter with an additional [counter]
@@ -4493,6 +4594,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 state,
                 object_id,
                 &enters_with_additional_counter_statics,
+                with_entry_effect.as_deref(),
             );
             counters_to_apply.extend(additional);
             // CR 614.1c: Apply pending ETB counters from delayed triggers
@@ -4692,6 +4794,7 @@ pub(crate) fn execute_zone_move_with_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    with_entry_effect: Option<&WithEntryEffect>,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
@@ -4714,6 +4817,9 @@ pub(crate) fn execute_zone_move_with_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
+        with_entry_effect,
+        // A raw mover belongs to no logical entry event.
+        &[],
         track_exiled_by_source,
         library_placement,
         library_shuffle,
@@ -4758,6 +4864,9 @@ pub(crate) fn execute_zone_move_with_terminal(
         effect_enter_with_counters,
         face_down_profile,
         ExileConcealment::Public,
+        // A raw mover carries no with-entry effect.
+        None,
+        &[],
         track_exiled_by_source,
         library_placement,
         LibraryShuffleMode::PerObject,
@@ -4783,6 +4892,9 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    with_entry_effect: Option<&WithEntryEffect>,
+    // CR 614.4 + CR 614.12: the announced members of this move's entry event.
+    event_members: &[ObjectIncarnationRef],
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
@@ -4805,6 +4917,8 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
+        with_entry_effect,
+        event_members,
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
@@ -4840,7 +4954,12 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
 /// entrant is a separate instruction whose counters are markers on the
 /// resulting object (CR 122.1) and must survive; callers add those after this
 /// seeding. The gate reads the proposal, so the caller must stamp
-/// `face_down_profile` (and `enter_transformed`) on it first.
+/// `face_down_profile` (and `enter_transformed`) on it first. Likewise the
+/// seeding is skipped when the proposal's carried `with_entry_effect` (read
+/// through the derived [`EntrantAbilities`] view) removes the entrant's
+/// abilities with its entry (CR 611.2e; Xu-Ifit, Osteoharmonist's "has no
+/// abilities") — the caller stamps it first, and delivery records the withheld
+/// kinds at zero.
 ///
 /// CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
 /// double-faced card exiled and returned with its back face up, like a
@@ -4862,11 +4981,20 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
         enter_transformed,
         face_down_profile: None,
         enter_with_counters,
+        with_entry_effect,
         ..
     } = proposed
     else {
         return;
     };
+    // CR 306.5b + CR 310.4b + CR 702.156a: intrinsic entry counters (loyalty,
+    // defense, Ravenous) come from abilities; CR 611.2e + CR 613.1f: a
+    // same-resolution "has no abilities" effect removes them before they apply.
+    // A Saga's CR 714.3a lore counter is its own replacement and is withheld by
+    // the candidate gate in replacement.rs.
+    if !EntrantAbilities::of(with_entry_effect.as_deref()).own_abilities_apply() {
+        return;
+    }
     let Some(obj) = state
         .liminal_entries
         .get(object_id)
@@ -4902,6 +5030,13 @@ fn execute_zone_move_with_applied_terminal(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    // CR 611.2e + CR 614.12: the same-resolution "is/has" effect that applies with the
+    // entry; stamped on the proposal before the seed.
+    with_entry_effect: Option<&WithEntryEffect>,
+    // CR 614.4 + CR 614.12: every announced member of the entry event this move belongs to,
+    // as it was when the event began (`LogicalZoneChangeGroup::announced_members`); `&[]`
+    // for a move outside a logical group.
+    event_members: &[ObjectIncarnationRef],
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with
@@ -4979,6 +5114,8 @@ fn execute_zone_move_with_applied_terminal(
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
+        with_entry_effect: ref mut carried,
+        ref mut co_entrants,
         ownership_actor: ref mut ownership,
         library_shuffle: ref mut shuffle_mode,
         ..
@@ -4989,6 +5126,14 @@ fn execute_zone_move_with_applied_terminal(
         *intent = chain_referent;
         *performer = actors.performed_by;
         *ownership = actors.ownership_actor.into();
+        // CR 611.2e + CR 614.12: stamped before `seed_intrinsic_entry_counters` and
+        // `replace_event` read it, and carried through every replacement pass and pause.
+        *carried = with_entry_effect.cloned().map(Box::new);
+        // CR 614.4 + CR 614.12: a battlefield entry carries the other members of its event, so a
+        // member delivered earlier is never a replacement source for this one (see `CoEntrants`).
+        if dest_zone == Zone::Battlefield {
+            *co_entrants = CoEntrants::for_entrant(event_members, obj_id);
+        }
         *shuffle_mode = library_shuffle;
     }
 
@@ -5225,6 +5370,7 @@ fn execute_zone_move_with_applied_terminal(
                     state,
                     ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
                         .with_replacement_applied(applied),
+                    &[],
                     events,
                 );
             }
@@ -5381,6 +5527,7 @@ mod announced_spell_residency_tests {
         let result = move_object_with_terminal(
             &mut state,
             ZoneMoveRequest::casting_to_stack(object_id, object_id, PlayerId(0)),
+            &[],
             &mut events,
         );
 

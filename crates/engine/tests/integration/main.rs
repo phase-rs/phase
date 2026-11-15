@@ -60,6 +60,7 @@ mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
 mod combo_table_on_resolve;
+mod corpse_appraiser;
 mod cross_slot_target_binding;
 mod crossway_troublemakers_attacking_keywords;
 mod cunning_rhetoric_attacks_you_scope_4736;
