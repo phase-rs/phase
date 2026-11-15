@@ -252,7 +252,64 @@ pub enum ZoneChoiceGatherRole {
 /// fewer eligible objects exist and is therefore suitable for optional actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectSelectionCardinality {
-    Exactly { count: u32 },
+    Exactly {
+        count: u32,
+    },
+    /// CR 107.1c: "any number" — the player may choose any positive number of
+    /// the eligible objects, or zero.
+    AnyNumber,
+}
+
+impl ObjectSelectionCardinality {
+    /// A post-reveal choice of one card uses the printed instruction's
+    /// cardinality and is made during resolution (CR 608.2d).
+    pub const SINGLE: Self = Self::Exactly { count: 1 };
+
+    /// Serde default for fields whose historical shape was a single pick.
+    pub fn single() -> Self {
+        Self::SINGLE
+    }
+
+    /// Serde skip predicate pairing [`Self::single`]: the historical default
+    /// is omitted so pre-existing serialized data keeps its exact shape.
+    pub fn is_single(&self) -> bool {
+        *self == Self::SINGLE
+    }
+
+    /// CR 608.2d: whether a submitted selection of `chosen` objects satisfies
+    /// this cardinality.
+    pub fn admits(&self, chosen: usize) -> bool {
+        match self {
+            Self::Exactly { count } => usize::try_from(*count).is_ok_and(|count| chosen == count),
+            Self::AnyNumber => true,
+        }
+    }
+
+    /// CR 608.2d + CR 107.1c: whether `eligible` objects admit at least two
+    /// distinct legal selections. An exact count `k` has `C(eligible, k)`
+    /// selections (two or more exactly when `0 < k < eligible`); "any number"
+    /// always has the empty selection plus one per non-empty subset, so a
+    /// single eligible object already offers two answers (none, or it).
+    pub fn has_multiple_selections(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                usize::try_from(*count).is_ok_and(|count| 0 < count && count < eligible)
+            }
+            Self::AnyNumber => eligible >= 1,
+        }
+    }
+
+    /// CR 608.2d: the selection that is the only legal answer — every eligible
+    /// object when an exact count equals the number eligible. "Any number" is
+    /// never forced: the empty selection is always legal (CR 107.1c).
+    pub fn forces_all_eligible(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                eligible > 0 && usize::try_from(*count).is_ok_and(|count| count == eligible)
+            }
+            Self::AnyNumber => false,
+        }
+    }
 }
 
 /// CR 608.2d + CR 101.2: Additional eligibility required before an object may
@@ -1206,6 +1263,23 @@ pub enum NumberDistinctness {
     DistinctFromSourceHistory,
 }
 
+/// CR 608.2d: whether a "choose a card name" instruction must exclude names
+/// already committed on this source ("...that hasn't been chosen" — a name
+/// chosen before is no longer a legal option), or repeats are legal.
+/// Parse-detected; static; serialized only when non-default so the existing
+/// `CardName` card-data stays byte-stable. Mirrors `NumberDistinctness`'s axis on
+/// the sibling `NumberRange` choice — the same Oracle cue on a different domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NameDistinctness {
+    /// The default for the entire existing `CardName` pool — repeats allowed.
+    /// Pithing Needle may name the same card on a second copy of itself.
+    #[default]
+    Repeatable,
+    /// Each commit must differ from every prior `ChosenAttribute::CardName` on
+    /// the source (Garth One-Eye: "a card name that hasn't been chosen").
+    DistinctFromSourceHistory,
+}
+
 /// CR 608.2c: whether a "choose a player"/"choose an opponent" instruction
 /// must exclude players already chosen earlier in the SAME resolution, or is
 /// an independent pick that may repeat an earlier choice. Parse-detected;
@@ -1255,7 +1329,21 @@ pub enum ChoiceType {
     CardType {
         options: Vec<CoreType>,
     },
-    CardName,
+    /// CR 201.4: A choice of a card name. `options`, when EMPTY, is the open
+    /// form — any name in the Oracle card reference is nameable (Pithing Needle,
+    /// Meddling Mage), so the engine enumerates nothing and the client supplies
+    /// the domain from its own card database (see `compute_options`). Non-empty
+    /// options are an explicit Oracle-listed closed domain in printed order
+    /// (Garth One-Eye's "from among Disenchant, Braingeyser, Terror, Shivan
+    /// Dragon, Regrowth, and Black Lotus"), which the engine DOES enumerate and
+    /// enforce — a closed domain that still accepted an arbitrary name would not
+    /// be a domain.
+    CardName {
+        options: Vec<String>,
+        /// CR 608.2d: distinctness requirement, parse-detected from "that hasn't
+        /// been chosen". Default `Repeatable` for every pre-existing card.
+        distinctness: NameDistinctness,
+    },
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
     /// CR 107.1a/b + CR 608.2d: choose a number from `min` up to `max`.
     ///
@@ -1438,6 +1526,24 @@ impl ChoiceType {
         Self::CardType { options }
     }
 
+    /// The open "choose a card name" prompt (CR 201.4) — any card name in the
+    /// Oracle card reference, with the domain supplied by the client.
+    pub fn card_name() -> Self {
+        Self::CardName {
+            options: Vec::new(),
+            distinctness: NameDistinctness::Repeatable,
+        }
+    }
+
+    /// Card-name choice restricted to an explicit Oracle-listed closed domain,
+    /// in printed order, with its distinctness requirement (CR 608.2d).
+    pub fn card_name_from(options: Vec<String>, distinctness: NameDistinctness) -> Self {
+        Self::CardName {
+            options,
+            distinctness,
+        }
+    }
+
     /// The authoritative legal domain for a `CardType` prompt. Empty options
     /// are the generic engine policy; non-empty options are already exact.
     pub fn legal_card_type_options(options: &[CoreType]) -> Vec<CoreType> {
@@ -1501,7 +1607,10 @@ impl ChoiceType {
     /// dependent instruction ("discards a card with that name") reads it from
     /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
+        matches!(
+            self,
+            Self::CardPredicateGuess { .. } | Self::CardName { .. }
+        )
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -1529,8 +1638,14 @@ impl ChoiceType {
     pub fn options_supplied_by_player(&self) -> bool {
         matches!(
             self,
-            Self::CardName
-                | Self::Word
+            // CR 201.4: only the OPEN card-name prompt has no enumerable domain.
+            // A closed Oracle-listed one (Garth One-Eye) is enumerated by the
+            // engine, so an empty list there IS the impossible choice CR 609.3
+            // turns into a no-op.
+            Self::CardName { options, .. } if options.is_empty()
+        ) || matches!(
+            self,
+            Self::Word
                 | Self::Artist
                 // CR 107.1a/b: an unbounded number choice cannot be enumerated,
                 // so the player supplies the value. Bounded ranges keep their
@@ -1645,7 +1760,32 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
-            Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
+            // Serialize the open, default-distinctness form as the legacy unit
+            // variant "CardName" so existing Pithing Needle/Meddling Mage
+            // card-data JSON stays byte-stable; only emit the struct form when a
+            // closed domain and/or a non-default `distinctness` is present.
+            Self::CardName {
+                options,
+                distinctness,
+            } => {
+                let non_default_distinctness = *distinctness != NameDistinctness::Repeatable;
+                if options.is_empty() && !non_default_distinctness {
+                    serializer.serialize_unit_variant("ChoiceType", 5, "CardName")
+                } else {
+                    let field_count = 1 + usize::from(non_default_distinctness);
+                    let mut variant = serializer.serialize_struct_variant(
+                        "ChoiceType",
+                        5,
+                        "CardName",
+                        field_count,
+                    )?;
+                    variant.serialize_field("options", options)?;
+                    if non_default_distinctness {
+                        variant.serialize_field("distinctness", distinctness)?;
+                    }
+                    variant.end()
+                }
+            }
             Self::NumberRange {
                 min,
                 max,
@@ -1805,6 +1945,12 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default)]
                 excluded: Vec<CoreType>,
             },
+            CardName {
+                #[serde(default)]
+                options: Vec<String>,
+                #[serde(default)]
+                distinctness: NameDistinctness,
+            },
             NumberRange {
                 min: u32,
                 /// CR 107.1a/b: absent = no maximum. A bounded range keeps
@@ -1858,7 +2004,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
                 "CardType" => Ok(Self::card_type()),
-                "CardName" => Ok(Self::CardName),
+                "CardName" => Ok(Self::card_name()),
                 "LandType" => Ok(Self::LandType),
                 "Opponent" => Ok(Self::opponent()),
                 "Player" => Ok(Self::player()),
@@ -1885,6 +2031,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             ChoiceTypeRepr::Data(data) => match data {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
+                ChoiceTypeData::CardName {
+                    options,
+                    distinctness,
+                } => Ok(Self::card_name_from(options, distinctness)),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { options, excluded } => {
                     if !options.is_empty() && !excluded.is_empty() {
@@ -3147,7 +3297,7 @@ impl ChoiceValue {
                     .then_some(Self::CardType(core_type))
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
-            ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+            ChoiceType::CardName { .. } => Some(Self::CardName(value.to_string())),
             ChoiceType::NumberRange { .. } => value.parse::<u32>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
@@ -6882,33 +7032,76 @@ pub enum AttackerBlockStatus {
     Unblocked,
 }
 
+/// CR 509.1g: which creature of a block pair a [`CombatRelation::BlockPairing`]
+/// requires to be the blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockPairDirection {
+    /// The subject is the blocker: "creatures blocked by this creature" (Wall of Nets).
+    SubjectIsBlocker,
+    /// The candidate is the blocker: "creatures that blocked this creature".
+    CandidateIsBlocker,
+    /// Either creature: "creatures blocking or blocked by it" (Abu Ja'far).
+    Either,
+}
+
 /// Combat relationship required by `FilterProp::CombatRelation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "CombatRelationWire")]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it —
-    /// the current block pairing, in either orientation. A subject that has left
-    /// the battlefield answers from the pairings it had immediately before it
-    /// left (CR 608.2h last known information), and only for a candidate still
-    /// in that combat role (CR 506.4).
-    BlockingOrBlockedBy,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature blocked by the
-    /// subject.
+    /// CR 509.1g + CR 400.7: the candidate and the subject form a block pair in
+    /// `direction`.
     ///
-    /// * `scope: None` — the current block pairing ("creatures blocked by this
-    ///   creature"): the same pairing authority as `BlockingOrBlockedBy`, in the
-    ///   one orientation where the subject is the blocker.
-    /// * `scope: Some(window)` — the subject was recorded as blocking the
-    ///   candidate within `window` ("creatures it blocked this turn"). This
-    ///   reads the block-history ledgers
+    /// * `scope: None` — the current block pairing (CR 509.1g). A subject that
+    ///   has left the battlefield answers from the pairings it had immediately
+    ///   before it left (CR 608.2h last known information), and only for a
+    ///   candidate still in that combat role (CR 506.4).
+    /// * `scope: Some(window)` — the pair was recorded within `window`
+    ///   (CR 608.2i). This reads the block-history ledgers
     ///   (`CombatState::creature_blocked_attackers_this_combat` /
     ///   `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
     ///   not prune. Each record pins both creatures' exact incarnations, so a
     ///   creature that left and returned matches none of its predecessor's
     ///   records.
-    BlockedBySubject {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<CombatHistoryScope>,
     },
+}
+
+/// Deserialization shape of [`CombatRelation`]. Writers emit only `BlockPairing`;
+/// the two retired variants stay readable so committed dumps, saved games and
+/// older card data keep loading.
+#[derive(Deserialize)]
+enum CombatRelationWire {
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+    BlockingOrBlockedBy,
+    BlockedBySubject {
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+}
+
+impl From<CombatRelationWire> for CombatRelation {
+    fn from(wire: CombatRelationWire) -> Self {
+        match wire {
+            CombatRelationWire::BlockPairing { direction, scope } => {
+                Self::BlockPairing { direction, scope }
+            }
+            CombatRelationWire::BlockingOrBlockedBy => Self::BlockPairing {
+                direction: BlockPairDirection::Either,
+                scope: None,
+            },
+            CombatRelationWire::BlockedBySubject { scope } => Self::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope,
+            },
+        }
+    }
 }
 
 /// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
@@ -6930,6 +7123,13 @@ pub enum CombatRelationSubject {
     Source,
     /// The first selected object target of the resolving spell or ability.
     ParentTarget,
+    /// CR 608.2c + CR 115.10a: a target an EARLIER instruction of the same spell
+    /// announced ("creatures that were blocked by that creature", Ride Down, Glyph
+    /// of Doom). Reads as `ParentTarget` does, the first object target by its
+    /// announced incarnation, and opens no target slot: the word "target" does not
+    /// identify it here. `ParentTarget` is the same-instruction form that does open
+    /// one (Trial).
+    AnaphoricTarget,
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
@@ -7246,10 +7446,12 @@ pub enum FilterProp {
     Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
-    /// from `Another`, which excludes the *ability source*. Used for intervening-if
-    /// count predicates like Valakut, the Molten Pinnacle's "if you control at
-    /// least five other Mountains" — here "other" means "other than the newly-
-    /// entered Mountain," not "other than Valakut." Resolves against
+    /// from `Another`, whose live-object matcher excludes a bound recipient, else
+    /// the *ability source*; see [`FilterProp::Another`].
+    /// Used for intervening-if count predicates like Valakut, the Molten
+    /// Pinnacle's "if you control at least five other Mountains" — here "other"
+    /// means "other than the newly-entered Mountain," not "other than Valakut."
+    /// Resolves against
     /// `FilterContext::triggering_object`, populated at trigger-condition
     /// evaluation from the current `GameEvent`.
     ///
@@ -7472,7 +7674,8 @@ pub enum FilterProp {
     /// `DistinctFrom { reference: ParentTarget }` with
     /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
     /// every color-sharer EXCEPT the already-damaged target. Distinct from
-    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::Another`] (whose live-object matcher excludes a bound
+    /// recipient, else the ability *source*) and
     /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
     DistinctFrom {
         reference: Box<TargetFilter>,
@@ -11012,26 +11215,42 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
                 // hit, Radiance's "each OTHER creature that shares a color with it")
                 // reads the parent's chosen target, so the enclosing effect must
                 // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| match prop {
-                    FilterProp::DistinctFrom { reference } => {
-                        filter_refs_parent_target(reference)
-                    }
-                    // CR 701.3a: a mass object set defined by attachment to the
-                    // parent referent ("destroy all Auras attached to that
-                    // creature") names the parent inside the host filter, so
-                    // propagation, delayed-trigger snapshotting and loop
-                    // rebinding must see it.
-                    FilterProp::AttachedTo {
-                        to: AttachmentReferent::Host { filter },
-                    } => filter_refs_parent_target(filter),
-                    _ => false,
-                })
+                || typed.properties.iter().any(filter_prop_refs_parent_target)
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
+        _ => false,
+    }
+}
+
+/// The property half of [`filter_refs_parent_target`]: whether `prop`, or a
+/// property its `Not`/`AnyOf` combinators nest, names the parent's target.
+fn filter_prop_refs_parent_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::DistinctFrom { reference } => filter_refs_parent_target(reference),
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent referent ("destroy all Auras attached to that
+        // creature") names the parent inside the host filter, so
+        // propagation, delayed-trigger snapshotting and loop
+        // rebinding must see it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_refs_parent_target(filter),
+        // CR 608.2c + CR 608.2i: a mass set defined by its history with
+        // an earlier instruction's target names that target inside a
+        // property, so propagation, delayed-trigger snapshotting and
+        // the mass-population validation arm must see it.
+        FilterProp::CombatRelation {
+            subject: CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => true,
+        // CR 608.2c: a negated or disjunctive property still reads the
+        // referent its inner property names.
+        FilterProp::Not { prop } => filter_prop_refs_parent_target(prop),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_refs_parent_target),
         _ => false,
     }
 }
@@ -11232,6 +11451,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             counter_type: _,
             count: _,
             target,
+            scope: _,
         }
         | Effect::SetTapState {
             target,
@@ -11485,6 +11705,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -11688,6 +11909,13 @@ pub fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        // CR 122.1 + CR 115.10a: a mass counter removal's population is a
+        // resolution-time scan, the removal twin of `PutCounterAll`.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -11805,6 +12033,14 @@ pub enum EffectScope {
     /// Every permanent matching the filter — `target` is a non-targeting
     /// population filter (legacy `Effect::TapAll` / `Effect::UntapAll`).
     All,
+}
+
+impl EffectScope {
+    /// Serde `skip_serializing_if` helper: `Single` is the default scope, so a
+    /// field that defaults to it can be omitted from the payload.
+    pub fn is_single(&self) -> bool {
+        matches!(self, EffectScope::Single)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12508,7 +12744,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         // Inherently selected: the resolving ability's first object
         // target, with no parked equivalent.
         FilterProp::SameNameAsParentTarget => true,
-        // Both subjects read ability-carried records (selected target,
+        // Every subject reads ability-carried records (selected target,
         // ability capture) with no parked equivalent.
         FilterProp::CombatRelation { .. } => true,
         FilterProp::AttachedTo { to } => match to {
@@ -16276,6 +16512,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -16584,6 +16821,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -19291,6 +19529,35 @@ impl<'de> serde::Deserialize<'de> for SacrificeCost {
     }
 }
 
+/// CR 118.3 + CR 115.10a: typed view of an effect-as-cost whose instruction acts on
+/// a player the payer chooses during payment. Single recognizer
+/// ([`AbilityCost::player_recipient_cost`]); consumers match exhaustively.
+///
+/// A borrowed, unserialized projection over `AbilityCost::EffectCost` — not a new
+/// cost variant, so ability scanners and the wire format are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerRecipientCost<'a> {
+    /// CR 119.3: "have an opponent gain N life" (Invigorate) or "have each other
+    /// player gain N life" (Reverent Silence, Skyshroud Cutter).
+    GainLife {
+        amount: &'a QuantityExpr,
+        recipient: &'a TargetFilter,
+        selection: CostRecipientSelection,
+    },
+}
+
+/// CR 118.3 + CR 115.10a: how many of the players matching a recipient
+/// effect-cost's filter the instruction reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostRecipientSelection {
+    /// "have an opponent ...": the payer chooses one matching player while paying
+    /// (CR 115.10a: a choice, not a target).
+    ChosenOne,
+    /// "have each other player ...": every matching player. CR 601.2h: partial
+    /// payments are not allowed, so every one of them must be able to perform it.
+    Each,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20314,6 +20581,12 @@ impl AbilityCost {
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
     ///
+    /// The recipient effect-cost shape ([`Self::player_recipient_cost`], e.g.
+    /// "have an opponent gain 3 life") is deliberately excluded: the activation,
+    /// resolution and unless payers have no recipient-choice surface, so they keep
+    /// refusing it. Only the spell payer
+    /// (`casting_costs::pay_additional_cost_with_source`) performs it.
+    ///
     /// CR 118.1 + CR 121.1: the deterministic effect-as-cost forms are source
     /// counters, fixed mana, and a draw by the cost's context-ref player (the
     /// controller, or the original controller for "has you draw a card").
@@ -20363,6 +20636,42 @@ impl AbilityCost {
             }
             leaf => leaf.supports_effect_cost_payment(),
         }
+    }
+
+    /// CR 118.3 + CR 115.10a: Single recognizer for an effect-as-cost whose
+    /// instruction acts on a player the payer chooses during payment. Consumers
+    /// (payability, the spell payer) match the returned view exhaustively, so a
+    /// new recipient shape is a compile error at each of them.
+    pub fn player_recipient_cost(&self) -> Option<PlayerRecipientCost<'_>> {
+        let AbilityCost::EffectCost { effect } = self else {
+            return None;
+        };
+        let Effect::GainLife {
+            amount,
+            player: recipient,
+        } = effect.as_ref()
+        else {
+            return None;
+        };
+        let selection = match recipient {
+            // "an opponent": one opponent, chosen by the payer.
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }) if type_filters.is_empty() && properties.is_empty() => {
+                CostRecipientSelection::ChosenOne
+            }
+            // "each <players>": every player the predicate names ("each other
+            // player" = `AllExcept { exclude: Controller }`).
+            TargetFilter::PlayerMatching { .. } => CostRecipientSelection::Each,
+            _ => return None,
+        };
+        Some(PlayerRecipientCost::GainLife {
+            amount,
+            recipient,
+            selection,
+        })
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -22903,8 +23212,24 @@ pub enum Effect {
         /// counters" (CR 107.1c, Rhys, the Evermore).
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 115.1: For `scope: Single`, the selectable target filter or a
+        /// context anaphor (`SelfRef`, `ParentTarget`, ...). For `scope: All`,
+        /// the non-targeting population filter.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a + CR 608.2h: `Single` removes counters from one
+        /// chosen or referenced object. `All` ("remove all counters from all
+        /// permanents", "remove a -1/-1 counter from each creature you
+        /// control") names no target: `target` is a population whose members
+        /// are fixed once, when the effect applies, and `target_filter()`
+        /// exposes no target slot for it. `count` keeps its per-object meaning
+        /// in both scopes. Omitted from serialized `Single` payloads so they
+        /// stay byte-identical to the pre-scope shape.
+        #[serde(
+            default = "default_effect_scope_single",
+            skip_serializing_if = "EffectScope::is_single"
+        )]
+        scope: EffectScope,
     },
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
@@ -22943,6 +23268,14 @@ pub enum Effect {
         /// top-of-library mechanics with a different destination.
         #[serde(default = "default_zone_graveyard")]
         destination: Zone,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards are taken
+        /// from. `Top` is the printed mill form — the only edge CR 701.17a
+        /// defines as milling, so only a top-edge move publishes `Milled`.
+        /// `Bottom` covers the printed "put the bottom card of your library into
+        /// your graveyard" class (Grenzo, Dungeon Warden; Cellar Door), which is
+        /// a plain library→zone move rather than a mill.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        position: LibraryPosition,
     },
     /// CR 701.22a: Scry N — look at the top N cards, then put any number on
     /// the bottom in any order and the rest on top in any order.
@@ -24386,6 +24719,18 @@ pub enum Effect {
         /// looked at (private to the ability controller).
         #[serde(default = "default_reveal_public")]
         reveal: bool,
+        /// CR 608.2d: how many `card_filter` cards the choosing player selects.
+        /// `Exactly { count: 1 }` (the default) is the historical post-reveal
+        /// choice of one card from the revealed/looked-at hand. CR 107.1c +
+        /// CR 701.20a: `AnyNumber` ("reveal any number of artifact cards in your
+        /// hand" — Metalworker) makes the selection itself the reveal: only the
+        /// chosen cards are revealed, and zero is a legal choice. Orthogonal to
+        /// `selection` (chosen vs. random) and to `choice_optional` (a "may").
+        #[serde(
+            default = "ObjectSelectionCardinality::single",
+            skip_serializing_if = "ObjectSelectionCardinality::is_single"
+        )]
+        cardinality: ObjectSelectionCardinality,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
@@ -26456,6 +26801,31 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_players: Option<PlayerFilter>,
     },
+    /// CR 707.13: Create a copy of a card defined by NAME rather than by an object
+    /// to be copied (Garth One-Eye). The copy's characteristics come from the
+    /// Oracle card reference — here `state.card_face_registry` — because the
+    /// named card need not exist in any zone, deck or graveyard.
+    ///
+    /// Distinct from `CastCopyOfCard` (and every other copy producer) on the axis
+    /// that matters: those copy an OBJECT in the game and read its copiable
+    /// values. `Conjure` is the wrong home too: that is a digital-only keyword
+    /// action whose product is a real card, and this product is a COPY, which
+    /// CR 704.5e removes from any zone but the stack and the battlefield.
+    ///
+    /// The created objects are published to `state.last_created_token_ids`, the
+    /// same-chain "it" referent every object producer uses, so a following
+    /// "you may cast the copy" binds to them via `TargetFilter::LastCreated`.
+    CreateCardCopyByName {
+        /// `None` = the name chosen on this source (CR 201.4; the
+        /// `ChosenAttribute::CardName` a preceding `Effect::Choose` committed) —
+        /// "the card with the chosen name". `Some(name)` is a literal printed
+        /// name, for a future "create a copy of a card named X".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// How many copies to create. Defaults to one.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
     /// modification to the matched cards that persists for the rest of the game
     /// and follows each card across all zones — a permanent edit to the card,
@@ -26561,6 +26931,13 @@ pub enum Effect {
 pub fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         Effect::PutCounterAll { target, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal ("remove all counters
+        // from all permanents") reads its population at resolution.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DestroyAll { target, .. }
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
@@ -26758,8 +27135,9 @@ pub fn reveal_hand_parks_card_choice(card_filter: &TargetFilter, choice_optional
 pub fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+        Effect::RevealHand { card_filter, choice_optional, cardinality, .. }
+            if *cardinality == ObjectSelectionCardinality::AnyNumber
+                || reveal_hand_parks_card_choice(card_filter, *choice_optional)
     )
 }
 
@@ -27127,7 +27505,23 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             return None;
         }
     }
-    effect.target_filter().filter(|t| !t.is_context_ref())
+    // CR 608.2c + CR 115.1: resolution-local anaphors ("the card milled this
+    // way", "the revealed card") are filled from the event ledger
+    // (`last_zone_changed_ids` / `last_revealed_ids`) as the resolution
+    // proceeds. They are never announced as targets, and the ledger is empty at
+    // announcement time, so a slot built from one always finds zero legal
+    // candidates and drops the whole ability before it resolves (Grenzo,
+    // Dungeon Warden's moved-card rider). `is_context_ref` deliberately
+    // excludes these two because it also drives
+    // `ability_with_event_context_targets`; exclude them at this seam instead,
+    // mirroring `attach_host_filter_needs_target_slot`.
+    effect.target_filter().filter(|t| {
+        !t.is_context_ref()
+            && !matches!(
+                t,
+                TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
+            )
+    })
 }
 
 pub fn move_counter_stack_target_filters<'a>(
@@ -27707,6 +28101,11 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
             target,
             ..
         }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::PutCounterAll { target, .. } => {
             filter_references_parent_target_combat_relation(target)
         }
@@ -27714,6 +28113,8 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
     }
 }
 
+/// CR 115.10a: `ParentTarget` only. `AnaphoricTarget` reads a target an earlier
+/// instruction announced, so it must not open a second slot.
 fn filter_references_parent_target_combat_relation(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
@@ -27871,6 +28272,12 @@ pub fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivati
         // CR 701.27a + CR 115.10a: mass Transform's population filter is a
         // resolution-time scan, walked here like the other mass-`All` effects.
         | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 122.1 + CR 115.10a: mass counter removal's population filter.
+        | Effect::RemoveCounter {
             scope: EffectScope::All,
             target,
             ..
@@ -31075,6 +31482,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -31327,6 +31735,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -31373,7 +31782,6 @@ impl Effect {
             | Effect::Regenerate { target, .. }
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
-            | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -31664,6 +32072,21 @@ impl Effect {
                 ..
             } => None,
 
+            // CR 122.1 + CR 115.10a: `RemoveCounter` exposes its target only for
+            // the single scope ("remove a counter from target creature", or an
+            // anaphor resolved by the context tiers). The `All` scope ("remove
+            // all counters from all permanents") names no target: its population
+            // filter is read when the effect applies and builds no slot.
+            Effect::RemoveCounter {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::RemoveCounter {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
             // CR 115.1a + CR 115.10a: `PreventDamage` exposes its recipient only
             // when it is declared ("prevent all damage that would be dealt to
             // target creature"). An `All` recipient ("...to creatures this turn")
@@ -31895,6 +32318,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32027,7 +32451,6 @@ impl Effect {
             | Effect::Regenerate { target, .. }
             | Effect::RemoveAllDamage { target, .. }
             | Effect::Counter { target, .. }
-            | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
             | Effect::Mill { target, .. }
@@ -32195,6 +32618,21 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 122.1 + CR 115.10a: `RemoveCounter` exposes its target only for
+            // the single scope ("remove a counter from target creature", or an
+            // anaphor resolved by the context tiers). The `All` scope ("remove
+            // all counters from all permanents") names no target: its population
+            // filter is read when the effect applies and builds no slot.
+            Effect::RemoveCounter {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::RemoveCounter {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -32367,6 +32805,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32705,6 +33144,10 @@ impl Effect {
             // rather than cited.
             Effect::Conjure { destination, .. }
             | Effect::DraftFromSpellbook { destination, .. } => *destination == Zone::Library,
+
+            // CR 707.13: a copy defined by name comes from the Oracle card
+            // reference, never from or into a library.
+            Effect::CreateCardCopyByName { .. } => false,
 
             // ---------- Reasoned FALSE: library-adjacent but not a move ----------
 
@@ -33119,6 +33562,7 @@ impl Effect {
             // conjures the drafted card) assign the referent to the card they
             // just made, including after a paused draft choice resumes.
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::DraftFromSpellbook { .. }
             // CR 707.2: token copies made by a batch or per-player resolver,
             // which republish every token they created.
@@ -33790,6 +34234,9 @@ macro_rules! define_effect_quantity_walk {
             // Each conjured card's count — and the optional dynamic library
             // slot — resolve during conjure resolution
             // (`game/effects/conjure.rs`).
+            // CR 707.13: the copy count resolves during resolution
+            // (`game/effects/create_card_copy_by_name.rs`).
+            Effect::CreateCardCopyByName { count, .. } => f(count),
             Effect::Conjure {
                 cards,
                 library_position,
@@ -34450,6 +34897,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -34486,6 +34934,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -34758,6 +35208,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -35267,6 +35719,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::BecomeBlocked { .. } => "BecomeBlocked",
         Effect::Conjure { .. } => "Conjure",
+        Effect::CreateCardCopyByName { .. } => "CreateCardCopyByName",
         Effect::Intensify { .. } => "Intensify",
         Effect::ApplyPerpetual { .. } => "ApplyPerpetual",
         Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
@@ -35525,6 +35978,7 @@ pub enum EffectKind {
     RemoveFromCombat,
     BecomeBlocked,
     Conjure,
+    CreateCardCopyByName,
     Intensify,
     ApplyPerpetual,
     DraftFromSpellbook,
@@ -35821,6 +36275,7 @@ impl From<&Effect> for EffectKind {
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::BecomeBlocked { .. } => EffectKind::BecomeBlocked,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::CreateCardCopyByName { .. } => EffectKind::CreateCardCopyByName,
             Effect::Intensify { .. } => EffectKind::Intensify,
             Effect::ApplyPerpetual { .. } => EffectKind::ApplyPerpetual,
             Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
@@ -36502,6 +36957,13 @@ pub struct AbilityDefinition {
     pub face_down_in_exile: ExileConcealment,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 113.2c + CR 602.5c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. A grant that overwrites an existing
+    /// `granting_object` stamp pushes the overwritten stamp here so a
+    /// re-donated copy stays distinct from a directly granted one.
+    /// Serialized through `AbilityDefinitionRepr` (empty chains omitted)
+    /// and backfilled by `AbilityDefinitionDe` (missing chains default).
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
@@ -36555,7 +37017,42 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
     .is_break()
 }
 
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
+/// CR 605.1a + CR 605.3b + CR 608.2c: the leading instructions of an activated
+/// mana ability whose mana production follows other instructions, split from the
+/// production node. Returns the `Effect::Mana` node, only when every preceding link is unconditional, non-targeting
+/// (CR 115.6) and resolves without a player decision (a counter or life-total
+/// change), so the immediate resolver can run the whole chain in written order
+/// before producing mana. Empowered Autogenerator ("Put a charge counter on this
+/// artifact. Add X mana of any one color, where X is the number of charge
+/// counters on this artifact.") is the canonical shape.
+pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    let mut node = ability_def;
+    let mut preceding = false;
+    loop {
+        if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
+            return preceding.then_some(node);
+        }
+        let choice_free = matches!(
+            node.effect.as_ref(),
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        );
+        if !choice_free
+            || node.condition.is_some()
+            || node.optional
+            || node.multi_target.is_some()
+            || extract_target_filter_from_effect(&node.effect).is_some()
+        {
+            return None;
+        }
+        node = node.sub_ability.as_deref()?;
+        preceding = true;
+    }
+}
+
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the ability adds
 /// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
 /// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
 /// (CR 606.2). Deliberately EXCLUDES the
@@ -36586,23 +37083,61 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
+    //
+    // CR 605.1a: "it could add mana to a player's mana pool when it resolves".
+    // The production is the root `Effect::Mana`, or — CR 107.1c + CR 701.20a —
+    // the `Effect::Mana` immediately after a root "reveal any number of
+    // [filter] cards in your hand" (Metalworker, Sacellum Godspeaker), whose
+    // resolution-time selection the immediate resolver pauses for and resumes
+    // into production. An ability whose production follows any other non-Mana
+    // clause (Empowered Autogenerator: "Put a charge counter on this artifact.
+    // Add X mana ...") also meets CR 605.1a. CR 608.2c: its instructions run in
+    // written order, so the immediate resolver performs that leading chain
+    // (`inline_mana_preamble`) before it produces mana.
     let target_attached = match &*ability_def.effect {
         Effect::Mana { target, .. } => target
             .as_ref()
             .and_then(|r| r.declared_filters().next())
-            .map(|(_, filter)| filter),
+            .is_some(),
+        Effect::RevealHand {
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            ..
+        } => match ability_def.sub_ability.as_deref().map(|sub| &*sub.effect) {
+            Some(Effect::Mana { target, .. }) => {
+                extract_target_filter_from_effect(&ability_def.effect).is_some()
+                    || target
+                        .as_ref()
+                        .and_then(|r| r.declared_filters().next())
+                        .is_some()
+            }
+            _ => return false,
+        },
         // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
         // target only when the shared target-slot authority surfaces one ("you" is a
         // context reference — Doubling Cube).
-        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
-        _ => return false,
+        effect if effect.adds_mana_on_resolution() => {
+            extract_target_filter_from_effect(effect).is_some()
+        }
+        // CR 605.1a + CR 608.2c: a chain of non-targeting, choice-free instructions
+        // that ends in mana production (Empowered Autogenerator); the leading
+        // links were already checked target-free by `inline_mana_preamble`.
+        _ => match inline_mana_preamble(ability_def) {
+            Some(mana) => match &*mana.effect {
+                Effect::Mana { target, .. } => target
+                    .as_ref()
+                    .and_then(|r| r.declared_filters().next())
+                    .is_some(),
+                _ => return false,
+            },
+            None => return false,
+        },
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
     // Reject both the explicit `multi_target` mechanism and the embedded
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
+    if ability_def.multi_target.is_some() || target_attached {
         return false;
     }
     // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
@@ -36813,6 +37348,8 @@ struct AbilityDefinitionRepr<'a> {
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
     granting_object: &'a Option<ObjectIncarnationRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grant_chain: &'a Vec<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -36870,6 +37407,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile,
             granting_object,
+            grant_chain,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -36922,6 +37460,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
+            grant_chain,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -37056,6 +37595,8 @@ struct AbilityDefinitionDe {
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
+    #[serde(default)]
+    grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -37118,6 +37659,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
+            grant_chain: de.grant_chain,
         })
     }
 }
@@ -37472,6 +38014,7 @@ impl AbilityDefinition {
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
+            grant_chain: Vec::new(),
         }
     }
 
@@ -37761,11 +38304,13 @@ pub enum EffectOutcomeSignal {
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
 /// [`AbilityCondition::AbilityUseCountThisTurn`] reads.
 ///
-/// Both tallies are keyed `(source_id, ability_index)` and cleared together at
-/// end-of-turn cleanup; they differ only in which point of an ability's life
-/// increments them. The distinction is rules-visible: an activation that is
-/// countered before it resolves still counts as an activation (CR 602.2a puts
-/// the ability on the stack at announcement) but never counts as a resolution.
+/// The `Resolved` tally is keyed `(source_id, ability_index)` while the
+/// `Activated` tally is keyed by the per-acquisition `AbilityUsageKey`
+/// (CR 602.5c); both clear together at end-of-turn cleanup. They differ only
+/// in which point of an ability's life increments them. The distinction is
+/// rules-visible: an activation that is countered before it resolves still
+/// counts as an activation (CR 602.2a puts the ability on the stack at
+/// announcement) but never counts as a resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AbilityUseTally {
     /// CR 608.2c: times this ability has RESOLVED this turn.
@@ -40373,6 +40918,23 @@ impl OriginConstraint {
             OriginConstraint::Equals(z) => from == &Some(*z),
             OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
             OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
+    }
+
+    /// CR 601.2a + CR 400.11: Does a spell cast from `origin` satisfy this
+    /// cast-origin constraint? `origin = None` is a cast from OUTSIDE the game
+    /// (CR 707.13: the copy Garth One-Eye creates), where "outside the game is not
+    /// a zone" (CR 400.11). Unlike [`Self::matches_from`], where `None` is "no
+    /// prior zone" and fails every negative constraint, an outside-the-game cast
+    /// IS a cast from somewhere other than any named zone: it satisfies
+    /// `NotEquals(z)` ("from anywhere other than your hand") for every `z`, and
+    /// fails `Equals` and `OneOf`.
+    pub fn matches_cast_origin(&self, origin: Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => origin == Some(*z),
+            OriginConstraint::NotEquals(z) => origin != Some(*z),
+            OriginConstraint::OneOf(zs) => origin.is_some_and(|o| zs.contains(&o)),
         }
     }
 }
@@ -45583,7 +46145,20 @@ mod tests {
                 "combat relation against the selected target",
                 typed(vec![FilterProp::CombatRelation {
                     subject: CombatRelationSubject::ParentTarget,
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None,
+                    },
+                }]),
+            ),
+            (
+                "combat relation against an earlier instruction's target",
+                typed(vec![FilterProp::CombatRelation {
+                    subject: CombatRelationSubject::AnaphoricTarget,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
                 }]),
             ),
             (
@@ -48907,15 +49482,22 @@ mod tests {
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::ParentTarget,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: None },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::Source,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
@@ -49610,6 +50192,7 @@ mod tests {
             selection: CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         };
         let json = serde_json::to_string(&effect).unwrap();
         assert!(
@@ -50186,6 +50769,201 @@ mod tests {
             }),
         }
         .contains_unimplemented());
+    }
+
+    fn combat_relation_prop(relation: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "CombatRelation",
+            "relation": relation,
+            "subject": "Source",
+        })
+    }
+
+    fn block_pairing_prop(
+        direction: BlockPairDirection,
+        scope: Option<CombatHistoryScope>,
+    ) -> FilterProp {
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing { direction, scope },
+            subject: CombatRelationSubject::Source,
+        }
+    }
+
+    /// Each retired `CombatRelation` shape reads as its `BlockPairing`, through
+    /// the internally tagged `FilterProp` path that committed data takes.
+    /// `{"BlockedBySubject":{}}` is what writers produced for `scope: None`.
+    #[test]
+    fn legacy_combat_relation_shapes_read_as_block_pairing() {
+        for (legacy, direction, scope) in [
+            (
+                serde_json::json!("BlockingOrBlockedBy"),
+                BlockPairDirection::Either,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {}}),
+                BlockPairDirection::SubjectIsBlocker,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisCombat"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisCombat),
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisTurn"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisTurn),
+            ),
+        ] {
+            let read: FilterProp = serde_json::from_value(combat_relation_prop(legacy.clone()))
+                .unwrap_or_else(|error| panic!("{legacy} must read: {error}"));
+            assert_eq!(read, block_pairing_prop(direction, scope), "{legacy}");
+        }
+    }
+
+    /// Writers emit only `BlockPairing`, with `direction` always present and
+    /// `scope` absent exactly when `None`, for every combination, including the
+    /// ones no parser path produces yet.
+    #[test]
+    fn combat_relation_writes_only_block_pairing_and_round_trips() {
+        for direction in [
+            BlockPairDirection::SubjectIsBlocker,
+            BlockPairDirection::CandidateIsBlocker,
+            BlockPairDirection::Either,
+        ] {
+            for scope in [
+                None,
+                Some(CombatHistoryScope::ThisCombat),
+                Some(CombatHistoryScope::ThisTurn),
+            ] {
+                let prop = block_pairing_prop(direction, scope);
+                let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+                let relation = written["relation"]
+                    .as_object()
+                    .expect("the relation is written as a struct variant");
+                assert_eq!(relation.len(), 1, "{written}");
+                let pairing = relation["BlockPairing"]
+                    .as_object()
+                    .expect("the only key is BlockPairing");
+                assert_eq!(
+                    pairing.get("direction"),
+                    Some(&serde_json::to_value(direction).expect("a direction serializes")),
+                    "{written}"
+                );
+                assert_eq!(pairing.contains_key("scope"), scope.is_some(), "{written}");
+                let read: FilterProp =
+                    serde_json::from_value(written.clone()).expect("the written shape reads back");
+                assert_eq!(read, prop, "{written}");
+            }
+        }
+    }
+
+    /// CR 608.2c + CR 115.10a: `AnaphoricTarget` names an earlier instruction's
+    /// target. The parent-read walk sees it wherever it nests, no slot opens for
+    /// it, its mass filter stays off the inherited-target path, and the value
+    /// round-trips. `ParentTarget` is the reverse on the first two axes, and
+    /// `Source` reads no target at all.
+    #[test]
+    fn anaphoric_target_subject_reads_the_parent_and_opens_no_slot() {
+        let filter_of = |subject| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
+                    subject,
+                },
+            ]))
+        };
+        let destroy_all = |target| Effect::DestroyAll {
+            target,
+            cant_regenerate: false,
+        };
+
+        let anaphor = filter_of(CombatRelationSubject::AnaphoricTarget);
+        assert!(filter_refs_parent_target(&anaphor));
+        assert!(filter_refs_parent_target(&TargetFilter::Not {
+            filter: Box::new(anaphor.clone()),
+        }));
+        assert!(filter_refs_parent_target(&TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, anaphor.clone()],
+        }));
+        let TargetFilter::Typed(anaphor_typed) = &anaphor else {
+            unreachable!("filter_of builds a typed filter")
+        };
+        let relation = anaphor_typed.properties[0].clone();
+        let nested = |prop| TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]));
+        assert!(filter_refs_parent_target(&nested(FilterProp::Not {
+            prop: Box::new(relation.clone()),
+        })));
+        assert!(filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token, relation],
+        })));
+        assert!(!filter_refs_parent_target(&nested(FilterProp::AnyOf {
+            props: vec![FilterProp::Token],
+        })));
+        assert!(effect_refs_parent_target(&destroy_all(anaphor.clone())));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(anaphor.clone())
+        ));
+        assert!(!generic_effect_affected_uses_inherited_targets(&anaphor));
+
+        let parent_target = filter_of(CombatRelationSubject::ParentTarget);
+        assert!(!filter_refs_parent_target(&parent_target));
+        assert!(effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(parent_target)
+        ));
+        let source = filter_of(CombatRelationSubject::Source);
+        assert!(!filter_refs_parent_target(&source));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(source)
+        ));
+
+        let prop: FilterProp = serde_json::from_value(serde_json::json!({
+            "type": "CombatRelation",
+            "relation": {"BlockPairing": {"direction": "Either", "scope": "ThisTurn"}},
+            "subject": "AnaphoricTarget",
+        }))
+        .expect("the new subject reads");
+        assert_eq!(
+            prop,
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            }
+        );
+        let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+        assert_eq!(written["subject"], "AnaphoricTarget");
+        let read: FilterProp = serde_json::from_value(written).expect("the written shape reads");
+        assert_eq!(read, prop);
+    }
+
+    /// The wire shim reads what was once written and invents nothing: no default
+    /// direction, no catch-all, and no shape that never existed. The first read
+    /// is the reach guard: the same envelope with a real relation parses.
+    #[test]
+    fn combat_relation_wire_refuses_what_never_was_written() {
+        serde_json::from_value::<FilterProp>(combat_relation_prop(
+            serde_json::json!({"BlockPairing": {"direction": "Either"}}),
+        ))
+        .expect("reach guard: a written relation reads in this envelope");
+        for invented in [
+            serde_json::json!("BlockedBySubject"),
+            serde_json::json!({"BlockingOrBlockedBy": {"scope": "ThisTurn"}}),
+            serde_json::json!("BlockedBy"),
+            serde_json::json!({"BlockPairing": {"scope": "ThisTurn"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<FilterProp>(combat_relation_prop(invented.clone()))
+                    .is_err(),
+                "{invented} was never written and must not read"
+            );
+        }
     }
 }
 

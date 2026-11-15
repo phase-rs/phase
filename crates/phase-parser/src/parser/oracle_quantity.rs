@@ -9261,16 +9261,19 @@ mod tests {
     // + suspended-card primitive. CR 400.1 / CR 601.2a / CR 702.62b.
     // ===================================================================
 
-    use crate::parser::oracle_target::cast_capable_zones_except;
     use crate::types::counter::CounterMatch;
 
-    /// Extract the `InAnyZone` zones from a `Typed` spell-history filter.
-    fn in_any_zone_of(filter: &TargetFilter) -> Option<&Vec<Zone>> {
+    /// Extract the zone negated by a cast-origin `Not(InZone(zone))` property of a
+    /// `Typed` spell-history filter ("from anywhere other than <zone>").
+    fn not_in_zone_of(filter: &TargetFilter) -> Option<Zone> {
         let TargetFilter::Typed(typed) = filter else {
             return None;
         };
         typed.properties.iter().find_map(|p| match p {
-            FilterProp::InAnyZone { zones } => Some(zones),
+            FilterProp::Not { prop } => match prop.as_ref() {
+                FilterProp::InZone { zone } => Some(*zone),
+                _ => None,
+            },
             _ => None,
         })
     }
@@ -9281,12 +9284,12 @@ mod tests {
     fn spell_history_filter_cast_origin_noun_phrase() {
         let filter = parse_spell_history_filter("spell from anywhere other than your hand")
             .expect("noun-phrase form must parse to a cast-origin filter");
-        let zones = in_any_zone_of(&filter)
-            .expect("filter must carry FilterProp::InAnyZone for the cast-origin restriction");
+        let zone = not_in_zone_of(&filter)
+            .expect("filter must carry Not(InZone) for the cast-origin restriction");
         assert_eq!(
-            zones,
-            &cast_capable_zones_except(Zone::Hand),
-            "cast-origin zones must be every cast-capable zone except Hand"
+            zone,
+            Zone::Hand,
+            "cast-origin must be the negation of a cast from Hand (CR 400.11)"
         );
     }
 
@@ -9301,8 +9304,9 @@ mod tests {
         assert_eq!(scope, CountScope::Controller);
         let filter = filter.expect("cast-origin clause must carry a filter");
         assert_eq!(
-            in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
-            &cast_capable_zones_except(Zone::Hand),
+            not_in_zone_of(&filter),
+            Some(Zone::Hand),
+            "filter must carry Not(InZone(Hand))"
         );
     }
 
@@ -9322,9 +9326,9 @@ mod tests {
                 .expect("type-qualified spell-history clause must parse");
         assert_eq!(scope, CountScope::Controller);
         let filter = filter.expect("type-qualified clause must carry a filter");
-        // Must be a typed Instant filter, not the cast-origin InAnyZone shape.
+        // Must be a typed Instant filter, not the cast-origin Not(InZone) shape.
         assert!(
-            in_any_zone_of(&filter).is_none(),
+            not_in_zone_of(&filter).is_none(),
             "type-only clause must not carry a cast-origin filter"
         );
         assert!(
@@ -9360,8 +9364,9 @@ mod tests {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
-                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
-                    &cast_capable_zones_except(Zone::Hand),
+                    not_in_zone_of(&filter),
+                    Some(Zone::Hand),
+                    "filter must carry Not(InZone(Hand))"
                 );
             }
             other => panic!("expected SpellsCastThisTurn, got {other:?}"),
@@ -9518,8 +9523,9 @@ mod tests {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
-                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
-                    &cast_capable_zones_except(Zone::Hand),
+                    not_in_zone_of(&filter),
+                    Some(Zone::Hand),
+                    "filter must carry Not(InZone(Hand))"
                 );
             }
             other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
@@ -9544,8 +9550,9 @@ mod tests {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
-                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
-                    &cast_capable_zones_except(Zone::Hand),
+                    not_in_zone_of(&filter),
+                    Some(Zone::Hand),
+                    "filter must carry Not(InZone(Hand))"
                 );
             }
             other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),

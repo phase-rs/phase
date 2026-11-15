@@ -3141,7 +3141,9 @@ async fn serve() {
     // `hosting`) — see `server_core::game_log`.
     session_manager.game_log = Arc::clone(&game_log);
     let state: SharedState = Arc::new(Mutex::new(session_manager));
-    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(
+        DraftSessionManager::new().with_card_db(db.clone()),
+    ));
     let draft_pools: SharedDraftPools = match data_bootstrap::load_data_file(
         data_path,
         data_bootstrap::DRAFT_POOLS_FILE,
@@ -13358,6 +13360,7 @@ mod state_transport_derived_tests {
             let logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
                 .map(|seq| GameLogEntry {
                     seq: seq as u32,
+                    game_number: 1,
                     turn: 1,
                     phase: Phase::PreCombatMain,
                     category: LogCategory::Game,
@@ -13399,6 +13402,7 @@ mod state_transport_derived_tests {
             let batch_logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
                 .map(|seq| GameLogEntry {
                     seq: seq as u32,
+                    game_number: 1,
                     turn: 1,
                     phase: Phase::PreCombatMain,
                     category: LogCategory::Game,
@@ -13409,6 +13413,7 @@ mod state_transport_derived_tests {
             let ai_logs: Vec<_> = (0..2)
                 .map(|seq| GameLogEntry {
                     seq: (100 + seq) as u32,
+                    game_number: 1,
                     turn: 1,
                     phase: Phase::PreCombatMain,
                     category: LogCategory::Game,
@@ -22501,6 +22506,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                companion: None,
                 printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {
@@ -25729,9 +25735,10 @@ mod p2p_backup_delete_tests {
             .expect("stored backup");
         let stored: serde_json::Value =
             serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
-        let stored_deck = &stored["intergameCommands"][0]["launchPayload"]["deckPayload"];
-        assert!(stored_deck.get("booster_pack_pool").is_none());
-        assert_eq!(stored_deck["main_deck"], serde_json::json!(["Public card"]));
+        // The whole launch deck payload goes (decks are another seat's private
+        // contents), not only its booster pool.
+        let stored_launch = &stored["intergameCommands"][0]["launchPayload"];
+        assert!(stored_launch.get("deckPayload").is_none());
 
         let response = admin::p2p_backup_get(
             State(app_state),
@@ -25750,11 +25757,9 @@ mod p2p_backup_delete_tests {
         let public: serde_json::Value =
             serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
                 .expect("snapshot JSON");
-        assert!(
-            public["intergameCommands"][0]["launchPayload"]["deckPayload"]
-                .get("booster_pack_pool")
-                .is_none()
-        );
+        assert!(public["intergameCommands"][0]["launchPayload"]
+            .get("deckPayload")
+            .is_none());
     }
 
     #[tokio::test]
@@ -25792,9 +25797,8 @@ mod p2p_backup_delete_tests {
         let public: serde_json::Value =
             serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
                 .expect("snapshot JSON");
-        let deck = &public["intergameCommands"][0]["launchPayload"]["deckPayload"];
-        assert!(deck.get("booster_pack_pool").is_none());
-        assert_eq!(deck["main_deck"], serde_json::json!(["Public card"]));
+        let launch = &public["intergameCommands"][0]["launchPayload"];
+        assert!(launch.get("deckPayload").is_none());
     }
 
     #[tokio::test]
