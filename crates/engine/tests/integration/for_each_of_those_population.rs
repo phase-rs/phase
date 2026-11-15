@@ -1390,3 +1390,149 @@ fn reveal_muster_optional_body_prompts_once_per_kept_creature() {
         );
     }
 }
+
+/// A `RevealUntil` for one creature card, kept onto the battlefield.
+fn reveal_one_creature_onto_battlefield(
+    source: ObjectId,
+) -> engine::types::ability::ResolvedAbility {
+    engine::types::ability::ResolvedAbility::new(
+        Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: RevealUntilDisposition::KeepEach,
+            kept_destination: Zone::Battlefield,
+            rest_destination: Zone::Library,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+            kept_destination_if: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// A3.7 (MED review gap, public ability-chain discriminator): CR 608.2c +
+/// CR 701.20a — the population anaphors of an admitted reveal ("They gain
+/// haste", "For each of those creatures") name THAT reveal's own population,
+/// never the chain's accumulated publication. An earlier instruction of the same
+/// chain (here an earlier reveal that kept its own creature onto the
+/// battlefield) has already extended the chain's tracked set; the later reveal's
+/// grant and iteration must reach only the later reveal's kept creature.
+///
+/// The chain is built at the building-block level (the sentinel population form
+/// the parser's admitted-producer lowering emits) and resolved through the
+/// public `resolve_ability_chain` entry. Library, top to bottom: Creature A (the
+/// earlier reveal's hit), Miss One, Creature B (the later reveal's hit),
+/// Creature C. Reach-guards: both hits entered the battlefield under P0, the
+/// earlier hit is a member of the chain's published set (so a read of that set
+/// WOULD reach it), and the later reveal's hit got the grant and the counter.
+#[test]
+fn reveal_population_excludes_an_earlier_publishers_permanents() {
+    use engine::game::effects::resolve_ability_chain;
+    use engine::types::ability::{ResolvedAbility, StaticDefinition, SubAbilityLink};
+
+    let library = [
+        MusterCard::Creature("Creature A"),
+        MusterCard::Sorcery("Miss One"),
+        MusterCard::Creature("Creature B"),
+        MusterCard::Creature("Creature C"),
+    ];
+    let mut scenario = GameScenario::new_n_player(4, 2026);
+    scenario.at_phase(Phase::PreCombatMain);
+    let staged = stage_muster_library(&mut scenario, P0, &library);
+    let source = scenario.add_creature(P0, "Source", 1, 1).id();
+    let mut runner = scenario.build();
+    finish_muster_library(&mut runner, P0, &library, &staged);
+    let card = |name: &str| {
+        staged
+            .iter()
+            .find(|(staged_name, _)| *staged_name == name)
+            .map(|(_, id)| *id)
+            .unwrap_or_else(|| panic!("no staged library card named {name}"))
+    };
+    let (a, miss, b, c) = (
+        card("Creature A"),
+        card("Miss One"),
+        card("Creature B"),
+        card("Creature C"),
+    );
+
+    let population = TargetFilter::reveal_population_on_battlefield(TrackedSetId(0));
+    // "They gain haste until end of turn."
+    let mut grant = ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(population.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    // "For each of those creatures, put a +1/+1 counter on that creature."
+    let mut for_each = ResolvedAbility::new(
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    for_each.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter: population },
+    });
+    for_each.sub_link = SubAbilityLink::SequentialSibling;
+    grant.sub_link = SubAbilityLink::SequentialSibling;
+    grant.sub_ability = Some(Box::new(for_each));
+    let mut later_reveal = reveal_one_creature_onto_battlefield(source);
+    later_reveal.sub_link = SubAbilityLink::SequentialSibling;
+    later_reveal.sub_ability = Some(Box::new(grant));
+    let mut chain = reveal_one_creature_onto_battlefield(source);
+    chain.sub_ability = Some(Box::new(later_reveal));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).expect("the chain resolves");
+
+    for id in [a, b] {
+        assert_eq!(zone_of(&runner, id), Zone::Battlefield, "reach-guard");
+        assert_eq!(runner.state().objects[&id].controller, P0, "reach-guard");
+    }
+    assert!(
+        in_p0_library(&runner, miss) && in_p0_library(&runner, c),
+        "reach-guard: the miss and the creature beyond the second reveal stay in the library"
+    );
+    assert!(
+        runner
+            .state()
+            .tracked_object_sets
+            .values()
+            .any(|members| members.contains(&a) && members.contains(&b)),
+        "reach-guard: the chain's published set holds BOTH reveals' cards, so a read of it \
+         would reach the earlier hit"
+    );
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    assert!(
+        has_haste(&runner, b),
+        "the later reveal's hit is granted haste"
+    );
+    assert_eq!(p1p1(&runner, b), 1, "and iterated once");
+    assert!(
+        !has_haste(&runner, a),
+        "the earlier reveal's hit is not one of \"those creatures\""
+    );
+    assert_eq!(p1p1(&runner, a), 0, "and is not iterated");
+    assert_eq!(total_p1p1(&runner), 1, "exactly one iteration ran");
+}

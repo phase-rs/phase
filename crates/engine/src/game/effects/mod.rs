@@ -15766,16 +15766,6 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     }
 }
 
-/// The set the next [`publish_tracked_set`] call writes into: the active chain
-/// set, else the id its else-branch will allocate. Single authority for that
-/// rule (see the ordering argument above), so a caller can name the set an
-/// instruction is about to publish before it resolves.
-pub(crate) fn chain_publication_set_id(state: &GameState) -> TrackedSetId {
-    state
-        .chain_tracked_set_id
-        .unwrap_or(TrackedSetId(state.next_tracked_set_id))
-}
-
 /// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
 /// per-object producer-action *cause* recorded by the producing effect.
 /// Producers publish/extend exactly as [`publish_tracked_set`] does (so every
@@ -22000,27 +21990,73 @@ fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[Objec
     }
 }
 
+/// CR 608.2c + CR 701.20a: the cards a reveal instruction revealed, read from
+/// the `CardsRevealed` events its own resolution emitted. `window` is the event
+/// span of that one instruction, so an earlier instruction's reveal, or any
+/// other chain publication, can never contribute a member.
+fn cards_revealed_in(window: &[GameEvent]) -> Vec<ObjectId> {
+    let mut revealed: Vec<ObjectId> = Vec::new();
+    for event in window {
+        if let GameEvent::CardsRevealed { card_ids, .. } = event {
+            for id in card_ids {
+                if !revealed.contains(id) {
+                    revealed.push(*id);
+                }
+            }
+        }
+    }
+    revealed
+}
+
+/// CR 608.2c + CR 701.20a: allocate the population a reveal instruction owns
+/// (exactly the cards it revealed) as a tracked set of its own. Unlike
+/// [`publish_tracked_set`], this neither joins nor replaces the chain's set
+/// (`chain_tracked_set_id`): ordinary "revealed this way" consumers keep reading
+/// the chain publication, while the instruction's own population anaphors read
+/// only its reveal, never an earlier publisher's members.
+fn allocate_reveal_population(state: &mut GameState, revealed: Vec<ObjectId>) -> TrackedSetId {
+    let set_id = TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(set_id, revealed);
+    set_id
+}
+
 /// CR 608.2c: bind every reveal-population reference in a reveal-until's
-/// continuation to the concrete set the reveal published. Called on the
-/// `RevealUntil` node itself; visits its `sub_ability` / `else_ability`
-/// descendants (the recursion of [`bind_revealed_pile_placement`]) and rewrites
-/// each `repeat_for: ObjectCount` filter and each `GenericEffect` static
-/// `affected` that is the sentinel population form
-/// ([`reveal_population_on_battlefield`]`(TrackedSetId(0))`). Nothing else is
-/// touched. Returns whether any node was rewritten.
+/// continuation to the reveal's own population. Called on the `RevealUntil`
+/// node itself; visits its `sub_ability` / `else_ability` descendants (the
+/// recursion of [`bind_revealed_pile_placement`]) and rewrites each
+/// `repeat_for: ObjectCount` filter and each `GenericEffect` static `affected`
+/// that is the sentinel population form
+/// ([`TargetFilter::reveal_population_on_battlefield`]`(TrackedSetId(0))`).
+/// Nothing else is touched. Returns whether any node was rewritten.
+///
+/// `owned_set` allocates the reveal's own population; it runs at most once, and
+/// only when a reference to bind exists, so a reveal whose continuation names no
+/// population allocates nothing.
 ///
 /// Stops at a descendant `RevealUntil`: that later reveal's own dispatch binds
-/// its own continuation to the set it publishes. CR 608.2c — a "those
+/// its own continuation to the population it revealed. CR 608.2c: a "those
 /// creatures" written after a second reveal-until names that reveal's
 /// population (the parser's nearest-producer rule, `admitted_population_producer`),
-/// not the first one's. With no nested child resolving in between, the second
-/// reveal extends the first one's chain set, so its population is that union
-/// (the pre-existing chain-unification residual).
-fn bind_reveal_population(ability: &mut ResolvedAbility, set: TrackedSetId) -> bool {
-    fn bind_node(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
-        let bind_filter = |filter: &mut TargetFilter| {
+/// not the first one's.
+fn bind_reveal_population(
+    ability: &mut ResolvedAbility,
+    owned_set: &mut dyn FnMut() -> TrackedSetId,
+) -> bool {
+    struct OwnedSet<'a> {
+        id: Option<TrackedSetId>,
+        allocate: &'a mut dyn FnMut() -> TrackedSetId,
+    }
+    impl OwnedSet<'_> {
+        fn get(&mut self) -> TrackedSetId {
+            let allocate = &mut self.allocate;
+            *self.id.get_or_insert_with(allocate)
+        }
+    }
+    fn bind_node(node: &mut ResolvedAbility, set: &mut OwnedSet<'_>) -> bool {
+        let mut bind_filter = |filter: &mut TargetFilter| {
             if TargetFilter::is_reveal_population_on_battlefield(filter) == Some(TrackedSetId(0)) {
-                *filter = TargetFilter::reveal_population_on_battlefield(set);
+                *filter = TargetFilter::reveal_population_on_battlefield(set.get());
                 true
             } else {
                 false
@@ -22046,7 +22082,7 @@ fn bind_reveal_population(ability: &mut ResolvedAbility, set: TrackedSetId) -> b
         }
         rewrote
     }
-    fn visit(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+    fn visit(node: &mut ResolvedAbility, set: &mut OwnedSet<'_>) -> bool {
         if matches!(node.effect, Effect::RevealUntil { .. }) {
             return false;
         }
@@ -22059,12 +22095,16 @@ fn bind_reveal_population(ability: &mut ResolvedAbility, set: TrackedSetId) -> b
         }
         rewrote
     }
+    let mut set = OwnedSet {
+        id: None,
+        allocate: owned_set,
+    };
     let mut rewrote = false;
     if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        rewrote |= visit(sub, set);
+        rewrote |= visit(sub, &mut set);
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        rewrote |= visit(else_ability, set);
+        rewrote |= visit(else_ability, &mut set);
     }
     rewrote
 }
@@ -24273,11 +24313,6 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
-    // CR 608.2c: the set a reveal-until is about to publish its revealed cards
-    // into, named before it resolves (see the `reveal_population_owned` binding
-    // below).
-    let reveal_population_set = matches!(ability.effect, Effect::RevealUntil { .. })
-        .then(|| chain_publication_set_id(state));
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
     // begins that seat's instruction. Its entry becomes the seat in progress
     // before the node acts, so a pause inside it re-parks the sidecar (cloned
@@ -25368,38 +25403,34 @@ fn resolve_chain_body(
         ability
     };
 
-    // CR 608.2c + CR 614.12a + CR 614.1c: the outer instruction's later
-    // anaphors over a reveal's kept permanents ("They're goaded", "For each of
-    // those permanents") name the population THIS reveal published. An
-    // as-enters replacement's own chain, resolved during the kept delivery,
-    // starts its own top-level scope (`reset_top_level_resolution_state` clears
-    // the chain set) and must not redirect them, so bind them to the concrete set
-    // now, on the continuation itself — the same idiom as the pile binding above.
+    // CR 608.2c + CR 614.12a + CR 614.1c + CR 701.20a: the outer instruction's
+    // later anaphors over a reveal's kept permanents ("They're goaded", "For each
+    // of those permanents") name the population THIS reveal revealed, never the
+    // chain's accumulated publication, which an earlier instruction (another
+    // reveal, a counter-placing category action) may already have extended with
+    // unrelated permanents. The population is allocated from this instruction's
+    // own `CardsRevealed` events and bound by id on the continuation itself (the
+    // same idiom as the pile binding above), so neither an earlier publisher nor
+    // an as-enters replacement's own chain (which starts its own top-level scope
+    // and resets the chain set) can redirect it. Only its kept permanents answer
+    // the anaphor: the population form narrows the revealed cards to those on the
+    // battlefield.
     let reveal_population_owned;
-    let ability = match reveal_population_set {
-        Some(set) if ability.sub_ability.is_some() => {
+    let ability =
+        if matches!(ability.effect, Effect::RevealUntil { .. }) && ability.sub_ability.is_some() {
             let mut owned = ability.clone();
-            let rewrote = bind_reveal_population(&mut owned, set);
-            debug_assert!(
-                !rewrote
-                    || events[events_before..]
-                        .iter()
-                        .find_map(|event| match event {
-                            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids),
-                            _ => None,
-                        })
-                        .is_some_and(|revealed| {
-                            state.tracked_object_sets.get(&set).is_some_and(|members| {
-                                revealed.iter().all(|id| members.contains(id))
-                            })
-                        }),
-                "CR 608.2c: the bound set {set:?} must hold every card the reveal revealed",
-            );
-            reveal_population_owned = owned;
-            &reveal_population_owned
-        }
-        _ => ability,
-    };
+            let rewrote = bind_reveal_population(&mut owned, &mut || {
+                allocate_reveal_population(state, cards_revealed_in(&events[events_before..]))
+            });
+            if rewrote {
+                reveal_population_owned = owned;
+                &reveal_population_owned
+            } else {
+                ability
+            }
+        } else {
+            ability
+        };
 
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
     // same resolution (instructions are followed "in the order written"), so it
@@ -34884,7 +34915,7 @@ mod tests {
         shuffle.sub_ability = Some(Box::new(grant));
         chain.sub_ability = Some(Box::new(shuffle));
 
-        assert!(bind_reveal_population(&mut chain, TrackedSetId(5)));
+        assert!(bind_reveal_population(&mut chain, &mut || TrackedSetId(5)));
 
         let shuffle = chain.sub_ability.as_deref().expect("shuffle");
         assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
@@ -34922,7 +34953,78 @@ mod tests {
         // Nothing to bind: the binder reports no rewrite.
         let mut plain = reveal_until_onto_battlefield();
         plain.sub_ability = Some(Box::new(shuffle_node()));
-        assert!(!bind_reveal_population(&mut plain, TrackedSetId(5)));
+        assert!(!bind_reveal_population(&mut plain, &mut || TrackedSetId(5)));
+    }
+
+    /// V4.14: CR 608.2c + CR 701.20a — a reveal's own population is exactly the
+    /// cards its own `CardsRevealed` events revealed (each once, in event
+    /// order), allocated as a tracked set of its own: the chain's earlier
+    /// publication is neither read into it nor disturbed by it, and the binder
+    /// allocates it only when the continuation names a population.
+    #[test]
+    fn reveal_population_is_allocated_from_the_instructions_own_reveal_events() {
+        let mut state = GameState::new_two_player(42);
+        publish_tracked_set(&mut state, vec![ObjectId(3)]);
+        let chain_set = state.chain_tracked_set_id.expect("the earlier publication");
+        let revealed = |ids: &[u64]| GameEvent::CardsRevealed {
+            player: PlayerId(0),
+            card_ids: ids.iter().copied().map(ObjectId).collect(),
+            card_names: Vec::new(),
+        };
+        let window = [
+            GameEvent::TurnStarted {
+                player_id: PlayerId(0),
+                turn_number: 1,
+            },
+            revealed(&[4, 5]),
+            revealed(&[5, 6]),
+        ];
+        assert_eq!(
+            cards_revealed_in(&window),
+            vec![ObjectId(4), ObjectId(5), ObjectId(6)]
+        );
+        assert!(cards_revealed_in(&[]).is_empty());
+
+        let mut chain = reveal_until_onto_battlefield();
+        chain.sub_ability = Some(Box::new(population_for_each(TrackedSetId(0))));
+        let mut allocations = 0;
+        assert!(bind_reveal_population(&mut chain, &mut || {
+            allocations += 1;
+            allocate_reveal_population(&mut state, cards_revealed_in(&window))
+        }));
+        assert_eq!(allocations, 1, "allocated once, for the one reference");
+        let owned = state.next_tracked_set_id - 1;
+        assert_eq!(
+            state.tracked_object_sets[&TrackedSetId(owned)],
+            vec![ObjectId(4), ObjectId(5), ObjectId(6)]
+        );
+        assert_eq!(
+            chain
+                .sub_ability
+                .as_deref()
+                .expect("for-each")
+                .repeat_for
+                .clone(),
+            population_for_each(TrackedSetId(owned)).repeat_for,
+            "the population reference is bound to the reveal's own set"
+        );
+        assert_eq!(
+            state.tracked_object_sets[&chain_set],
+            vec![ObjectId(3)],
+            "the chain's earlier publication is untouched"
+        );
+        assert_eq!(state.chain_tracked_set_id, Some(chain_set));
+
+        let before = state.next_tracked_set_id;
+        let mut plain = reveal_until_onto_battlefield();
+        plain.sub_ability = Some(Box::new(shuffle_node()));
+        assert!(!bind_reveal_population(&mut plain, &mut || {
+            allocate_reveal_population(&mut state, Vec::new())
+        }));
+        assert_eq!(
+            state.next_tracked_set_id, before,
+            "no population reference, no allocation"
+        );
     }
 
     /// V4.13 (B3): CR 608.2c — the binder stops at a later `RevealUntil` in the
@@ -34939,7 +35041,7 @@ mod tests {
         let mut first = reveal_until_onto_battlefield();
         first.sub_ability = Some(Box::new(shuffle));
 
-        assert!(!bind_reveal_population(&mut first, TrackedSetId(5)));
+        assert!(!bind_reveal_population(&mut first, &mut || TrackedSetId(5)));
         let second = first
             .sub_ability
             .as_deref_mut()
@@ -34952,32 +35054,10 @@ mod tests {
         );
 
         // Reach-guard: the second reveal's own binding rewrites its for-each.
-        assert!(bind_reveal_population(second, TrackedSetId(7)));
+        assert!(bind_reveal_population(second, &mut || TrackedSetId(7)));
         assert_eq!(
             second.sub_ability.as_deref().expect("for-each").repeat_for,
             population_for_each(TrackedSetId(7)).repeat_for
-        );
-    }
-
-    /// V4.13: `chain_publication_set_id` names the set the next
-    /// `publish_tracked_set` writes into — the active chain set when present,
-    /// else the id the else-branch allocates.
-    #[test]
-    fn chain_publication_set_id_names_the_publish_target() {
-        let mut state = GameState::new_two_player(42);
-        state.chain_tracked_set_id = None;
-        let predicted = chain_publication_set_id(&state);
-        publish_tracked_set(&mut state, vec![ObjectId(3)]);
-        assert_eq!(state.chain_tracked_set_id, Some(predicted));
-        assert_eq!(state.tracked_object_sets[&predicted], vec![ObjectId(3)]);
-
-        let predicted = chain_publication_set_id(&state);
-        assert_eq!(Some(predicted), state.chain_tracked_set_id);
-        publish_tracked_set(&mut state, vec![ObjectId(4)]);
-        assert_eq!(state.chain_tracked_set_id, Some(predicted));
-        assert_eq!(
-            state.tracked_object_sets[&predicted],
-            vec![ObjectId(3), ObjectId(4)]
         );
     }
 
