@@ -14049,6 +14049,8 @@ pub enum LatchedScopePlan {
     /// "~": the watcher is the doubler, by exact incarnation.
     SelfRef,
     Object(ObjectId),
+    /// CR 112.1: "a ... spell": the watcher was latched on the stack.
+    StackSpell,
     Or(Vec<LatchedScopePlan>),
     And(Vec<LatchedScopePlan>),
     Not(Box<LatchedScopePlan>),
@@ -14093,6 +14095,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         TargetFilter::Any => LatchedScopePlan::Any,
         TargetFilter::SelfRef => LatchedScopePlan::SelfRef,
         TargetFilter::SpecificObject { id } => LatchedScopePlan::Object(*id),
+        TargetFilter::StackSpell => LatchedScopePlan::StackSpell,
         TargetFilter::Or { filters } => LatchedScopePlan::Or(
             filters
                 .iter()
@@ -14139,7 +14142,6 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
@@ -14411,6 +14413,7 @@ fn latched_scope_plan_matches(
             watcher.identity.reference == doubler.source.identity.reference
         }
         LatchedScopePlan::Object(id) => watcher.identity.reference.object_id == *id,
+        LatchedScopePlan::StackSpell => watcher.identity.expected_zone == Zone::Stack,
         LatchedScopePlan::Or(plans) => plans
             .iter()
             .any(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
@@ -21949,7 +21952,7 @@ pub mod tests {
             ),
             (
                 "Echoes of Eternity",
-                r#"{"filters": [{"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Card"]}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
+                r#"{"filters": [{"filters": [{"type": "StackSpell"}, {"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": []}], "type": "And"}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
             ),
             (
                 "Harmonic Prodigy",

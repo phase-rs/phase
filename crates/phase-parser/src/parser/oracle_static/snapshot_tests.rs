@@ -945,22 +945,33 @@ fn echoes_of_eternity_colorless_disjunctive_doubler() {
         );
     };
     assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
-    let mut any_branch_is_another = false;
-    for branch in filters {
-        let TargetFilter::Typed(tf) = branch else {
-            panic!("expected Typed disjunct, got {branch:?}");
-        };
+    // CR 112.1: the "colorless spell" disjunct is scoped to the stack, so it
+    // never matches a colorless permanent (Echoes itself included).
+    let TargetFilter::And { filters: spell } = &filters[0] else {
+        panic!(
+            "the spell disjunct must be stack-scoped, got {:?}",
+            filters[0]
+        );
+    };
+    assert_eq!(spell[0], TargetFilter::StackSpell);
+    let TargetFilter::Typed(spell_tf) = &spell[1] else {
+        panic!(
+            "expected the spell's typed characteristics, got {:?}",
+            spell[1]
+        );
+    };
+    let TargetFilter::Typed(permanent_tf) = &filters[1] else {
+        panic!("expected Typed permanent disjunct, got {:?}", filters[1]);
+    };
+    for tf in [spell_tf, permanent_tf] {
         assert_eq!(
             tf.controller,
             Some(ControllerRef::You),
             "each disjunct must keep the shared `you control` scope, got {tf:?}"
         );
-        if tf.properties.contains(&FilterProp::Another) {
-            any_branch_is_another = true;
-        }
     }
     assert!(
-        any_branch_is_another,
+        permanent_tf.properties.contains(&FilterProp::Another),
         "the `another colorless permanent` branch must carry FilterProp::Another"
     );
 }

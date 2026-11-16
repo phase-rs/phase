@@ -331,3 +331,61 @@ fn another_scoped_doubler_does_not_double_itself() {
         "another Wizard's prowess is doubled"
     );
 }
+
+const ECHOES_OF_ETERNITY: &str = "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.\nWhenever you cast a colorless spell, copy it. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)";
+
+/// CR 603.2d: Echoes of Eternity scopes its doubling to "a colorless spell you
+/// control or another colorless permanent you control". Echoes is a colorless
+/// permanent, not a spell, and not "another", so its own copy trigger triggers
+/// once: one colorless spell cast, one copy. Revert-to-red: without the stack
+/// zone on the "spell" disjunct, that disjunct matches Echoes on the
+/// battlefield and the spell is copied twice.
+#[test]
+fn echoes_of_eternity_does_not_double_its_own_trigger() {
+    let mut s = scenario();
+    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
+        .with_subtypes(vec!["Eldrazi"]);
+    let spell = s
+        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
+        .id();
+    let mut runner = s.build();
+
+    let mut events = cast(&mut runner, spell);
+    events.extend(drive(&mut runner, true));
+
+    let copies = events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::SpellCopied { .. }))
+        .count();
+    assert_eq!(copies, 1, "Echoes' own copy trigger must trigger once");
+}
+
+/// CR 603.2d + CR 112.1: the stack-scoped "colorless spell you control"
+/// disjunct still doubles a colorless spell's own cast trigger. The copy Echoes
+/// makes is not cast (CR 707.10), so the only life gained is the doubled cast
+/// trigger: +2.
+#[test]
+fn echoes_of_eternity_doubles_a_colorless_spells_cast_trigger() {
+    let mut s = scenario();
+    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
+        .with_subtypes(vec!["Eldrazi"]);
+    let spell = s
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Eldrazi Study",
+            true,
+            "When you cast this spell, you gain 1 life.\nDraw a card.",
+        )
+        .id();
+    let mut runner = s.build();
+    let before = life(&runner);
+
+    cast(&mut runner, spell);
+    drive(&mut runner, true);
+
+    assert_eq!(
+        life(&runner) - before,
+        2,
+        "the spell's cast trigger is doubled"
+    );
+}
