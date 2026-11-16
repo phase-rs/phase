@@ -1241,6 +1241,9 @@ fn filter_may_name_another_creature(filter: &TargetFilter) -> bool {
         | TargetFilter::ScopedPlayer
         | TargetFilter::LastRevealed
         | TargetFilter::ChosenCard
+        // CR 608.2c: read only by GiveControl's resolution; every other
+        // consumer declines it.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -1569,6 +1572,9 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::LastRevealed
+        // CR 608.2c: a resolution-scoped control assignment, read only by
+        // GiveControl's resolution; every other consumer declines it.
+        | TargetFilter::ChoiceAssignment { .. }
         // Players, and a player-or-planeswalker attack target.
         | TargetFilter::None
         | TargetFilter::Player
