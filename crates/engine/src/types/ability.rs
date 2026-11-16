@@ -968,8 +968,8 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
     }
 }
 
-/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
-/// variant lists are read and edited together.
+/// Mutable counterpart of `phase_ast::types::ability::mass_population_target`;
+/// the two variant lists must stay identical.
 pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
     match effect {
         Effect::ChangeZoneAll { target, .. }
@@ -981,6 +981,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
         | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        | Effect::SetTapState {
             scope: EffectScope::All,
             target,
             ..
@@ -1947,6 +1952,15 @@ pub struct SpellContext {
     /// `delayed_trigger::resolve`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
+    /// CR 608.2b + CR 603.7c: the referents of this delayed ability's creation snapshot
+    /// (`ResolvedAbility::targets`) that the creating chain announced only in target slots
+    /// that were illegal (or unjudged) as it resolved, each by the incarnation it had at
+    /// creation. An illegal target "fails to determine any such information". `targets`
+    /// keeps these entries, so positional `ParentTargetSlot` readers keep their numbering.
+    /// Stamped only by `delayed_trigger::resolve`; read by
+    /// `filter::combat_relation_subject_refs` (`AnaphoricTarget`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creation_illegal_referents: Vec<ObjectIncarnationRef>,
     /// Digital-only Alchemy (no CR entry): the noted number this boon
     /// grant captured. Each "note ..." + "you get a one-time boon with
     /// [... the noted number ...]" resolution snapshots the noting
@@ -2015,8 +2029,11 @@ pub struct SpellContext {
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
+    /// Boxed: the result carries a full LKI snapshot, is populated only for that
+    /// one hand-off, and the resolver keeps many `SpellContext`s live per chain
+    /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_discard_result: Option<DiscardedCardResult>,
+    pub direct_discard_result: Option<Box<DiscardedCardResult>>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -5056,6 +5073,8 @@ impl ResolvedAbility {
     /// - the keyed delayed-referent pins (CR 603.7c) and the positional
     ///   announcement pins (CR 601.2c);
     /// - the bound force-block attacker (CR 509.1c) and the granting object;
+    /// - the creation-time unavailable referents (CR 608.2b), which retain
+    ///   exact identity alongside the delayed snapshot's keyed pins;
     /// - the boon and exile-until batches, and the objects a forwarding
     ///   instruction produced or selected (CR 608.2c);
     /// - the Attach bindings: attachments, host and candidates (CR 701.3a);
@@ -5110,6 +5129,7 @@ impl ResolvedAbility {
             .chain(self.target_pins.iter_mut().flatten())
             .chain(self.force_block_attacker.iter_mut())
             .chain(self.context.granting_object.iter_mut())
+            .chain(self.context.creation_illegal_referents.iter_mut())
             .chain(self.context.boon_trigger_batch_objects.iter_mut())
             .chain(self.context.exile_until_batch.iter_mut())
             .chain(
@@ -6196,7 +6216,7 @@ impl ResolvedAbility {
     /// explicitly cleared so this one contingent fact cannot leak past its
     /// immediate consumer.
     pub fn set_direct_discard_result_for_immediate_node(&mut self, result: DiscardedCardResult) {
-        self.context.direct_discard_result = Some(result);
+        self.context.direct_discard_result = Some(Box::new(result));
         for (_, child) in self.child_links_mut() {
             child.clear_direct_discard_result_recursive();
         }
@@ -6963,6 +6983,66 @@ mod tests {
         for context in nodes(&tree) {
             assert!(!context.has_player_choice_records());
         }
+    }
+
+    #[test]
+    fn spell_context_creation_illegal_referents_defaults_omits_empty_and_round_trips() {
+        for fixture in [
+            serde_json::json!({}),
+            serde_json::json!({"creation_illegal_referents": []}),
+        ] {
+            let context: SpellContext =
+                serde_json::from_value(fixture).expect("absent/empty record");
+            assert_eq!(
+                context.creation_illegal_referents,
+                Vec::<ObjectIncarnationRef>::new()
+            );
+            assert!(serde_json::to_value(&context)
+                .unwrap()
+                .get("creation_illegal_referents")
+                .is_none());
+        }
+        assert!(serde_json::to_value(SpellContext::default())
+            .unwrap()
+            .get("creation_illegal_referents")
+            .is_none());
+        let fixture = serde_json::json!({"creation_illegal_referents": [{"object_id": 11, "incarnation": 7}]});
+        let populated: SpellContext = serde_json::from_value(fixture).expect("populated record");
+        let pin = ObjectIncarnationRef::of(ObjectId(11), 7);
+        assert_eq!(populated.creation_illegal_referents, vec![pin]);
+        let encoded = serde_json::to_value(&populated).unwrap();
+        assert_eq!(
+            encoded["creation_illegal_referents"],
+            serde_json::json!([{"object_id": 11, "incarnation": 7}])
+        );
+        let decoded: SpellContext = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, populated);
+        assert_eq!(decoded.creation_illegal_referents, vec![pin]);
+    }
+
+    #[test]
+    fn creation_illegal_referents_participate_in_loop_pin_visitation() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(900),
+            crate::types::player::PlayerId(0),
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(ObjectId(11), 7)];
+        let mut visited = Vec::new();
+        ability.for_each_loop_pin_mut(ObjectId(900), &mut |id, epoch| {
+            visited.push((id, *epoch));
+            *epoch = 3;
+        });
+        assert_eq!(visited, vec![(ObjectId(11), 7)]);
+        assert_eq!(
+            ability.context.creation_illegal_referents,
+            vec![ObjectIncarnationRef::of(ObjectId(11), 3)]
+        );
     }
 
     #[test]
