@@ -43,7 +43,6 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
-use crate::types::format::DeckSizeOverride;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -25557,7 +25556,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let face = verbatim_commander_face("The Covert Blue Mage", COVERT_VERBATIM, &[]);
         assert_eq!(
             face.deck_size_override,
-            Some(DeckSizeOverride::NoMaximum),
+            Some(crate::types::format::DeckSizeOverride::NoMaximum),
             "the Covert face must carry the typed marker"
         );
 
