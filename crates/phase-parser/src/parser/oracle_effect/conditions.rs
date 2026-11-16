@@ -15955,7 +15955,7 @@ mod tests {
     /// **T11 — SHAPE.** The tense conjunct: a PAST-tense divergent-noun gate is
     /// declined even when the declared target agrees, because the zone-change
     /// route has no ` was ` arm and `strip_target_supertype_conditional` /
-    /// `nonbasic_land_lki_condition` still own that half (CR 400.7).
+    /// the owner's `NonbasicLand` surface still own that half (CR 400.7).
     ///
     /// Revert probe: delete `use_lki ||` from the gate and all three `None`s
     /// below become `Some`, which would strip Choking Sands / Molten Rain /
@@ -17918,7 +17918,7 @@ mod referent_owner_tests {
                 "{card}: suffix mana value"
             );
             assert!(
-                !body.contains(" if "),
+                !body.contains(" if "), // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 "{card}: body must drop the rider, got {body:?}"
             );
         }
@@ -18015,7 +18015,7 @@ mod referent_owner_tests {
                 "{card}"
             );
             assert!(
-                !body.contains(" if its "),
+                !body.contains(" if its "), // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 "{card}: rider stripped, got {body:?}"
             );
         }
@@ -18044,8 +18044,10 @@ mod referent_owner_tests {
             "Welcome to the Fold madness clause (boundary B2)"
         );
         // B1: the ability's own source (player-subject trigger).
-        let mut source_ctx = ParseContext::default();
-        source_ctx.subject = Some(TargetFilter::Controller);
+        let source_ctx = ParseContext {
+            subject: Some(TargetFilter::Controller),
+            ..ParseContext::default()
+        };
         let (condition, _) = strip_property_conditional(
             "Double the number of +1/+1 counters on ~ if its power is 16 or less",
             &source_ctx,
@@ -18165,7 +18167,8 @@ mod referent_owner_tests {
         let source: String = source
             .lines()
             .map(|line| {
-                if line.trim_start().starts_with("//") {
+                let is_comment = line.trim_start().starts_with("//"); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                if is_comment {
                     ""
                 } else {
                     line
@@ -18187,12 +18190,12 @@ mod referent_owner_tests {
                 .iter()
                 .collect();
             let after = after.trim_start();
-            let pattern = body.contains("..")
-                || body.contains(": _")
-                || after.starts_with("=>")
+            let pattern = body.contains("..") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || body.contains(": _") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || after.starts_with("=>") // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 || after.starts_with('|')
-                || (after.starts_with('=') && !after.starts_with("=="))
-                || after.starts_with("if ");
+                || (after.starts_with('=') && !after.starts_with("==")) // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                || after.starts_with("if "); // allow-noncombinator: source-reading test instrument, not Oracle parsing
             if !pattern {
                 found.push(text[..start].to_string());
             }
@@ -18222,7 +18225,7 @@ mod referent_owner_tests {
         "#;
         let found = constructors(&production_source(source));
         assert_eq!(found.len(), 1, "one planted constructor, got {found:?}");
-        assert!(found[0].contains("fn writer"));
+        assert!(found[0].contains("fn writer")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
     }
 
     /// Single writer, NO allow-list: the only constructor of `TargetMatchesFilter` in the
@@ -18240,8 +18243,8 @@ mod referent_owner_tests {
         for (name, source) in files {
             for before in constructors(&production_source(source)) {
                 let owner_fn = before
-                    .rfind("\nfn ")
-                    .or_else(|| before.rfind("\npub(super) fn "));
+                    .rfind("\nfn ") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                    .or_else(|| before.rfind("\npub(super) fn ")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 let signature: String = owner_fn
                     .map(|at| before[at..].lines().nth(1).unwrap_or("").to_string())
                     .unwrap_or_default();
@@ -18254,7 +18257,7 @@ mod referent_owner_tests {
             "exactly one production constructor expected, found {writers:?}"
         );
         assert!(
-            writers[0].contains("fn referent_condition"),
+            writers[0].contains("fn referent_condition"), // allow-noncombinator: source-reading test instrument, not Oracle parsing
             "the single writer must be referent_condition, found {writers:?}"
         );
     }
