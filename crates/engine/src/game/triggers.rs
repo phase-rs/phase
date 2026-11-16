@@ -13895,27 +13895,6 @@ fn dispatch_deferred_triggers_in_order(
     drain_deferred_triggers_after_trigger_construction(state, events_out)
 }
 
-/// CR 603.2d: Apply trigger doubling from `StaticMode::DoubleTriggers`
-/// static abilities. Scans battlefield for permanents with a DoubleTriggers
-/// static, then clones matching pending triggers an additional time. The
-/// `TriggerCause` predicate restricts which spawning events qualify
-/// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
-/// CR 603.2d: True when `filter` references the doubler's own source object —
-/// directly (`SelfRef`) or transitively through an `Or`/`And`/`Not` composition
-/// (e.g. Cloud's "Cloud or an Equipment attached to it"). Mirrors the parser-side
-/// `filter_references_self` in `oracle_trigger.rs`; used to decide whether a
-/// trigger doubler may double its own triggered abilities.
-fn filter_references_self(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::SelfRef => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_references_self)
-        }
-        TargetFilter::Not { filter } => filter_references_self(filter),
-        _ => false,
-    }
-}
-
 /// CR 403.3: A doubler's "ability of a permanent" scope refers to a source
 /// that was a battlefield permanent when it triggered. The `Permanent` type
 /// filter remains available for "permanent card" queries in other zones, so
@@ -14530,20 +14509,11 @@ fn doubler_applies(
     if trigger.controller != doubler.controller() {
         return false;
     }
-    // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-    // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
-    // OTHER permanents. The carve-out: when the doubler's `affected` filter
-    // references the source itself (`~`, e.g. Cloud's "a triggered ability
-    // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
-    // triggered abilities eligible, so skip the exclusion and let the
-    // `affected` match below decide.
-    let affected_references_self = doubler
-        .affected
-        .as_ref()
-        .is_some_and(filter_references_self);
-    if !affected_references_self && trigger.source_id == doubler.source_id() {
-        return false;
-    }
+    // CR 603.2d: No blanket self-exclusion. The doubler's `affected` scope
+    // decides whether its own triggered abilities qualify: "a permanent you
+    // control" includes the doubler (Veyran's own Magecraft, Wulfgar's melee),
+    // while "another Wizard you control" excludes it through the `Another`
+    // property, and "~ or an Equipment attached to it" names it (Cloud).
     // CR 603.2d: Check the cause predicate against the spawning event.
     if !trigger_cause_matches(
         state,
@@ -14566,6 +14536,11 @@ fn doubler_applies(
         })
 }
 
+/// CR 603.2d: Apply trigger doubling from `StaticMode::DoubleTriggers`
+/// static abilities. Scans battlefield for permanents with a DoubleTriggers
+/// static, then clones matching pending triggers an additional time. The
+/// `TriggerCause` predicate restricts which spawning events qualify
+/// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
     let live = active_trigger_doublers(state);
     let mut extra: Vec<PendingTriggerContext> = Vec::new();

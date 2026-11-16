@@ -2186,10 +2186,10 @@ fn cloud_doubles_attached_equipment_trigger_when_equipped() {
 }
 
 /// CR 603.2d: Self-inclusion — Cloud's OWN triggered ability is doubled while
-/// equipped, because its `affected` filter references the source (`~`), so the
-/// self-exclusion carve-out fires. Discriminating: reverting the runtime
-/// `affected_references_self` gate (or the SelfRef affected arm) re-applies the
-/// unconditional self-exclusion and this drops to 1.
+/// equipped, because its `affected` filter references the source (`~`) and the
+/// filter alone decides self-inclusion. Discriminating: reintroducing a
+/// self-exclusion in `doubler_applies` (or dropping the SelfRef affected arm)
+/// drops this to 1.
 #[test]
 fn cloud_doubles_its_own_trigger_when_equipped_self_inclusion() {
     let mut state = setup();
