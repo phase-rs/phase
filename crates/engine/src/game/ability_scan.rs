@@ -4846,7 +4846,9 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             that_player: false,
         },
         TargetFilter::ChosenCard => Axes::NONE,
-        TargetFilter::TrackedSet { id: _ } => Axes::NONE,
+        TargetFilter::TrackedSet { id: _ } | TargetFilter::ChoiceAssignment { side: _ } => {
+            Axes::NONE
+        }
         TargetFilter::TrackedSetFiltered {
             filter,
             id: _,
@@ -7228,6 +7230,11 @@ pub(crate) fn trigger_refers_to_its_player(def: &TriggerDefinition) -> bool {
     scan_trigger_definition(def, ScanMode::LoopFirewall, DefinitionPart::Whole).that_player
 }
 
+/// CR 805.4d: [`trigger_refers_to_its_player`] over a firing's resolved ability.
+pub(crate) fn ability_refers_to_its_player(ability: &ResolvedAbility) -> bool {
+    resolved_ability_axes(ability, ScanMode::LoopFirewall).that_player
+}
+
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
 /// the off-stack scan surface (`analysis::resource` item 5).
 pub(crate) fn trigger_condition_reads_projected_resource(condition: &TriggerCondition) -> bool {
@@ -8697,7 +8704,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
@@ -8840,7 +8847,7 @@ fn attack_defended_history(defended: Option<&AttackTargetFilter>) -> HistoryRead
         None
         | Some(
             AttackTargetFilter::Player
-            | AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::Planeswalker { .. }
             | AttackTargetFilter::PlayerOrPlaneswalker
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner

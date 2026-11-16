@@ -3812,7 +3812,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -7913,7 +7913,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -23476,6 +23476,49 @@ mod tests {
             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             target: crate::types::ability::TargetFilter::Controller,
         }
+    }
+
+    /// F1 relief negative (CR 118.3 + CR 608.2d): on the unfunded shared fixture
+    /// a shape-(B) fixed-{1} `PayCost` entry mints NOTHING at the analysis layer. The
+    /// reach-guards prove the refusal is the feasibility gate, not routing —
+    /// the branch still resolves the payer to the proposer.
+    #[test]
+    fn unfunded_fixed_mana_may_offer_mints_no_relief_slot() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::{AbilityCost, Effect, TargetFilter};
+
+        let (board, src) = u2_relief_board();
+        assert!(
+            board.players[0].mana_pool.is_empty(),
+            "reach-guard: the shared fixture funds nothing, so the {{1}} offer is infeasible"
+        );
+        let entry = u2_shape_b_entry(
+            src,
+            990,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            |_| {},
+        );
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("the fixture is a triggered ability");
+        };
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&board, ability),
+            Some(PlayerId(0)),
+            "reach-guard: routing still returns the proposer — only the mint is withheld"
+        );
+        assert!(
+            entry_publishes_pin_slots(&board, &entry, PlayerId(0)).is_none(),
+            "CR 608.2d: an infeasible fixed-mana `may` offer mints no relief slot"
+        );
     }
 
     /// R17 — ID FRESHNESS ON THE DRIVEN DUMPS, AND `normalize_for_loop` PRESERVES EVERY

@@ -271,11 +271,21 @@ pub(crate) fn finalize_attach(
 
     install_aura_continuous_effect(state, ability, returned_id, enchant_filter, grants);
 
+    // CR 303.4a + CR 613.1d + CR 702.16c: the returned permanent is an Aura
+    // enchantment (not a creature) from the moment the continuous effect exists,
+    // so apply the layers BEFORE the attach legality check. Otherwise the
+    // protection/enchant-restriction guard reads the pre-conversion creature
+    // (Teysa, a Forest with protection from creatures, would wrongly refuse an
+    // Old-Growth Troll that is now an enchantment).
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+
     // CR 701.3 + CR 303.4: attach the Aura to the chosen permanent. This is
     // a silent no-op if the target carries `CantBeEnchanted` / `CantBeAttached`
     // (CR 701.3 / CR 702.5 / CR 702.6) — the next SBA pass will then move the
     // newly-orphaned Aura to its owner's graveyard per CR 704.5n.
-    let _ = crate::game::effects::attach::attach_to(state, returned_id, target_id);
+    let _ =
+        crate::game::effects::attach::attach_to_with_events(state, returned_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ReturnAsAura,
