@@ -115,6 +115,8 @@ pub fn resolve(
         filter: card_filter,
         optional: true,
         decline_runs_continuation: true,
+        cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+        pending_mana_ability: None,
     };
 
     events.push(GameEvent::EffectResolved {

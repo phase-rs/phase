@@ -1,8 +1,10 @@
 use crate::types::ability::{
-    ControllerRef, Effect, EffectScope, ManaProduction, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TypedFilter,
+    CardSelectionMode, ControllerRef, Effect, EffectScope, LibraryPosition, ManaContribution,
+    ManaProduction, PtValue, QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
 };
+use crate::types::counter::parse_counter_type;
 use crate::types::mana::ManaColor;
+use crate::types::zones::EtbTapState;
 use crate::types::Zone;
 
 use super::filter::translate_filter;
@@ -255,12 +257,8 @@ fn translate_put_counter(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
-    let counter_type = params
-        .get("CounterType")
-        .unwrap_or("P1P1")
-        .replace("P1P1", "+1/+1")
-        .replace("M1M1", "-1/-1")
-        .to_lowercase();
+    let counter_type_str = params.get("CounterType").unwrap_or("P1P1");
+    let counter_type = parse_counter_type(counter_type_str);
     let count = resolve_quantity(params, "CounterNum", resolver);
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::PutCounter {
@@ -321,6 +319,9 @@ fn translate_token(
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        supertypes: Vec::new(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
     })
 }
 
@@ -375,14 +376,21 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         resolve_target(params, "ValidTgts").or_filter(resolve_target(params, "ChangeType"));
 
     Ok(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin,
         destination,
         target,
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_tapped: EtbTapState::Unspecified,
         enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
     })
 }
 
@@ -412,6 +420,7 @@ fn translate_mana(
         ManaProduction::AnyOneColor {
             count: amount,
             color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
         }
     } else if colors.len() == 1 {
         // Single color with amount: repeat the color N times.
@@ -420,21 +429,29 @@ fn translate_mana(
         match amount {
             QuantityExpr::Fixed { value } => {
                 let repeated = vec![colors[0]; value as usize];
-                ManaProduction::Fixed { colors: repeated }
+                ManaProduction::Fixed {
+                    colors: repeated,
+                    contribution: ManaContribution::Base,
+                }
             }
             _ => ManaProduction::AnyOneColor {
                 count: amount,
                 color_options: colors,
+                contribution: ManaContribution::Base,
             },
         }
     } else {
         // Multiple colors: the full set is produced once (Amount$ is unusual here).
-        ManaProduction::Fixed { colors }
+        ManaProduction::Fixed {
+            colors,
+            contribution: ManaContribution::Base,
+        }
     };
 
     Ok(Effect::Mana {
         produced,
         restrictions: Vec::new(),
+        grants: Vec::new(),
         expiry: None,
         target: None,
     })
@@ -447,11 +464,15 @@ fn translate_discard(
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
     let target = resolve_defined(params);
-    let random = params.get("Mode") == Some("Random");
+    let selection = if params.get("Mode") == Some("Random") {
+        CardSelectionMode::Random
+    } else {
+        CardSelectionMode::Chosen
+    };
     Ok(Effect::Discard {
         count,
         target,
-        random,
+        selection,
         unless_filter: None,
         filter: None,
     })
@@ -467,6 +488,7 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
     Ok(Effect::Sacrifice {
         target,
         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        min_count: 0,
     })
 }
 
@@ -477,11 +499,22 @@ fn translate_mill(
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
     let target = resolve_defined(params);
+    let position = resolve_library_position(params);
     Ok(Effect::Mill {
         count,
         target,
         destination: Zone::Graveyard,
+        position,
     })
+}
+
+/// Resolve LibraryPosition from Forge params. Forge uses "Top" or "Bottom"
+/// (case-insensitive). Defaults to Top per CR 701.17a.
+fn resolve_library_position(params: &ForgeParams) -> LibraryPosition {
+    match params.get("Position") {
+        Some(v) if v.eq_ignore_ascii_case("Bottom") => LibraryPosition::Bottom,
+        _ => LibraryPosition::Top,
+    }
 }
 
 // CR 701.22a: Scry.
@@ -523,14 +556,21 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
 fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Hand,
         target,
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_tapped: EtbTapState::Unspecified,
         enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
     })
 }
 

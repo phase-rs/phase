@@ -209,7 +209,7 @@ fn terror_of_the_peaks_still_charges_when_kicker_is_declined() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("declining kicker should succeed");
                 declined_kicker = true;
             }

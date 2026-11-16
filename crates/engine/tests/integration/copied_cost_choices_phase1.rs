@@ -243,14 +243,14 @@ fn copied_second_kicker_keeps_its_variant_specific_entry_rider() {
         WaitingFor::OptionalCostChoice { .. }
     ));
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline first kicker");
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalCostChoice { .. }
     ));
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("pay second kicker");
     assert!(matches!(
         runner.state().waiting_for,
@@ -405,7 +405,9 @@ fn copy_squad_with_payments(payments: u32) -> usize {
             WaitingFor::OptionalCostChoice { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalCost { pay })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("declare Squad payment count");
     }
     assert!(matches!(

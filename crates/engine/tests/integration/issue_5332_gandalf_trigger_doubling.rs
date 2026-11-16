@@ -137,6 +137,7 @@ fn gandalf_parsed_static_doubles_legendary_reentry_triggers() {
             block_pairs: Vec::new(),
             trigger_definitions: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,

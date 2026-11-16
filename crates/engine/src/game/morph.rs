@@ -71,6 +71,15 @@ pub(crate) fn turn_face_up_offer(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<TurnFaceUpOffer> {
+    // CR 702.106c + CR 116.2j: turning a hidden agenda conspiracy face up costs
+    // nothing, so it never reaches the paid-cost authority below.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player))
+    {
+        return Some(TurnFaceUpOffer::Ready);
+    }
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player).ok()?;
     match cost {
         TurnFaceUpCost::Mana(cost) => {
@@ -137,7 +146,7 @@ pub(in crate::game) fn priority_turn_face_up_candidates(
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityTurnFaceUpCandidate> {
     let player = principal.semantic_holder();
-    state
+    let mut candidates: Vec<PriorityTurnFaceUpCandidate> = state
         .battlefield
         .iter()
         .copied()
@@ -149,7 +158,23 @@ pub(in crate::game) fn priority_turn_face_up_candidates(
                 ),
             })
         })
-        .collect()
+        .collect();
+
+    // CR 702.106c / CR 116.2j / CR 905.4a: As a special action, a player may turn a
+    // face-down hidden agenda conspiracy card they control in the command zone face up.
+    // `turn_face_up_offer` returns Ready for eligible conspiracies (no cost, no X).
+    for &object_id in &state.command_zone {
+        if let Some(offer) = turn_face_up_offer(state, player, object_id) {
+            candidates.push(match offer {
+                TurnFaceUpOffer::RequiresChosenX => PriorityTurnFaceUpCandidate::RequiresChosenX,
+                TurnFaceUpOffer::Ready => PriorityTurnFaceUpCandidate::Ready(
+                    PriorityTurnFaceUpAnnouncement::new(object_id),
+                ),
+            });
+        }
+    }
+
+    candidates
 }
 
 /// An engine-authored face-down play announcement for Priority preflight. The
@@ -240,6 +265,9 @@ pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
 ) {
+    // CR 708.2: turning face down changes this same permanent's characteristics;
+    // carry its still-live resolution effects across the rebaseline.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
@@ -294,8 +322,12 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_abilities = Arc::new(Vec::new());
     obj.trigger_definitions = crate::types::definitions::Definitions::default();
     obj.base_trigger_definitions = Arc::new(Vec::new());
-    obj.replacement_definitions = crate::types::definitions::Definitions::default();
     obj.base_replacement_definitions = Arc::new(Vec::new());
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.static_definitions = crate::types::definitions::Definitions::default();
     obj.base_static_definitions = Arc::new(Vec::new());
     obj.color = Vec::new();
@@ -307,6 +339,10 @@ pub fn apply_face_down_creature_characteristics(
     // `turn_face_up` → `apply_back_face_to_object`.
     obj.printed_ref = None;
     obj.base_printed_ref = None;
+    // CR 708.2a + CR 708.3 + CR 708.4: the face-down object has no printed identity, so it
+    // forgets the physical card's printing as well, for good (a turn-up restores the face from
+    // `back_face`, which carries none).
+    obj.conceal_printing();
     // CR 708.2a + CR 306.5b + CR 310.4b: a face-down permanent is a 2/2
     // creature — it has no loyalty or defense characteristic. Blanking here
     // keeps `intrinsic_etb_counters` from seeding loyalty/defense counters on
@@ -572,6 +608,31 @@ pub(crate) fn handle_turn_face_up(
     announced_x: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.106c / CR 116.2j / CR 905.4a: Special action to turn face-down hidden agenda conspiracy in command zone face up.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
+            if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
+                return Err(EngineError::InvalidAction(
+                    "You don't control this face-down conspiracy".to_string(),
+                ));
+            }
+            if announced_x != 0 {
+                return Err(EngineError::InvalidAction(
+                    "Turning a conspiracy face up has no X cost".to_string(),
+                ));
+            }
+            if !crate::game::conspiracy::turn_hidden_agenda_face_up(
+                state, object_id, player, events,
+            ) {
+                return Err(EngineError::InvalidAction(
+                    "Failed to turn conspiracy face up".to_string(),
+                ));
+            }
+            events.push(GameEvent::TurnedFaceUp { object_id });
+            return Ok(WaitingFor::Priority { player });
+        }
+    }
+
     // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
     // authority, shared with the Priority offer enumeration.
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player)?;
@@ -804,6 +865,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
                 .collect();
             events.push(GameEvent::CardsRevealed {
                 player,
+                occurrences: state.disclosed_occurrences(chosen),
                 card_ids: chosen.to_vec(),
                 card_names: revealed_names,
             });

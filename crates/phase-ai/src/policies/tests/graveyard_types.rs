@@ -95,6 +95,7 @@ fn self_mill_effect() -> Effect {
         count: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Controller,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }
 }
 

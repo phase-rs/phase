@@ -525,6 +525,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -566,6 +568,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -685,6 +689,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -709,6 +715,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![

@@ -18,7 +18,7 @@ use engine::database::card_db::CardDatabase;
 use engine::game::engine::{apply, certify_object_growth_frames_for_tests};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::period_confirm::PeriodPerformance;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::{play_trace_view, NamingCause};
 use engine::types::ability::{AbilityKind, TargetFilter, TargetRef};
@@ -56,14 +56,14 @@ const POOL: [ManaType; 6] = [
 
 /// How a drive answers the prompts a board's loop asks.
 #[derive(Clone)]
-struct Answers {
-    color: ManaType,
+pub(crate) struct Answers {
+    pub(crate) color: ManaType,
     /// What every target prompt names, and every source choice and cost `cost` leaves unnamed.
-    aim: Option<TargetRef>,
+    pub(crate) aim: Option<TargetRef>,
     /// The permanent a sacrifice or tap cost names when it is not `aim`.
-    cost: Option<ObjectId>,
+    pub(crate) cost: Option<ObjectId>,
     /// The answer to a "you may".
-    accept: bool,
+    pub(crate) accept: bool,
 }
 
 impl Answers {
@@ -127,7 +127,7 @@ fn answer_prompts(state: &mut GameState, answers: &Answers) {
 }
 
 /// [`answer_prompts`], with every player passing priority until the stack is empty.
-fn settle(state: &mut GameState, answers: &Answers) {
+pub(crate) fn settle(state: &mut GameState, answers: &Answers) {
     for _ in 0..BEAT_CAP {
         answer_prompts(state, answers);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
@@ -138,7 +138,7 @@ fn settle(state: &mut GameState, answers: &Answers) {
     panic!("the stack did not empty");
 }
 
-fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
+pub(crate) fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
     act(
         state,
         GameAction::ActivateAbility {
@@ -1979,6 +1979,76 @@ fn a_copy_effect_naming_a_departed_sliver_keeps_the_period_refused() {
         certified(&periods(false), &[reflection]),
         ObjectGrowthVerdict::FodderGrowth([vec![], vec![]])
     );
+}
+
+/// Ulvenwald Tracker ("{1}{G}, {T}: Target creature you control fights another target creature.")
+/// makes P0's newest Sliver fight `other`, paid by `elves`, then the stack.
+fn newest_sliver_fights(
+    state: &mut GameState,
+    tracker: ObjectId,
+    elves: ObjectId,
+    other: ObjectId,
+) {
+    tap_for_mana(state, elves);
+    activate_ability(state, tracker);
+    let sliver = *tokens(state, "Sliver").last().expect("a Sliver");
+    for target in [sliver, other] {
+        act(
+            state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+        );
+    }
+    settle(state, &untargeted());
+}
+
+/// CR 701.14a + CR 111.7 + CR 732.2a: a Sliver that Ulvenwald Tracker makes fight before Ashnod's
+/// Altar sacrifices it leaves only a spent fight entry, so the loop Intruder Alarm ("Whenever a
+/// creature enters, untap all creatures.") untaps is offered and taken like hand-driven play.
+#[test]
+fn a_sliver_that_fought_before_it_was_sacrificed_is_offered_and_taken() {
+    let db = shared_card_db().expect("the card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let queen = scenario.add_real_card(P0, "Sliver Queen", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Training Grounds", Zone::Battlefield, db);
+    let altar = scenario.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Intruder Alarm", Zone::Battlefield, db);
+    let tracker = scenario.add_real_card(P0, "Ulvenwald Tracker", Zone::Battlefield, db);
+    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let myr = scenario.add_real_card(P1, "Darksteel Myr", Zone::Battlefield, db);
+    let board = scenario.build().state().clone();
+    let answers = untargeted();
+    let make = |state: &mut GameState| make_sliver(state, queen, &answers);
+    let fight = |state: &mut GameState| newest_sliver_fights(state, tracker, elves, myr);
+    let sacrifice = |state: &mut GameState| sacrifice_newest_sliver(state, altar, &answers);
+    let period: [Step; 3] = [&fight, &sacrifice, &make];
+    let hand_period = |state: &mut GameState| period.iter().for_each(|step| step(state));
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    tap_for_mana(&mut live, forest);
+    settle(&mut live, &answers);
+    offered_after_one_period(&mut live, &[&make, &fight, &sacrifice, &make], &context);
+    let (certificate, _) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Mana(ManaType::Colorless)]
+    );
+    assert_eq!(tokens(&live, "Sliver").len(), 1);
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
+        assert!(taken.unbounded_resources.is_empty(), "{count}");
+        assert_eq!(
+            (
+                tokens(&taken, "Sliver").len(),
+                taken.players[0].mana_pool.total()
+            ),
+            (1, 1 + count as usize),
+            "{count} cycles"
+        );
+    }
 }
 
 /// Kitchen Finks returns under the id it died with, so dying untapped and then tapped by
