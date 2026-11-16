@@ -2633,9 +2633,15 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     )))
     .parse(rest)
     .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("returned"),
-        tag::<_, _, OracleError<'_>>("put into a graveyard"),
+    // CR 614.6: "put into a graveyard" names the destination the member must
+    // have actually reached; "returned" prints for both bounce destinations and
+    // so names none.
+    let (rest, destination) = alt((
+        value(None, tag::<_, _, OracleError<'_>>("returned")),
+        map(
+            preceded(tag("put into "), parse_graveyard_destination_phrase),
+            Some,
+        ),
     ))
     .parse(rest)
     .ok()?;
@@ -2646,6 +2652,7 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(filter),
         caused_by: None,
+        destination,
     })
 }
 
@@ -2655,6 +2662,7 @@ fn parse_control_gained_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
         QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(TargetFilter::Any),
             caused_by: Some(ThisWayCause::ControlGained),
+            destination: None,
         },
         (
             tag("one "),
@@ -2679,6 +2687,7 @@ fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
                 return Some(QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,
+                    destination: None,
                 });
             }
             return Some(QuantityRef::TrackedSetSize);
@@ -2693,6 +2702,7 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
                 caused_by: Some(cause),
+                destination: None,
             })
         }
         _ => None,
@@ -2705,6 +2715,7 @@ fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<Quanti
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
                 caused_by: Some(cause),
+                destination: None,
             })
         }
         // CR 608.2c: a bare "<verb> this way" with no restricting filter counts
@@ -3083,8 +3094,9 @@ fn parse_drew_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleErr
 /// Rejecting lets the clause fall through to the existing `TrackedSetSize`
 /// fallback, i.e. exactly today's behaviour, keeping the gap visible.
 fn parse_this_way_filter_and_cause(lower: &str) -> Option<(TargetFilter, Option<ThisWayCause>)> {
-    if let Some(QuantityRef::FilteredTrackedSetSize { filter, caused_by }) =
-        parse_filtered_landing_zone_this_way(lower)
+    if let Some(QuantityRef::FilteredTrackedSetSize {
+        filter, caused_by, ..
+    }) = parse_filtered_landing_zone_this_way(lower)
     {
         return Some((*filter, caused_by));
     }
@@ -3405,47 +3417,99 @@ fn parse_spell_history_clause(
     None
 }
 
+/// CR 614.6 + CR 400.3: the graveyard phrase of a "put into <graveyard> this
+/// way" destination — "a graveyard", a possessive singular ("your", "their",
+/// "its owner's", "that player's", …) or the plural owners' form. Every
+/// spelling names the graveyard zone; whose graveyard is fixed by the cards'
+/// owners (CR 400.3), so the possessive carries no extra restriction.
+/// Shared by every "put into <graveyard> this way" consumer.
+pub(crate) fn parse_graveyard_destination_phrase(input: &str) -> OracleResult<'_, Zone> {
+    value(
+        Zone::Graveyard,
+        alt((
+            preceded(
+                alt((
+                    tag("a "),
+                    tag("your "),
+                    tag("their "),
+                    tag("its owner's "),
+                    tag("their owner's "),
+                    tag("that player's "),
+                    tag("target player's "),
+                    tag("an opponent's "),
+                    tag("each player's "),
+                )),
+                tag("graveyard"),
+            ),
+            tag("their owners' graveyards"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 614.6: the "<verb phrase> this way" tail of a tracked-set
+/// consumer, as the destination the verb phrase names. "put into <a graveyard>
+/// this way" names the graveyard (`Some(Zone::Graveyard)`): only members that
+/// arrived there count. Any other verb phrase ("milled", "exiled", …) names an
+/// action, not a destination (`None`): the member counts wherever it is. A
+/// relative-clause lead-in ("that was/were") is optional. `None` overall when
+/// the tail is not a "this way" phrase or has trailing text.
+fn parse_this_way_destination_tail(input: &str) -> Option<Option<Zone>> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("that was "),
+        tag("that were "),
+    )))
+    .parse(input.trim_start())
+    .ok()?;
+    let (rest, destination) = alt((
+        map(
+            preceded(tag("put into "), parse_graveyard_destination_phrase),
+            Some,
+        ),
+        value(None, take_until("this way")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = (opt(tag(" ")), tag::<_, _, OracleError<'_>>("this way"))
+        .parse(rest)
+        .ok()?;
+    rest.trim().is_empty().then_some(destination)
+}
+
 /// CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" → count only the
 /// tracked-set members matching <TYPE> (`FilteredTrackedSetSize`), so
 /// "for each creature card put into a graveyard this way" makes a token per
 /// creature milled, not per card (Dread Summons, #4678-adjacent #4697). A bare
-/// "card" (`TypeFilter::Card`) or a typeless clause is the unfiltered count and
-/// returns `None`, so the caller keeps `TrackedSetSize`. Building block for the
-/// whole "for each <filter> card <verb> this way" class (creature / land /
-/// artifact / … milled / exiled / destroyed / put into a graveyard).
-/// `caused_by: None` counts every filtered member of the most recent tracked set
-/// (the cards moved "this way").
+/// "card" or a typeless clause is the unfiltered count and returns `None`, so
+/// the caller keeps `TrackedSetSize` — EXCEPT when the verb phrase names a
+/// destination ([`parse_this_way_destination_tail`]): "for each card put into a
+/// graveyard this way" counts only the cards that actually arrived in a
+/// graveyard (CR 614.6), so it keeps the card filter and carries the
+/// destination. Building block for the whole "for each <filter> card <verb> this
+/// way" class (creature / land / artifact / … milled / exiled / destroyed / put
+/// into a graveyard). `caused_by: None` counts every filtered member of the most
+/// recent tracked set (the cards moved "this way").
 fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
     let (filter, rest) = parse_type_phrase_folding(clause);
     let TargetFilter::Typed(ref typed) = filter else {
         return None;
     };
-    // Only a SPECIFIC card type filters the set; a typeless clause or the generic
-    // "card" (`TypeFilter::Card`) is the unfiltered `TrackedSetSize` count.
-    if typed.type_filters.is_empty()
-        || typed
-            .type_filters
-            .iter()
-            .all(|t| matches!(t, TypeFilter::Card))
-    {
-        return None;
-    }
-    // The remainder must be a "<zone-move verb> this way" tracked-set phrase
-    // (e.g. "put into a graveyard this way", "milled this way", "exiled this
-    // way"): nom `take_until("this way") + tag`, with nothing after it.
-    let terminates_this_way = (
-        take_until::<_, _, OracleError<'_>>("this way"),
-        tag::<_, _, OracleError<'_>>("this way"),
-    )
-        .parse(rest.trim())
-        .map(|(after, _)| after.trim().is_empty())
-        .unwrap_or(false);
-    if !terminates_this_way {
+    let destination = parse_this_way_destination_tail(rest)?;
+    // Only a SPECIFIC card type narrows the set by type. A typeless clause is
+    // the unfiltered count; the generic "card" (`TypeFilter::Card`) is too, but
+    // it still counts only the cards that reached a named destination.
+    let names_specific_type = typed
+        .type_filters
+        .iter()
+        .any(|t| !matches!(t, TypeFilter::Card));
+    let names_cards = !typed.type_filters.is_empty();
+    if !(names_specific_type || (names_cards && destination.is_some())) {
         return None;
     }
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(filter),
         caused_by: None,
+        destination,
     })
 }
 
@@ -4793,7 +4857,8 @@ mod tests {
 
     #[test]
     fn for_each_this_way_produces_tracked_set_size() {
-        let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
+        // A destination-less bare "card ... this way" keeps the unfiltered set.
+        let qty = parse_for_each_clause("card returned this way").unwrap();
         assert_eq!(qty, QuantityRef::TrackedSetSize);
     }
 
@@ -4802,6 +4867,7 @@ mod tests {
         let control_gained = QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(TargetFilter::Any),
             caused_by: Some(ThisWayCause::ControlGained),
+            destination: None,
         };
         for clause in [
             "one they gained control of this way",
@@ -8817,7 +8883,9 @@ mod tests {
     fn nonland_card_revealed_this_way_uses_filtered_tracked_set_nonland() {
         let qty = parse_for_each_clause("nonland card revealed this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+            QuantityRef::FilteredTrackedSetSize {
+                filter, caused_by, ..
+            } => {
                 assert_eq!(caused_by, None, "revealed-this-way is action-agnostic");
                 match *filter {
                     TargetFilter::Typed(ref tf) => {
@@ -8848,7 +8916,10 @@ mod tests {
         assert_eq!(factor, 2);
         match *inner {
             QuantityExpr::Ref {
-                qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+                qty:
+                    QuantityRef::FilteredTrackedSetSize {
+                        filter, caused_by, ..
+                    },
             } => {
                 assert_eq!(caused_by, None, "returned-this-way is action-agnostic");
                 match *filter {
@@ -8872,7 +8943,10 @@ mod tests {
         let result =
             parse_event_context_quantity("the number of Mountains put into a graveyard this way");
         let Some(QuantityExpr::Ref {
-            qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+            qty:
+                QuantityRef::FilteredTrackedSetSize {
+                    filter, caused_by, ..
+                },
         }) = result
         else {
             panic!("expected Ref(FilteredTrackedSetSize), got {result:?}");
@@ -8977,7 +9051,9 @@ mod tests {
     fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
         let qty = parse_for_each_clause("nonland card discarded this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+            QuantityRef::FilteredTrackedSetSize {
+                filter, caused_by, ..
+            } => {
                 assert_eq!(
                     caused_by,
                     Some(crate::types::ability::ThisWayCause::Discarded),
@@ -9024,15 +9100,108 @@ mod tests {
         }
     }
 
-    /// Regression: a bare "card put into a graveyard this way" (no card type)
-    /// counts EVERY tracked-set member and must keep the unfiltered
-    /// `TrackedSetSize`.
+    /// CR 614.6: a bare "card put into a graveyard this way" counts every CARD in
+    /// the tracked set that actually arrived in a graveyard — the card filter and
+    /// the named destination, never the unfiltered `TrackedSetSize` (which would
+    /// also count a card a replacement exiled instead).
     #[test]
-    fn bare_card_put_into_graveyard_this_way_keeps_tracked_set_size() {
+    fn bare_card_put_into_graveyard_this_way_carries_the_graveyard_destination() {
+        for clause in [
+            "card put into a graveyard this way",
+            "card put into your graveyard this way",
+            "card put into their graveyard this way",
+            "card put into its owner's graveyard this way",
+        ] {
+            let qty =
+                parse_for_each_clause(clause).unwrap_or_else(|| panic!("{clause:?} must parse"));
+            let QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by,
+                destination,
+            } = qty
+            else {
+                panic!("{clause:?}: expected FilteredTrackedSetSize, got {qty:?}");
+            };
+            assert_eq!(caused_by, None, "{clause:?}: action-agnostic");
+            assert_eq!(destination, Some(Zone::Graveyard), "{clause:?}");
+            assert_eq!(
+                *filter,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)),
+                "{clause:?}: counts cards"
+            );
+        }
+    }
+
+    /// CR 614.6 + CR 701.17c: the destination phrasings name the graveyard —
+    /// singular ("a graveyard") and possessive ("their graveyard", Coerced
+    /// Confession) — and keep the type filter.
+    #[test]
+    fn creature_card_put_into_graveyard_this_way_carries_the_graveyard_destination() {
+        for clause in [
+            "creature card put into a graveyard this way",
+            "creature card put into their graveyard this way",
+            "creature card that was put into your graveyard this way",
+        ] {
+            let qty =
+                parse_for_each_clause(clause).unwrap_or_else(|| panic!("{clause:?} must parse"));
+            let QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by,
+                destination,
+            } = qty
+            else {
+                panic!("{clause:?}: expected FilteredTrackedSetSize, got {qty:?}");
+            };
+            assert_eq!(caused_by, None, "{clause:?}");
+            assert_eq!(destination, Some(Zone::Graveyard), "{clause:?}");
+            assert_eq!(
+                *filter,
+                TargetFilter::Typed(TypedFilter::creature()),
+                "{clause:?}"
+            );
+        }
+    }
+
+    /// CR 701.17c: "milled this way" names an ACTION, not a destination, so it
+    /// keeps counting every milled card wherever it is now (the Locke-style
+    /// reference to a milled card found in its public zone): bound to the
+    /// `Milled` cause with no destination.
+    #[test]
+    fn creature_card_milled_this_way_names_no_destination() {
+        let qty = parse_for_each_clause("creature card milled this way").expect("must parse");
+        let QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } = qty
+        else {
+            panic!("expected FilteredTrackedSetSize, got {qty:?}");
+        };
+        assert_eq!(caused_by, Some(ThisWayCause::Milled));
         assert_eq!(
-            parse_for_each_clause("card put into a graveyard this way"),
-            Some(QuantityRef::TrackedSetSize),
+            destination, None,
+            "an action-named count has no destination"
         );
+        assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    /// CR 614.6: the landing-zone building block carries the graveyard
+    /// destination too (Volcanic Eruption: a destroyed Mountain a replacement
+    /// exiled was not "put into a graveyard"), while "returned" names none.
+    #[test]
+    fn landing_zone_this_way_carries_the_graveyard_destination_only() {
+        let Some(QuantityRef::FilteredTrackedSetSize { destination, .. }) =
+            parse_filtered_landing_zone_this_way("mountains put into a graveyard this way")
+        else {
+            panic!("expected FilteredTrackedSetSize");
+        };
+        assert_eq!(destination, Some(Zone::Graveyard));
+        let Some(QuantityRef::FilteredTrackedSetSize { destination, .. }) =
+            parse_filtered_landing_zone_this_way("mountains returned this way")
+        else {
+            panic!("expected FilteredTrackedSetSize");
+        };
+        assert_eq!(destination, None);
     }
 
     /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"

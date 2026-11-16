@@ -11216,6 +11216,21 @@ fn self_return_origin_tracks_an_earlier_self_exile_in_the_chain() {
         "\"exile it\" is the dying source, got {:?}",
         chain[0].effect
     );
+    // CR 118.12 + CR 608.2c: "exile it and collect evidence 4" is one optional
+    // action — the evidence is an unconditional, non-optional step of the
+    // optional exile, not a separate choice or an "if you do" rider.
+    assert!(chain[0].optional, "the exile is the optional instruction");
+    assert!(
+        matches!(
+            chain[1].effect.as_ref(),
+            Effect::CollectEvidence { amount: 4 }
+        ),
+        "the conjunct is collect evidence 4, got {:?}",
+        chain[1].effect
+    );
+    assert_eq!(chain[1].condition, None);
+    assert_eq!(chain[1].sub_link, SubAbilityLink::ContinuationStep);
+    assert!(!chain[1].optional);
     let (origin, target) = chain
         .iter()
         .find_map(|link| match link.effect.as_ref() {
@@ -35409,7 +35424,14 @@ fn trigger_veilstone_amulet_cant_be_targets() {
     );
     assert!(
         matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
-        "expected GenericEffect (hexproof grant), got {:?}",
+        "expected GenericEffect (CantBeTargeted grant), got {:?}",
+        execute.effect
+    );
+    // CR 611.2c + CR 109.5: the opponents-scoped prohibition survives as a typed
+    // `CantBeTargeted { Opponents }` rule effect over the live "creatures you control" set.
+    assert!(
+        format!("{:?}", execute.effect).contains("CantBeTargeted"),
+        "expected a CantBeTargeted rule effect, got {:?}",
         execute.effect
     );
 }

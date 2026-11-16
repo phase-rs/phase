@@ -3,7 +3,9 @@ use std::ops::ControlFlow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value, verify};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, rest, value, verify,
+};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -4554,6 +4556,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -4656,6 +4659,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -5885,6 +5889,70 @@ pub(crate) fn strip_for_each_prefix_with_difference(
         }
     }
     (None, None, text.to_string())
+}
+
+/// CR 608.2c: peel a leading "for each of those <noun>, " / "for each of
+/// them, " prefix whose clause is exactly a demonstrative population
+/// ([`nom_quantity::parse_population_anaphor`]), returning the anaphor and the
+/// body in its original case. Context-free: whether the population has an
+/// admitted antecedent is the chunk loop's decision, which alone holds the
+/// chain's earlier clauses. Unlike [`strip_for_each_prefix_with_difference`],
+/// it yields no count — the population's own size is the count.
+pub(crate) fn strip_for_each_population_prefix(
+    text: &str,
+) -> Option<(nom_quantity::PopulationAnaphor, String)> {
+    let lower = text.to_lowercase();
+    let (anaphor, body) = nom_on_lower(text, &lower, |i| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("for each "),
+            map_parser(
+                terminated(take_until(", "), tag(", ")),
+                all_consuming(nom_quantity::parse_population_anaphor),
+            ),
+        )
+        .parse(i)
+    })?;
+    Some((anaphor, body.to_string()))
+}
+
+#[cfg(test)]
+mod population_prefix_tests {
+    use super::strip_for_each_population_prefix;
+    use crate::parser::oracle_nom::quantity::PopulationAnaphor;
+    use crate::types::ability::TypeFilter;
+
+    #[test]
+    fn peels_a_demonstrative_population_and_keeps_the_body_case() {
+        assert_eq!(
+            strip_for_each_population_prefix(
+                "For each of those creatures, put a +1/+1 counter on that creature."
+            ),
+            Some((
+                PopulationAnaphor::Restated(TypeFilter::Creature),
+                "put a +1/+1 counter on that creature.".to_string()
+            ))
+        );
+        assert_eq!(
+            strip_for_each_population_prefix("For each of them, choose a different opponent."),
+            Some((
+                PopulationAnaphor::Pronoun,
+                "choose a different opponent.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn declines_counted_and_qualified_for_each_clauses() {
+        for text in [
+            "For each creature you control, put a +1/+1 counter on it.",
+            "For each of those colors, you may exile a card of that color.",
+            "For each of those opponents who didn't discard a card, draw a card.",
+            "For each of those cards that have the same name, draw a card.",
+            "Put a +1/+1 counter on each of them.",
+        ] {
+            assert_eq!(strip_for_each_population_prefix(text), None, "{text}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -8155,8 +8223,9 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
 /// turn") owns its trailing window; it is a look-back restriction, not an effect
 /// duration (#9179: Cathedral Membrane, Defiant Vanguard). Context-free on
 /// purpose: when the target parser declines to bind the clause's partner (a bare
-/// "it" with no antecedent, or a partner no subject word covers, such as Triton
-/// Tactics' "one of those creatures"), the window still belongs to the clause,
+/// "it" or a "one of those creatures" with no antecedent, or a partner no subject
+/// word covers, such as Glyph of Reincarnation's "target Wall"), the window still
+/// belongs to the clause,
 /// so no spurious duration appears and the instruction fails closed instead
 /// (`instruction_drops_block_partner`). The same holds for a partner that is an
 /// indefinite filter phrase ("a Zombie": Time to Reflect), which no relation
@@ -13783,7 +13852,7 @@ fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
 /// is not). A negation names what the target is *not*, so it never supplies an
 /// antecedent. Every remaining filter (`Any`, the player scopes, the stack and
 /// context refs) names no creature noun either.
-fn target_filter_names_creature(filter: &TargetFilter) -> bool {
+pub(super) fn target_filter_names_creature(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.type_filters.contains(&TypeFilter::Creature),
         TargetFilter::And { filters } => filters.iter().any(target_filter_names_creature),

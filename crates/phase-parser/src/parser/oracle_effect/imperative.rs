@@ -14546,6 +14546,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
@@ -19898,23 +19899,13 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
         (trimmed, Duration::UntilEndOfTurn)
     };
 
-    // CR 702.18a / 702.11a: "can't be the target [of ...]" granted to the target
-    // for a duration is a Shroud / Hexproof keyword grant (Vines of Vastwood). Map
-    // it to the keyword so the targeting check applies the correct controller scope
-    // (Hexproof leaves the controller able to target), reusing the enforced keyword
-    // path rather than a scope-less rule static.
+    // CR 702.18a + CR 109.5: "can't be the target [of ...]" granted to the target
+    // for a duration (Vines of Vastwood). The opponent-scoped form is scoped from
+    // the granting controller, not Hexproof; see `cant_be_targeted_effect_grant`.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(clean) {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                crate::types::keywords::Keyword::Shroud
-            }
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                crate::types::keywords::Keyword::Hexproof
-            }
-        };
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
-                .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+                .modifications(vec![super::subject::cant_be_targeted_effect_grant(scope)])],
             duration: Some(duration),
             target: None,
             end_cost: None,
@@ -31366,6 +31357,135 @@ mod tests {
             Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 3 }))
         );
         assert_eq!(execute.target_choice_timing, TargetChoiceTiming::Resolution);
+    }
+
+    /// SHAPE — CR 510.1a: "… and this creature assigns no combat damage this
+    /// turn" after a bare " and " is its own subject-predicate clause. Covers the
+    /// printed members of the class (Goblin Vandal after a Destroy, Rysorian
+    /// Badger after a GainLife). Before the clause splitter recognised the
+    /// conjunct, it stayed glued to the leading imperative: the trailing "this
+    /// turn" was stripped onto that imperative and the rider fell to an
+    /// `Unimplemented` sub-ability.
+    #[test]
+    fn self_assigns_no_combat_damage_conjunct_splits_off_the_leading_imperative() {
+        let cases = [
+            (
+                "Goblin Vandal",
+                "Whenever this creature attacks and isn't blocked, you may pay {R}. If you do, destroy target artifact defending player controls and this creature assigns no combat damage this turn.",
+                vec!["Goblin".to_string(), "Rogue".to_string()],
+            ),
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+                vec!["Badger".to_string()],
+            ),
+        ];
+        for (name, oracle, subtypes) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &subtypes,
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            // Walk to the last link of the chain: the rider, immediately after
+            // the conditional ("If you do") leading imperative.
+            let mut chain: Vec<&AbilityDefinition> = vec![execute];
+            while let Some(next) = chain.last().and_then(|def| def.sub_ability.as_deref()) {
+                chain.push(next);
+            }
+            let [.., leading, rider] = chain.as_slice() else {
+                panic!("{name}: expected a leading imperative and a rider, got {chain:?}");
+            };
+            assert_eq!(
+                leading.duration, None,
+                "{name}: the rider's \"this turn\" must not leak onto the leading imperative"
+            );
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = rider.effect.as_ref()
+            else {
+                panic!("{name}: expected the rider GenericEffect, got {rider:?}");
+            };
+            assert_eq!(duration, &Some(Duration::UntilEndOfTurn), "{name}");
+            let [rule] = static_abilities.as_slice() else {
+                panic!("{name}: expected one rule modification, got {static_abilities:?}");
+            };
+            assert_eq!(rule.mode, StaticMode::AssignNoCombatDamage, "{name}");
+            assert_eq!(rule.affected, Some(TargetFilter::SelfRef), "{name}");
+        }
+    }
+
+    /// SHAPE — CR 508.5a + CR 108.3: a target card "from defending player's
+    /// graveyard" is owned by that one defending player, not by any player.
+    /// Covers the attack-trigger class across the exile (Rysorian Badger,
+    /// Graven Abomination) and reanimate (Rakshasa Debaser) verbs.
+    #[test]
+    fn defending_player_graveyard_target_binds_the_defending_owner() {
+        let cases = [
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+            ),
+            (
+                "Graven Abomination",
+                "Whenever this creature attacks, exile target card from defending player's graveyard.",
+            ),
+            (
+                "Rakshasa Debaser",
+                "Whenever this creature attacks, put target creature card from defending player's graveyard onto the battlefield under your control.",
+            ),
+        ];
+        for (name, oracle) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            // Reach guard: the owner binding below comes from a complete parse.
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            let Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::Typed(target),
+                ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected a graveyard-origin ChangeZone, got {execute:?}");
+            };
+            assert!(
+                target.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::DefendingPlayer,
+                }),
+                "{name}: target must be owned by the defending player: {target:?}"
+            );
+            assert!(
+                target.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }),
+                "{name}: target must be in a graveyard: {target:?}"
+            );
+        }
     }
 
     #[test]

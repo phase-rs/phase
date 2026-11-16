@@ -1745,9 +1745,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
         Effect::CreateDrawReplacement { replacement_effect } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect, mode));
-            acc
+            ability_definition_axes(replacement_effect, mode)
         }
         Effect::LoseTheGame { target } => {
             let mut acc = Axes::NONE;
@@ -2798,12 +2796,18 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // CR 608.2c: with a cause, the set is what one zone change, keyword action or control
         // change produced "this way", so its size scales only through that producer, whose own
         // arm carries any population read.
-        QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
-            let ctx = match (mode, caused_by) {
-                (ScanMode::LoopFirewall, Some(_)) => FilterReadContext::SnapshotOrEvent,
-                (ScanMode::LoopFirewall, None) | (ScanMode::Conservative, _) => {
-                    FilterReadContext::LiveBoardCensus
-                }
+        // CR 614.6: a named destination is read against each member's CURRENT zone
+        // (live state), so it never counts as a snapshot-only read.
+        QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } => {
+            let ctx = match (mode, caused_by, destination) {
+                (ScanMode::LoopFirewall, Some(_), None) => FilterReadContext::SnapshotOrEvent,
+                (ScanMode::LoopFirewall, Some(_), Some(_))
+                | (ScanMode::LoopFirewall, None, _)
+                | (ScanMode::Conservative, _, _) => FilterReadContext::LiveBoardCensus,
             };
             scan_target_filter(filter, ctx, mode)
         }
@@ -3804,7 +3808,9 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
         },
         TargetFilter::ChosenCard => Axes::NONE,
-        TargetFilter::TrackedSet { id: _ } => Axes::NONE,
+        TargetFilter::TrackedSet { id: _ } | TargetFilter::ChoiceAssignment { side: _ } => {
+            Axes::NONE
+        }
         TargetFilter::TrackedSetFiltered {
             filter,
             id: _,
@@ -4058,6 +4064,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         valid_subject_player,
         valid_source,
         zone_change_clauses,
+        // CR 509.3e: the blocker-count threshold's blocker filter is an event
+        // matcher like `valid_target` (scanned below); `minimum` is a literal.
+        blocker_count,
 
         // ---- read-free: the Room-half (door) STAMP — a matcher key like the
         //      filters above, at its most inert end. `RoomDoor` is a fieldless two-variant
@@ -4154,6 +4163,11 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
     for f in [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
+        .chain(
+            blocker_count
+                .as_ref()
+                .and_then(|threshold| threshold.blocker.as_ref()),
+        )
     {
         matcher = matcher.or(scan_target_filter(
             f,
@@ -5112,6 +5126,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::InAnyZone { .. }
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::Transformed
@@ -9689,6 +9704,7 @@ mod tests {
                 &QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(ct()),
                     caused_by,
+                    destination: None,
                 },
                 LoopFirewall,
             )

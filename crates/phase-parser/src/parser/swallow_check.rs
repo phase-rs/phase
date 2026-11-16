@@ -5946,6 +5946,7 @@ fn detect_duration_this_turn(
                 | FilterProp::ZoneChangedThisTurn { .. }
                 | FilterProp::AttackedThisTurn { .. }
                 | FilterProp::BlockedThisTurn
+                | FilterProp::FoughtThisTurn
                 | FilterProp::AttackedOrBlockedThisTurn
                 | FilterProp::CountersPutOnThisTurn { .. }
         )
@@ -6689,9 +6690,11 @@ fn pairing_subject_of(word: CombatRelationSubjectWord) -> CombatRelationSubject 
             CombatRelationSubject::Source
         }
         CombatRelationSubjectWord::TargetCreature => CombatRelationSubject::ParentTarget,
-        // The pairing grammar never produces the demonstrative; the arm keeps the
-        // match exhaustive.
-        CombatRelationSubjectWord::Demonstrative => CombatRelationSubject::AnaphoricTarget,
+        // The pairing grammar never produces either demonstrative ("that
+        // creature", "one of those creatures"); the arm keeps the match exhaustive.
+        CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
+            CombatRelationSubject::AnaphoricTarget
+        }
     }
 }
 
@@ -16009,10 +16012,13 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
-    /// CR 603.7a: Triton Tactics' deferred body keeps both of its actions under
-    /// "at this turn's next end of combat" — the bare "and it doesn't untap …"
-    /// must not split out of the delayed trigger and run at resolution. The body
-    /// itself stays a reported gap.
+    /// CR 603.7a + CR 608.2c + CR 608.2i: Triton Tactics' deferred body keeps both
+    /// of its actions under "at this turn's next end of combat" — the bare "and it
+    /// doesn't untap …" must not split out of the delayed trigger and run at
+    /// resolution. "One of those creatures" binds the spell's announced targets
+    /// (`AnaphoricTarget`), so the payload taps exactly the creatures one of them
+    /// was declared to block this turn, and "it" names each creature that payload
+    /// tapped (`affected: ParentTarget`), not the spell.
     #[test]
     fn triton_tactics_delayed_body_keeps_its_second_action() {
         let triton = parse_named(
@@ -16045,19 +16051,143 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             delayed_def.sub_ability
         );
         assert!(
+            !any_ability_has_unimplemented(&triton),
+            "Triton Tactics parses with no unimplemented node: {:?}",
+            triton.abilities
+        );
+        let wanted = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::AnaphoricTarget,
+        };
+        assert!(
             matches!(
                 &*payload.effect,
-                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(typed),
+                    scope: crate::types::ability::EffectScope::All,
+                    state: crate::types::ability::TapStateChange::Tap,
+                } if typed.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+                    && typed.properties.contains(&wanted)
             ),
-            "the deferred body stays a reported gap: {payload:?}"
+            "the payload taps each creature one of the targets was declared to block this turn: {payload:?}"
         );
+        let cant_untap = payload
+            .sub_ability
+            .as_deref()
+            .expect("the payload keeps its second action");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } = &*cant_untap.effect
+        else {
+            panic!("expected the CantUntap grant, got {:?}", cant_untap.effect);
+        };
+        assert_eq!(*target, None, "{cant_untap:?}");
+        assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget),
+            "\"it\" names each creature the payload tapped, not the spell"
+        );
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilNextStepOf {
+                step: crate::types::phase::Phase::Untap,
+                player: crate::types::ability::PlayerScope::Controller,
+            }),
+            "{cant_untap:?}"
+        );
+        assert!(
+            cant_untap.sub_ability.is_none(),
+            "{:?}",
+            cant_untap.sub_ability
+        );
+    }
+
+    /// CR 608.2c + CR 601.2c: "one of those creatures" in a history clause binds
+    /// only when the creature targets an earlier instruction announced are the
+    /// NEAREST antecedent. With no announced targets (a mass untap alone), or with
+    /// a nearer mass operand between the announcement and the clause, the word
+    /// names no announced set and the instruction fails closed as `Unimplemented
+    /// { block_history_partner }`. No printed card has the two synthetic shapes;
+    /// Triton Tactics is the nearest printed card, and its verbatim text binding
+    /// the same word through the same grammar is the reach guard.
+    #[test]
+    fn plural_history_partner_binds_only_the_nearest_announced_targets() {
+        let unbound = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any_effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                )
+            })
+        };
+        let binds_announced_targets = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            parse_has_history_relation(
+                parsed,
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                CombatRelationSubject::AnaphoricTarget,
+            )
+        };
+
+        // Reach guard: the printed card binds the word.
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert!(
+            binds_announced_targets(&triton),
+            "Triton Tactics: {:?}",
+            triton.abilities
+        );
+        assert!(!unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
+
+        for (label, text) in [
+            (
+                "no announced creature target",
+                "Untap all creatures you control. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn.",
+            ),
+            (
+                "a nearer mass operand",
+                "Up to two target creatures each get +0/+3 until end of turn. Untap all creatures you control. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn.",
+            ),
+        ] {
+            let parsed = parse_named(text, "Test Card", &["Instant"]);
+            assert!(
+                UnitEvidence::of(&parsed).any_effect(|effect| matches!(
+                    effect,
+                    Effect::CreateDelayedTrigger { condition, .. }
+                        if *condition == this_turns_next_end_of_combat()
+                )),
+                "{label}: reach guard — the delayed ability parses; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                unbound(&parsed),
+                "{label}: the instruction must fail closed; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                !binds_announced_targets(&parsed),
+                "{label}: no population may carry the announced-target relation; {:?}",
+                parsed.abilities
+            );
+        }
     }
 
     /// CR 608.2c + CR 608.2i + CR 115.1a: a history clause whose partner no
     /// subject word covers fails its instruction closed as `Unimplemented {
     /// block_history_partner }`, and the clause owns its window, so no spurious
     /// duration appears. On a mass instruction no widened mass effect is left
-    /// behind (Triton Tactics, Glyph of Reincarnation); on a single target no
+    /// behind (Glyph of Reincarnation); on a single target no
     /// targeted effect is left behind with the restriction dropped — for a
     /// partner that is an indefinite filter phrase (Time to Reflect, You Cannot
     /// Pass!) and for any other unbound partner alike. A unary clause is no
@@ -16073,31 +16203,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 ) && def.duration.is_none()
             })
         };
-        let triton = parse_named(
-            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
-            "Triton Tactics",
-            &["Instant"],
-        );
-        assert!(unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
-        assert!(
-            !UnitEvidence::of(&triton).any_effect(|effect| matches!(
-                effect,
-                Effect::SetTapState {
-                    scope: crate::types::ability::EffectScope::All,
-                    ..
-                }
-            )),
-            "Triton Tactics: no widened tap may remain"
-        );
-        assert!(
-            UnitEvidence::of(&triton).any_effect(|effect| matches!(
-                effect,
-                Effect::CreateDelayedTrigger { condition, .. }
-                    if *condition == this_turns_next_end_of_combat()
-            )),
-            "Triton Tactics: reach guard — the delayed ability keeps its turn-bound condition"
-        );
-
         let reincarnation = parse_named(
             "Cast this spell only after combat.\nDestroy all creatures that were blocked by target Wall this turn. They can't be regenerated. For each creature that died this way, put a creature card from the graveyard of the player who controlled that creature the last time it became blocked by that Wall onto the battlefield under its owner's control.",
             "Glyph of Reincarnation",

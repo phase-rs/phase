@@ -1,3 +1,4 @@
+use crate::types::game_state::EntryEventReplay;
 use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
@@ -2769,7 +2770,8 @@ fn handle_persist_chosen_attribute_choice(
             .get(&source_id)
             .is_some_and(|aura| aura.attached_to.is_none())
     {
-        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events)
+        {
             // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
             // entrant already ENTERED the battlefield as a non-Aura and only became
             // an Aura when its `BecomeCopy` replacement realized post-entry. There is
@@ -3224,7 +3226,7 @@ fn apply_copy_target_choice(
                 source_id,
                 events,
                 post_actions,
-                false,
+                EntryEventReplay::AlreadyDelivered,
                 CopyEntryCounters::ReplacementsOnly,
             )? {
                 if state.active_counter_additions().is_none() {
@@ -3401,7 +3403,7 @@ fn apply_copy_target_choice(
             source_id,
             events,
             counter_pause_post_actions,
-            true,
+            EntryEventReplay::Required,
             CopyEntryCounters::Merged {
                 exceptions: held_exceptions,
             },
@@ -3527,7 +3529,7 @@ fn apply_copy_target_choice(
         source_id,
         events,
         Vec::new(),
-        true,
+        EntryEventReplay::Required,
         CopyEntryCounters::Merged {
             exceptions: held_exceptions,
         },
@@ -3570,7 +3572,7 @@ fn finish_copy_target_choice_entry(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
@@ -3650,7 +3652,7 @@ fn finish_copy_target_choice_entry_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -3784,7 +3786,7 @@ pub(crate) fn resume_copy_target_choice_entry(
                 entrant.object_id,
                 events,
                 Vec::new(),
-                true,
+                EntryEventReplay::Required,
                 resume_stage,
             )?
         }
@@ -3889,7 +3891,7 @@ fn finish_copy_target_choice_entry_after_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
@@ -3949,7 +3951,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // battlefield — concede / error / chained-replacement paths can leave a
     // stale event in the vec, and we discard rather than fire a phantom entry
     // trigger.
-    if replay_entry_events {
+    if replay_entry_events == EntryEventReplay::Required {
         let delivery_start = events.len();
         if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
             state.capture_paused_zone_change_delivery_for_member(
@@ -3978,7 +3980,8 @@ fn finish_copy_target_choice_entry_after_counters(
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if replay_entry_events && state.active_batch_delivery().is_some() {
+    if replay_entry_events == EntryEventReplay::Required && state.active_batch_delivery().is_some()
+    {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(Some(state.waiting_for.clone()));
@@ -4009,7 +4012,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // a multi-host Aura with a token continuation), but "no card does this today"
     // is not a property the engine should depend on.
     let child_stack_start = state.resolution_stack.capture_child_boundary();
-    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events) {
         // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
         // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
         // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
@@ -4824,11 +4827,8 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
                 if *object_id == source_id
         ) || matches!(
             event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::Attach,
-                source_id: attach_source_id,
-                ..
-            } if *attach_source_id == source_id
+            GameEvent::Attached { attachment_id, .. }
+                if *attachment_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
@@ -4903,34 +4903,30 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
-            // resume path is an effect resolution, so emit `EffectResolved
-            // { Attach }` (Bramble Elemental) -- but only when the attachment
-            // actually moved: a same-host re-attach is a CR 701.3b no-op and
-            // must not re-trigger "becomes attached".
-            let attached = match target {
+            // CR 608.3c + CR 603.2e: an Aura spell becoming attached on this
+            // resume path publishes `GameEvent::Attached` (the single "becomes
+            // attached" trigger authority) only on an actual host transition;
+            // a same-host re-attach is a CR 701.3b no-op.
+            match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
+                    effects::attach::attach_to_with_events(
+                        state,
+                        ctx.object_id,
+                        *target_id,
+                        events,
+                    );
                 }
-                crate::types::ability::TargetRef::Object(_) => false,
+                crate::types::ability::TargetRef::Object(_) => {}
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player_reporting_change(
+                    effects::attach::attach_to_player_with_events(
                         state,
                         ctx.object_id,
                         *player_id,
-                    )
+                        events,
+                    );
                 }
-            };
-            if attached {
-                events.push(GameEvent::EffectResolved {
-                    kind: EffectKind::Attach,
-                    source_id: ctx.object_id,
-                    subject: state
-                        .capture_event_object_snapshot(ctx.object_id)
-                        .map(Box::new),
-                });
             }
         }
     }
@@ -9496,7 +9492,7 @@ mod tests {
             entering_aura,
             &mut events,
             vec![continuation],
-            false,
+            EntryEventReplay::AlreadyDelivered,
             CopyEntryCounters::ReplacementsOnly,
         )
         .expect("the host pause is not an error");
@@ -10628,7 +10624,10 @@ mod tests {
                 serde_json::Value::Array(items) => {
                     items.iter_mut().for_each(|v| walk(v, removed, edits))
                 }
-                _ => {}
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
             }
         }
         let mut value =
