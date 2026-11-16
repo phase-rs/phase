@@ -28358,8 +28358,9 @@ pub(crate) fn own_instruction_populations(effect: &Effect) -> Vec<&TargetFilter>
 /// population or a target — are defined by a block-history clause their filter does not
 /// carry: a partner that is an indefinite filter phrase (Time to Reflect: "target creature
 /// that blocked or was blocked by a Zombie this turn"), any other partner no subject word
-/// covers (Triton Tactics: "each creature that was blocked by one of those creatures this
-/// turn"), or a recognized partner with no source or earlier-target antecedent.
+/// covers (Glyph of Reincarnation: "all creatures that were blocked by target Wall this
+/// turn"), or a recognized partner with no source or earlier-target antecedent ("one of
+/// those creatures" with no announced creature targets as its nearest antecedent).
 /// Representing it without the clause would widen it to every creature, or every creature
 /// as a legal target, so the caller fails the instruction closed. The populations are read
 /// from the clause's own instruction only, and from a broadcast grant's statics, against
@@ -28433,7 +28434,8 @@ mod instruction_drops_block_partner_tests {
 
     /// The guard's three outcomes for one mass population: a history clause its
     /// filter carries binds; the same clause over the bare population (a declined
-    /// "it") and a partner no subject word covers both fail closed.
+    /// "it") and a partner with no antecedent ("one of those creatures" under a
+    /// context that announced no creature targets) both fail closed.
     fn assert_guard_reads_population(population: fn(TargetFilter) -> Effect, verb: &str) {
         let bare = TargetFilter::Typed(TypedFilter::creature());
         let represented = format!("{verb} all creatures it blocked this turn.");
@@ -28681,11 +28683,12 @@ mod instruction_drops_block_partner_tests {
 
     /// CR 608.2c + CR 611.2c: a broadcast grant keeps its population in its statics'
     /// `affected`. Ride Down's bound partner ("that creature", the earlier target)
-    /// binds. Synthetic: an "each creature" grant over a partner no subject word
-    /// covers (an indefinite "a Zombie", or "one of those creatures") parses its
-    /// population bare, so it fails closed instead of granting trample to every
-    /// creature. No printed card has these shapes; Ride Down is the nearest printed
-    /// card.
+    /// binds. Synthetic: an "each creature" grant over a partner that names no
+    /// bound object (an indefinite "a Zombie", or "one of those creatures" in a
+    /// standalone parse with no announced creature targets as its antecedent)
+    /// parses its population bare, so it fails closed instead of granting trample
+    /// to every creature. No printed card has these shapes; Ride Down is the
+    /// nearest printed card.
     #[test]
     fn broadcast_grant_population_binds_or_fails_closed() {
         let ride_down = parse_effect_chain(
@@ -30035,18 +30038,38 @@ fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
 /// a ParentTarget referent is active and carrying forward (e.g. Code of Constraint's
 /// "tap that creature and it doesn't untap...").
 fn chain_has_prior_parent_target_carrier(clauses: &[ClauseIr]) -> bool {
-    let Some(prev) = clauses.last() else {
-        return false;
-    };
+    nearest_ungated_clause(clauses)
+        .is_some_and(|prev| effect_is_parent_target_carrier(&prev.parsed.effect))
+}
+
+/// CR 608.2c: the nearest clause, when no condition other than a "when you do",
+/// affirmative reflexive or casting gate separates it from the next instruction.
+fn nearest_ungated_clause(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+    let prev = clauses.last()?;
     if let Some(cond) = prev.condition.as_ref() {
         if !cond.has_when_you_do_marker()
             && !cond.is_affirmative_reflexive_gate()
             && !cond.is_casting_condition()
         {
-            return false;
+            return None;
         }
     }
-    effect_is_parent_target_carrier(&prev.parsed.effect)
+    Some(prev)
+}
+
+/// CR 608.2c + CR 701.26a/b: the nearest clause's mass tap/untap population, the
+/// antecedent of a following bare "it" affected object.
+fn chain_prior_mass_tap_selection(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    let prev = nearest_ungated_clause(clauses)?;
+    let Effect::SetTapState {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = &prev.parsed.effect
+    else {
+        return None;
+    };
+    Some(target.clone())
 }
 
 /// CR 611.2a + CR 400.7: An `Otherwise, return it ... and it's a <animation>` else
@@ -32269,6 +32292,46 @@ fn chain_prior_object_set(clauses: &[ClauseIr]) -> Option<TargetFilter> {
             )
         })
         .cloned()
+}
+
+/// CR 601.2c: whether `clause` itself announces one or more target slots and
+/// every one of them names a creature (`lower::target_filter_names_creature`).
+fn clause_announces_creature_targets(clause: &ClauseIr) -> bool {
+    matches!(
+        chain_declared_slot_registry(std::slice::from_ref(clause)),
+        DeclaredSlotRegistry::Known(entries)
+            if !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|entry| lower::target_filter_names_creature(&entry.filter))
+    )
+}
+
+/// CR 608.2c: "those creatures" takes the nearest antecedent; CR 601.2c: the
+/// antecedent is the set the earlier instruction announced as its targets.
+///
+/// The antecedent of a plural demonstrative ("one of those creatures") at the
+/// current chunk: `Some(ParentTarget)` when the nearest clause announces
+/// creature targets itself, or acts on the chain's plain tracked set right
+/// after a clause that did ("Up to two target creatures … Untap those
+/// creatures."). A chain with no clause yet (a nested delayed payload) takes the
+/// enclosing chunk's value; any other nearest clause is the nearer referent and
+/// yields `None`.
+fn chain_plural_target_antecedent(
+    clauses: &[ClauseIr],
+    enclosing: &Option<TargetFilter>,
+) -> Option<TargetFilter> {
+    let Some((nearest, earlier)) = clauses.split_last() else {
+        return enclosing.clone();
+    };
+    let names_announced_set = clause_announces_creature_targets(nearest)
+        || (matches!(
+            chain_prior_object_set(clauses),
+            Some(TargetFilter::TrackedSet { .. })
+        ) && earlier
+            .last()
+            .is_some_and(clause_announces_creature_targets));
+    names_announced_set.then_some(TargetFilter::ParentTarget)
 }
 
 /// CR 608.2c: a bare "they" names one player only when the declaring clause
@@ -48789,6 +48852,9 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
+    // CR 608.2c + CR 601.2c: the enclosing chunk's plural-demonstrative antecedent;
+    // a nested chain takes it while its own builder is empty, restored after the loop.
+    let outer_plural_demonstrative = ctx.plural_demonstrative_object_ref.take();
     // CR 608.2c: the clause count before the previous chunk's trailing-guarded
     // instruction was pushed, and whether the instruction settled before it
     // released its successor (see `settle_trailing_guard`).
@@ -48813,6 +48879,10 @@ fn parse_effect_chain_ir_body(
         // a stale antecedent for the next chunk.
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
+        // CR 608.2c + CR 601.2c: "those creatures" names the nearest announced
+        // creature-target set, reassigned per chunk like the slot registry.
+        ctx.plural_demonstrative_object_ref =
+            chain_plural_target_antecedent(builder.clauses(), &outer_plural_demonstrative);
         // CR 608.2c: only a root chunk with no earlier same-sentence target
         // declaration can open permission. A local or sentence-inherited X
         // definition can introduce such a target, even after its text is stripped.
@@ -51588,6 +51658,10 @@ fn parse_effect_chain_ir_body(
             demonstrative_object_ref: chunk_object_referent
                 .clone()
                 .or_else(|| ctx.demonstrative_object_ref.clone()),
+            // CR 608.2c + CR 601.2c: the chunk's plural-demonstrative antecedent,
+            // computed at the top of this iteration (the `..Default::default()`
+            // below would otherwise reset it).
+            plural_demonstrative_object_ref: ctx.plural_demonstrative_object_ref.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
             // body, not of an individual chunk, so all chunks inside a trigger
@@ -51725,6 +51799,13 @@ fn parse_effect_chain_ir_body(
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
             prior_player_declaration: bare_they_player_declaration(builder.clauses()),
             chain_prior_object_set: chain_prior_object_set(builder.clauses()),
+            // CR 608.2c: a source-counter gate or an "if you do" anchor is this
+            // chunk's own nearer antecedent, so the mass selection yields to it (as
+            // object_pronoun_ref does).
+            chain_prior_mass_tap_selection: (!binds_source_counter_pronoun
+                && if_you_do_anchor.is_none())
+            .then(|| chain_prior_mass_tap_selection(builder.clauses()))
+            .flatten(),
             declared_player_scope,
             clause_declared_group: None,
             // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
@@ -54532,6 +54613,8 @@ fn parse_effect_chain_ir_body(
     // declared-object-target fact can escape to its caller.
     ctx.chain_declared_object_target = outer_declared_object_target;
     ctx.chain_declared_slots = outer_declared_slots;
+    // CR 608.2c + CR 601.2c: pairs with the `outer_plural_demonstrative` take above.
+    ctx.plural_demonstrative_object_ref = outer_plural_demonstrative;
 
     settle_trailing_guard(
         builder.clauses_mut(),
@@ -58507,14 +58590,19 @@ mod change_targets_stack_object_tests {
 /// fixture these tests use to separate returning from continuing.
 #[cfg(test)]
 mod chain_declared_object_target_tests {
-    use super::{chain_declared_object_target, chain_prior_object_set};
+    use super::{
+        chain_declared_object_target, chain_plural_target_antecedent,
+        chain_prior_mass_tap_selection, chain_prior_object_set,
+    };
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseIrBuilder};
     use crate::types::ability::{
-        Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, Effect, EffectScope, MultiTargetSpec, PtValue, QuantityExpr,
+        TapStateChange, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::TrackedSetId;
+    use crate::types::phase::Phase;
 
     fn emit() -> ClauseDisposition {
         ClauseDisposition::Emit {
@@ -58905,6 +58993,337 @@ mod chain_declared_object_target_tests {
         let builder = ClauseIrBuilder::new("untap those creatures");
         assert_eq!(builder.clauses().len(), 0);
         assert_eq!(chain_prior_object_set(builder.clauses()), None);
+    }
+
+    /// "Up to two target creatures each get +0/+3 until end of turn": one
+    /// variable-count creature slot (Triton Tactics' first instruction).
+    fn push_up_to_two_creature_pump(builder: &mut ClauseIrBuilder) {
+        builder
+            .clause(
+                "up to two target creatures each get +0/+3 until end of turn",
+                parsed_clause(Effect::Pump {
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(3),
+                    target: creature_filter(),
+                }),
+                None,
+                emit(),
+            )
+            .multi_target(Some(MultiTargetSpec::up_to(QuantityExpr::Fixed {
+                value: 2,
+            })))
+            .push();
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        })
+    }
+
+    fn draw_a_card() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn mass_tap_state(state: TapStateChange) -> Effect {
+        Effect::SetTapState {
+            target: creature_filter(),
+            scope: EffectScope::All,
+            state,
+        }
+    }
+
+    /// CR 608.2c + CR 601.2c: `chain_plural_target_antecedent` names the announced
+    /// creature-target set only while it is the NEAREST object referent, and a
+    /// chain with no clause of its own takes the enclosing value. (a)/(b)/(c) are
+    /// the paired positives for every `None` leg on the same helper.
+    #[test]
+    fn chain_plural_target_antecedent_reads_only_the_nearest_referent() {
+        let parent = Some(TargetFilter::ParentTarget);
+
+        // (a) [Pump up to two target creatures, untap those creatures] → the
+        // announced set (Triton Tactics' shape).
+        let mut builder = ClauseIrBuilder::new(
+            "up to two target creatures each get +0/+3 until end of turn. untap those creatures",
+        );
+        push_up_to_two_creature_pump(&mut builder);
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            parent,
+            "the tracked-set clause right after the announcing clause keeps the set nearest",
+        );
+
+        // (b) [Pump] → the announcing clause itself is nearest.
+        let mut builder =
+            ClauseIrBuilder::new("up to two target creatures each get +0/+3 until end of turn");
+        push_up_to_two_creature_pump(&mut builder);
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            parent,
+        );
+
+        // (c) no clause yet, enclosing Some → the enclosing antecedent (a delayed
+        // payload's first chunk).
+        let builder = ClauseIrBuilder::new("tap each creature");
+        assert_eq!(builder.clauses().len(), 0);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &parent),
+            parent,
+        );
+
+        // (d) [Pump, untap all creatures you control] → None: the nearer mass
+        // operand is the nearer antecedent.
+        let mut builder = ClauseIrBuilder::new(
+            "up to two target creatures each get +0/+3 until end of turn. untap all creatures you control",
+        );
+        push_up_to_two_creature_pump(&mut builder);
+        builder
+            .clause(
+                "untap all creatures you control",
+                parsed_clause(mass_tap_state(TapStateChange::Untap)),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            None
+        );
+
+        // (e) [Pump, untap a filtered tracked set] → None: a narrowed subset is
+        // not the announced set.
+        let mut builder = ClauseIrBuilder::new(
+            "up to two target creatures each get +0/+3 until end of turn. untap the creatures revealed this way",
+        );
+        push_up_to_two_creature_pump(&mut builder);
+        builder
+            .clause(
+                "untap the creatures revealed this way",
+                parsed_clause(Effect::SetTapState {
+                    target: TargetFilter::TrackedSetFiltered {
+                        id: TrackedSetId(0),
+                        filter: Box::new(creature_filter()),
+                        caused_by: None,
+                    },
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            None
+        );
+
+        // (f) [gain control of target artifact, untap those creatures] → None:
+        // the announced antecedent is not creatures.
+        let mut builder =
+            ClauseIrBuilder::new("gain control of target artifact. untap those creatures");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            None
+        );
+
+        // (g) [Pump, untap those creatures, draw a card] → None: a nearer clause.
+        let mut builder = ClauseIrBuilder::new(
+            "up to two target creatures each get +0/+3 until end of turn. untap those creatures. draw a card",
+        );
+        push_up_to_two_creature_pump(&mut builder);
+        builder
+            .clause(
+                "untap those creatures",
+                parsed_clause(untap_those_creatures()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause("draw a card", parsed_clause(draw_a_card()), None, emit())
+            .push();
+        assert_eq!(builder.clauses().len(), 3);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            None
+        );
+
+        // (h) [draw a card] with enclosing Some → None: the chain's own nearer
+        // referent wins over the enclosing one.
+        let mut builder = ClauseIrBuilder::new("draw a card");
+        builder
+            .clause("draw a card", parsed_clause(draw_a_card()), None, emit())
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &parent),
+            None
+        );
+
+        // (i) no clause yet, enclosing None → None (a standalone parse).
+        let builder = ClauseIrBuilder::new("tap each creature");
+        assert_eq!(
+            chain_plural_target_antecedent(builder.clauses(), &None),
+            None
+        );
+    }
+
+    /// CR 608.2c + CR 701.26a/b: `chain_prior_mass_tap_selection` reads only the
+    /// NEAREST clause, only an unconditioned or affirmatively/casting-gated one,
+    /// and only a mass `SetTapState`. (a) is the paired positive for every `None`
+    /// leg on the same helper.
+    #[test]
+    fn chain_prior_mass_tap_selection_reads_only_the_nearest_mass_tap() {
+        let population = creature_filter();
+
+        // (a) [tap each creature] → its population filter.
+        let mut builder = ClauseIrBuilder::new("tap each creature");
+        builder
+            .clause(
+                "tap each creature",
+                parsed_clause(mass_tap_state(TapStateChange::Tap)),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(
+            chain_prior_mass_tap_selection(builder.clauses()),
+            Some(population.clone()),
+        );
+
+        // (b) [untap each creature] → its population filter.
+        let mut builder = ClauseIrBuilder::new("untap each creature");
+        builder
+            .clause(
+                "untap each creature",
+                parsed_clause(mass_tap_state(TapStateChange::Untap)),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(
+            chain_prior_mass_tap_selection(builder.clauses()),
+            Some(population.clone()),
+        );
+
+        // (c) a casting-condition gate is allowed, as in
+        // `chain_has_prior_parent_target_carrier`.
+        let mut builder = ClauseIrBuilder::new("tap each creature");
+        builder
+            .clause(
+                "tap each creature",
+                parsed_clause(mass_tap_state(TapStateChange::Tap)),
+                None,
+                emit(),
+            )
+            .condition(Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }))
+            .push();
+        assert_eq!(
+            chain_prior_mass_tap_selection(builder.clauses()),
+            Some(population.clone()),
+        );
+
+        // (d) no clause yet → None.
+        let builder = ClauseIrBuilder::new("tap each creature");
+        assert_eq!(chain_prior_mass_tap_selection(builder.clauses()), None);
+
+        // (e) [tap that creature] → None: a carrier of a chosen referent, not a
+        // selection (Code of Constraint keeps its own rung).
+        let mut builder = ClauseIrBuilder::new("tap that creature");
+        builder
+            .clause(
+                "tap that creature",
+                parsed_clause(Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(chain_prior_mass_tap_selection(builder.clauses()), None);
+
+        // (f) [tap each creature, draw a card] → None: a nearer clause.
+        let mut builder = ClauseIrBuilder::new("tap each creature. draw a card");
+        builder
+            .clause(
+                "tap each creature",
+                parsed_clause(mass_tap_state(TapStateChange::Tap)),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause("draw a card", parsed_clause(draw_a_card()), None, emit())
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(chain_prior_mass_tap_selection(builder.clauses()), None);
+
+        // (g) a non-reflexive state gate → None.
+        let mut builder = ClauseIrBuilder::new("tap each creature");
+        builder
+            .clause(
+                "tap each creature",
+                parsed_clause(mass_tap_state(TapStateChange::Tap)),
+                None,
+                emit(),
+            )
+            .condition(Some(AbilityCondition::IsMonarch))
+            .push();
+        assert_eq!(chain_prior_mass_tap_selection(builder.clauses()), None);
+
+        // (h) [put a +1/+1 counter on each creature] → None: a mass effect whose
+        // selection the runtime does not snapshot for a following grant.
+        let mut builder = ClauseIrBuilder::new("put a +1/+1 counter on each creature");
+        builder
+            .clause(
+                "put a +1/+1 counter on each creature",
+                parsed_clause(Effect::PutCounterAll {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: creature_filter(),
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(chain_prior_mass_tap_selection(builder.clauses()), None);
     }
 }
 
