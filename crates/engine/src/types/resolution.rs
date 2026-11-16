@@ -11128,6 +11128,41 @@ mod tests {
     }
 
     #[test]
+    fn v1_logical_zone_owners_restore_missing_prospective_entrants() {
+        for (key, batch) in [
+            ("pending_change_zone_iteration", false),
+            ("pending_batch_deliveries", true),
+            ("pending_mill_deliveries", true),
+        ] {
+            let current = logical_zone_owner_wire(batch);
+            let data = &current["resolution_frames"]["frames"][0]["data"];
+            let mut owner = if batch { data } else { &data["pending"] }.clone();
+            assert!(owner["logical_zone_change_group"]
+                .as_object_mut()
+                .expect("the legacy owner carries a logical-zone group")
+                .remove("prospective_entrants")
+                .is_some());
+
+            let mut state = GameState::new_two_player(55);
+            state.next_logical_zone_change_group_id = 2;
+            let mut wire = v1_wire_value(state);
+            assert_eq!(
+                wire["resolution_state_version"],
+                Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION)
+            );
+            wire[key] = owner;
+            let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap_or_else(|error| panic!("v1 {key}: {error}"));
+            let mut rewritten = serde_json::to_value(restored).expect("restored owner writes");
+            assert_eq!(
+                logical_zone_owner_group(&mut rewritten, batch)["prospective_entrants"],
+                serde_json::json!([]),
+                "v1 {key}: missing entrants retain their empty-list meaning"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_logical_zone_owners_restore_missing_prospective_entrants() {
         for batch in [false, true] {
             for version in [11, 14] {
