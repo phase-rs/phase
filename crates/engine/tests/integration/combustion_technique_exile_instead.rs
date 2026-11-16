@@ -45,6 +45,12 @@ fn board(target_toughness: i32, lessons: usize) -> Board {
             .add_spell_to_graveyard(P0, &format!("Lesson {i}"), true)
             .with_subtypes(vec!["Lesson"]);
     }
+    // Noise that a wrong count would pick up: a non-Lesson card in P0's graveyard and a
+    // Lesson in the OPPONENT's graveyard. Only P0's Lessons count ("your graveyard").
+    scenario.add_spell_to_graveyard(P0, "Not A Lesson", true);
+    scenario
+        .add_spell_to_graveyard(P1, "Their Lesson", true)
+        .with_subtypes(vec!["Lesson"]);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Combustion Technique", true, COMBUSTION_TECHNIQUE)
         .id();
@@ -96,6 +102,11 @@ fn nonlethal_damage_leaves_the_creature_on_the_battlefield() {
     let mut b = board(5, 0);
     let outcome = b.runner.cast(b.spell).target_object(b.target).resolve();
     assert_eq!(outcome.zone_of(b.target), Zone::Battlefield);
+    assert_eq!(
+        b.runner.state().objects[&b.target].damage_marked,
+        2,
+        "CR 120.3e: the spell dealt exactly 2 damage (2 + 0 Lessons)"
+    );
 }
 
 /// The replacement is about THAT creature only. A different creature dying later

@@ -3,10 +3,11 @@
 //! each face as exported in card-data.json (checked against Scryfall).
 //!
 //! Clause shape: "If that creature would die this turn, exile it instead." (CR 614.1a +
-//! CR 614.6), a replacement scoped to the one damaged/targeted creature. Each test: the
-//! target (toughness == damage) is exiled instead of dying, and a different creature
-//! killed afterwards by an unrelated Shock reaches the graveyard (the replacement is
-//! scoped, not board-wide).
+//! CR 614.6), a replacement scoped to the one damaged/targeted creature. Each test: a target
+//! the spell kills (damage, or -5/-5 for Ob Nixilis's Cruelty) is exiled instead of dying.
+//! The shared `single_target` harness also checks that a different creature killed
+//! afterwards by an unrelated Shock reaches the graveyard (the replacement is scoped, not
+//! board-wide); Bouncer's Beatdown and the both-modes test have their own setups.
 //!
 //! Deliberately NOT covered: "If a creature dealt damage this way would die ..." faces
 //! (Pillar of Flame, Annihilating Fire, ...). Their rider is not gated on damage having
@@ -150,10 +151,51 @@ fn bouncers_beatdown() {
     scenario.add_creature(P0, "Small", 1, 1);
     scenario.add_creature(P0, "Big", 3, 3);
     let target = scenario.add_creature(P1, "Target Bear", 3, 3).id();
+    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Bouncer's Beatdown", true, BOUNCERS_BEATDOWN)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
         .id();
     let mut runner = scenario.build();
     let outcome = runner.cast(spell).target_object(target).resolve();
     assert_eq!(outcome.zone_of(target), Zone::Exile);
+    let after = runner.cast(shock).target_object(bystander).resolve();
+    assert_eq!(
+        after.zone_of(bystander),
+        Zone::Graveyard,
+        "the rider is scoped to the damaged creature"
+    );
+}
+
+const BRUTAL_EXPULSION: &str = "Devoid (This card has no color.)\nChoose one or both —\n• Return target spell or creature to its owner's hand.\n• Brutal Expulsion deals 2 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.";
+
+/// Both modes chosen: the rider must bind to the DAMAGED creature (mode 2's target), not to
+/// the creature bounced by mode 1.
+#[test]
+fn brutal_expulsion_both_modes_binds_rider_to_the_damaged_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bounced = scenario.add_creature(P1, "Bounced Bear", 2, 2).id();
+    let damaged = scenario.add_creature(P1, "Damaged Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brutal Expulsion", true, BRUTAL_EXPULSION)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_objects(&[bounced, damaged])
+        .resolve();
+    assert_eq!(
+        outcome.zone_of(bounced),
+        Zone::Hand,
+        "mode 1 bounces its target"
+    );
+    assert_eq!(
+        outcome.zone_of(damaged),
+        Zone::Exile,
+        "the rider binds to the creature dealt lethal damage by mode 2"
+    );
 }
