@@ -1992,14 +1992,19 @@ fn drivnod_doubles_dies_triggers() {
     );
 }
 
-/// CR 603.2d: Wayta (ControlledCreatureDealtDamage cause) doubles only
+/// CR 603.2d: Wayta (ControlledCreature { DealtDamage } cause) doubles only
 /// triggers caused by a creature you control being dealt damage.
 #[test]
 fn wayta_doubles_damage_caused_triggers() {
     use crate::types::statics::TriggerCause;
 
     let (mut state, observer) = setup_with_observer(TriggerMode::DamageDone);
-    let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+    let _wayta = install_doubler(
+        &mut state,
+        TriggerCause::ControlledCreature {
+            event: crate::types::statics::ControlledCreatureEvent::DealtDamage,
+        },
+    );
     let damaged = create_object(
         &mut state,
         CardId(21),
@@ -2057,7 +2062,12 @@ fn wayta_does_not_double_unrelated_triggers() {
         .trigger_definitions[0]
         .definition
         .destination = Some(Zone::Battlefield);
-    let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+    let _wayta = install_doubler(
+        &mut state,
+        TriggerCause::ControlledCreature {
+            event: crate::types::statics::ControlledCreatureEvent::DealtDamage,
+        },
+    );
 
     let new_etb = create_object(
         &mut state,

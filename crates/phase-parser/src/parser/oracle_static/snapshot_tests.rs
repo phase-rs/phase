@@ -686,7 +686,9 @@ fn parses_wayta_damage_caused_doubler() {
     assert_eq!(
         def.mode,
         StaticMode::DoubleTriggers {
-            cause: TriggerCause::ControlledCreatureDealtDamage
+            cause: TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            }
         }
     );
     let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
@@ -908,20 +910,30 @@ fn gandalf_the_white_doubler_static() {
     assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
-/// CR 603.2d + CR 115.1: Valiant Emberkin's cause is a creature you control
-/// becoming the target of a spell or ability, not `Any`.
+/// CR 603.2d: a creature you control becoming the target (Valiant Emberkin,
+/// CR 115.1) or dealing combat damage to a player (Felix Five-Boots, CR 510.2)
+/// is a typed cause, not `Any`.
 #[test]
-fn valiant_emberkin_becomes_target_doubler_cause() {
-    let def = parse_static_line(
-        "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
-    )
-    .expect("expected DoubleTriggers static for Valiant Emberkin");
-    assert_eq!(
-        def.mode,
-        StaticMode::DoubleTriggers {
-            cause: TriggerCause::ControlledCreatureBecameTarget
-        }
-    );
+fn controlled_creature_event_doubler_causes() {
+    for (text, event) in [
+        (
+            "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            ControlledCreatureEvent::BecameTarget,
+        ),
+        (
+            "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            ControlledCreatureEvent::DealsCombatDamageToPlayer,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::ControlledCreature { event }
+            },
+            "{text}"
+        );
+    }
 }
 
 /// CR 603.2d: "another permanent entering" (The Fish Brewer) excludes the

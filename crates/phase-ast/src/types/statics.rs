@@ -679,6 +679,20 @@ pub enum ZoneChangeQualifier {
     Supertype(super::card_type::Supertype),
 }
 
+/// CR 603.2d: the event of a creature you control that causes a trigger, for
+/// `TriggerCause::ControlledCreature`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ControlledCreatureEvent {
+    /// CR 120.3: the creature is dealt damage (Wayta, Trainer Prodigy).
+    DealtDamage,
+    /// CR 115.1: the creature becomes the target of a spell or ability
+    /// (Valiant Emberkin).
+    BecameTarget,
+    /// CR 510.2 + CR 120.1: the creature deals combat damage to a player
+    /// (Felix Five-Boots).
+    DealsCombatDamageToPlayer,
+}
+
 /// CR 603.2d: which object a trigger doubler's cause event may be about,
 /// relative to the doubler. "If another permanent entering the battlefield
 /// causes ..." (The Fish Brewer) excludes the doubler's own entering; the
@@ -724,16 +738,11 @@ pub enum TriggerCause {
     /// to `Graveyard` for an object whose snapshot included `Creature` in
     /// its core types.
     CreatureDying,
-    /// CR 603.2d + CR 120.3: Trigger was caused by a creature you control
-    /// being dealt damage (Wayta, Trainer Prodigy-class). Matches
-    /// `GameEvent::DamageDealt` whose target is a creature controlled by the
-    /// doubler's controller.
-    ControlledCreatureDealtDamage,
-    /// CR 603.2d + CR 115.1: Trigger was caused by a creature you control
-    /// becoming the target of a spell or ability (Valiant Emberkin-class).
-    /// Matches `GameEvent::BecomesTarget` whose target is a creature
-    /// controlled by the doubler's controller.
-    ControlledCreatureBecameTarget,
+    /// CR 603.2d: Trigger was caused by an event of a creature the doubler's
+    /// controller controls ("a creature you control being dealt damage",
+    /// "... becoming the target of a spell or ability", "... dealing combat
+    /// damage to a player").
+    ControlledCreature { event: ControlledCreatureEvent },
     /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
     /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
     /// casting or copying an instant or sorcery spell causes ..."). Matches
@@ -786,11 +795,8 @@ impl fmt::Display for TriggerCause {
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
-            TriggerCause::ControlledCreatureDealtDamage => {
-                write!(f, "ControlledCreatureDealtDamage")
-            }
-            TriggerCause::ControlledCreatureBecameTarget => {
-                write!(f, "ControlledCreatureBecameTarget")
+            TriggerCause::ControlledCreature { event } => {
+                write!(f, "ControlledCreature({event:?})")
             }
             TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
                 let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();

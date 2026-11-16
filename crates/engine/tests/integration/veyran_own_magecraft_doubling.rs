@@ -17,13 +17,15 @@
 //! Signals: a creature's power counts its resolved pump/counter instances;
 //! Witherbloom Apprentice's life gain counts its resolved Magecraft instances.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::{Keyword, WardCost};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -43,6 +45,10 @@ const INSPIRATION: &str = "Target player draws two cards.";
 const TWINCAST: &str =
     "Copy target instant or sorcery spell. You may choose new targets for the copy.";
 const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+const DESOLATION_TWIN: &str =
+    "When you cast this spell, create a 10/10 colorless Eldrazi creature token.";
+const FELIX_FIVE_BOOTS: &str = "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+const MURDER: &str = "Destroy target creature.";
 
 fn scenario() -> GameScenario {
     let mut s = GameScenario::new();
@@ -351,32 +357,29 @@ fn echoes_of_eternity_does_not_double_its_own_trigger() {
 }
 
 /// CR 603.2d + CR 112.1: the stack-scoped "colorless spell you control"
-/// disjunct still doubles a colorless spell's own cast trigger. No printed
-/// colorless instant or sorcery has a cast trigger; the nearest printed card,
-/// Kozilek, Butcher of Truth, is a legendary creature whose Echoes copy would
-/// also enter and invoke the legend rule, so a minimal colorless instant
-/// stands in. The copy Echoes makes is not cast (CR 707.10), so the only life
-/// gained is the doubled cast trigger: +2.
+/// disjunct still doubles a colorless spell's own cast trigger. Desolation
+/// Twin's cast trigger triggers twice, so two Eldrazi tokens; the copy Echoes
+/// makes is not cast (CR 707.10) and makes none.
 #[test]
 fn echoes_of_eternity_doubles_a_colorless_spells_cast_trigger() {
     let mut s = scenario();
     add_echoes(&mut s);
-    let spell = add_instant(
-        &mut s,
-        "Colorless Study",
-        "When you cast this spell, you gain 1 life.\nDraw a card.",
-    );
+    let twin = s
+        .add_creature_to_hand_from_oracle(P0, "Desolation Twin", 10, 10, DESOLATION_TWIN)
+        .with_subtypes(vec!["Eldrazi"])
+        .id();
     let mut runner = s.build();
-    let before = life(&runner);
 
-    cast(&mut runner, spell);
+    cast(&mut runner, twin);
     drive(&mut runner, true);
 
-    assert_eq!(
-        life(&runner) - before,
-        2,
-        "the spell's cast trigger is doubled"
-    );
+    let tokens = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].name == "Eldrazi")
+        .count();
+    assert_eq!(tokens, 2, "the spell's cast trigger is doubled");
 }
 
 /// CR 603.2d: Valiant Emberkin doubles only triggers that a creature you
@@ -467,4 +470,35 @@ fn the_fish_brewer_does_not_double_its_own_enters_trigger() {
         .count();
     assert_eq!(runner.state().objects[&brewer].zone, Zone::Battlefield);
     assert_eq!(fish, 1, "one enters trigger, one Fish");
+}
+
+/// CR 603.2d + CR 702.21a: Felix Five-Boots doubles only triggers that a
+/// creature you control dealing combat damage to a player causes. An
+/// opponent's spell targeting Felix triggers its ward once. Revert-to-red:
+/// with the cause parsed as `Any`, Felix doubles its own ward (two triggers).
+#[test]
+fn felix_five_boots_does_not_double_its_own_ward() {
+    let mut s = scenario();
+    let felix = s
+        .add_creature_from_oracle(P1, "Felix Five-Boots", 5, 4, FELIX_FIVE_BOOTS)
+        .with_subtypes(vec!["Ooze", "Rogue"])
+        .with_keyword(Keyword::Menace)
+        .with_keyword(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
+        .id();
+    let murder = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    let commit = runner.cast(murder).target_object(felix).commit();
+    let ward_triggers = commit
+        .state()
+        .stack
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == felix)
+        })
+        .count();
+
+    assert_eq!(ward_triggers, 1, "Felix's ward triggers once");
 }

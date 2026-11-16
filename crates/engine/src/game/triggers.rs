@@ -42,7 +42,8 @@ use crate::types::resolved_commands::{
     ResolvedTriggerCollectionReplayInvariantError,
 };
 use crate::types::statics::{
-    CausingObject, StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+    CausingObject, ControlledCreatureEvent, StaticMode, SuppressedTriggerEvent, TriggerCause,
+    ZoneChangeQualifier,
 };
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
@@ -14600,8 +14601,7 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
         TriggerCause::EntersBattlefield { .. }
         | TriggerCause::CreatureAttacking
         | TriggerCause::CreatureDying
-        | TriggerCause::ControlledCreatureDealtDamage
-        | TriggerCause::ControlledCreatureBecameTarget
+        | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
         | TriggerCause::BattlefieldTransition { .. } => false,
@@ -14622,10 +14622,9 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
 /// - `TriggerCause::CreatureAttacking` matches `AttackersDeclared` events.
 ///   CR 508.1a: every object declared as an attacker must be a creature,
 ///   so no further type check is required.
-/// - `TriggerCause::ControlledCreatureDealtDamage` matches `DamageDealt`
-///   events whose target is a creature controlled by `doubler_controller`.
-/// - `TriggerCause::ControlledCreatureBecameTarget` matches `BecomesTarget`
-///   events whose target is a creature controlled by `doubler_controller`.
+/// - `TriggerCause::ControlledCreature { event }` matches the event `event`
+///   names (`DamageDealt` to, `BecomesTarget` of, or combat damage to a
+///   player by) a creature controlled by `doubler_controller`.
 fn trigger_cause_matches(
     state: &GameState,
     cause: &TriggerCause,
@@ -14687,34 +14686,59 @@ fn trigger_cause_matches(
             };
             record.core_types.contains(&CoreType::Creature)
         }
-        TriggerCause::ControlledCreatureDealtDamage => {
-            // CR 603.2d: Wayta doubles triggers caused by a creature you control being dealt damage.
-            let Some(GameEvent::DamageDealt { target, .. }) = event else {
-                return false;
+        TriggerCause::ControlledCreature {
+            event: creature_event,
+        } => {
+            let controlled_creature = |id: &ObjectId| {
+                state.objects.get(id).is_some_and(|obj| {
+                    obj.controller == doubler_controller
+                        && obj.card_types.core_types.contains(&CoreType::Creature)
+                })
             };
-            let TargetRef::Object(target_id) = target else {
-                return false;
-            };
-            let Some(obj) = state.objects.get(target_id) else {
-                return false;
-            };
-            obj.controller == doubler_controller
-                && obj.card_types.core_types.contains(&CoreType::Creature)
-        }
-        TriggerCause::ControlledCreatureBecameTarget => {
-            // CR 603.2d + CR 115.1: Valiant Emberkin doubles triggers caused by
-            // a creature you control becoming the target of a spell or ability.
-            let Some(GameEvent::BecomesTarget {
-                target: TargetRef::Object(target_id),
-                ..
-            }) = event
-            else {
-                return false;
-            };
-            state.objects.get(target_id).is_some_and(|obj| {
-                obj.controller == doubler_controller
-                    && obj.card_types.core_types.contains(&CoreType::Creature)
-            })
+            match (creature_event, event) {
+                // CR 603.2d + CR 120.3: Wayta — a creature you control being
+                // dealt damage.
+                (
+                    ControlledCreatureEvent::DealtDamage,
+                    Some(GameEvent::DamageDealt {
+                        target: TargetRef::Object(target_id),
+                        ..
+                    }),
+                ) => controlled_creature(target_id),
+                // CR 603.2d + CR 115.1: Valiant Emberkin — a creature you
+                // control becoming the target of a spell or ability.
+                (
+                    ControlledCreatureEvent::BecameTarget,
+                    Some(GameEvent::BecomesTarget {
+                        target: TargetRef::Object(target_id),
+                        ..
+                    }),
+                ) => controlled_creature(target_id),
+                // CR 603.2d + CR 510.2: Felix Five-Boots — a creature you
+                // control dealing combat damage to a player, seen per source
+                // or as the step's per-player batch.
+                (
+                    ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    Some(GameEvent::DamageDealt {
+                        source_id,
+                        target: TargetRef::Player(_),
+                        is_combat: true,
+                        ..
+                    }),
+                ) => controlled_creature(source_id),
+                (
+                    ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    Some(GameEvent::CombatDamageDealtToPlayer { source_amounts, .. }),
+                ) => source_amounts
+                    .iter()
+                    .any(|(source_id, _)| controlled_creature(source_id)),
+                (
+                    ControlledCreatureEvent::DealtDamage
+                    | ControlledCreatureEvent::BecameTarget
+                    | ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    _,
+                ) => false,
+            }
         }
         TriggerCause::RoomEntered => {
             // CR 309.4c: Room abilities of dungeons you own trigger an
@@ -22071,8 +22095,15 @@ pub mod tests {
             },
             TriggerCause::CreatureAttacking,
             TriggerCause::CreatureDying,
-            TriggerCause::ControlledCreatureDealtDamage,
-            TriggerCause::ControlledCreatureBecameTarget,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            },
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::BecameTarget,
+            },
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            },
             TriggerCause::ControllerCastOrCopiedSpell {
                 core_types: vec![CoreType::Instant],
             },

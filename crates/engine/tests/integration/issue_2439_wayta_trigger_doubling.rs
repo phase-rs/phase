@@ -46,7 +46,9 @@ fn install_wayta_doubler(state: &mut GameState) -> engine::types::identifiers::O
     assert_eq!(
         mode,
         StaticMode::DoubleTriggers {
-            cause: TriggerCause::ControlledCreatureDealtDamage
+            cause: TriggerCause::ControlledCreature {
+                event: engine::types::statics::ControlledCreatureEvent::DealtDamage,
+            }
         },
         "Wayta must parse as damage-caused trigger doubling (#2439)"
     );

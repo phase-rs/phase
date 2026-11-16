@@ -3920,7 +3920,9 @@ pub(crate) fn parse_static_line_inner(
     //
     // Cause classification by phrasing:
     // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
-    //   Prodigy (ControlledCreatureDealtDamage).
+    //   Prodigy (ControlledCreature { DealtDamage }); "becoming the target of"
+    //   — Valiant Emberkin (BecameTarget); "dealing combat damage to a player
+    //   causes" — Felix Five-Boots (DealsCombatDamageToPlayer).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
@@ -3966,11 +3968,24 @@ pub(crate) fn parse_static_line_inner(
         } else if nom_primitives::scan_contains(tp.lower, "becoming the target of") {
             // CR 603.2d + CR 115.1: "a creature you control becoming the target
             // of a spell or ability causes" (Valiant Emberkin).
-            TriggerCause::ControlledCreatureBecameTarget
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::BecameTarget,
+            }
+        } else if nom_primitives::scan_contains(
+            tp.lower,
+            "dealing combat damage to a player causes",
+        ) {
+            // CR 603.2d + CR 510.2: "a creature you control dealing combat
+            // damage to a player causes" (Felix Five-Boots).
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
-            TriggerCause::ControlledCreatureDealtDamage
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
@@ -4003,7 +4018,10 @@ pub(crate) fn parse_static_line_inner(
             // Empty core_types (e.g. "a permanent entering") means any type.
             // CR 603.2d: "another permanent entering" (The Fish Brewer) is not
             // caused by the doubler's own entering.
-            let entrant = if nom_primitives::scan_contains(tp.lower, "if another ") {
+            let entrant = if tag::<_, _, OracleError<'_>>("if another ")
+                .parse(tp.lower)
+                .is_ok()
+            {
                 CausingObject::OtherThanDoubler
             } else {
                 CausingObject::Any
