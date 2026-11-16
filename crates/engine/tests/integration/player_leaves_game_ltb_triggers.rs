@@ -2586,3 +2586,64 @@ fn a_departed_suppressor_still_applies_to_the_entry_completed_before_its_owner_l
         0
     );
 }
+
+/// CR 704.3 + CR 603.3b + CR 603.10a: a player who loses at the state-based
+/// check before a step's first batch takes their permanents with them, and
+/// what that departure triggered joins the step's own batch. P1 draws from an
+/// empty library in their draw step and loses at the check (CR 704.5b). P0's
+/// Howling Mine ("At the beginning of each player's draw step, ...", CR 500.6)
+/// and P0's Extractor Demon, which sees P1's Grizzly Bears leave the
+/// battlefield, wait together, so P0 orders both in one prompt.
+///
+/// REVERT-FAILING: without the step check stamping the departure's queued
+/// triggers into the step's batch, the Mine's trigger is put on the stack
+/// alone and the Demon's after it, with no ordering prompt.
+#[test]
+fn a_departure_at_the_step_check_joins_the_steps_trigger_batch() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Top One", "Top Two", "Top Three"]);
+    scenario.with_library_top(P2, &["Top One", "Top Two", "Top Three"]);
+    let mine = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Howling Mine",
+            "At the beginning of each player's draw step, if this artifact is untapped, \
+             that player draws an additional card.",
+        )
+        .id();
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Extractor Demon", 5, 5, EXTRACTOR_DEMON_ORACLE)
+        .id();
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    let mut runner = scenario.build();
+    assert!(runner.state().players[1].library.is_empty());
+
+    for _ in 0..64 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            ref other => panic!("unexpected prompt before P1's draw: {other:?}"),
+        };
+        runner.act(action).expect("advance to P1's draw step");
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(runner.state().phase, Phase::Draw);
+
+    let WaitingFor::OrderTriggers { player, .. } = &runner.state().waiting_for else {
+        panic!(
+            "CR 603.3b: both of P0's abilities wait in one batch, so P0 orders them; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    drive_trigger_prompts(&mut runner);
+    assert_eq!(triggers_from(&runner, mine), 1);
+    assert_eq!(triggers_from(&runner, demon), 1);
+}
