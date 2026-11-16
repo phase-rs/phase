@@ -383,29 +383,29 @@ impl IdNames for ActionIds<'_> {
         if let Some(target) = engine_target(value) {
             return Some(self.named(target));
         }
-        match (self.field_ids(field)?, value) {
-            (FieldIds::ObjectAmounts, Value::Array(pairs)) => self.object_amounts(pairs),
-            (FieldIds::Objects, Value::Number(number)) => {
-                Some(self.named(TargetRef::Object(ObjectId(number.as_u64()?))))
-            }
-            (FieldIds::Players, Value::Number(number)) => {
-                let player = u8::try_from(number.as_u64()?).ok()?;
+        // Matched on the field's kind alone, so a new kind cannot compile
+        // without its arm. A value of another shape (a list, an absent
+        // optional id, a nested value) returns `None` and the walk renders it:
+        // a list's elements meet this field again, and an object's members are
+        // named under their own keys.
+        match self.field_ids(field)? {
+            FieldIds::ObjectAmounts => self.object_amounts(value.as_array()?),
+            FieldIds::Objects => Some(self.named(TargetRef::Object(ObjectId(value.as_u64()?)))),
+            FieldIds::Players => {
+                let player = u8::try_from(value.as_u64()?).ok()?;
                 Some(self.named(TargetRef::Player(PlayerId(player))))
             }
-            (FieldIds::VoteCandidates, Value::Number(number)) => {
+            FieldIds::VoteCandidates => {
                 let WaitingFor::VoteChoice {
                     candidate_objects, ..
                 } = &self.state.waiting_for
                 else {
                     return None;
                 };
-                let index = usize::try_from(number.as_u64()?).ok()?;
+                let index = usize::try_from(value.as_u64()?).ok()?;
                 let candidate = *candidate_objects.get(index)?;
                 Some(self.named(TargetRef::Object(candidate)))
             }
-            // A list, an absent optional id, or a nested value: the walk goes
-            // into it, and each number in it meets this field again.
-            _ => None,
         }
     }
 }
