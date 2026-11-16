@@ -14108,9 +14108,8 @@ pub enum QuantityRef {
     /// submitted starting deck (library + command-zone decklist cards,
     /// single-counted), latched into `Player::starting_deck_size` at deck
     /// load. Read by Whtz, the Bibliophile's activation discount ("if you had
-    /// 200 or more cards in your starting deck") and the Nylea comparative
-    /// ("more cards in your library than your starting deck"). Past-tense
-    /// "had" is deliberate: the latch never changes mid-game.
+    /// 200 or more cards in your starting deck"). Past-tense "had" is
+    /// deliberate: the latch never changes mid-game.
     StartingDeckSize {
         #[serde(
             default = "player_scope_controller",

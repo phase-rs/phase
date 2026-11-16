@@ -1820,7 +1820,7 @@ fn no_other_command_zone_format_admits_a_card_this_format_now_admits() {
     }
 }
 
-/// V3 (Whtz guard row): without a `no_maximum_deck_size` marker the exact
+/// V3 (Whtz guard row): without a `deck_size_override` marker the exact
 /// CR 903.5a rule holds — an unmarked commander with 101 cards fails on both
 /// paths. The marker-bearing Whtz/Covert lists live in the deck-validation
 /// unit tests (the shared export carries no marker face); this row pins the

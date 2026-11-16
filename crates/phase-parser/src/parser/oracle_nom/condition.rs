@@ -4345,45 +4345,6 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
-    // CR 103.2a: "you have more cards in your library than your starting
-    // deck" (the Nylea comparative) — strict library-size-over-latched-start
-    // gate: live `ZoneCardCount` library size GT the `Player::starting_deck_size`
-    // snapshot. Only the library noun binds; a graveyard comparative ("more
-    // cards in your graveyard than your starting deck") MUST fail loud —
-    // the graveyard size is a different count and must never alias the latch.
-    // Typed decomposition: the zone noun routes through the `parse_zone_word`
-    // authority with a `peek_zone_boundary` guard and an explicit Library-only
-    // gate, so non-library zones fall through to later arms (loud failure).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more cards in your ").parse(rest) {
-        if let Ok((rest, zone)) = parse_zone_word(rest) {
-            if peek_zone_boundary(rest).is_ok() && matches!(zone, Zone::Library) {
-                if let Ok((rest, _)) =
-                    tag::<_, _, OracleError<'_>>(" than your starting deck").parse(rest)
-                {
-                    return Ok((
-                        rest,
-                        StaticCondition::QuantityComparison {
-                            lhs: QuantityExpr::Ref {
-                                qty: QuantityRef::ZoneCardCount {
-                                    zone: ZoneRef::Library,
-                                    card_types: Vec::new(),
-                                    filter: None,
-                                    scope: CountScope::Controller,
-                                },
-                            },
-                            comparator: Comparator::GT,
-                            rhs: QuantityExpr::Ref {
-                                qty: QuantityRef::StartingDeckSize {
-                                    player: PlayerScope::Controller,
-                                },
-                            },
-                        },
-                    ));
-                }
-            }
-        }
-    }
-
     // "you have exactly N life" → LifeTotal EQ N
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
         let (rest, n) = parse_number(rest)?;
@@ -13181,7 +13142,7 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,
+        CardTypeSetSource, ControllerRef, CountScope, Effect, PtStat, PtValueScope, RoundingMode,
         TargetFilter, TriggerCondition, TypeFilter, TypedFilter, UnlessPayScaling, ZoneRef,
     };
     use crate::types::card_type::Supertype;
@@ -16909,39 +16870,88 @@ mod tests {
     }
 
     #[test]
-    fn nylea_library_vs_starting_deck_comparative_parses_strict_gt() {
-        // CR 103.2a: "you have more cards in your library than your starting
-        // deck" — live library size strictly greater than the latched
-        // starting size. The graveyard variant MUST NOT bind: the graveyard
-        // size is a different count and must fail loud rather than alias the
-        // latch.
-        let (rest, condition) =
+    fn removed_library_vs_starting_deck_comparative_fails_loud() {
+        // CR 103.2a: the removed "you have more cards in your <zone> than
+        // your starting deck" arm parsed nothing in the corpus — no printed
+        // card uses that wording (Nylea's Oracle prints the existential
+        // "there are" shape, which never routed here). Both zone variants
+        // must fail loud rather than bind the latch. Reach-guard: the kept
+        // `whtz_had_starting_deck_count_parses_to_latched_count_ge` test
+        // stays green in the same run, proving the failure is the deletion
+        // and not a broken condition pipeline.
+        assert!(
             parse_inner_condition("you have more cards in your library than your starting deck")
-                .expect("nylea comparative must parse");
-        assert_eq!(rest, "");
-        assert_eq!(
-            condition,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::ZoneCardCount {
-                        zone: ZoneRef::Library,
-                        card_types: Vec::new(),
-                        filter: None,
-                        scope: CountScope::Controller,
-                    },
-                },
-                comparator: Comparator::GT,
-                rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::StartingDeckSize {
-                        player: PlayerScope::Controller,
-                    },
-                },
-            }
+                .is_err(),
+            "removed library comparative must fail loud, never bind the latch"
         );
         assert!(
             parse_inner_condition("you have more cards in your graveyard than your starting deck")
                 .is_err(),
             "graveyard comparative must not bind the starting-deck latch"
+        );
+    }
+
+    #[test]
+    fn nylea_there_are_comparative_binds_no_latch_comparison() {
+        // CR 103.2a (F2 parity): Nylea's Oracle prints the existential
+        // "there are more cards in your library than your starting deck"
+        // shape, which never routed through the removed `you have …` arm —
+        // base output (measured before the deletion) carries the honest
+        // conjure gap and no latch comparison. Deleting the arm must leave
+        // this output identical.
+        let text = "When this creature enters, conjure X cards named Nylea's Oracle into your library, where X is your devotion to green, then shuffle. Then if there are more cards in your library than your starting deck, creatures you control get +X/+X and gain haste until end of turn.";
+        let result = crate::parser::parse_oracle_text(
+            text,
+            "Nylea's Oracle",
+            &[],
+            &["Creature".to_string()],
+            &["God".to_string()],
+        );
+        assert!(
+            result.parse_warnings.is_empty(),
+            "base output carries no warnings, got: {:?}",
+            result.parse_warnings
+        );
+        assert_eq!(
+            result.triggers.len(),
+            1,
+            "one ETB trigger, no extra trigger from the comparative"
+        );
+        let trigger = &result.triggers[0];
+        assert!(
+            trigger.condition.is_none(),
+            "the trigger carries no intervening-if condition"
+        );
+        // Walk the execute chain (conjure gap → shuffle → +X/+X grant):
+        // the "then if" binds no condition on any link.
+        let mut next = trigger.execute.as_deref();
+        let mut saw_gap = false;
+        while let Some(ability) = next {
+            assert!(
+                ability.condition.is_none(),
+                "no chain link may carry the comparative as a condition"
+            );
+            if matches!(&*ability.effect, Effect::Unimplemented { .. }) {
+                saw_gap = true;
+            }
+            next = ability.sub_ability.as_deref();
+        }
+        assert!(
+            saw_gap,
+            "the conjure gap must be present as the honest marker — \
+             without it the no-comparison assertions pass on a fully parsed card"
+        );
+        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
+        let debug = format!("{:?}", result.triggers);
+        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
+        assert!(
+            !debug.contains("StartingDeckSize"),
+            "no latch comparison may bind out of the there-are sentence"
+        );
+        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
+        assert!(
+            !debug.contains("ZoneCardCount"),
+            "no live zone count may bind out of the there-are sentence"
         );
     }
 

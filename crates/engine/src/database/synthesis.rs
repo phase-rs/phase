@@ -27,7 +27,7 @@ use crate::types::ability::{
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{
     BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
@@ -1747,19 +1747,19 @@ pub fn compute_deck_copy_limit(face: &CardFace) -> Option<DeckCopyLimit> {
         .and_then(compute_deck_copy_limit_from_text)
 }
 
-/// CR 903.5a: determine a card's deck-construction no-maximum-deck-size
-/// override from its Oracle text. `true` for the Class A marker (Whtz, the
+/// CR 903.5a: determine a card's deck-construction maximum-size override
+/// from its Oracle text. `Some(NoMaximum)` for the Class A marker (Whtz, the
 /// Bibliophile: "A deck with this commander has no maximum deck size") and
-/// the Class B marker naming this face (Covert Blue Mage: "if <this> is your
-/// commander, your starting deck can contain any number of cards beyond the
-/// maximum deck size"). `false` for every other face — including partners
+/// the Class B marker naming this face (The Covert Blue Mage: "if <this> is
+/// your commander, your starting deck can contain any number of cards beyond
+/// the maximum deck size"). `None` for every other face — including partners
 /// that merely share a deck with a marker (the subject check pins the marker
 /// to the commander's own face). Delegates to the parser so the recognizer,
 /// the validator, and the coverage skips agree.
-pub fn compute_no_maximum_deck_size(face: &CardFace) -> bool {
+pub fn compute_no_maximum_deck_size(face: &CardFace) -> Option<DeckSizeOverride> {
     match face.oracle_text.as_deref() {
         Some(text) => compute_no_maximum_deck_size_from_text(text, &face.name),
-        None => false,
+        None => None,
     }
 }
 
@@ -1776,13 +1776,16 @@ mod no_maximum_deck_size_tests {
     }
 
     const WHTZ_ORACLE: &str = "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.";
-    const COVERT_ORACLE: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhenever The Covert Blue Mage enters, draw a card.";
+    const COVERT_ORACLE: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.";
 
     /// CR 903.5a: the Class A marker latches the override on the face.
     #[test]
     fn whtz_face_marks_no_maximum_deck_size() {
         let face = face_with_oracle("Whtz, the Bibliophile", WHTZ_ORACLE);
-        assert!(compute_no_maximum_deck_size(&face));
+        assert_eq!(
+            compute_no_maximum_deck_size(&face),
+            Some(DeckSizeOverride::NoMaximum)
+        );
     }
 
     /// CR 903.5a: the Class B marker latches only when the face IS the named
@@ -1790,10 +1793,14 @@ mod no_maximum_deck_size_tests {
     #[test]
     fn covert_face_marks_only_when_it_is_the_named_commander() {
         let covert = face_with_oracle("The Covert Blue Mage", COVERT_ORACLE);
-        assert!(compute_no_maximum_deck_size(&covert));
+        assert_eq!(
+            compute_no_maximum_deck_size(&covert),
+            Some(DeckSizeOverride::NoMaximum)
+        );
         let partner = face_with_oracle("Some Partner", COVERT_ORACLE);
-        assert!(
-            !compute_no_maximum_deck_size(&partner),
+        assert_eq!(
+            compute_no_maximum_deck_size(&partner),
+            None,
             "a partner sharing the deck must not inherit the marker"
         );
     }
@@ -1811,8 +1818,9 @@ mod no_maximum_deck_size_tests {
             ("Grizzly Bears", "Trample"),
         ] {
             let face = face_with_oracle(name, oracle);
-            assert!(
-                !compute_no_maximum_deck_size(&face),
+            assert_eq!(
+                compute_no_maximum_deck_size(&face),
+                None,
                 "{name} must not mark no-maximum-deck-size"
             );
         }
@@ -1820,7 +1828,7 @@ mod no_maximum_deck_size_tests {
             name: "Vanilla".to_string(),
             ..CardFace::default()
         };
-        assert!(!compute_no_maximum_deck_size(&textless));
+        assert_eq!(compute_no_maximum_deck_size(&textless), None);
     }
 }
 
@@ -10711,7 +10719,7 @@ fn build_oracle_face_inner(
         is_commander: false,
         is_oathbreaker: false,
         deck_copy_limit: None,
-        no_maximum_deck_size: false,
+        deck_size_override: None,
         metadata: Default::default(),
         rarities: Default::default(),
         attraction_lights: vec![],
@@ -10726,7 +10734,7 @@ fn build_oracle_face_inner(
     face.deck_copy_limit = compute_deck_copy_limit(&face);
     // CR 903.5a: deck-construction maximum-size override (Whtz / Covert
     // Blue Mage class). Read at deck-validation time, never at runtime.
-    face.no_maximum_deck_size = compute_no_maximum_deck_size(&face);
+    face.deck_size_override = compute_no_maximum_deck_size(&face);
     synthesize_all(&mut face);
     face
 }

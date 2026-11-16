@@ -5044,7 +5044,7 @@ fn resolve_ref(
         // CR 103.2a + CR 702.139b: the latched submitted-starting-deck count
         // for the scoped player (`Player::starting_deck_size`), written once
         // at deck load. Mill, draw, and command-zone moves never change it —
-        // the Whtz discount and the Nylea comparative read the snapshot.
+        // the Whtz discount reads the snapshot.
         QuantityRef::StartingDeckSize { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.starting_deck_size as usize)
@@ -14249,11 +14249,10 @@ mod tests {
     }
 
     /// CR 103.2a: `StartingDeckSize` reads the latched
-    /// `Player::starting_deck_size` snapshot, not the live library — and the
-    /// Nylea comparative's strict-GT gate evaluates over the two resolved
-    /// sides (50 > 40 true, 40 > 40 false). Mill after the latch cannot move
-    /// the snapshot: the revert (resolving live library size) collapses the
-    /// distinction.
+    /// `Player::starting_deck_size` snapshot, not the live library — and a
+    /// strict-GT gate over the two resolved sides evaluates (50 > 40 true,
+    /// 40 > 40 false). Mill after the latch cannot move the snapshot: the
+    /// revert (resolving live library size) collapses the distinction.
     #[test]
     fn starting_deck_size_reads_the_latched_snapshot() {
         let mut state = GameState::new_two_player(42);
@@ -14291,7 +14290,7 @@ mod tests {
             "controller-scoped latch reads P1's 60"
         );
 
-        // V12 (nylea comparative): live library GT latched starting size.
+        // V12 (library-vs-starting-deck GT): live library GT latched starting size.
         // Reset P0's latch to the 40 boundary for the discriminating rows.
         state.players[0].starting_deck_size = 40;
         let library = QuantityExpr::Ref {
@@ -14307,7 +14306,7 @@ mod tests {
         assert_eq!((lhs, rhs), (50, 40));
         assert!(
             Comparator::GT.evaluate(lhs, rhs),
-            "nylea gate: 50-card library > 40-card starting deck must hold"
+            "library-vs-starting-deck gate: 50-card library > 40-card starting deck must hold"
         );
         while state.players[0].library.len() > 40 {
             state.players[0].library.pop_back();
@@ -14317,7 +14316,7 @@ mod tests {
         assert_eq!((lhs, rhs), (40, 40));
         assert!(
             !Comparator::GT.evaluate(lhs, rhs),
-            "nylea gate: strict GT must fail at equality (40 == 40)"
+            "library-vs-starting-deck gate: strict GT must fail at equality (40 == 40)"
         );
     }
 

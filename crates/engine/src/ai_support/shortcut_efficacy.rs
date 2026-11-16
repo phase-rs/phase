@@ -2316,22 +2316,22 @@ mod tests {
             // round that read this line. A wrong reason in this bucket is worse than no
             // reason: it certifies that no gate is needed.
             card_type: _,
-            power: _,                // combat statistic
-            toughness: _,            // combat statistic
-            loyalty: _,              // resource counter, abilities that spend it are in `abilities`
-            defense: _,              // battle counter, same argument as loyalty
-            oracle_text: _,          // the SOURCE the parser reads; the parse is the rules content
-            non_ability_text: _,     // by definition not an ability
-            flavor_name: _,          // cosmetic
-            color_override: _,       // colour is a characteristic, not an action
-            color_identity: _,       // deck construction (CR 903.4), not in-game behaviour
-            scryfall_oracle_id: _,   // external identifier
-            brawl_commander: _,      // format eligibility
-            is_commander: _,         // format eligibility
-            is_oathbreaker: _,       // format eligibility
-            deck_copy_limit: _,      // deck construction
-            no_maximum_deck_size: _, // deck construction
-            rarities: _,             // printing metadata
+            power: _,              // combat statistic
+            toughness: _,          // combat statistic
+            loyalty: _,            // resource counter, abilities that spend it are in `abilities`
+            defense: _,            // battle counter, same argument as loyalty
+            oracle_text: _,        // the SOURCE the parser reads; the parse is the rules content
+            non_ability_text: _,   // by definition not an ability
+            flavor_name: _,        // cosmetic
+            color_override: _,     // colour is a characteristic, not an action
+            color_identity: _,     // deck construction (CR 903.4), not in-game behaviour
+            scryfall_oracle_id: _, // external identifier
+            brawl_commander: _,    // format eligibility
+            is_commander: _,       // format eligibility
+            is_oathbreaker: _,     // format eligibility
+            deck_copy_limit: _,    // deck construction
+            deck_size_override: _, // deck construction
+            rarities: _,           // printing metadata
         } = CardFace::default();
     }
 

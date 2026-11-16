@@ -16,8 +16,9 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeRule, DeckSizeSubject,
-    DeckSupply, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy, SurvivorDeckFormat,
+    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeOverride, DeckSizeRule,
+    DeckSizeSubject, DeckSupply, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
+    SurvivorDeckFormat,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1765,10 +1766,10 @@ fn evaluate_commander_with_format(
     // authority for min-vs-exact. Compared only through `accepts`, never by
     // hand — CR 903.13f(1) sets a minimum with NO maximum, which a literal
     // equality cannot express.
-    // CR 903.5a: a commander face carrying the `no_maximum_deck_size`
-    // deck-construction marker (Whtz / Covert Blue Mage class) widens an
-    // exact rule to its minimum — the count side already includes the
-    // command-zone cards via `deck_size_subject_count`.
+    // CR 903.5a: a commander face carrying the `deck_size_override`
+    // deck-construction marker set to `NoMaximum` (Whtz / Covert Blue Mage
+    // class) widens an exact rule to its minimum — the count side already
+    // includes the command-zone cards via `deck_size_subject_count`.
     let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     // CR 903.5e: the sideboard is dropped at game load for Commander-style
     // formats. Re-scope the request so singleton, color-identity, and legality
@@ -4158,14 +4159,14 @@ fn deck_size_subject_count(
 
 /// CR 903.5a: the effective deck-size rule for a commander deck — `Exactly(n)`
 /// becomes `Minimum(n)` when any commander face carries the
-/// `no_maximum_deck_size` deck-construction marker (Whtz, the Bibliophile's
-/// "A deck with this commander has no maximum deck size"; Covert Blue Mage's
-/// "your starting deck can contain any number of cards beyond the maximum
-/// deck size"). Non-exact rules pass through unchanged: the marker lifts only
-/// the maximum, never the minimum. Unknown commander names resolve to no face
-/// and are ignored here — the legality gates report them separately. The
-/// subject stays `MainDeckAndCommanders`, so the count side is untouched;
-/// only the rule's acceptance widens.
+/// `deck_size_override` deck-construction marker set to `NoMaximum` (Whtz,
+/// the Bibliophile's "A deck with this commander has no maximum deck size";
+/// The Covert Blue Mage's "your starting deck can contain any number of
+/// cards beyond the maximum deck size"). Non-exact rules pass through
+/// unchanged: the marker lifts only the maximum, never the minimum. Unknown
+/// commander names resolve to no face and are ignored here — the legality
+/// gates report them separately. The subject stays `MainDeckAndCommanders`,
+/// so the count side is untouched; only the rule's acceptance widens.
 fn effective_deck_size_rule(
     db: &CardDatabase,
     base: DeckSizeRule,
@@ -4176,8 +4177,8 @@ fn effective_deck_size_rule(
     };
     let any_no_maximum = commanders.iter().any(|name| {
         db.get_face_by_name(&db.lookup_key(name))
-            .map(|face| face.no_maximum_deck_size)
-            .unwrap_or(false)
+            .and_then(|face| face.deck_size_override)
+            .is_some_and(|override_value| matches!(override_value, DeckSizeOverride::NoMaximum))
     });
     if any_no_maximum {
         DeckSizeRule::Minimum(n)
@@ -5374,7 +5375,7 @@ mod tests {
                 "color_override": null,
                 "color_identity": ["White", "Blue"],
                 "scryfall_oracle_id": null,
-                "no_maximum_deck_size": true,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
                 "legalities": {
                     "standard": "legal",
                     "commander": "legal"
@@ -5392,7 +5393,7 @@ mod tests {
                 "toughness": null,
                 "loyalty": null,
                 "defense": null,
-                "oracle_text": "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhenever The Covert Blue Mage enters, draw a card.",
+                "oracle_text": "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.",
                 "non_ability_text": null,
                 "flavor_name": null,
                 "keywords": [],
@@ -5403,7 +5404,7 @@ mod tests {
                 "color_override": null,
                 "color_identity": ["White", "Blue"],
                 "scryfall_oracle_id": null,
-                "no_maximum_deck_size": true,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
                 "legalities": {
                     "standard": "legal",
                     "commander": "legal"

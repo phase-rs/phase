@@ -43,6 +43,7 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
+use crate::types::format::DeckSizeOverride;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -1658,7 +1659,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal { .. } => "starting life total".into(),
         // CR 103.2a: the latched submitted-starting-deck count (Whtz, the
-        // Bibliophile's activation discount; the Nylea comparative).
+        // Bibliophile's activation discount).
         QuantityRef::StartingDeckSize { .. } => "starting deck size".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
         QuantityRef::TriggeringScryLookCount => {
@@ -9575,7 +9576,7 @@ fn effective_oracle_lines_for_card(oracle_text: &str, card_name: &str) -> Vec<St
         // this commander has no maximum deck size."; "if <this> is your
         // commander, your starting deck can contain any number of cards
         // beyond the maximum deck size.") are consumed as the typed
-        // `no_maximum_deck_size` face marker (see
+        // `deck_size_override` face marker (see
         // `compute_no_maximum_deck_size_from_text`, read by
         // `effective_deck_size_rule`), not as a resolvable ability — they
         // legitimately produce no `ParsedElement`.
@@ -12908,7 +12909,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // CR 903.5a: deck-construction maximum-size sentences (Whtz, the
         // Bibliophile; Covert Blue Mage class) are consumed as the typed
-        // `no_maximum_deck_size` face marker, not as a resolvable ability —
+        // `deck_size_override` face marker, not as a resolvable ability —
         // they legitimately produce no `SemanticFinding`.
         if is_deck_construction_size_sentence(stripped, &face.name) {
             continue;
@@ -19425,7 +19426,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
-            no_maximum_deck_size: false,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -25478,7 +25479,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     const WHTZ_VERBATIM: &str = "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.";
-    const COVERT_VERBATIM: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhenever The Covert Blue Mage enters, draw a card.";
+    const COVERT_VERBATIM: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.";
 
     /// A face built from verbatim Oracle the way the export carries it —
     /// the V8/V15 harness for the no-maximum-deck-size class.
@@ -25500,7 +25501,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         face.replacements = parsed.replacements;
         face.parse_warnings = parsed.parse_warnings;
         face.keywords = parsed.extracted_keywords;
-        face.no_maximum_deck_size = crate::database::synthesis::compute_no_maximum_deck_size(&face);
+        face.deck_size_override = crate::database::synthesis::compute_no_maximum_deck_size(&face);
         face
     }
 
@@ -25546,13 +25547,18 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// effective lines exclude it, the audit stays clean, and the face
     /// reports supported. Hostile: the reminder line ("For example, your
     /// deck can be 120 cards.") is reminder text, so it must not produce a
-    /// second ParsedItem.
+    /// second ParsedItem. Reach-guards pin the real token payload (the
+    /// ETB creates the named Covert Sunglasses Equipment granting
+    /// can't-be-blocked): a regression to `Unimplemented` would flip
+    /// `is_supported` AND these guards, so the test cannot pass on a
+    /// silently dropped token.
     #[test]
     fn covert_blue_mage_size_sentence_consumes_cleanly() {
         let face = verbatim_commander_face("The Covert Blue Mage", COVERT_VERBATIM, &[]);
-        assert!(
-            face.no_maximum_deck_size,
-            "the Covert face must carry the marker"
+        assert_eq!(
+            face.deck_size_override,
+            Some(DeckSizeOverride::NoMaximum),
+            "the Covert face must carry the typed marker"
         );
 
         let lines = effective_oracle_lines_for_card(COVERT_VERBATIM, "The Covert Blue Mage");
@@ -25563,6 +25569,49 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             audit_card_lines(COVERT_VERBATIM, &face).is_empty(),
             "Covert must raise no audit finding"
+        );
+        assert!(
+            !card_face_has_unimplemented_parts(&face),
+            "Covert must parse with zero Unimplemented: {:?}",
+            face.parse_warnings
+        );
+
+        // Reach-guard: the ETB trigger creates the named Equipment token.
+        let token_effect = face
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.mode == TriggerMode::ChangesZone)
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find_map(|ability| match &*ability.effect {
+                Effect::Token { name, .. } if name == "Covert Sunglasses" => Some(&*ability.effect),
+                _ => None,
+            })
+            .expect("the Covert ETB must create the Covert Sunglasses token");
+        // Reach-guard: the token grants can't-be-blocked to the equipped
+        // creature (the printed "It has ..." grant is modelled, not dropped).
+        let grants_cant_be_blocked = match token_effect {
+            Effect::Token {
+                static_abilities, ..
+            } => static_abilities.iter().any(|static_ability| {
+                static_ability.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantStaticAbility { definition, .. }
+                        if matches!(
+                            definition.as_ref(),
+                            StaticDefinition {
+                                mode: StaticMode::CantBeBlocked,
+                                ..
+                            }
+                        )
+                    )
+                })
+            }),
+            _ => false,
+        };
+        assert!(
+            grants_cant_be_blocked,
+            "the Sunglasses token must grant can't-be-blocked to the equipped creature"
         );
 
         let coverage = card_face_coverage(&face);

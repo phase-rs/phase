@@ -29,7 +29,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -520,7 +520,7 @@ fn parse_deck_size_sentence<'a>(input: &'a str, card_name_lower: &str) -> Oracle
 }
 
 /// CR 903.5a: Recognize a deck-construction maximum-size sentence so the line
-/// is consumed as `no_maximum_deck_size` metadata (see
+/// is consumed as [`DeckSizeOverride`] metadata (see
 /// `compute_no_maximum_deck_size_from_text`, read by deck validation) instead
 /// of falling through to an unimplemented gap (see `Effect::unimplemented`).
 pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
@@ -540,17 +540,20 @@ pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
 /// 120-card example as a parenthetical on the same printed line, which would
 /// otherwise defeat the all-consuming recognizer. Reminder-text bodies carry
 /// no size sentence of their own, so they are stripped, never scanned.
-pub fn compute_no_maximum_deck_size_from_text(text: &str, card_name: &str) -> bool {
+pub fn compute_no_maximum_deck_size_from_text(
+    text: &str,
+    card_name: &str,
+) -> Option<DeckSizeOverride> {
     for line in text.lines() {
         let stripped = strip_reminder_text(line);
         if stripped.is_empty() {
             continue;
         }
         if is_deck_construction_size_sentence(&stripped, card_name) {
-            return true;
+            return Some(DeckSizeOverride::NoMaximum);
         }
     }
-    false
+    None
 }
 
 /// Recognizer for draft-time procedural sentences on Conspiracy / "draft

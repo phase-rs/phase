@@ -2354,8 +2354,8 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // library is counted exactly once, in the command zone). Sideboards,
     // companions, planar / scheme / attraction / contraption decks, and emblems
     // are NOT starting-deck cards (CR 103.2a / CR 702.139b) and are excluded.
-    // `Player::starting_deck_size` never changes mid-game: Whtz's "had" and
-    // the Nylea comparative read this snapshot, not the live library.
+    // `Player::starting_deck_size` never changes mid-game: Whtz's "had"
+    // reads this snapshot, not the live library.
     // Boundary: engine-replaced libraries (Horde challenge decks) keep the
     // submitted-placeholder count — no starting-deck reader exists for those
     // seats, so the latch is inert there rather than silently redefined.
@@ -2907,7 +2907,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
-            no_maximum_deck_size: false,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -2961,7 +2961,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
-            no_maximum_deck_size: false,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
