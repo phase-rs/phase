@@ -3860,7 +3860,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -7714,7 +7714,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -7868,7 +7868,7 @@ fn additional_cost_references_growing_class(a: &crate::types::ability::Additiona
     match a {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => reads(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(reads),
-        AdditionalCost::Choice(a, b) => reads(a) || reads(b),
+        AdditionalCost::Choice(costs) => costs.iter().any(reads),
     }
 }
 
@@ -20747,7 +20747,7 @@ mod tests {
         attacker: ObjectId,
         exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{UntapStepProgress, WaitingFor};
         vec![
             (
                 "Priority{active} — CR 704.3 SBA point; NOT exempt, and the positive control",
@@ -20912,6 +20912,7 @@ mod tests {
                     // battlefield, not a card in hand.
                     candidates: on_board.to_vec(),
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -20926,6 +20927,7 @@ mod tests {
                     // empty one, so "this window enumerates no cast" would be a
                     // degenerate zero rather than a measured one.
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -26326,7 +26328,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
 
-        let (state, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // `may` slot mints through the state-reading branch again.
+        let mut state = board.clone();
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let mana = || AbilityCost::Mana {
             cost: crate::types::mana::ManaCost::Cost {
                 shards: vec![],
@@ -26420,6 +26435,51 @@ mod tests {
                  slot minted through a state-reading branch can never reach a published offer"
             );
         }
+    }
+
+    /// F1 relief negative (CR 118.3 + CR 608.2d): the (a) arm two tests up
+    /// mints a `may` slot for a *funded* fixed-{1} `PayCost`. This matched
+    /// row differs in exactly the funding: on the unfunded shared fixture
+    /// the same shape-(B) entry mints NOTHING at the analysis layer. The
+    /// reach-guards prove the refusal is the feasibility gate, not routing —
+    /// the branch still resolves the payer to the proposer.
+    #[test]
+    fn unfunded_fixed_mana_may_offer_mints_no_relief_slot() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::{AbilityCost, Effect, TargetFilter};
+
+        let (board, src) = u2_relief_board();
+        assert!(
+            board.players[0].mana_pool.is_empty(),
+            "reach-guard: the shared fixture funds nothing, so the {{1}} offer is infeasible"
+        );
+        let entry = u2_shape_b_entry(
+            src,
+            990,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            |_| {},
+        );
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("the fixture is a triggered ability");
+        };
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&board, ability),
+            Some(PlayerId(0)),
+            "reach-guard: routing still returns the proposer — only the mint is withheld"
+        );
+        assert!(
+            entry_publishes_pin_slots(&board, &entry, PlayerId(0)).is_none(),
+            "CR 608.2d: an infeasible fixed-mana `may` offer mints no relief slot"
+        );
     }
 
     /// R33 arms (a) / (b) / (a′1) / (c) — THE FROZEN EXEMPTION IS KEYED TO THE CERTIFYING
@@ -27973,7 +28033,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, TargetFilter};
 
-        let (frame, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // fixture reaches the mint again.
+        let mut frame = board.clone();
+        frame.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let entry = u2_shape_b_entry(
             src,
             9310,

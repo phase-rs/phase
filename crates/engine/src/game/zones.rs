@@ -421,6 +421,9 @@ pub(crate) fn apply_zone_exit_cleanup(
 
         // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
         // zone exit (transform DFCs are only valid in transformed state on the battlefield).
+        // `swap_object_faces` stores the face shown on the battlefield or stack as
+        // its copiable values (CR 707.2), so the card in its new zone keeps no
+        // anthem, counter or granted ability in it.
         if obj_mut.transformed && obj_mut.back_face.is_some() {
             swap_object_faces(obj_mut);
             obj_mut.transformed = false;
@@ -436,6 +439,9 @@ pub(crate) fn apply_zone_exit_cleanup(
         // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
         // front face in any zone other than the stack or battlefield (back face is
         // valid on the stack while the spell is being cast, and on the battlefield).
+        // `swap_object_faces` stores the face shown on the battlefield or stack as
+        // its copiable values (CR 707.2), so the card in its new zone keeps no
+        // anthem, counter or granted ability in it.
         if obj_mut.modal_back_face
             && to != Zone::Stack
             && to != Zone::Battlefield
@@ -752,9 +758,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         // do not retain copied identity (Vesuva legend-rule sacrifice).
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.revert_layered_characteristics_to_base();
-            if crate::game::stickers::zone_retains_stickers(to) && !obj.stickers.is_empty() {
-                crate::game::stickers::rebuild_public_zone_stickers(obj);
-            }
         }
         for tapped in state.lands_tapped_for_mana.values_mut() {
             tapped.retain(|&id| id != object_id);
@@ -1064,6 +1067,33 @@ fn clear_stickers_for_hidden_destination(object: &mut GameObject, to: Zone) -> b
     object.stickers.clear();
     object.revert_layered_characteristics_to_base();
     true
+}
+
+/// CR 123.5 + CR 400.7m: Re-derive retained sticker characteristics after the
+/// final Battlefield-exit reset. Battlefield stickers use layers; Stack
+/// stickers retain their as-cast values and are handled by the spell path.
+fn rebuild_retained_stickers_after_battlefield_exit(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
+    if from != Zone::Battlefield
+        || from == to
+        || to == Zone::Stack
+        || !super::stickers::zone_retains_stickers(to)
+    {
+        return;
+    }
+    let object = state
+        .objects
+        .get_mut(&object_id)
+        .expect("the zone transition object remains live");
+    if object.stickers.is_empty() {
+        return;
+    }
+    super::stickers::rebuild_public_zone_stickers(object);
+    state.layers_dirty.mark_full();
 }
 
 /// CR 613.7d + CR 613.7k: replay installs the recorded stamps and only adopts
@@ -1453,6 +1483,12 @@ pub fn apply_resolved_zone_change(
         .objects
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
+    // CR 400.7: replay bypasses the live exit cleanup, so clear battlefield-only
+    // state on the same real departure. A same-zone ordering change is not a new
+    // battlefield object and keeps its state.
+    if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
+        object.reset_for_battlefield_exit();
+    }
     object.zone = command.to;
     if command.rebound_from.is_some() {
         install_rebound_owner(object, command.owner);
@@ -1469,6 +1505,20 @@ pub fn apply_resolved_zone_change(
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
+        // CR 400.7 + CR 611.2a: replay bypasses the live battlefield host-left
+        // replacement prune. Run the same authority before the object is
+        // restored from base, or legacy base-resident turn-bound riders can
+        // return with the new battlefield occurrence.
+        super::layers::prune_controller_controls_source_on_leave(state, command.object.object_id);
+        // CR 400.7 + CR 613.1: the live move restores the printed baseline after
+        // pruning battlefield-bound effects. This also ends resolution-installed
+        // riders from the departing object before a later re-entry.
+        if let Some(object) = state.objects.get_mut(&command.object.object_id) {
+            object.revert_layered_characteristics_to_base();
+        }
+        state.layers_dirty.mark_full();
+    }
     let object = state
         .objects
         .get_mut(&command.object.object_id)
@@ -1523,6 +1573,15 @@ pub fn apply_resolved_zone_change(
             entry: command.entry_timestamp,
             retained: command.retained_sticker_timestamps.clone(),
         },
+    );
+
+    // CR 123.5 + CR 400.7m: match the live transition's post-reset sticker
+    // rebuild after replay installs the recorded timestamps.
+    rebuild_retained_stickers_after_battlefield_exit(
+        state,
+        command.object.object_id,
+        command.from,
+        command.to,
     );
 
     let mut zone_change_record = command.zone_change_record.clone();
@@ -1938,6 +1997,9 @@ pub(crate) fn move_to_zone_with_entry_flags(
             }
             let new_incarnation = obj_mut.incarnation;
             install_zone_timestamps(state, object_id, &timestamps);
+            // CR 123.5 + CR 400.7m: the raw Command/Stack route bypasses the
+            // resolved applier, so use the same post-reset rebuild authority.
+            rebuild_retained_stickers_after_battlefield_exit(state, object_id, from, to);
             (pre_bump_incarnation, new_incarnation, false)
         } else {
             let resolved_zone_change = resolve_and_apply_zone_change(
@@ -2119,16 +2181,23 @@ pub(crate) fn move_to_zone_with_entry_flags(
     if to == Zone::Battlefield {
         if let Some(designation) = state.day_night {
             use crate::types::game_state::DayNight;
-            use crate::types::keywords::Keyword;
-            if let Some(obj) = state.objects.get(&object_id) {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| crate::game::day_night::face_disagrees_with(obj, designation))
+            {
                 match designation {
-                    DayNight::Night if obj.has_keyword(&Keyword::Daybound) && !obj.transformed => {
+                    DayNight::Night => {
                         let _ = super::transform::enter_back_face_up(state, object_id);
                     }
-                    DayNight::Day if obj.has_keyword(&Keyword::Nightbound) && obj.transformed => {
-                        let _ = super::transform::transform_permanent(state, object_id, events);
+                    DayNight::Day => {
+                        let _ = super::transform::transform_permanent_with_cause(
+                            state,
+                            object_id,
+                            super::transform::TransformCause::DayNightDesignation,
+                            events,
+                        );
                     }
-                    DayNight::Night | DayNight::Day => {}
                 }
             }
         }
@@ -3402,6 +3471,10 @@ pub(crate) fn route_component(state: &mut GameState, component_id: ObjectId, to:
         // `apply_zone_exit_cleanup` cannot double-bump normal moves.
         component.bump_incarnation();
     }
+    // CR 123.5 + CR 400.7m: this raw component route does not pass through the
+    // resolved-zone applier, so restore sticker characteristics after its exit
+    // reset just as the live and replayed ordinary routes do.
+    rebuild_retained_stickers_after_battlefield_exit(state, component_id, Zone::Battlefield, to);
     // CR 700.11: a nontoken permanent card put into its owner's graveyard from
     // anywhere counts as having descended this turn — shared single authority
     // with `move_to_zone`.

@@ -1555,8 +1555,10 @@ pub fn place_blocking(
     );
     // CR 509.3c: only an unblocked attacker becomes blocked for the bare form.
     if !expected_attacker_blocked {
-        events.push(GameEvent::AttackerBecameBlockedByEffect {
+        // CR 400.7: stamp the incarnation that became blocked.
+        events.push(GameEvent::AttackerBecameBlocked {
             attacker: attacker_id,
+            attacker_incarnation: state.objects.get(&attacker_id).map(|obj| obj.incarnation),
         });
     }
     // CR 509.3d + CR 509.4: every entering blocker supplies a creature-bound

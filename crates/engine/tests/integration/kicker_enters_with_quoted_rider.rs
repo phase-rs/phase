@@ -93,7 +93,9 @@ fn announce_cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: 
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: *pay })
+            .act(GameAction::DecideOptionalCost {
+                index: if *pay { 0 } else { 1 },
+            })
             .expect("P0 decides the kicker");
     }
 }

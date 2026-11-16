@@ -411,8 +411,8 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     const { title, options } = additionalCostChoices(repeatableKicker, 0);
 
     expect(title.toLowerCase()).toContain("multikicker");
-    const pay = options.find((o) => o.id === "pay")!;
-    const decline = options.find((o) => o.id === "decline")!;
+    const pay = options.find((o) => o.id === "0")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(pay.label).toContain("kick it");
     expect(decline.label).toBe("Cast without kicking");
     expect(decline.label.toLowerCase()).not.toContain("skip");
@@ -424,7 +424,7 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     const { title, options } = additionalCostChoices(repeatableKicker, 2);
 
     expect(title).toContain("kicked 2");
-    const decline = options.find((o) => o.id === "decline")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(kicked 2×)");
     expect(decline.label.toLowerCase()).not.toContain("cancel");
@@ -444,17 +444,45 @@ describe("additionalCostChoices — repeatable additional cost", () => {
     const { title, options } = additionalCostChoices(repeatableCost, 0);
 
     expect(title).toContain("Pay additional cost");
-    expect(options.find((o) => o.id === "pay")?.label).toBe("Pay {1}");
-    expect(options.find((o) => o.id === "decline")?.label).toBe("Cast without paying");
+    expect(options.find((o) => o.id === "0")?.label).toBe("Pay {1}");
+    expect(options.find((o) => o.id === "1")?.label).toBe("Cast without paying");
   });
 
   it("re-prompt shows the payment count and finish-casting decline", () => {
     const { title, options } = additionalCostChoices(repeatableCost, 2);
 
     expect(title).toContain("paid 2");
-    const decline = options.find((o) => o.id === "decline")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(paid 2×)");
+  });
+});
+
+describe("additionalCostChoices — option ids are engine option indices", () => {
+  it("lists every Choice alternative in printed order (Dusk Mangler, #10442)", () => {
+    const threeWay: AdditionalCost = {
+      type: "Choice",
+      data: [
+        { type: "Sacrifice", target: { type: "Any" }, count: 1 },
+        { type: "Discard", count: 1 },
+        { type: "PayLife", amount: { type: "Fixed", value: 4 } },
+      ],
+    };
+
+    const { options } = additionalCostChoices(threeWay);
+
+    expect(options.map((o) => o.id)).toEqual(["0", "1", "2"]);
+  });
+
+  it("offers a Required cost as its single payment, leaving cancel to the close button", () => {
+    const required: AdditionalCost = {
+      type: "Required",
+      data: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+    };
+
+    const { options } = additionalCostChoices(required);
+
+    expect(options.map((o) => o.id)).toEqual(["0"]);
   });
 });
 
