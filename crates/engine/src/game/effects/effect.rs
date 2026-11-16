@@ -596,12 +596,10 @@ fn bind_transient_effect(
     if matches!(target_filter, Some(TargetFilter::TriggeringSource))
         || (affected_is_triggering_source && ability.targets.is_empty())
     {
-        if let Some(TargetRef::Object(obj_id)) =
-            crate::game::targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            )
+        // CR 400.7 + CR 608.2k: a grant mutates its referent, so it binds only
+        // the incarnation the trigger event recorded (the shared authority).
+        if let Some(obj_id) =
+            crate::game::targeting::triggering_source_mutation_referent(state, ability.source_id)
         {
             install_transient(
                 state,

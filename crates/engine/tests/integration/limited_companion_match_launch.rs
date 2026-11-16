@@ -2381,7 +2381,7 @@ fn limited_jegantha_reads_every_split_half_at_admission_and_reveal() {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         let mut state = GameState::new(FormatConfig::limited(), 2, 42);
         load_deck_into_state(&mut state, &payload);
         let start = start_game_with_starting_player(&mut state, P0);
@@ -2519,7 +2519,7 @@ fn limited_companion_permanent_card_conditions_count_battles() {
                 },
                 ..Default::default()
             };
-            let payload = resolve_deck_list(&db, &list);
+            let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
             let mut state = GameState::new(FormatConfig::limited(), 2, 42);
             load_deck_into_state(&mut state, &payload);
             let start = start_game_with_starting_player(&mut state, P0);

@@ -1,5 +1,5 @@
 import type { DeckPrinting, FormatConfig } from "../adapter/types";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
 
 /** The `DeckChoice::DeckList` payload: the client mirror of the engine's
  *  `DeckData` (`crates/engine/src/starter_decks.rs`). Every list the engine
@@ -15,8 +15,10 @@ export interface DeckListData {
   contraption_deck?: string[];
   sticker_sheets?: string[];
   signature_spell?: string[];
-  /** Declared Commander bracket tier; the engine defaults an omitted tier to Core. */
-  bracket_tier?: CommanderBracketTier;
+  /** Declared Commander bracket tier; omitted or `null` is undeclared and plays at the engine's estimate. */
+  bracket_tier?: CommanderBracketTier | null;
+  /** The owner's two-card-combo answer; omitted means unanswered. */
+  combo_declaration?: ComboDeclaration;
   /** The owner's explicit printing choices; display-only. Omitted when empty. */
   printings?: DeckPrinting[];
 }
