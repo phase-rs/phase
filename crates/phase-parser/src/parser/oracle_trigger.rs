@@ -82,18 +82,18 @@ use crate::types::ability::{
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttachmentReferent, AttackersDeclaredCountSubject, BlockPairDirection, CardSelectionMode,
-    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
-    CombatRelation, CombatRelationSubject, Comparator, ControllerRef, CountScope,
-    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet,
-    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
-    StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    AttachmentReferent, AttackersDeclaredCountSubject, BlockPairDirection, BlockerCountThreshold,
+    CardSelectionMode, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold,
+    DamageChannel, DamageKindFilter, DelayedTriggerCondition, DestinationConstraint,
+    DieResultFilter, Effect, EffectScope, FilterProp, IllegalTargetsDisposition,
+    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -14089,6 +14089,9 @@ pub fn parse_trigger_condition(
 
     // Parse event verb from the remaining text.
     let subject_text = &after_keyword[..after_keyword.len() - rest.len()];
+    let attacking_player_subject =
+        nom_primitives::scan_at_word_boundaries(subject_text, parse_attacking_player_postnominal)
+            .is_some();
     // CR 603.2 + CR 603.2c + CR 608.2c: every batched subject must retain
     // the scalar filter used to count matching arrivals for "that many".
     let graveyard_origins = if is_batched {
@@ -14098,7 +14101,24 @@ pub fn parse_trigger_condition(
     };
     if let Some((mode, mut def)) =
         try_parse_event(&subject, subject_text, rest, &lower, graveyard_origins, ctx)
+            // CR 509.3e + CR 603.2c: a blocker-count tail consumes its own "one or
+            // more" (Hedron Blade's "by one or more colorless creatures"), so
+            // batching is read from the subject alone. A batched SUBJECT with a
+            // count tail fires per attacker under CR 509.3e, not per batch, and
+            // has no printed card: leave it unparsed.
+            .filter(|(_, def)| {
+                def.blocker_count.is_none() || !scan_contains(subject_text, "one or more ")
+            })
+            // CR 508.1b: an attacked-player subject is read only by the
+            // becomes-blocked matcher (through `attack_target_filter`); every
+            // other event would ignore half of it, so it stays unparsed.
+            .filter(|(mode, _)| !attacking_player_subject || *mode == TriggerMode::BecomesBlocked)
     {
+        if attacking_player_subject {
+            // CR 508.1b: "attacking you / one of your opponents" names a PLAYER
+            // being attacked, not a planeswalker or battle that player controls.
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+        }
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
         ctx.diagnostics.extend(subject_diagnostics);
         // CR 109.2: the type-phrase parser swallows the trailing "card" of "a
@@ -14110,7 +14130,7 @@ pub fn parse_trigger_condition(
         {
             def.valid_card = def.valid_card.take().map(with_card_qualifier);
         }
-        if is_batched {
+        if is_batched && def.blocker_count.is_none() {
             def.batched = true;
         }
         // CR 603.4: "an opponent who controls F draws a card" — the
@@ -15178,6 +15198,17 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     .parse(text)
     {
         let (filter, rest) = parse_type_phrase_folding_with_ctx(after, ctx);
+        // CR 508.1b: a postnominal "attacking you / your opponents / one of your
+        // opponents" scopes the subject creature by the player it attacks
+        // (Seifer, Balamb Rival). `parse_trigger_condition` admits it only for
+        // the event that reads it.
+        if let Ok((after_suffix, defender)) = parse_attacking_player_postnominal(rest.trim_start())
+        {
+            let attacking = FilterProp::Attacking {
+                defender: Some(defender),
+            };
+            return (conjoin_filter_property(filter, attacking), after_suffix);
+        }
         return (filter, rest);
     }
 
@@ -15202,6 +15233,28 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
 /// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {
     conjoin_filter_property(filter, FilterProp::Another)
+}
+
+/// CR 508.1b: the postnominal attacked-player phrase of a trigger subject,
+/// ending at the space before the event verb. Only player defenders: a phrase
+/// that goes on to name planeswalkers ("… and/or planeswalkers they control",
+/// "… or a planeswalker you control") is refused here, so the condition stays
+/// unparsed instead of splitting into a compound subject.
+fn parse_attacking_player_postnominal(input: &str) -> OracleResult<'_, ControllerRef> {
+    terminated(
+        preceded(
+            tag("attacking "),
+            alt((
+                value(
+                    ControllerRef::Opponent,
+                    alt((tag("one of your opponents"), tag("your opponents"))),
+                ),
+                value(ControllerRef::You, tag("you")),
+            )),
+        ),
+        (space1, not(alt((tag("and/or "), tag("or "))))),
+    )
+    .parse(input)
 }
 
 /// Conjoin a property without inventing a card noun or replacing subject control.
@@ -17513,6 +17566,39 @@ fn try_parse_event(
         )))
         .parse(input)
     }
+    /// CR 509.3c + CR 509.3d + CR 509.3e: the blocker qualifier after "becomes
+    /// blocked". `None` means an unmodelled tail, which the caller fails closed.
+    enum BecomesBlockedTail {
+        /// CR 509.3c: no qualifier; once per combat.
+        Bare,
+        /// CR 509.3d: "by a/an <type>"; once per matching blocker.
+        ByEachMatching(TargetFilter),
+        /// CR 509.3e: "by N or more <type>"; once per attacker crossing N.
+        AtLeast(BlockerCountThreshold),
+    }
+    fn parse_becomes_blocked_tail(input: &str) -> Option<BecomesBlockedTail> {
+        if input.trim().is_empty() {
+            return Some(BecomesBlockedTail::Bare);
+        }
+        if let Some(filter) = parse_becomes_blocked_by_filter(input) {
+            return Some(BecomesBlockedTail::ByEachMatching(filter));
+        }
+        let (_, (minimum, filter)) = preceded(
+            tag::<_, _, OracleError<'_>>(" by "),
+            parse_count_qualified_block_filter,
+        )
+        .parse(input)
+        .ok()?;
+        let minimum = u32::try_from(minimum)
+            .ok()
+            .filter(|minimum| *minimum >= 1)?;
+        // CR 509.1a: every blocker is a creature, so bare "creatures" counts all.
+        let blocker = filter_narrows_beyond_creature(&filter).then_some(filter);
+        Some(BecomesBlockedTail::AtLeast(BlockerCountThreshold {
+            minimum,
+            blocker,
+        }))
+    }
     fn parse_becomes_blocked_by_filter(input: &str) -> Option<TargetFilter> {
         let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
             .parse(input)
@@ -17556,16 +17642,18 @@ fn try_parse_event(
             SimpleEvent::BecomesBlocked => {
                 def.mode = TriggerMode::BecomesBlocked;
                 def.valid_card = Some(subject.clone());
-                // CR 509.3c vs 509.3d: a bare "becomes blocked" triggers once per
-                // combat, while "becomes blocked by a <type>" triggers once for
-                // each matching blocker. Capture the "by a/an <type phrase>"
-                // qualifier as the blocker filter so the runtime matcher can tell
-                // the two apart (a present `valid_target` => per-blocker). Without
-                // this, plain "becomes blocked by a creature" cards (which carry no
-                // further qualifier) were indistinguishable from the bare form.
-                // Only the singular-article form qualifies — a threshold like
-                // "by two or more creatures" stays the bare once-per-combat form.
-                def.valid_target = parse_becomes_blocked_by_filter(remaining);
+                // CR 509.3c vs 509.3d vs 509.3e: a bare "becomes blocked" triggers
+                // once per combat; "becomes blocked by a <type>" triggers once for
+                // each matching blocker (a present `valid_target` => per-blocker);
+                // "becomes blocked by N or more <type>" triggers once when the
+                // attacker's matching blockers reach N. Any other tail is not
+                // modelled, so the trigger stays unparsed rather than silently
+                // dropping the qualifier.
+                match parse_becomes_blocked_tail(remaining)? {
+                    BecomesBlockedTail::Bare => {}
+                    BecomesBlockedTail::ByEachMatching(filter) => def.valid_target = Some(filter),
+                    BecomesBlockedTail::AtLeast(threshold) => def.blocker_count = Some(threshold),
+                }
             }
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;

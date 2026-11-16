@@ -35,7 +35,6 @@ function seed(submitAction: EngineAdapter["submitAction"]): EngineAdapter {
     initialize: vi.fn().mockResolvedValue(undefined),
     initializeGame: vi.fn().mockResolvedValue({ events: [] } as SubmitResult),
     restoreState: vi.fn(),
-    estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
     submitAction,
     getState: vi.fn(async () => useGameStore.getState().gameState ?? state),

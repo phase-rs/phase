@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint,
-    DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, BlockerCountThreshold, CoinFlipResult, ControllerRef, DamageKindFilter,
+    DestinationConstraint, DieResultFilter, EffectKind, ManaAbilityProducedFilter,
+    OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{BoundActivationCost, ExertOrigin, GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
@@ -878,7 +878,8 @@ fn player_matches_filter_as(
         // reason as the arm above — the fallback below is fail-OPEN, and
         // without them a dead slot would match every player (PR #8881).
         TargetFilter::SpecificPlayer { id } => *id == player_id,
-        TargetFilter::None => false,
+        // CR 603.2e + CR 201.5: An object-source SelfRef can never match a player.
+        TargetFilter::SelfRef | TargetFilter::None => false,
         // The binder leaves those leaves under the boolean shape the condition
         // was written in (`Not { slot }`, `Or { slot, slot }`, `And { … }`), so
         // the shape has to be evaluated here rather than fall through to the
@@ -1214,6 +1215,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
         // count for a "one or more <FILTER> …" trigger filter.
@@ -1221,7 +1223,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::BlockersDeclared { .. }
         // Mirrors BlockersDeclared: the "becomes blocked" trigger uses the
         // dedicated matcher, not this generic per-object count helper.
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -3640,7 +3642,7 @@ pub(super) fn match_attacker_blocked(
         // authority as ordinary becomes-blocked triggers. Keep the established
         // declared-blocker verdict above unchanged.
         match event {
-            GameEvent::AttackerBecameBlockedByEffect { .. }
+            GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => {
                 !matching_becomes_blocked_events(event, trigger, source_context, state).is_empty()
             }
@@ -3745,7 +3747,7 @@ pub(super) fn match_exiled(
     }
 }
 
-/// CR 701.3a: Attached triggers compare the object that became attached
+/// CR 701.3a + CR 603.2e: Attached triggers compare the object that became attached
 /// (`valid_card`) with the host it is attached to (`valid_target`).
 pub(super) fn match_attached(
     event: &GameEvent,
@@ -3754,61 +3756,25 @@ pub(super) fn match_attached(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    match event {
-        GameEvent::EffectResolved {
-            kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
-            source_id: eventsource_id,
-            ..
-        } => {
-            let attachment_id = if matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::AttachAll,
-                    ..
-                }
-            ) {
-                source_id
-            } else {
-                *eventsource_id
-            };
-
-            if attachment_id != source_id
-                && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef))
-            {
-                return false;
-            }
-
-            valid_card_matches(trigger, state, attachment_id, source_context)
-                && attached_host_matches(trigger, state, attachment_id, source_context)
-        }
-        _ => false,
-    }
-}
-
-fn attached_host_matches(
-    trigger: &TriggerDefinition,
-    state: &GameState,
-    attachment_id: ObjectId,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let Some(host) = state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
+    let GameEvent::Attached {
+        attachment_id,
+        target,
+    } = event
     else {
         return false;
     };
-    let Some(filter) = trigger.valid_target.as_ref() else {
-        return true;
-    };
-    match host {
-        crate::game::game_object::AttachTarget::Object(object_id) => {
-            target_filter_matches_object(state, object_id, filter, source_context)
-        }
-        crate::game::game_object::AttachTarget::Player(player_id) => {
-            player_matches_filter(filter, state, player_id, source_context)
-        }
+    let attachment_id = *attachment_id;
+
+    if attachment_id != source_id && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef)) {
+        return false;
     }
+
+    valid_card_matches(trigger, state, attachment_id, source_context)
+        && trigger
+            .valid_target
+            .as_ref()
+            .map(|filter| target_ref_matches_filter(target, filter, state, source_context))
+            .unwrap_or(true)
 }
 
 fn target_ref_matches_filter(
@@ -3822,6 +3788,11 @@ fn target_ref_matches_filter(
             target_filter_matches_object(state, *object_id, filter, source_context)
         }
         TargetRef::Player(player_id) => {
+            // CR 603.2e + CR 201.5: An object-source SelfRef ("this creature", "this permanent")
+            // requires an object host and can never match a player host.
+            if matches!(filter, TargetFilter::SelfRef) {
+                return false;
+            }
             player_matches_filter(filter, state, *player_id, source_context)
         }
     }
@@ -4675,13 +4646,15 @@ pub(super) fn matching_becomes_blocked_events(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> Vec<GameEvent> {
-    let source_id = source_event_subject_id(source_context);
+    if let Some(threshold) = trigger.blocker_count.as_ref() {
+        return matching_blocker_count_events(event, trigger, threshold, source_context, state);
+    }
     let blocker_filter = combat_filter(trigger);
     // CR 509.3d: the promoted ByCreature mode carries the per-creature
     // qualifier in its mode even when no narrower valid_target filter exists.
     let per_blocker =
         blocker_filter.is_some() || matches!(trigger.mode, TriggerMode::AttackerBlockedByCreature);
-    if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
+    if let GameEvent::AttackerBecameBlocked { attacker, .. } = event {
         // CR 509.3c/509.3d: this event carries only the first blocked transition,
         // not a blocker identity. Only the bare form fires here; a real entering
         // blocker supplies its own per-creature event separately.
@@ -4692,11 +4665,8 @@ pub(super) fn matching_becomes_blocked_events(
         if per_blocker {
             return Vec::new();
         }
-        let attacker_matches = if trigger.valid_card.is_some() {
-            valid_card_matches(trigger, state, *attacker, source_context)
-        } else {
-            *attacker == source_id
-        };
+        let attacker_matches =
+            becomes_blocked_attacker_matches(trigger, state, *attacker, source_context);
         return if attacker_matches {
             vec![event.clone()]
         } else {
@@ -4710,11 +4680,8 @@ pub(super) fn matching_becomes_blocked_events(
         if !per_blocker {
             return Vec::new();
         }
-        let attacker_matches = if trigger.valid_card.is_some() {
-            valid_card_matches(trigger, state, *attacker, source_context)
-        } else {
-            *attacker == source_id
-        };
+        let attacker_matches =
+            becomes_blocked_attacker_matches(trigger, state, *attacker, source_context);
         let blocker_matches = match blocker_filter {
             Some(filter) => target_filter_matches_object(state, *blocker, filter, source_context),
             None => true,
@@ -4736,12 +4703,7 @@ pub(super) fn matching_becomes_blocked_events(
         assignments
             .iter()
             .filter_map(|(blocker, attacker)| {
-                let attacker_matches = if trigger.valid_card.is_some() {
-                    valid_card_matches(trigger, state, *attacker, source_context)
-                } else {
-                    *attacker == source_id
-                };
-                if !attacker_matches {
+                if !becomes_blocked_attacker_matches(trigger, state, *attacker, source_context) {
                     return None;
                 }
                 let blocker_matches = match blocker_filter {
@@ -4779,6 +4741,138 @@ pub(super) fn matching_becomes_blocked_events(
             .collect()
     } else {
         Vec::new()
+    }
+}
+
+/// CR 509.3c + CR 508.1b: the attacker-side subject of a `BecomesBlocked`
+/// trigger. `valid_card` (or the source itself) names the attacker, and an
+/// `attack_target_filter` ("a creature attacking one of your opponents" is
+/// `Player`) restricts what it is attacking. Only the type-level match applies
+/// here: `valid_target` is this mode's BLOCKER filter, never a defending-player
+/// filter, so `attack_target_matches` (which reads it as one) is not used.
+fn becomes_blocked_attacker_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    attacker: ObjectId,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    let subject_matches = if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, attacker, source_context)
+    } else {
+        attacker == source_event_subject_id(source_context)
+    };
+    subject_matches
+        && trigger.attack_target_filter.as_ref().is_none_or(|filter| {
+            state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|info| info.object_id == attacker)
+                    .is_some_and(|info| attack_target_type_matches(info.attack_target, filter))
+            })
+        })
+}
+
+/// CR 509.3e: the narrowed firing for a blocker-count threshold. The event names
+/// the ATTACKER (its referent) and stamps the incarnation that is blocked
+/// (CR 400.7). Read while that id is still a current attacker: CR 506.4 removes a
+/// departing permanent from combat, so an id still attacking with these
+/// blockers is the blocked incarnation. A no-longer-attacking id yields nothing.
+fn blocked_attacker_count_firing(state: &GameState, attacker: ObjectId) -> Option<GameEvent> {
+    let combat = state.combat.as_ref()?;
+    if !combat
+        .attackers
+        .iter()
+        .any(|info| info.object_id == attacker)
+    {
+        return None;
+    }
+    let incarnation = state.objects.get(&attacker)?.incarnation;
+    Some(GameEvent::AttackerBecameBlocked {
+        attacker,
+        attacker_incarnation: Some(incarnation),
+    })
+}
+
+/// CR 509.3e: "Whenever [a creature] becomes blocked by N or more [creatures]"
+/// triggers if the creature is blocked by that many matching creatures when
+/// blockers are declared; effects that add blockers can also cause it to
+/// trigger. It fires once per attacker per crossing, never per blocker, and the
+/// count is part of the trigger event: it is not rechecked on resolution.
+fn matching_blocker_count_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    threshold: &BlockerCountThreshold,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> Vec<GameEvent> {
+    // Fail closed on shapes the parser never emits: a zero threshold, a
+    // batched definition (the count form fires per attacker, CR 509.3e), or a
+    // second per-blocker filter alongside the threshold.
+    if threshold.minimum == 0 || trigger.batched || combat_filter(trigger).is_some() {
+        return Vec::new();
+    }
+    let minimum = threshold.minimum as usize;
+    // CR 509.3f: a blocker's characteristics count as they are when it becomes
+    // a blocking creature, which is when this matcher runs for its event.
+    let counts = |blocker: ObjectId| {
+        threshold.blocker.as_ref().is_none_or(|filter| {
+            target_filter_matches_object(state, blocker, filter, source_context)
+        })
+    };
+    match event {
+        GameEvent::BlockersDeclared { assignments } => {
+            let mut attackers: Vec<ObjectId> = Vec::new();
+            for (_, attacker) in assignments {
+                if !attackers.contains(attacker) {
+                    attackers.push(*attacker);
+                }
+            }
+            attackers
+                .into_iter()
+                .filter(|attacker| {
+                    becomes_blocked_attacker_matches(trigger, state, *attacker, source_context)
+                })
+                .filter(|attacker| {
+                    assignments
+                        .iter()
+                        .filter(|(blocker, blocked)| blocked == attacker && counts(*blocker))
+                        .count()
+                        >= minimum
+                })
+                .filter_map(|attacker| blocked_attacker_count_firing(state, attacker))
+                .collect()
+        }
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            // CR 509.3e + CR 509.3f: a blocker-filtered threshold fires only at
+            // declaration. Deciding whether an added blocker is the crossing
+            // needs each earlier blocker's characteristics as of the moment it
+            // blocked, which combat does not record; fail closed instead.
+            if threshold.blocker.is_some()
+                || !becomes_blocked_attacker_matches(trigger, state, *attacker, source_context)
+            {
+                return Vec::new();
+            }
+            // CR 509.3e: the added blocker crosses the threshold when the
+            // blockers ahead of it in the assignment order fall short and it
+            // reaches it. Reading its position (not the live total) fires
+            // simultaneous entrants exactly once.
+            let position = state.combat.as_ref().and_then(|combat| {
+                combat
+                    .blocker_assignments
+                    .get(attacker)
+                    .and_then(|blockers| blockers.iter().position(|id| id == blocker))
+            });
+            match position {
+                Some(before) if before < minimum && before + 1 >= minimum => {
+                    blocked_attacker_count_firing(state, *attacker)
+                        .into_iter()
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -6750,7 +6844,10 @@ mod tests {
             "Effect-Blocked Attacker".to_string(),
             Zone::Battlefield,
         );
-        let event = GameEvent::AttackerBecameBlockedByEffect { attacker };
+        let event = GameEvent::AttackerBecameBlocked {
+            attacker,
+            attacker_incarnation: None,
+        };
 
         // Positive (CR 509.3c): the bare becomes-blocked matcher fires, source == attacker.
         let bare = make_trigger(TriggerMode::BecomesBlocked);
@@ -7458,10 +7555,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(match_attached(
@@ -7501,10 +7597,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(land),
         };
 
         assert!(!match_attached(
@@ -7549,10 +7644,9 @@ mod tests {
         state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
 
         let trigger = make_trigger(TriggerMode::Attached);
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: other_equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: other_equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(!match_attached(
@@ -7564,7 +7658,7 @@ mod tests {
     }
 
     /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" fires when
-    /// an Aura (eventsource_id) attaches to the trigger source (source_id).
+    /// an Aura (attachment_id) attaches to the trigger source (source_id).
     /// Cards: Bramble Elemental, Brood Keeper.
     #[test]
     fn attached_pattern2_fires_when_aura_attaches_to_host() {
@@ -7600,11 +7694,10 @@ mod tests {
         ));
         trigger.valid_target = Some(TargetFilter::SelfRef);
 
-        // Event: Attach resolved with the Aura as source
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Attach,
-            source_id: aura,
-            subject: None,
+        // Event: Attached event with the Aura as attachment and host as target
+        let event = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(host),
         };
         assert!(
             match_attached(
@@ -7625,9 +7718,13 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&aura).unwrap().attached_to = Some(other_host.into());
+        let event_other = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(other_host),
+        };
         assert!(
             !match_attached(
-                &event,
+                &event_other,
                 &trigger,
                 &test_trigger_source_context(&state, host),
                 &state
@@ -12457,8 +12554,73 @@ mod tests {
         );
     }
 
+    /// CR 509.3e: the blocker-count matcher fails closed on shapes the parser
+    /// never emits but a deserialized definition could carry: a zero threshold,
+    /// and a batched definition (the count form fires per attacker, so a batched
+    /// collector would hand it an unnarrowed event). Reach: the same event and
+    /// definition fire once with a valid threshold.
+    #[test]
+    fn blocker_count_matcher_fails_closed_on_zero_or_batched() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let blockers: Vec<ObjectId> = (2..4)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n),
+                    PlayerId(1),
+                    "Blocker".to_string(),
+                    Zone::Battlefield,
+                )
+            })
+            .collect();
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        let event = GameEvent::BlockersDeclared {
+            assignments: blockers
+                .iter()
+                .map(|blocker| (*blocker, attacker))
+                .collect(),
+        };
+        let context = test_trigger_source_context(&state, attacker);
+        let mut trigger =
+            make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        trigger.blocker_count = Some(BlockerCountThreshold {
+            minimum: 2,
+            blocker: None,
+        });
+        assert_eq!(
+            matching_becomes_blocked_events(&event, &trigger, &context, &state),
+            vec![GameEvent::AttackerBecameBlocked {
+                attacker,
+                attacker_incarnation: Some(state.objects[&attacker].incarnation),
+            }],
+            "reach: two blockers cross a threshold of two once"
+        );
+        let mut zero = trigger.clone();
+        zero.blocker_count = Some(BlockerCountThreshold {
+            minimum: 0,
+            blocker: None,
+        });
+        assert!(matching_becomes_blocked_events(&event, &zero, &context, &state).is_empty());
+        let mut batched = trigger;
+        batched.batched = true;
+        assert!(matching_becomes_blocked_events(&event, &batched, &context, &state).is_empty());
+    }
+
     /// CR 509.3c: the bare "becomes blocked" form must still fire when an EFFECT
-    /// makes the attacker become blocked (`AttackerBecameBlockedByEffect`). A
+    /// makes the attacker become blocked (`AttackerBecameBlocked`). A
     /// spurious `TargetFilter::Player` surfaced by effect-text lowering (Goblin
     /// Cadets' "target opponent gains control of it") must NOT be mistaken for a
     /// genuine CR 509 blocker filter and suppress the firing. Reverting the
@@ -12475,7 +12637,10 @@ mod tests {
             "Attacker".to_string(),
             Zone::Battlefield,
         );
-        let event = GameEvent::AttackerBecameBlockedByEffect { attacker };
+        let event = GameEvent::AttackerBecameBlocked {
+            attacker,
+            attacker_incarnation: None,
+        };
         let bare = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
         let mut player_filter =
             make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);

@@ -1992,9 +1992,12 @@ mod tests {
 
         let db_cards = std::sync::Arc::new(engine::database::CardDatabase::default());
         let recorded = find(&recorded).expect("a recorded row with the same pools restores");
-        let restored =
-            server_core::session::GameSession::from_persisted(recorded.persisted, &db_cards)
-                .expect("the recorded row restores");
+        let restored = server_core::session::GameSession::from_persisted(
+            recorded.persisted,
+            &db_cards,
+            &engine::database::ComboTable::default(),
+        )
+        .expect("the recorded row restores");
         let face = &restored.state.deck_pools[0].current_sideboard[0].card;
         assert!(
             matches!(
@@ -2006,9 +2009,12 @@ mod tests {
 
         let onset_free =
             find(&onset_free).expect("an unrecorded row with onset-free pools restores");
-        let restored =
-            server_core::session::GameSession::from_persisted(onset_free.persisted, &db_cards)
-                .expect("the onset-free unrecorded row restores");
+        let restored = server_core::session::GameSession::from_persisted(
+            onset_free.persisted,
+            &db_cards,
+            &engine::database::ComboTable::default(),
+        )
+        .expect("the onset-free unrecorded row restores");
         assert_eq!(
             restored.state.ability_onset_record,
             AbilityOnsetRecord::Recorded,
@@ -2424,6 +2430,7 @@ mod tests {
             seat_state,
             &SeatDelta::empty(),
             &engine::database::CardDatabase::default(),
+            &engine::database::ComboTable::default(),
         );
 
         assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);

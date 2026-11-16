@@ -1745,6 +1745,23 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
     Some(defs)
 }
 
+/// CR 115.1: fail-closed result for a targeting prohibition whose source-kind or
+/// source-quality qualifier ("of spells", "of abilities", "of black or red spells
+/// your opponents control") `StaticMode::CantBeTargeted { who }` cannot express.
+/// Emitting the blanket mode would also forbid the sources the card does not name
+/// (Spectral Shield must not stop Royal Assassin's activated ability), so the
+/// clause is carried as an inert, coverage-visible `StaticMode::Other` holding the
+/// printed text. Source-kind modeling is a separate enum axis, deliberately not
+/// added here.
+pub(crate) fn source_qualified_cant_be_targeted_gap(
+    affected: TargetFilter,
+    original: &str,
+) -> StaticDefinition {
+    StaticDefinition::new(StaticMode::Other(original.to_string()))
+        .affected(affected)
+        .description(original.to_string())
+}
+
 /// CR 702.18a / CR 702.11a: Decompose `"<grant or restriction> and can't be the
 /// target of …"` into the first conjunct's static(s) plus the targeting
 /// restriction, sharing the same `affected` set.
@@ -1780,7 +1797,15 @@ pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDef
     // the unqualified form → blanket Shroud (CR 702.18a). Decline if the tail is
     // not a recognized targeting restriction.
     let targeting_clause = &lower[before.len()..];
-    let scope = crate::parser::oracle_keyword::classify_cant_be_targeted(targeting_clause)?;
+    let qualified =
+        crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(targeting_clause);
+    let scope = if qualified {
+        None
+    } else {
+        Some(crate::parser::oracle_keyword::classify_cant_be_targeted(
+            targeting_clause,
+        )?)
+    };
 
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
@@ -1796,23 +1821,20 @@ pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDef
 
     let affected = defs[0].affected.clone()?;
     let companion = match scope {
-        // CR 702.11a: "… your opponents control" grants Hexproof so the
-        // permanent's own controller can still target it.
-        crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: crate::types::keywords::Keyword::Hexproof,
-                }])
-                .description(text.to_string())
-        }
-        // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-        // `targeting.rs::can_target` via the object's active static definitions.
-        crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-            StaticDefinition::new(StaticMode::CantBeTargeted)
+        Some(scope) => {
+            let who = match scope {
+                crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                    crate::types::statics::ProhibitionScope::Opponents
+                }
+                crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                    crate::types::statics::ProhibitionScope::AllPlayers
+                }
+            };
+            StaticDefinition::new(StaticMode::CantBeTargeted { who })
                 .affected(affected)
                 .description(text.to_string())
         }
+        None => source_qualified_cant_be_targeted_gap(affected, text),
     };
     defs.push(companion);
     Some(defs)
