@@ -930,6 +930,39 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+/// CR 400.7 + CR 608.2c: the bound members a referent move ("exile it",
+/// `ChangeZone { target: SelfRef | TriggeringSource }`) will actually move,
+/// with its destination — read through the resolver's own binding and
+/// per-member movability test. `None` for every other effect.
+pub(crate) fn referent_move_departures(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(Vec<ObjectId>, Zone)> {
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !matches!(
+        target,
+        TargetFilter::SelfRef | TargetFilter::TriggeringSource
+    ) {
+        return None;
+    }
+    let (members, expected_origin) = referent_move_members(state, ability, *origin, target);
+    Some((
+        members
+            .into_iter()
+            .filter(|&id| !zone_move_member_cannot_move(state, id, expected_origin))
+            .collect(),
+        *destination,
+    ))
+}
+
 // CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
 // delivered set once. Bottom is only a transient delivery position; a printed
 // placement remains authoritative, and ordinary library moves keep auto-shuffling.

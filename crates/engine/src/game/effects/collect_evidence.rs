@@ -20,8 +20,9 @@ use super::super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 /// `spell_being_priced`. CR 602.2a: an activated ability's source stays where
 /// it is, so it can be evidence for its own cost (the gate passes `None`).
 ///
-/// The single authority for the payability gate, the joint object-leg model
-/// and the `CollectEvidenceChoice` prompt.
+/// The single authority for the payability gate, the optional-conjunction
+/// gate ([`can_collect_evidence_without`]), the joint object-leg model and the
+/// `CollectEvidenceChoice` prompt.
 pub(crate) fn evidence_candidates(
     state: &GameState,
     player: PlayerId,
@@ -66,6 +67,24 @@ pub(crate) fn can_collect_evidence(
         state,
         &evidence_candidates(state, player, spell_being_priced),
     ) >= amount
+}
+
+/// CR 701.59b + CR 118.3 + CR 608.2d: whether collect evidence `amount` can
+/// be paid in full from the evidence pool left once `departed` — objects an
+/// earlier part of the same optional action moves away — are gone. "You may
+/// exile it and collect evidence 4" can't count the exiled card toward its
+/// own evidence (Lamplight Phoenix).
+pub(crate) fn can_collect_evidence_without(
+    state: &GameState,
+    player: PlayerId,
+    departed: &[ObjectId],
+    amount: u32,
+) -> bool {
+    let pool: Vec<ObjectId> = evidence_candidates(state, player, None)
+        .into_iter()
+        .filter(|id| !departed.contains(id))
+        .collect();
+    total_mana_value(state, &pool) >= amount
 }
 
 /// The prompt runs while a cost is being paid, after any spell paying it was
