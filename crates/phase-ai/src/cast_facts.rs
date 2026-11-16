@@ -10,6 +10,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
@@ -318,6 +319,32 @@ pub fn effective_activated_ability(
     engine::game::casting::activated_ability_definitions(state, *source_id)
         .into_iter()
         .find_map(|(index, ability)| (index == *ability_index).then_some(ability))
+}
+
+/// CR 605.1a: The mana ability a payment-step action activates, with its
+/// source — an activated ability of any permanent, or a land's (or chosen mana
+/// source's) indexed mana ability. `None` for an intrinsic basic-land ability
+/// and for every other action.
+pub fn mana_activation_ability(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<(ObjectId, AbilityDefinition)> {
+    let (source_id, ability_index) = match action {
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            ..
+        } => (*source_id, *ability_index),
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
+            (selection.source.object_id, selection.ability_index?)
+        }
+        _ => return None,
+    };
+    engine::game::casting::activated_ability_definitions(state, source_id)
+        .into_iter()
+        .find_map(|(index, ability)| (index == ability_index).then_some(ability))
+        .filter(engine::game::mana_abilities::is_mana_ability)
+        .map(|ability| (source_id, ability))
 }
 
 /// Build an EffectProfile for any action — spells, activated abilities, or target

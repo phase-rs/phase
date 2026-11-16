@@ -1246,6 +1246,6 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(38);
     expect(Object.keys(helpers)).toHaveLength(12);
     expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
-    expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });
+    expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 4 });
   }, V15_CENSUS_TIMEOUT_MS);
 });

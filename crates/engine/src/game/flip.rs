@@ -345,6 +345,9 @@ pub(crate) fn restore_normal_cost_and_color_if_flipped(obj: &mut GameObject) {
 /// printed/base values plus their live mirrors, exactly as the layer system
 /// expects; `mark_layers_full` then reapplies every continuous effect.
 pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceData) {
+    // CR 710.1c: a flip changes this same permanent's characteristics, so its
+    // still-live resolution effects remain attached through the rebaseline.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     // CR 710.1b: alternative name.
     obj.name = face.name.clone();
     obj.base_name = face.name;
@@ -373,9 +376,13 @@ pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceD
     obj.base_keywords = face.keywords;
     obj.abilities = Arc::new(face.abilities.clone());
     obj.base_abilities = Arc::new(face.abilities);
-    obj.replacement_definitions = face.replacement_definitions.clone();
     obj.base_replacement_definitions =
         Arc::new(face.replacement_definitions.iter_all().cloned().collect());
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.static_definitions = face.static_definitions.clone();
     obj.base_static_definitions = Arc::new(face.static_definitions.iter_all().cloned().collect());
     obj.install_trigger_base_definitions(Arc::new(

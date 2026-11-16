@@ -627,6 +627,50 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
     )
 }
 
+/// CR 608.2d + CR 400.7: an ordinary-optional exact graveyard exile ("that
+/// player may exile a card from their graveyard", Web of Inertia) is
+/// impossible when no eligible card exists — the typed move names a graveyard
+/// population, and an exact selection from an empty set cannot be performed.
+/// Sibling of [`exact_scoped_graveyard_exile_is_infeasible`], which serves the
+/// `optional_for: AnyPlayer` fan-out shape; this one serves the single-prompt
+/// shape (`multi_target: None`, exact-1, non-`up_to`) with any typed filter.
+/// Untargeted moves only: bound targets keep today's behavior under the
+/// targeting/fizzle machinery. Returns `false` (feasible) for shapes outside
+/// the gate or with a candidate in hand.
+pub(crate) fn optional_exact_graveyard_exile_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target: TargetFilter::Typed { .. },
+        up_to: false,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    if !ability.optional || ability.multi_target.is_some() || !ability.targets.is_empty() {
+        return false;
+    }
+    let target_filter = match &ability.effect {
+        Effect::ChangeZone { target, .. } => target,
+        _ => unreachable!("shape matched above"),
+    };
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
+    let candidates = resolution_zone_candidates(
+        state,
+        ability,
+        target_filter,
+        filter_controller,
+        &[Zone::Graveyard],
+        Zone::Exile,
+    );
+    candidates.is_empty()
+}
+
 // PLAN §7 Phase A: the zone-change pipeline (result enums, delivery tail,
 // `execute_zone_move`, `deliver_replaced_zone_change`) now lives in
 // `crate::game::zone_pipeline`. These shims keep every existing
@@ -928,6 +972,39 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
         && members
             .into_iter()
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
+}
+
+/// CR 400.7 + CR 608.2c: the bound members a referent move ("exile it",
+/// `ChangeZone { target: SelfRef | TriggeringSource }`) will actually move,
+/// with its destination — read through the resolver's own binding and
+/// per-member movability test. `None` for every other effect.
+pub(crate) fn referent_move_departures(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(Vec<ObjectId>, Zone)> {
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !matches!(
+        target,
+        TargetFilter::SelfRef | TargetFilter::TriggeringSource
+    ) {
+        return None;
+    }
+    let (members, expected_origin) = referent_move_members(state, ability, *origin, target);
+    Some((
+        members
+            .into_iter()
+            .filter(|&id| !zone_move_member_cannot_move(state, id, expected_origin))
+            .collect(),
+        *destination,
+    ))
 }
 
 // CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
@@ -1654,14 +1731,11 @@ pub fn resolve(
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && targeted_objects
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        targeted_objects.iter().copied(),
+        dest_zone,
+    );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
@@ -3630,6 +3704,9 @@ pub fn resolve_all(
         state.tracked_set_member_origins.remove(id);
     }
 
+    // CR 614.12 + CR 614.1c: the same snapshot also serves population-counting
+    // as-enters replacements (Ascendant Acolyte), which must not count a
+    // co-entrant's counters or presence.
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
     // simultaneously, snapshot the eligible pool BEFORE any co-entering member
     // enters — `state.objects` is unordered, so an ordinary co-arriver may be
@@ -3638,14 +3715,11 @@ pub fn resolve_all(
     // battlefield is still the pre-entry set) so every co-arriver is excluded.
     // `is_none`-gated so a nested/resumed pass doesn't re-capture; cleared on the
     // event-completion paths below.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && matching
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        matching.iter().copied(),
+        dest_zone,
+    );
 
     // CR 401.4: When multiple objects are placed at the same library position
     // simultaneously and `random_order` is false, the owner arranges their

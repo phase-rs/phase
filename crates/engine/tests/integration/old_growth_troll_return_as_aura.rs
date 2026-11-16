@@ -300,3 +300,101 @@ fn old_growth_troll_dies_to_graveyard_returns_as_aura_attached_to_forest() {
         runner.state().waiting_for
     );
 }
+
+/// Place a Forest carrying `protection` ("protection from <quality>") — the
+/// shape Ashaya + Teysa produce (a Forest that is also a creature with
+/// protection from creatures), reduced to the attribute the attach gate reads.
+fn add_protected_forest(
+    state: &mut engine::types::game_state::GameState,
+    player: engine::types::player::PlayerId,
+    quality: &str,
+) -> engine::types::identifiers::ObjectId {
+    let id = add_forest(state, player);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.keywords.push(Keyword::Protection(
+        engine::types::keywords::ProtectionTarget::CardType(quality.to_string()),
+    ));
+    obj.base_keywords = obj.keywords.clone();
+    id
+}
+
+fn attached_events(
+    events: &[engine::types::events::GameEvent],
+    attachment: engine::types::identifiers::ObjectId,
+) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                engine::types::events::GameEvent::Attached { attachment_id, .. }
+                    if *attachment_id == attachment
+            )
+        })
+        .count()
+}
+
+/// Kill the Troll through the production zone pipeline, resolve its dies
+/// trigger up to the host choice, then choose `host`. Returns the choice's events.
+fn troll_returns_choosing(
+    protected_quality: &str,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+    Vec<engine::types::events::GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let troll_id = scenario
+        .add_creature_from_oracle(P0, "Old-Growth Troll", 4, 4, OLD_GROWTH_TROLL_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    let protected = add_protected_forest(runner.state_mut(), P0, protected_quality);
+    // A second legal Forest so the controller is offered a choice (the
+    // single-host path would auto-attach).
+    add_forest(runner.state_mut(), P0);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), troll_id, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    drain_to_priority(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ),
+        "two legal Forests: the controller chooses, got {:?}",
+        runner.state().waiting_for
+    );
+    let result = runner
+        .act(engine::types::actions::GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(protected)),
+        })
+        .expect("the protected Forest is an offered host");
+    (runner, troll_id, protected, result.events)
+}
+
+/// CR 702.16c + CR 613.1d: the returned permanent is an Aura ENCHANTMENT, so a
+/// Forest with protection from creatures (Teysa under Ashaya) can be enchanted
+/// by it. The protection check reads the converted Aura, not the pre-conversion
+/// creature, and exactly one `Attached` event is published.
+#[test]
+fn returned_aura_attaches_to_forest_with_protection_from_creatures() {
+    let (runner, troll, forest, events) = troll_returns_choosing("Creature");
+    let aura = &runner.state().objects[&troll];
+    assert_eq!(aura.zone, Zone::Battlefield);
+    assert_eq!(aura.attached_to, Some(forest.into()));
+    assert_eq!(attached_events(&events, troll), 1);
+}
+
+/// CR 702.16c: control — protection from enchantments does stop the converted
+/// Aura (it is an enchantment), so the attach is refused and no `Attached`
+/// event is published (CR 701.3b: an illegal attach does nothing).
+#[test]
+fn returned_aura_cannot_attach_to_forest_with_protection_from_enchantments() {
+    let (runner, troll, forest, events) = troll_returns_choosing("Enchantment");
+    let aura = &runner.state().objects[&troll];
+    assert_ne!(aura.attached_to, Some(forest.into()));
+    assert_eq!(attached_events(&events, troll), 0);
+}

@@ -718,6 +718,7 @@ fn random_card_predicate_guess(
     use rand::seq::IndexedRandom;
 
     let WaitingFor::NamedChoice {
+        decision_subject_id: _,
         free_entry: _,
         player,
         choice_type,
@@ -4088,6 +4089,9 @@ fn score_candidates_core_for_root(
     }
 
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+    if let Some(seeds) = crate::policies::payment_surplus_seeds(state, &prepared) {
+        services.context.payment_surplus.seed(seeds);
+    }
     let prepared = services.validate_prepared_candidates(state, prepared);
     let gated = gate_prepared_candidates(
         state,
@@ -4562,6 +4566,7 @@ pub(crate) fn build_ai_context_with_session(
         session,
         player,
         deadline: engine::util::Deadline::none(),
+        payment_surplus: Default::default(),
     };
     // Compute opponent threat profile based on difficulty setting.
     ctx.opponent_threat = match config.search.threat_awareness {
@@ -5822,17 +5827,26 @@ fn softmax_select_index_with(
             .map(|(index, _)| index);
     }
 
+    // Selection invariant: a zero-weight row (a policy Reject's −∞ score) is
+    // never selected while a positive-weight row exists. A zero draw lands on
+    // the first positive-weight row, and float shortfall at the top of the walk
+    // falls back to the last positive-weight row.
     let threshold: f64 = uniform() * total;
     let mut cumulative = 0.0;
+    let mut last_positive = None;
     for (i, w) in weights.iter().enumerate() {
+        if *w <= 0.0 {
+            continue;
+        }
+        last_positive = Some(i);
         cumulative += w;
         if cumulative >= threshold {
             return Some(i);
         }
     }
 
-    // Fallback to last
-    Some(scored.len() - 1)
+    // Fallback to the last selectable row
+    last_positive.or(Some(scored.len() - 1))
 }
 
 #[cfg(test)]
@@ -11497,6 +11511,7 @@ mod tests {
             .collect();
         resolve_deck_list(
             db,
+            &engine::database::ComboTable::default(),
             &DeckList {
                 player: PlayerDeckList {
                     main_deck,
@@ -13321,6 +13336,50 @@ mod tests {
         );
     }
 
+    fn land(id: u64) -> GameAction {
+        GameAction::PlayLand {
+            object_id: ObjectId(id),
+            card_id: CardId(id),
+        }
+    }
+
+    #[test]
+    fn softmax_zero_draw_skips_a_leading_rejected_row() {
+        let scored = vec![
+            (land(1), f64::NEG_INFINITY),
+            (GameAction::PassPriority, 0.0),
+        ];
+        assert_eq!(
+            softmax_select_index_with(&scored, 1.0, || 0.0),
+            Some(1),
+            "a zero uniform draw must not select a −∞ row while a finite row exists"
+        );
+    }
+
+    #[test]
+    fn softmax_top_draw_stays_on_a_finite_row() {
+        let scored = vec![
+            (GameAction::PassPriority, 0.0),
+            (land(1), f64::NEG_INFINITY),
+        ];
+        assert_eq!(
+            softmax_select_index_with(&scored, 1.0, || 1.0 - f64::EPSILON),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn softmax_all_rejected_keeps_the_stable_argmax_fallback() {
+        let scored = vec![(land(2), f64::NEG_INFINITY), (land(1), f64::NEG_INFINITY)];
+        let first = softmax_select_index_with(&scored, 1.0, || 0.5);
+        assert_eq!(
+            first,
+            softmax_select_index_with(&scored, 1.0, || 0.0),
+            "all-rejected rows take the deterministic fallback regardless of the draw"
+        );
+        assert!(first.is_some());
+    }
+
     #[test]
     fn budget_limits_stop_search() {
         let mut budget = SearchBudget::new(3);
@@ -14831,6 +14890,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
@@ -14931,6 +14991,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicate {
@@ -14969,6 +15030,7 @@ mod tests {
         );
         state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -14989,6 +15051,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = vec!["Forest".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: P0,
             choice_type: ChoiceType::card_name(),
@@ -15022,6 +15085,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -18741,6 +18805,7 @@ mod tests {
             Zone::Battlefield,
         );
         guess.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {

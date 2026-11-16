@@ -208,6 +208,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "crew_activated_this_turn",
         "crew_resolved_this_turn",
         "crew_history_this_turn",
+        "creatures_fought_this_turn",
         "exerted_this_turn",
         "graveyard_cast_permissions_used",
         "graveyard_cast_permissions_used_per_type",
@@ -631,6 +632,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "replacement_applied",
             "HashSet",
             HASH_SET,
+        ),
+        (
+            "PendingBatchDeliveries",
+            None,
+            "pre_entry_battlefield",
+            "Option<HashSet>",
+            OPTION_HASH_SET,
         ),
         (
             "PendingBatchZoneChangeCause",
