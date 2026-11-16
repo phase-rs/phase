@@ -29638,7 +29638,7 @@ pub(crate) mod replacement_library_placement_wire_tests {
         else {
             panic!("zone event survives")
         };
-        assert_eq!(library_placement, &expected);
+        assert_eq!(library_placement.as_deref(), expected.as_ref());
         assert_eq!(pending.depth, 2);
         assert_eq!(pending.choice_player, Some(PlayerId(0)));
         assert_eq!(pending.candidates.len(), 1);

@@ -5392,8 +5392,8 @@ mod tests {
             }]
         );
         assert!(matches!(&pending.proposed, ProposedEvent::ZoneChange {
-            object_id, to: Zone::Library, library_placement: Some(LibraryPosition::Top), ..
-        } if *object_id == placed));
+            object_id, to: Zone::Library, library_placement: Some(placement), ..
+        } if *object_id == placed && **placement == LibraryPosition::Top));
         assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
 
         state.priority_player = PlayerId(0);

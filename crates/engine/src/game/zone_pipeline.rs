@@ -1023,7 +1023,7 @@ fn move_batch_member_with_terminal(
                 ..
             } = &mut proposed
             {
-                *library_placement = Some(position.clone());
+                *library_placement = Some(Box::new(position.clone()));
                 *chain_referent = req.mods.chain_referent;
                 *performed_by = req.mods.performed_by;
                 *ownership_actor = req.mods.ownership_actor.into();
@@ -4412,7 +4412,7 @@ fn deliver_replaced_batch_member(
                 state,
                 object_id,
                 to,
-                library_placement.as_ref(),
+                library_placement.as_deref(),
                 library_shuffle,
                 &applied,
                 performed_by,
@@ -4430,7 +4430,7 @@ fn deliver_replaced_batch_member(
                     exile_controller,
                     exile_tracking,
                     drain,
-                    library_placement.as_ref(),
+                    library_placement.as_deref(),
                     events,
                 ),
                 BatchMoveResult::NeedsChoice => replacement_pause_delivery_result(state),
@@ -5021,7 +5021,7 @@ fn deliver_replaced_batch_member(
             exile_controller,
             exile_tracking,
             drain,
-            library_placement.as_ref(),
+            library_placement.as_deref(),
             events,
         );
         if matches!(result, ZoneDeliveryResult::Done) && enters_attacking && entered_battlefield {
@@ -5493,7 +5493,7 @@ fn execute_zone_move_with_applied_terminal(
         ..
     } = &mut proposed
     {
-        *placement = library_placement;
+        *placement = library_placement.map(Box::new);
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
@@ -5942,7 +5942,7 @@ mod w3_library_placement_tests {
         else {
             panic!("expected a zone-change proposal");
         };
-        library_placement.clone()
+        library_placement.as_deref().cloned()
     }
 
     fn assert_finished(state: &GameState) {
@@ -6170,7 +6170,7 @@ mod w3_library_placement_tests {
                     library_placement, ..
                 } = &mut event
                 {
-                    *library_placement = position.clone();
+                    *library_placement = position.clone().map(Box::new);
                 }
                 assert_eq!(event_placement(&event), position);
                 let mut events = Vec::new();
@@ -8026,9 +8026,9 @@ mod w3_library_placement_tests {
                 &pinned,
                 ProposedEvent::ZoneChange {
                     to: Zone::Library,
-                    library_placement: Some(LibraryPosition::Bottom),
+                    library_placement: Some(placement),
                     ..
-                }
+                } if **placement == LibraryPosition::Bottom
             ),
             "the production pin retains the original positioned boundary"
         );

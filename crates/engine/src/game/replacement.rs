@@ -21400,7 +21400,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(crate::types::ability::LibraryPosition::Top);
+            *library_placement = Some(Box::new(crate::types::ability::LibraryPosition::Top));
         }
         let ReplacementResult::Execute(ProposedEvent::ZoneChange {
             from,
@@ -23336,7 +23336,7 @@ mod tests {
                 library_placement, ..
             } = &mut proposed
             {
-                *library_placement = Some(LibraryPosition::Top);
+                *library_placement = Some(Box::new(LibraryPosition::Top));
             }
             let mut events = Vec::new();
             let ReplacementResult::Execute(ProposedEvent::ZoneChange {
@@ -23380,7 +23380,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(LibraryPosition::Bottom);
+            *library_placement = Some(Box::new(LibraryPosition::Bottom));
         }
         // Synthetic non-Library placement isolates preservation by the modifier;
         // terminal delivery independently ignores placement outside Library.
@@ -23394,7 +23394,7 @@ mod tests {
         else {
             panic!("tap modifier must execute");
         };
-        assert_eq!(library_placement, Some(LibraryPosition::Bottom));
+        assert_eq!(library_placement, Some(Box::new(LibraryPosition::Bottom)));
         assert!(enter_tapped.resolve(false));
         assert!(applied.contains(&AppliedReplacementKey::object(source, 0)));
 
@@ -23409,7 +23409,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(LibraryPosition::Top);
+            *library_placement = Some(Box::new(LibraryPosition::Top));
         }
         assert_eq!(
             replace_event(&mut state, proposed, &mut events),
@@ -23425,7 +23425,7 @@ mod tests {
             panic!("decline must complete consultation");
         };
         assert_eq!(to, Zone::Library);
-        assert_eq!(library_placement, Some(LibraryPosition::Top));
+        assert_eq!(library_placement, Some(Box::new(LibraryPosition::Top)));
         assert_eq!(
             applied,
             HashSet::from([AppliedReplacementKey::object(source, 0)])
@@ -23448,7 +23448,7 @@ mod tests {
                 library_placement, ..
             } = &mut proposed
             {
-                *library_placement = Some(LibraryPosition::Top);
+                *library_placement = Some(Box::new(LibraryPosition::Top));
             }
             let mut events = Vec::new();
             assert_eq!(
@@ -23471,7 +23471,7 @@ mod tests {
             };
             assert_eq!(object_id, commander);
             assert_eq!(to, expected_zone);
-            assert_eq!(library_placement, expected_placement);
+            assert_eq!(library_placement, expected_placement.map(Box::new));
             assert_eq!(
                 applied,
                 HashSet::from([AppliedReplacementKey::object(
