@@ -582,6 +582,27 @@ pub fn record_battlefield_entry(
     state.battlefield_entries_this_turn.push_back(record);
 }
 
+/// Update the battlefield entry record for an object to reflect its current
+/// characteristics. This is needed for face-down entries where the profile
+/// (morph, manifest, disguise, cloak) is applied after the initial record
+/// is created in `record_battlefield_entry`.
+pub fn update_battlefield_entry_record_for_object(
+    state: &mut crate::types::game_state::GameState,
+    object_id: ObjectId,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let new_record = battlefield_entry_record_for(obj);
+
+    for record in state.battlefield_entries_this_turn.iter_mut() {
+        if record.object_id == object_id {
+            *record = new_record;
+            break;
+        }
+    }
+}
+
 fn entry_controller_matches(
     controller: &ControllerRef,
     record_controller: PlayerId,

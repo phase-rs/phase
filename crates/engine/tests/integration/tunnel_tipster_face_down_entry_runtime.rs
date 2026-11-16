@@ -4,7 +4,7 @@
 //! the battlefield under your control this turn, put a +1/+1 counter on this
 //! creature."
 //!
-//! The intervening-if reads the CR 403.3 battlefield-entry snapshot, whose
+//! The intervening-if reads the CR 608.2i battlefield-entry snapshot, whose
 //! `face_state` is captured at entry time. This test enters a printed morph
 //! creature through the public face-down cast path, then advances through the
 //! end step; the trigger is checked when the event occurs and again as it
@@ -23,11 +23,12 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 /// Tunnel Tipster's printed trigger (CR 603.4 + CR 708.2).
-const TUNNEL_TIPSTER: &str = "At the beginning of your end step, if a face-down creature entered the battlefield under your control this turn, put a +1/+1 counter on this creature.";
+const TUNNEL_TIPSTER: &str = "At the beginning of your end step, if a face-down creature entered the battlefield under your control this turn, put a +1/+1 counter on this creature.\n{T}: Add {G}.";
 
 /// Sagu Archer — a printed morph creature, so the real face-down cast path
 /// (CR 708.2 + CR 708.4) produces the entry snapshot this test reads.
-const SAGU_ARCHER: &str = "Morph {2}{G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+/// Printed: {4}{G} 2/5 "Morph {4}{G}"
+const SAGU_ARCHER: &str = "Morph {4}{G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
 
 fn green_pool(count: usize) -> Vec<ManaUnit> {
     (0..count)
@@ -36,20 +37,20 @@ fn green_pool(count: usize) -> Vec<ManaUnit> {
 }
 
 /// Tunnel Tipster plus a Sagu Archer in hand. Six green mana covers both the
-/// face-down {3} and the printed {1}{G}{G}; three library cards fuel the draw
+/// face-down {3} and the printed {4}{G}; three library cards fuel the draw
 /// step of the turn-reset control.
 fn board() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let tipster = scenario
-        .add_creature(P0, "Tunnel Tipster", 1, 2)
+        .add_creature(P0, "Tunnel Tipster", 1, 1)
         .from_oracle_text(TUNNEL_TIPSTER)
         .id();
     let archer = scenario
-        .add_creature_to_hand_from_oracle(P0, "Sagu Archer", 2, 3, SAGU_ARCHER)
+        .add_creature_to_hand_from_oracle(P0, "Sagu Archer", 2, 5, SAGU_ARCHER)
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
-            generic: 1,
+            shards: vec![ManaCostShard::Green],
+            generic: 4,
         })
         .id();
     scenario.with_mana_pool(P0, green_pool(6));
@@ -127,7 +128,7 @@ fn face_down_entry_fires_tunnel_tipster() {
         "Tunnel Tipster must get a +1/+1 counter from the face-down entry"
     );
     assert_eq!(runner.state().objects[&tipster].power, Some(2));
-    assert_eq!(runner.state().objects[&tipster].toughness, Some(3));
+    assert_eq!(runner.state().objects[&tipster].toughness, Some(2));
 }
 
 /// Control: an ordinary face-up entry must not satisfy the condition.
