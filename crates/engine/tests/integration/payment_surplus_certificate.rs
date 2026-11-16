@@ -21,6 +21,7 @@ use engine::game::casting::activated_ability_definitions;
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::AbilityDefinition;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
@@ -1557,8 +1558,17 @@ struct RefractorHarrow {
     ruins_red_index: usize,
 }
 
-/// The ability index on `refractor` whose definition is `land`'s ability
-/// `land_index` — discovered, not assumed.
+/// Whether `copy`, an ability of a Refractor, is its donated copy of `land`'s
+/// printed ability `printed`: stamped with `land` as its provider (CR 201.5a)
+/// and printing the same ability.
+fn donated_copy_of(copy: &AbilityDefinition, land: ObjectId, printed: &AbilityDefinition) -> bool {
+    copy.granting_object
+        .is_some_and(|provider| provider.object_id == land)
+        && copy.description == printed.description
+}
+
+/// The ability index on `refractor` whose definition is its donated copy of
+/// `land`'s ability `land_index` — discovered, not assumed.
 fn granted_index(
     state: &GameState,
     refractor: ObjectId,
@@ -1568,7 +1578,7 @@ fn granted_index(
     let wanted = &activated_ability_definitions(state, land)[land_index].1;
     let matches: Vec<usize> = activated_ability_definitions(state, refractor)
         .into_iter()
-        .filter(|(_, ability)| ability == wanted)
+        .filter(|(_, ability)| donated_copy_of(ability, land, wanted))
         .map(|(index, _)| index)
         .collect();
     assert_eq!(
@@ -1756,14 +1766,20 @@ fn refractor_ability_index_renamed_by_the_finisher_refuses_deferral() {
         .find(|(index, _)| *index == board.ruins_red_index)
         .map(|(_, ability)| ability)
         .expect("reach: B still has an ability at the old index");
-    assert_ne!(
-        named_after,
-        activated_ability_definitions(state, board.ruins)[1].1,
+    assert!(
+        !donated_copy_of(
+            &named_after,
+            board.ruins,
+            &activated_ability_definitions(state, board.ruins)[1].1
+        ),
         "reach: B's old index no longer names the Ruins red ability"
     );
-    assert_eq!(
-        named_after,
-        activated_ability_definitions(state, board.forest)[0].1,
+    assert!(
+        donated_copy_of(
+            &named_after,
+            board.forest,
+            &activated_ability_definitions(state, board.forest)[0].1
+        ),
         "reach: B's old index now names the Forest's {{G}} ability"
     );
 
