@@ -6407,6 +6407,56 @@ mod restored_card_db_requirements_tests {
         clear_game_state();
     }
 
+    /// Issue #10939 under CR 723.1 + CR 723.4 + CR 723.5, on the printed card: during the
+    /// turn Mindslaver hands to P2, P2 casts P1's Lightning Bolt for P1, and
+    /// the target choice is P1's decision, asked as P2. Its options name each
+    /// target as P1's board does: P1 is "You" in both, every other seat is
+    /// named by number.
+    #[test]
+    fn the_targets_of_a_decision_mindslaver_controls_are_named_as_its_owners_board_names_them() {
+        use engine::game::scenario::P1;
+        let p2 = PlayerId(2);
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
+
+        assert_eq!(authorized_seat(), p2);
+        let (bolt, card_id) = with_state(|state| {
+            let bolt = state.players[usize::from(P1.0)]
+                .hand
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Lightning Bolt")
+                .expect("P1 holds its Lightning Bolt");
+            (bolt, state.objects[&bolt].card_id)
+        })
+        .expect("the game is installed");
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        );
+
+        let delegated = build_llm_decision(p2, &log);
+        let body = delegated["request"]["body"]
+            .as_str()
+            .expect("a request body");
+        assert!(body.contains("You are Player 1."), "{body}");
+        for option in [
+            "Choose Target (Target: Player 0)",
+            "Choose Target (Target: You)",
+            "Choose Target (Target: Player 2)",
+        ] {
+            assert!(body.contains(option), "{option}\n{body}");
+        }
+
+        clear_game_state();
+    }
+
     /// A new game (or a cleared one) never continues the last game's thread.
     #[test]
     fn clearing_the_game_clears_llm_message_threads() {

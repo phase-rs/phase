@@ -2331,6 +2331,7 @@ mod tests {
             is_commander: _,       // format eligibility
             is_oathbreaker: _,     // format eligibility
             deck_copy_limit: _,    // deck construction
+            deck_size_override: _, // deck construction
             rarities: _,           // printing metadata
         } = CardFace::default();
     }

@@ -29,7 +29,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -460,6 +460,100 @@ pub fn is_deck_construction_copy_limit_sentence(line: &str) -> bool {
         .parse(lower.as_str())
         .is_ok()
         || lower.trim() == "megalegendary"
+}
+
+/// CR 903.5a: Strip one leading "<Word> — " ability-word label ("Rulebreaker — ")
+/// from a deck-construction size sentence. The label carries no rules meaning
+/// (CR 207.2c); the dispatch loop reaches the size sentence with the label
+/// still attached, so this runs inside the size-sentence combinator rather than
+/// in the ability-word strip pass. Combinators only: `opt` backtracks when the
+/// dash tail is absent, leaving ordinary sentences untouched.
+fn strip_deck_size_label(input: &str) -> OracleResult<'_, ()> {
+    opt(terminated(
+        take_while(|c: char| c.is_alphanumeric()),
+        alt((tag(" \u{2014} "), tag(" - "))),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
+/// CR 903.5a: Parse a deck-construction maximum-size sentence into ().
+/// Class A (Whtz, the Bibliophile): "a deck with this commander has no
+/// maximum deck size". Class B (Covert Blue Mage): "if <subject> is your
+/// commander, your starting deck can contain any number of cards beyond the
+/// maximum deck size" — the subject must be this face (card name or "~");
+/// a partner that merely shares the deck MUST NOT match (the hostile
+/// partner-neither-Rulebreaker row). Class C/D (companions, Rulebreaker
+/// keyword) never reach this shape. The leading ability-word label is
+/// stripped by [`strip_deck_size_label`].
+fn parse_deck_size_sentence<'a>(input: &'a str, card_name_lower: &str) -> OracleResult<'a, ()> {
+    let (input, _) = strip_deck_size_label(input)?;
+    alt((
+        // Class A: no-maximum marker (Whtz).
+        value(
+            (),
+            terminated(
+                tag("a deck with this commander has no maximum deck size"),
+                opt(tag(".")),
+            ),
+        ),
+        // Class B: beyond-maximum marker (Covert Blue Mage).
+        (|input: &'a str| {
+            let (input, subject) =
+                preceded(tag("if "), take_until(" is your commander, ")).parse(input)?;
+            if subject.trim() != card_name_lower && subject.trim() != "~" {
+                return Err(nom::Err::Error(OracleError::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+            let (input, _) = tag(" is your commander, ").parse(input)?;
+            let (input, _) = tag(
+                "your starting deck can contain any number of cards beyond the maximum deck size",
+            )
+            .parse(input)?;
+            let (input, _) = opt(tag(".")).parse(input)?;
+            Ok((input, ()))
+        }),
+    ))
+    .parse(input)
+}
+
+/// CR 903.5a: Recognize a deck-construction maximum-size sentence so the line
+/// is consumed as [`DeckSizeOverride`] metadata (see
+/// `compute_no_maximum_deck_size_from_text`, read by deck validation) instead
+/// of falling through to an unimplemented gap (see `Effect::unimplemented`).
+pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let card_name_lower = card_name.trim().to_ascii_lowercase();
+    let mut recognize = all_consuming(|input| parse_deck_size_sentence(input, &card_name_lower));
+    recognize.parse(lower.as_str()).is_ok()
+}
+
+/// CR 903.5a: Extract the deck-construction no-maximum marker from a card's
+/// full Oracle text, scanning each line. The marker sentence is its own
+/// printed line ("Rulebreaker — A deck with this commander has no maximum
+/// deck size."), so unlike the copy-limit tail sentences no per-sentence
+/// split is needed; the same combinator both extracts the marker (for deck
+/// validation) and recognizes the line. The first match wins. Reminder text
+/// is stripped per line before matching: the Class B sentence carries its
+/// 120-card example as a parenthetical on the same printed line, which would
+/// otherwise defeat the all-consuming recognizer. Reminder-text bodies carry
+/// no size sentence of their own, so they are stripped, never scanned.
+pub fn compute_no_maximum_deck_size_from_text(
+    text: &str,
+    card_name: &str,
+) -> Option<DeckSizeOverride> {
+    for line in text.lines() {
+        let stripped = strip_reminder_text(line);
+        if stripped.is_empty() {
+            continue;
+        }
+        if is_deck_construction_size_sentence(&stripped, card_name) {
+            return Some(DeckSizeOverride::NoMaximum);
+        }
+    }
+    None
 }
 
 /// Recognizer for draft-time procedural sentences on Conspiracy / "draft
@@ -2003,6 +2097,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3988,6 +4083,7 @@ fn is_spell_resolution_instruction_line(
     ctx.diagnostics.truncate(loyalty_snap);
     if is_commander_permission_sentence(line)
         || is_deck_construction_copy_limit_sentence(line)
+        || is_deck_construction_size_sentence(line, card_name)
         || is_draft_matters_sentence(line)
         || is_loyalty
     {
@@ -6932,7 +7028,9 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        if is_deck_construction_copy_limit_sentence(&line) {
+        if is_deck_construction_copy_limit_sentence(&line)
+            || is_deck_construction_size_sentence(&line, card_name)
+        {
             i += 1;
             continue;
         }
