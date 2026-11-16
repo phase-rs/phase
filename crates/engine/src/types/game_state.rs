@@ -22088,19 +22088,6 @@ pub struct PendingLifelinkGain {
     pub amount: u32,
 }
 
-/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
-/// parked because a lifelink life-gain event met two or more co-applicable replacement effects
-/// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
-/// activating abilities* between combat damage being assigned and dealt — a priority window — but
-/// not a CR 616.1 choice made while the event is being applied, which opens no priority window
-/// and puts nothing on the stack. What it *does* forbid is replaying the batch: it is one event,
-/// so the damage is never re-dealt and only the unstarted tail is parked.
-///
-/// The tail is parked whole, in emission order, so the completing batch's event stream is
-/// byte-identical to the un-paused one: per-source gains, then the per-player
-/// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
-/// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
-/// while the CR 616.1 prompt is open.
 /// CR 510.2 + CR 616.1: one combat-damage assignment still owed after a
 /// Phase C pause, with its post-Phase-B survivor. Owned (unlike the borrowed
 /// `BatchEntry`) so the batch remnant round-trips through saves and AI
@@ -22150,6 +22137,19 @@ pub struct PendingCombatPhaseCRemnant {
     pub source_incarnations: Vec<ObjectIncarnationRef>,
 }
 
+/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
+/// parked because a lifelink life-gain event met two or more co-applicable replacement effects
+/// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
+/// activating abilities* between combat damage being assigned and dealt — a priority window — but
+/// not a CR 616.1 choice made while the event is being applied, which opens no priority window
+/// and puts nothing on the stack. What it *does* forbid is replaying the batch: it is one event,
+/// so the damage is never re-dealt and only the unstarted tail is parked.
+///
+/// The tail is parked whole, in emission order, so the completing batch's event stream is
+/// byte-identical to the un-paused one: per-source gains, then the per-player
+/// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
+/// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
+/// while the CR 616.1 prompt is open.
 /// `Eq` is absent because the Phase C remnant holds `ProposedEvent`
 /// survivors (see `PendingCombatLeg`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22194,11 +22194,102 @@ pub struct PendingCombatLifelink {
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
+    /// CR 616.1 + CR 616.1g: set when the batch parked EARLIER than the
+    /// lifelink tail — inside the replacement pass over its damage events
+    /// (Phase B), before any damage was dealt. `remaining` and
+    /// `damage_to_players` are then still empty (Phase C builds them), and
+    /// `prevention_tally` holds the `Prevention::All` aggregate of the events
+    /// already replaced. `None` for a lifelink-only park, and absent from saves
+    /// written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<PendingCombatDamageReplacement>,
     /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
     /// the batch parked on a LEG's life-loss pause (rather than a lifelink
     /// gain's). The resume completes it before draining `remaining`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
+}
+
+/// CR 510.2 + CR 616.1 + CR 616.1g: the replacement pass of ONE simultaneous
+/// combat-damage batch, parked mid-way. CR 510.2 forbids a priority window
+/// between assignment and dealing, not the CR 616.1 choice of which
+/// replacement applies first, nor a choice raised by an event the replacement
+/// substitutes (CR 616.1g: "put that many +1/+1 counters", "mills that many
+/// cards"). Every entry keeps its place, so the resumed batch applies exactly
+/// the events the un-paused one would, once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatDamageReplacement {
+    /// Every assignment that passed the pre-replacement gate, in batch order.
+    pub entries: Vec<PendingCombatDamageEntry>,
+    /// The progress of every leg, aligned 1:1 with `entries`. A leg is not yet
+    /// proposed, settled, or owes a choice (see [`PendingCombatLegProgress`]).
+    pub resolved: Vec<PendingCombatLegProgress>,
+    /// CR 510.2 + CR 615.8: the one-shot shields that already applied to an
+    /// earlier portion of this simultaneous instance, keyed by damage source. A
+    /// "the next time [source] would deal damage" shield prevents the source's
+    /// whole instance, so a portion proposed after the pause must still see the
+    /// application recorded before it. Absent from saves written before it
+    /// existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
+}
+
+/// CR 616.1 + CR 616.1g + CR 101.4: where one proposed damage leg of a parked
+/// combat-damage batch stands. The batch interleaves its legs: a leg's next
+/// ordering choice can belong to a different seat than its first (CR 614.6:
+/// a redirect hands the damage to another player's permanent), so the prompts
+/// are surfaced in APNAP order of the *actual* chooser across all outstanding
+/// legs, and a leg that is not the one being asked keeps its in-progress
+/// event here until its turn comes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PendingCombatLegProgress {
+    /// CR 616.2: the leg's event has not been proposed yet. Its first chooser
+    /// is known only once it has been advanced through its choice-free steps (a
+    /// redirect hands it to another seat), so every unstarted leg stays in its
+    /// own slot until its chooser outranks the prompts already outstanding.
+    Unstarted(ProposedEvent),
+    /// The leg's event has settled: `Some(event)` survives to Phase C, `None`
+    /// was fully replaced or prevented.
+    Settled(Option<ProposedEvent>),
+    /// CR 616.1: `chooser` orders two or more applicable replacements for this
+    /// leg. `parked` holds the leg's in-progress record while another leg's
+    /// prompt is open; it is `None` for the surfaced leg, whose record is
+    /// `state.pending_replacement` and is the resume's authority.
+    AwaitingChoice {
+        chooser: PlayerId,
+        parked: Option<Box<PendingCombatLegChoice>>,
+    },
+    /// CR 616.1g: the surfaced leg's event settled to `survivor`, but the
+    /// replacement's own continuation (the substitute event) raised a prompt.
+    /// The batch resumes once that continuation has fully drained.
+    AwaitingContinuation { survivor: Option<ProposedEvent> },
+}
+
+/// CR 616.1: the in-progress state of a leg that owes a choice while another
+/// leg's prompt is open, lifted out of the single `pending_replacement` /
+/// `replacement_auto_choice_tail` slots and reinstalled losslessly when the
+/// leg's prompt is surfaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatLegChoice {
+    pub pending: PendingReplacement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_choice_tail: Option<ReplacementAutoChoiceTail>,
+}
+
+/// CR 510.2: one collected combat-damage assignment of a parked batch — what
+/// Phase C needs to apply its survivor and book it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatDamageEntry {
+    /// CR 510.2: the source's damage context captured when the batch was
+    /// collected. The batch is one simultaneous event, so a resume never
+    /// re-derives it.
+    pub context: crate::types::ability::DamageContextSnapshot,
+    /// CR 704.6c: whether the source is a commander (commander-damage tally).
+    pub source_is_commander: bool,
+    pub target: crate::game::combat::DamageTarget,
+    /// CR 702.15b: the controller a lifelink source gains life for.
+    pub lifelink_controller: Option<PlayerId>,
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
@@ -30972,6 +31063,17 @@ pub struct PostReplacementDrain {
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
 
+    /// CR 614.1a + CR 614.6: the amount of the damage event a damage
+    /// SUBSTITUTION replaced (Soul-Scar Mage: "put that many -1/-1 counters on
+    /// that creature instead"; Szadek). Read by `QuantityRef::EventContextAmount`
+    /// ahead of the enclosing trigger's event while this drain is resident, so
+    /// "that many" names the replaced damage — not the amount of a trigger
+    /// whose resolution dealt it, and not a count a preceding link of the same
+    /// continuation produced. `None` on every other install path: prevention
+    /// riders keep their "damage prevented this way" stamp.
+    #[serde(default)]
+    pub event_amount: Option<u32>,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -31114,6 +31216,7 @@ impl PostReplacementDrain {
             applied: HashSet::new(),
             event_source: None,
             event_target: None,
+            event_amount: None,
             controller: None,
         }
     }
@@ -37832,6 +37935,14 @@ impl GameState {
         self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_target.as_ref())
+    }
+
+    /// CR 614.1a: the resident drain's replaced damage amount — set only by a
+    /// damage substitution (see [`PostReplacementDrain::event_amount`]).
+    pub fn post_replacement_event_amount(&self) -> Option<u32> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.event_amount)
     }
 
     /// Clear the resident drain's replacement source while leaving the
@@ -48851,6 +48962,7 @@ mod tests {
             )],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
+            replacement: None,
             phase_c_remnant: None,
         })
     }
