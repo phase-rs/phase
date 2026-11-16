@@ -24170,26 +24170,40 @@ fn resolve_chain_body(
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => false,
     };
-    let host_bound;
-    let mut unaffectable_host_context = None;
+    // Boxed (as is the snapshot below): `resolve_chain_body` recurses once per
+    // chain node and a `ResolvedAbility` is several KiB, so an inline slot
+    // here is paid at every level of the 16 MiB native stack.
+    let host_bound: Box<ResolvedAbility>;
+    // Boxed: the snapshot is large and `resolve_chain_body` recurses once per
+    // chain node, so an inline copy would grow every level's stack frame.
+    let mut unaffectable_host_context: Option<Box<crate::types::ability::CostPaidObjectSnapshot>> =
+        None;
     let ability = match host_binding {
         crate::game::targeting::ResolutionHostBinding::Bound(bound) => {
-            host_bound = *bound;
-            &host_bound
+            host_bound = bound;
+            &*host_bound
         }
         crate::game::targeting::ResolutionHostBinding::NotApplicable => ability,
-        crate::game::targeting::ResolutionHostBinding::Absent => {
-            host_bound = without_unavailable_host_followers(
-                ability,
-                MissingParentReferent::HostObjectAndMetadata,
-            );
-            &host_bound
-        }
-        crate::game::targeting::ResolutionHostBinding::Unaffectable(snapshot) => {
-            unaffectable_host_context = Some(*snapshot);
-            host_bound =
-                without_unavailable_host_followers(ability, MissingParentReferent::HostObject);
-            &host_bound
+        // One call site for both unavailable-host shapes: `resolve_chain_body`
+        // recurses once per chain node, and each call's pruned-chain temporary
+        // would otherwise take its own slot in every level's stack frame.
+        unavailable @ (crate::game::targeting::ResolutionHostBinding::Absent
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_)) => {
+            let missing = if matches!(
+                unavailable,
+                crate::game::targeting::ResolutionHostBinding::Absent
+            ) {
+                MissingParentReferent::HostObjectAndMetadata
+            } else {
+                MissingParentReferent::HostObject
+            };
+            if let crate::game::targeting::ResolutionHostBinding::Unaffectable(snapshot) =
+                unavailable
+            {
+                unaffectable_host_context = Some(snapshot);
+            }
+            host_bound = boxed_without_unavailable_host_followers(ability, missing);
+            &*host_bound
         }
     };
     // CR 608.2c: Snapshot the `pending_continuation` *value* at chain-body
@@ -26912,11 +26926,13 @@ fn resolve_chain_body(
     let announced_object = (event_context_object.is_none() && unaffectable_host_context.is_none())
         .then(|| announced_object_context(state, ability))
         .flatten();
-    let effect_context_object = event_context_object
-        .or_else(|| {
-            if announced_object.is_some() {
-                return None;
-            }
+    // One closure builds the whole fallback chain: `resolve_chain_body`
+    // recurses once per chain node, so an intermediate `Option<snapshot>`
+    // temporary in this frame would be paid at every level.
+    let effect_context_object = event_context_object.or_else(|| {
+        let derived = if announced_object.is_some() {
+            None
+        } else {
             ability
                 .sub_ability
                 .as_deref()
@@ -26926,7 +26942,7 @@ fn resolve_chain_body(
                 })
                 .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
-        })
+        };
         // CR 608.2h: an unaffectable host's information (last known for a
         // departed host, current for a phased-out one),
         // for the metadata-only instructions its pruned chain kept. CR 701.24c: a kept
@@ -26934,7 +26950,8 @@ fn resolve_chain_body(
         // it — the objects it would shuffle in need not be in the zone they
         // were expected to be in, so the shuffle is never contingent on the
         // move that the pruned head could no longer perform.
-        .or(unaffectable_host_context);
+        derived.or_else(|| unaffectable_host_context.map(|snapshot| *snapshot))
+    });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -29791,6 +29808,14 @@ fn without_missing_forward_result_dependencies(
 /// (`ResolutionHostBinding::Absent` / `Unaffectable`): the same node with every
 /// instruction after it that depends on what is `missing` pruned, so none can
 /// fall back to the ability's source or to another object.
+#[inline(never)] // keeps the pruned copy's temporaries out of the recursing caller's frame
+fn boxed_without_unavailable_host_followers(
+    ability: &ResolvedAbility,
+    missing: MissingParentReferent,
+) -> Box<ResolvedAbility> {
+    Box::new(without_unavailable_host_followers(ability, missing))
+}
+
 fn without_unavailable_host_followers(
     ability: &ResolvedAbility,
     missing: MissingParentReferent,
