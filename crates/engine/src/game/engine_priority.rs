@@ -969,6 +969,26 @@ pub(crate) fn parked_batch_origin(
 /// CR 117.5 + CR 603.3b: hold a pass's triggers for the boundary's one batch.
 /// A resolving spell that still owes its final part owns their placement.
 fn hold_pass_triggers(state: &mut GameState, events: &[GameEvent]) {
+    // CR 707.10 + CR 603.2: `copy_spell` collects `SpellCopied` observers itself (or the live
+    // announcement's carrier holds them), so the pass must not collect the same event again —
+    // Prismari Apprentice's "whenever you cast or copy an instant or sorcery spell" fired twice
+    // for one Twincast copy (issue #2866 class; every other collector already excludes it).
+    if events
+        .iter()
+        .any(|event| matches!(event, GameEvent::SpellCopied { .. }))
+    {
+        let collectable: Vec<GameEvent> = events
+            .iter()
+            .filter(|event| !matches!(event, GameEvent::SpellCopied { .. }))
+            .cloned()
+            .collect();
+        triggers::collect_parked_triggers_into_deferred(
+            state,
+            &collectable,
+            pass_hold_origin(state),
+        );
+        return;
+    }
     triggers::collect_parked_triggers_into_deferred(state, events, pass_hold_origin(state));
 }
 

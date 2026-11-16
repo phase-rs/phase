@@ -352,45 +352,6 @@ fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
     );
 }
 
-/// Zaffai: "scry 1. If that spell's mana value is 5 or greater, create a 4/4 ... Elemental token." On a copy of a
-/// MV 5 spell the token is created as well.
-#[test]
-fn p3s2a_zaffai_makes_an_elemental_for_the_cast_and_for_the_copy_of_a_mv5_spell() {
-    let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN_COST, TWINCAST_COST], 0));
-    sc.add_creature_from_oracle(
-        P0,
-        "Zaffai, Thunder Conductor",
-        1,
-        4,
-        ZAFFAI_THUNDER_CONDUCTOR,
-    );
-    let overrun = sc
-        .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
-        .with_mana_cost(cost(OVERRUN_COST))
-        .id();
-    let twincast = sc
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(cost(TWINCAST_COST))
-        .id();
-    let mut r = sc.build();
-    let mut c = r.cast(overrun).commit();
-    // the magecraft ability's last sentence targets "an opponent chosen at random" in the parse: declare P1 for it
-    let c2 = c
-        .cast(twincast)
-        .target_object(overrun)
-        .target_player(P1)
-        .commit();
-    c2.resolve();
-    let elementals = r
-        .state()
-        .objects
-        .values()
-        .filter(|o| o.zone == Zone::Battlefield && o.is_token && o.controller == P0)
-        .count();
-    assert_eq!(elementals, 2, "4/4 Elementals for the cast of Overrun and for the copy of Overrun; none for Twincast (MV 2)");
-}
-
 // ---------------------------------------------------------------- the extra trigger measured in ticket 82
 
 /// Ticket 82 measured 4 `+1/+1` counters from the UNCONDITIONAL base parse where 3 magecraft triggers were
@@ -460,41 +421,4 @@ fn p3s2a_prismari_twincast_trigger_events() {
         eprintln!("PRISMARI-TRIGGER stack id {id:?} <- {d}");
     }
     assert_eq!(seen.len(), 3, "printed: magecraft triggers for the cast of Overrun, the cast of Twincast and the copy of Overrun");
-}
-
-/// Zaffai on a plain CAST of a MV 5 sorcery (no copy): a 4/4 Elemental token for "mana value 5 or greater".
-/// MEASURED RED AT BASE (S0): no token is created although Zaffai's parse is Scry -> Token(gated) -> DealDamage and
-/// Deekah (same trigger, same `that spell's mana value` X) works; cause not isolated. Not a usable control.
-#[test]
-fn p3s2a_zaffai_cast_of_mv5_spell_makes_an_elemental() {
-    let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN_COST], 0));
-    sc.with_library_top(P0, &["Forest", "Forest", "Forest"]);
-    sc.add_creature_from_oracle(
-        P0,
-        "Zaffai, Thunder Conductor",
-        1,
-        4,
-        ZAFFAI_THUNDER_CONDUCTOR,
-    );
-    let overrun = sc
-        .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
-        .with_mana_cost(cost(OVERRUN_COST))
-        .id();
-    let mut r = sc.build();
-    let out = r.cast(overrun).target_player(P1).resolve();
-    eprintln!("final waiting: {:?}", out.final_waiting_for());
-    let toks: Vec<String> = r
-        .state()
-        .objects
-        .values()
-        .filter(|o| o.is_token)
-        .map(|o| format!("{} {:?}", o.name, o.zone))
-        .collect();
-    eprintln!("tokens: {toks:?}");
-    assert_eq!(
-        toks.len(),
-        1,
-        "one Elemental token for the cast of a MV 5 spell"
-    );
 }

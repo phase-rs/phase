@@ -78,5 +78,3 @@ pub const VINDICTIVE_TRIUMPH: &str = "Exile target creature or planeswalker. If 
 pub const VINDICTIVE_TRIUMPH_COST: &str = "{W}{B}{B}";
 pub const WALKING_BALLISTA: &str = "This creature enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.";
 pub const WALKING_BALLISTA_COST: &str = "{X}{X}";
-pub const ZAFFAI_THUNDER_CONDUCTOR: &str = "Magecraft — Whenever you cast or copy an instant or sorcery spell, scry 1. If that spell's mana value is 5 or greater, create a 4/4 blue and red Elemental creature token. If that spell's mana value is 10 or greater, Zaffai deals 10 damage to an opponent chosen at random.";
-pub const ZAFFAI_THUNDER_CONDUCTOR_COST: &str = "{2}{U}{R}";
