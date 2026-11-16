@@ -770,17 +770,11 @@ fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() 
 /// event, so the upkeep scan cannot re-collect it (2 = double-fire,
 /// 0 = lost).
 ///
-/// Fixture honesty: no corpus card parses to singular `Untaps` with
-/// `batched == false` — `try_parse_untap_trigger` requires the literal "one
-/// or more" quantifier (always `batched = true`), and the only other `Untaps`
-/// arm (`SimpleEvent::BecomesUntapped`) has zero printed triggered shapes
-/// reaching it (the named `becomes untapped` leads sit in activated-ability
-/// lines per the `oracle_trigger.rs` disjunction census; the parser's own
-/// singular test uses a synthetic line). The nearest printed card is The
-/// Ninth Doctor (a "becomes untapped during your untap step" trigger), which
-/// carries a window this pin deliberately omits. So the definition below is
-/// synthetic — but it drives the REAL pipeline (scenario → untap step →
-/// upkeep priority drain → resolution), asserting exactly one firing.
+/// Printed cards already reach unbatched, unwindowed `Untaps`, including
+/// Ghostly Pilferer. This synthetic fixture isolates a controller-wide
+/// permanent filter and a time-counter payload. It drives the real pipeline
+/// (scenario → untap step → upkeep priority drain → resolution), asserting
+/// exactly one firing.
 /// Needs-assessment: needed — yes; sole guard of the unwindowed
 /// exactly-once half.
 ///
