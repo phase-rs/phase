@@ -1669,14 +1669,15 @@ fn required_blight_with_no_creatures_rejects_cast() {
     assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
-/// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable
-/// preferred cost A, the fallback B is applied automatically with no prompt.
-#[test]
-fn choice_cost_falls_through_when_preferred_unpayable() {
+/// Casts a "Choice Bolt" whose additional cost is blight 1 (unpayable: P0
+/// controls no creatures) or `fallback`, and returns the cast's result.
+fn cast_choice_bolt_with_unpayable_blight(
+    fallback: AbilityCost,
+) -> (engine::game::scenario::GameRunner, ObjectId, ActionResult) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::White);
-    // No creatures — blight half is unpayable — but life is available.
+    scenario.add_basic_land(P0, ManaColor::White);
 
     let spell_id = scenario
         .add_creature_to_hand(P0, "Choice Bolt", 0, 0)
@@ -1689,16 +1690,12 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
         })
         .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::Blight { count: 1 },
-            AbilityCost::PayLife {
-                amount: QuantityExpr::Fixed { value: 2 },
-            },
+            fallback,
         ]))
         .id();
 
     let mut runner = scenario.build();
-    let life_before = runner.state().players[0].life;
     let card_id = runner.state().objects[&spell_id].card_id;
-
     let result = runner
         .act(GameAction::CastSpell {
             object_id: spell_id,
@@ -1708,22 +1705,98 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
+    (runner, spell_id, result)
+}
 
-    handle_target_selection(&mut runner, &result);
+/// CR 601.2b + CR 601.2h: When an `AdditionalCost::Choice(A, B)` has an
+/// unpayable preferred cost A and a fallback B that pays no life, B is applied
+/// automatically with no prompt.
+#[test]
+fn choice_cost_falls_through_when_preferred_unpayable() {
+    let (mut runner, spell_id, result) =
+        cast_choice_bolt_with_unpayable_blight(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+        });
 
     // CR 601.2b: No prompt; fallback was applied automatically.
     assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalCostChoice { .. }
-        ),
+        !matches!(result.waiting_for, WaitingFor::OptionalCostChoice { .. }),
         "no prompt expected when preferred cost is unpayable and fallback applies, got {:?}",
-        runner.state().waiting_for,
+        result.waiting_for,
+    );
+    handle_target_selection(&mut runner, &result);
+
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell_id),
+        "the fallback branch must complete the cast, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.tapped)
+            .count(),
+        1,
+        "the {{1}} fallback taps exactly one land"
+    );
+    assert_eq!(runner.state().players[0].life, 20, "no life is paid");
+}
+
+/// CR 118.11 + CR 119.4: a sole payable fallback that pays life is still
+/// prompted. Effects may change the life the payment actually costs, so the
+/// branch is committed only by the caster's answer, where the life-safety
+/// preview reads the post-replacement receipt.
+#[test]
+fn choice_cost_with_a_sole_life_fallback_still_prompts() {
+    let (mut runner, spell_id, result) =
+        cast_choice_bolt_with_unpayable_blight(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        });
+
+    assert!(
+        matches!(
+            &result.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(costs),
+                ..
+            } if costs.len() == 2
+        ),
+        "a sole life branch must be decided through the prompt, got {:?}",
+        result.waiting_for,
     );
     assert_eq!(
         runner.state().players[0].life,
-        life_before - 2,
+        20,
+        "no life is paid before the caster answers"
+    );
+
+    let result = runner
+        .act(GameAction::DecideOptionalCost { index: 1 })
+        .expect("the payable life branch is accepted");
+    handle_target_selection(&mut runner, &result);
+
+    assert_eq!(
+        runner.state().players[0].life,
+        18,
         "fallback life cost should have been paid"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell_id),
+        "paying the life branch must complete the cast, got {:?}",
+        runner.state().waiting_for
     );
 }
 

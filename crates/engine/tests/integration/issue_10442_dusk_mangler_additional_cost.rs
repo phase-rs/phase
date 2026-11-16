@@ -6,8 +6,9 @@
 //! the caster may pick any option they can actually pay. A caster with no
 //! creatures and less than 4 life must still be able to discard a card.
 
-use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{AbilityCost, AdditionalCost};
+use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{AbilityCost, AdditionalCost, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -295,4 +296,201 @@ fn discard_option_is_the_second_index() {
         "index 1 sacrifices nothing"
     );
     assert_eq!(runner.state().players[0].life, 8, "index 1 pays no life");
+}
+
+/// CR 118.11 + CR 119.4: with no creature and no other card in hand, paying 4
+/// life is Dusk Mangler's only payable branch — and it is still prompted, so the
+/// branch is committed by the caster's answer rather than automatically.
+#[test]
+fn sole_payable_life_option_is_still_prompted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    scenario.with_life(P0, 8);
+    let mangler = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dusk Mangler", 5, 4, DUSK_MANGLER_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 5,
+        })
+        .id();
+    let mut runner = scenario.build();
+    cast_mangler(&mut runner, mangler);
+    assert_eq!(
+        runner.state().players[0].life,
+        8,
+        "no life is paid before the caster answers"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalCost { index: 2 })
+        .expect("paying 4 life is the payable option");
+    assert_cast_committed(&runner, mangler);
+    assert_eq!(runner.state().players[0].life, 4);
+}
+
+// --- Final Payment: a sole payable life branch and the lethal-life veto ---
+
+/// Verbatim Oracle text (Scryfall, 2026-11-16).
+const FINAL_PAYMENT_ORACLE: &str = "As an additional cost to cast this spell, pay 5 life or sacrifice a creature or enchantment.\nDestroy target creature.";
+/// Verbatim Oracle text (Scryfall, 2026-11-16).
+const BLOODLETTER_ORACLE: &str = "Flying\nIf an opponent would lose life during your turn, they lose twice that much life instead. (Damage causes loss of life.)";
+
+/// Whose turn Final Payment is cast in. Bloodletter of Aclazotz (controlled by
+/// P1) doubles P0's life loss only during P1's turn.
+#[derive(Clone, Copy)]
+enum Turn {
+    Caster,
+    BloodletterController,
+}
+
+/// P0 has a Plains, a Swamp and Final Payment in hand, and controls no creature
+/// or enchantment, so paying 5 life is the only payable branch. P1 controls
+/// Bloodletter of Aclazotz. Casts Final Payment and returns at its
+/// additional-cost prompt.
+fn cast_final_payment(
+    life: i32,
+    turn: Turn,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, life);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    let bloodletter = scenario
+        .add_creature(P1, "Bloodletter of Aclazotz", 2, 4)
+        .from_oracle_text_with_keywords(&["Flying"], BLOODLETTER_ORACLE)
+        .id();
+    let final_payment = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Payment", true, FINAL_PAYMENT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    if let Turn::BloodletterController = turn {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let card_id = runner.state().objects[&final_payment].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: final_payment,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announcing Final Payment must succeed");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(bloodletter)],
+            })
+            .expect("Bloodletter is a legal target");
+    }
+
+    let WaitingFor::OptionalCostChoice {
+        cost: AdditionalCost::Choice(costs),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the sole payable life branch must be prompted, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(
+            costs.as_slice(),
+            [AbilityCost::PayLife { .. }, AbilityCost::Sacrifice(_)]
+        ),
+        "Final Payment's printed branches: pay 5 life or sacrifice, got {costs:?}"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life,
+        "no life is paid before the caster answers"
+    );
+    (runner, final_payment, bloodletter)
+}
+
+/// The generated "pay 5 life" answer and its life-safety verdict.
+fn pay_life_verdict(runner: &engine::game::scenario::GameRunner) -> CandidateLifeSafety {
+    let candidate = engine::ai_support::candidate_actions(runner.state())
+        .into_iter()
+        .find(|candidate| candidate.action == GameAction::DecideOptionalCost { index: 0 })
+        .expect("the prompt must generate the pay-life answer");
+    preview_candidate_life_safety(runner.state(), &candidate)
+}
+
+/// CR 119.4 + CR 704.5a: paying 5 life at 5 life is legal but leaves the caster
+/// at 0, so the veto judges the answer lethal.
+#[test]
+fn final_payment_nominally_lethal_life_payment_is_vetoed() {
+    let (runner, _, _) = cast_final_payment(5, Turn::Caster);
+    assert_eq!(
+        pay_life_verdict(&runner),
+        CandidateLifeSafety::Unsafe {
+            before: 5,
+            after: 0,
+            committed: 5,
+        }
+    );
+}
+
+/// CR 118.11 + CR 614.1a + CR 704.5a: at 8 life the nominal 5 looks safe, but
+/// during P1's turn Bloodletter of Aclazotz doubles the loss to 10. The branch
+/// must still reach the prompt, and the veto judges the post-replacement loss.
+#[test]
+fn final_payment_replacement_amplified_life_payment_is_vetoed() {
+    let (runner, _, _) = cast_final_payment(8, Turn::BloodletterController);
+    assert_eq!(
+        pay_life_verdict(&runner),
+        CandidateLifeSafety::Unsafe {
+            before: 8,
+            after: -2,
+            committed: 10,
+        }
+    );
+
+    // Reach guard: the replacement really doubles the payment.
+    let mut paid = runner;
+    paid.act(GameAction::DecideOptionalCost { index: 0 })
+        .expect("paying 5 life is legal at 8 life");
+    assert_eq!(paid.state().players[0].life, -2);
+}
+
+/// Control: at 8 life during the caster's own turn Bloodletter does not apply,
+/// so paying 5 life is not lethal, stays available, and completes the cast.
+#[test]
+fn final_payment_nonlethal_life_payment_stays_available() {
+    let (mut runner, final_payment, bloodletter) = cast_final_payment(8, Turn::Caster);
+    assert_eq!(pay_life_verdict(&runner), CandidateLifeSafety::NotUnsafe);
+
+    runner
+        .act(GameAction::DecideOptionalCost { index: 0 })
+        .expect("paying 5 life is the payable branch");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(bloodletter)],
+            })
+            .expect("Bloodletter is a legal target");
+    }
+    assert_eq!(runner.state().players[0].life, 3, "exactly 5 life is paid");
+    assert_eq!(runner.state().objects[&final_payment].zone, Zone::Stack);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must complete, got {:?}",
+        runner.state().waiting_for
+    );
 }

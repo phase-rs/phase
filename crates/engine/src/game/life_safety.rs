@@ -137,6 +137,18 @@ fn is_complete_generated_candidate(state: &GameState, candidate: &CandidateActio
             })
 }
 
+/// CR 119.4 + CR 118.11: whether paying `cost` is a direct life payment whose
+/// actual, post-replacement loss this preview judges.
+///
+/// This is the single authority for which additional-cost branches arm a
+/// receipt root. The casting pipeline consults it too: a `Choice` branch it
+/// names is always decided through the `OptionalCostChoice` prompt and never
+/// committed automatically, because an effect may change how much life the
+/// payment actually costs and only an answered prompt reaches this preview.
+pub(crate) fn is_receipt_rooted_life_cost(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::PayLife { .. })
+}
+
 fn selected_optional_life_branch(
     cost: &AdditionalCost,
     index: usize,
@@ -145,29 +157,28 @@ fn selected_optional_life_branch(
         // Only accepting (index 0) pays the optional cost; index 1 declines and
         // pays nothing.
         AdditionalCost::Optional {
-            cost: materialized @ AbilityCost::PayLife { .. },
-            ..
-        } => (index == 0).then(|| {
+            cost: materialized, ..
+        } => (index == 0 && is_receipt_rooted_life_cost(materialized)).then(|| {
             (
                 OptionalAdditionalCostBranch::OptionalAccepted,
                 materialized.clone(),
             )
         }),
-        AdditionalCost::Optional { .. }
-        | AdditionalCost::Kicker { .. }
-        | AdditionalCost::Required(_) => None,
+        AdditionalCost::Kicker { .. } | AdditionalCost::Required(_) => None,
         // CR 601.2b: the selected option *is* the branch. Reading the option
         // list (rather than searching every alternative for a life cost) is
         // what lets any index count — Dusk Mangler's index 2 pay-life option is
         // a direct life cost, while its index 0/1 alternatives are not.
         AdditionalCost::Choice(_) => {
             match crate::game::casting_costs::optional_cost_options(cost).get(index)? {
-                crate::game::casting_costs::OptionalCostOption::Pay(
-                    materialized @ AbilityCost::PayLife { .. },
-                ) => Some((
-                    OptionalAdditionalCostBranch::Choice { index },
-                    materialized.clone(),
-                )),
+                crate::game::casting_costs::OptionalCostOption::Pay(materialized)
+                    if is_receipt_rooted_life_cost(materialized) =>
+                {
+                    Some((
+                        OptionalAdditionalCostBranch::Choice { index },
+                        materialized.clone(),
+                    ))
+                }
                 _ => None,
             }
         }

@@ -10511,6 +10511,13 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 // additional cost, so each is judged by the same authority as a
                 // `Required` cost — including a matching Defiler's reduction
                 // announced alongside it (`required_declaration_offerable`).
+                //
+                // CR 118.11 + CR 119.4: a sole branch that pays life still
+                // prompts. Effects can change how much life the payment actually
+                // costs (Bloodletter of Aclazotz doubles it), so whether it is
+                // lethal is known only from the post-replacement receipt, which
+                // the life-safety preview reads from the answered prompt. The
+                // nominal amount cannot stand in for it.
                 let mut offerable = Vec::new();
                 for (option_index, chosen_cost) in costs.iter().enumerate() {
                     if required_declaration_offerable(
@@ -10527,45 +10534,18 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     [] => Err(EngineError::ActionNotAllowed(
                         "Cannot pay any alternative additional cost".to_string(),
                     )),
-                    [only] => {
-                        // CR 119.4 + CR 601.2b: if the sole offerable branch is a life
-                        // payment that would be lethal (reduce life to 0 or less), we
-                        // must prompt so the AI's lethal-life veto can trigger.
-                        // Auto-paying would bypass the safety boundary.
-                        let sole_cost = &costs[*only];
-                        let is_lethal_life_payment = match sole_cost {
-                            AbilityCost::PayLife { amount } => {
-                                let life_amount = super::quantity::resolve_quantity(
-                                    state, amount, player, object_id,
-                                )
-                                .max(0);
-                                let current_life = super::players::team_life_total(state, player);
-                                current_life - life_amount <= 0
-                            }
-                            _ => false,
-                        };
-                        if is_lethal_life_payment {
-                            continue_cost_declarations(
-                                state,
-                                player,
-                                pending,
-                                residual,
-                                DeclarationExit::Prompt(additional_cost),
-                                events,
-                            )
-                        } else {
-                            continue_cost_declarations(
-                                state,
-                                player,
-                                pending,
-                                residual,
-                                DeclarationExit::Pay {
-                                    cost: sole_cost.clone(),
-                                    source: SpellCostSource::Other,
-                                },
-                                events,
-                            )
-                        }
+                    [only] if !super::life_safety::is_receipt_rooted_life_cost(&costs[*only]) => {
+                        continue_cost_declarations(
+                            state,
+                            player,
+                            pending,
+                            residual,
+                            DeclarationExit::Pay {
+                                cost: costs[*only].clone(),
+                                source: SpellCostSource::Other,
+                            },
+                            events,
+                        )
                     }
                     _ => continue_cost_declarations(
                         state,
