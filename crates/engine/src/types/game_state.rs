@@ -38557,6 +38557,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -38923,6 +38924,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -39100,6 +39102,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::BlockersDeclared { .. }
